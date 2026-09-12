@@ -326,11 +326,37 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         }
 
         arguments = runner.materialize_tool_arguments(
-            definition, {"node_id": "function:graph", "code_node_id": "sym:code"}
+            definition,
+            {
+                "node_id": "function:graph",
+                "code_navigation_node_ids": {
+                    "tracedecay_code_declaration": "sym:code",
+                },
+            },
         )
-        self.assertEqual(arguments["node_id"], "sym:code")
+        self.assertEqual(arguments, {"node_id": "sym:code", "format": "json"})
         with self.assertRaises(runner.SweepError):
             runner.materialize_tool_arguments(definition, {"node_id": "function:graph"})
+
+    def test_each_navigation_consumer_uses_its_matching_search_result(self) -> None:
+        runner = load_runner()
+        identities = {
+            name: f"symbol:{index}"
+            for index, name in enumerate(runner.CODE_NAVIGATION_NODE_NAMES, 1)
+        }
+        for name, node_id in identities.items():
+            arguments = runner.materialize_tool_arguments(
+                {
+                    "name": name,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"node_id": {"type": "string"}},
+                        "required": ["node_id"],
+                    },
+                },
+                {"code_navigation_node_ids": identities},
+            )
+            self.assertEqual(arguments, {"node_id": node_id, "format": "json"}, name)
 
     def test_graph_file_consumers_use_the_seeded_source_file(self) -> None:
         runner = load_runner()
@@ -461,11 +487,6 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
                 "run_id": "run.fixture",
                 "target": {"kind": "clean_in_place"},
             },
-            "work_duplicate_arguments": {
-                "first_attempt": {"attempt_id": "attempt.fixture"},
-                "second_attempt": {"attempt_id": "attempt.fixture.second"},
-                "verdict": "not_duplicate",
-            },
         }
         placeholder = {"type": "object", "properties": {}, "required": []}
 
@@ -481,13 +502,6 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         placement = runner.materialize_tool_arguments(
             {"name": "tracedecay_work_placement_status", "inputSchema": placeholder}, fixture
         )
-        duplicate = runner.materialize_tool_arguments(
-            {
-                "name": "tracedecay_work_prepare_duplicate_adjudication",
-                "inputSchema": placeholder,
-            },
-            fixture,
-        )
 
         self.assertEqual(status["attempt_id"], "attempt.fixture")
         self.assertEqual(compared["old_version"], {"graph_version": 1})
@@ -499,9 +513,6 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             "run_id": "run.fixture",
             "format": "json",
         })
-        self.assertEqual(
-            duplicate["second_attempt"]["attempt_id"], "attempt.fixture.second"
-        )
 
 
 class NegotiatedSurfaceTests(unittest.TestCase):
@@ -643,91 +654,6 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertEqual(prepared.arguments, {"mutation_id": "mutation.fixture"})
         note = prepared.cleanup(self.response('{"replayed":true}'))
         self.assertIn("producer/effect/replay/status", note)
-
-    def test_target_specific_work_journey_precedes_the_shared_replay(self) -> None:
-        runner = load_runner()
-        shared = runner.prepare_journey(
-            "tracedecay_work_create",
-            object(),
-            {
-                "work_attempt_id": "attempt.fixture",
-                "work_status_arguments": {},
-                "work_effect_arguments": {
-                    "tracedecay_work_create": {"mutation_id": "mutation.fixture"},
-                },
-            },
-            lambda _tool: 1_000,
-            lambda *_args: self.response('{"identity":{"attempt_id":"attempt.fixture"}}'),
-        )
-        fixture = {
-            "work_effect_journey": shared,
-            "work_effect_arguments": {
-                "tracedecay_work_create": {"mutation_id": "stale.fallback"},
-            },
-        }
-
-        selected = runner.prepare_journey(
-            "tracedecay_work_pause_run",
-            object(),
-            fixture,
-            lambda _tool: 1_000,
-            lambda *_args: {},
-        )
-
-        self.assertIs(selected, shared)
-        self.assertEqual(selected.arguments["mutation_id"], "mutation.fixture")
-
-    def test_attempt_recovery_journey_requires_typed_sets_and_rechecks(self) -> None:
-        runner = load_runner()
-        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
-        calls = []
-
-        def call(tool, arguments, _deadline_ms):
-            calls.append((tool, dict(arguments)))
-            return self.response('{"recovery_required":[],"cancelled":[]}')
-
-        prepared = journeys._prepare_work_effect_journey(
-            "tracedecay_work_resume_attempts",
-            {},
-            call,
-            lambda _tool: 1_000,
-            {},
-            {},
-        )
-        note = prepared.cleanup(self.response('{"recovery_required":[],"cancelled":[]}'))
-
-        self.assertEqual(prepared.settlement, "contained")
-        self.assertEqual(calls[0][0], "tracedecay_work_resume_attempts")
-        self.assertIn("idempotent rescan", note)
-
-    def test_pause_journey_resumes_and_reads_the_durable_control(self) -> None:
-        runner = load_runner()
-        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
-        calls = []
-
-        def call(tool, arguments, _deadline_ms):
-            calls.append((tool, dict(arguments)))
-            if tool == "tracedecay_work_resume_run":
-                return self.response('{"state":"running","authority":2}')
-            if tool == "tracedecay_work_run_control":
-                return self.response('{"state":"controlled","control":{"state":"running"}}')
-            raise AssertionError(tool)
-
-        prepared = journeys._prepare_work_effect_journey(
-            "tracedecay_work_pause_run",
-            {"work_task_id": "task.fixture", "work_run_id": "run.fixture"},
-            call,
-            lambda _tool: 1_000,
-            {},
-            {},
-        )
-        note = prepared.cleanup(self.response('{"state":"paused","authority":1}'))
-
-        self.assertEqual([tool for tool, _ in calls], [
-            "tracedecay_work_resume_run", "tracedecay_work_run_control"
-        ])
-        self.assertEqual(calls[0][1]["expected_authority_version"], 1)
-        self.assertIn("durable run-control", note)
 
     def test_git_apply_consumes_preview_and_verifies_its_inverse(self) -> None:
         runner = load_runner()
@@ -1268,40 +1194,31 @@ class MutationJourneyTests(unittest.TestCase):
                 "node_id": "function:fixture",
             }
             accepted = {
-                "preview_id": "sha256:" + "0" * 64,
+                "preview_id": "rename.preview.fixture",
                 "preview_digest": "sha256:" + "1" * 64,
                 "plan_digest": "sha256:" + "2" * 64,
-                "graph_revision": "sha256:" + "3" * 64,
+                "graph_revision": "graph.fixture.v1",
                 "repository_revision": "repository.fixture.v1",
             }
-            calls = []
 
             def call(tool, arguments, _deadline_ms):
-                calls.append((tool, dict(arguments)))
                 if tool == "tracedecay_rename_preview":
                     return self.response(
                         '{"node":{"id":"function:fixture",'
                         '"qualified_name":"src/lib.rs::sweep_anchor","kind":"function",'
-                        '"file":"src/lib.rs","name":"sweep_anchor"}}'
+                        '"file":"src/lib.rs","name":"sweep_anchor"},'
+                        f'"accepted_preview":{json.dumps(accepted)}}}'
                     )
                 self.assertEqual(tool, "tracedecay_rename_symbol")
                 self.assertIs(arguments["dry_run"], True)
-                self.assertNotIn("accepted_preview", arguments)
-                return self.response(json.dumps({
-                    **accepted,
-                    "expected_state": accepted["preview_digest"],
-                }))
+                self.assertEqual(arguments["accepted_preview"], accepted)
+                return self.response('{"expected_state":"sha256:' + "3" * 64 + '"}')
 
             prepared = runner.prepare_journey(
                 "tracedecay_rename_symbol", object(), fixture, lambda _tool: 1_000, call
             )
 
         self.assertEqual(prepared.arguments["accepted_preview"], accepted)
-        self.assertEqual(prepared.arguments["expected_state"], accepted["preview_digest"])
-        self.assertTrue(prepared.arguments["verify"])
-        self.assertEqual([tool for tool, _ in calls], [
-            "tracedecay_rename_preview", "tracedecay_rename_symbol",
-        ])
 
     def test_source_edit_journey_replays_receipt_and_restores_exact_source(self) -> None:
         runner = load_runner()
@@ -1405,7 +1322,14 @@ class FixturePrimingRetryTests(unittest.TestCase):
             ),
             "tracedecay_read": cls.response('{"handle":"rh_fixture"}'),
             "tracedecay_retrieve": cls.response("catalog sweep handle source"),
-            "tracedecay_code_symbol_search": cls.response('{"node_id":"sym:code"}'),
+            "tracedecay_code_symbol_search": cls.response(
+                '{"items":['
+                '{"name":"sweep_anchor","kind":"function","node_id":"sym:anchor"},'
+                '{"name":"sweep_peer","kind":"function","node_id":"sym:peer"},'
+                '{"name":"sweep_typed","kind":"function","node_id":"sym:typed"},'
+                '{"name":"SweepType","kind":"struct","node_id":"sym:type"}'
+                ']}'
+            ),
             "tracedecay_git_hunks": cls.response(
                 '{"preview_input_id":"preview.fixture","hunks":'
                 '[{"digest":"sha256:fixture","hunk":{}}]}'
@@ -1488,11 +1412,6 @@ class FixturePrimingRetryTests(unittest.TestCase):
                     return cls.response(json.dumps({
                         "request": {"fixture_mutation": change},
                     })), 3
-                if name == "tracedecay_work_prepare_duplicate_adjudication":
-                    return cls.response(json.dumps({
-                        **arguments,
-                        "command_id": "command.duplicate.fixture",
-                    })), 3
                 if name in {
                     "tracedecay_work_admit_placement",
                     "tracedecay_work_start_attempt",
@@ -1551,7 +1470,6 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_work_start_attempt",
             "tracedecay_work_attempt_status",
             "tracedecay_work_cancel_attempt",
-            "tracedecay_work_prepare_duplicate_adjudication",
         )
         return {
             name: runner.ToolPolicy(name, "available", "read", 1_000)
@@ -1590,9 +1508,18 @@ class FixturePrimingRetryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(fixture["node_id"], "function:fixture")
-        self.assertEqual(fixture["code_node_id"], "sym:code")
-        self.assertNotIn("preview_input_id", fixture)
-        self.assertNotIn("tracedecay_git_hunks", [name for name, _ in client.calls])
+        self.assertEqual(
+            fixture["code_navigation_node_ids"],
+            {
+                "tracedecay_code_callees": "sym:peer",
+                "tracedecay_code_callers": "sym:anchor",
+                "tracedecay_code_declaration": "sym:anchor",
+                "tracedecay_code_references": "sym:anchor",
+                "tracedecay_code_type_definition": "sym:typed",
+                "tracedecay_code_type_hierarchy": "sym:type",
+            },
+        )
+        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
         self.assertEqual(fixture["lcm_store_id"], 41)
         self.assertEqual(fixture["session_refresh_handle"], "srh_fixture")
@@ -1678,75 +1605,33 @@ class FixturePrimingRetryTests(unittest.TestCase):
         )
         self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
 
-    def test_code_node_failure_does_not_block_git_work_or_workflow_groups(self) -> None:
-        runner = load_runner()
-        runner.CODE_INDEX_READY_TIMEOUT_S = 0
-        client = self.client([self.response('{"node_id":"function:fixture"}')])
-        original_call = client.call_tool
-
-        def missing_code_node(name, arguments, deadline_ms):
-            if name == "tracedecay_code_symbol_search":
-                return self.response('{"nodes":[]}'), 3
-            return original_call(name, arguments, deadline_ms)
-
-        client.call_tool = missing_code_node
-        fixture = {
-            "symbol": "sweep_anchor",
-            "qualified_name": "src/lib.rs::sweep_anchor",
-            "session_id": "session.fixture",
-            "lcm_message": "catalog sweep captured LCM message",
-            "root": "/fixture/root",
-            "commit": "a" * 40,
-        }
-        policies = self.policies(runner)
-        policies["tracedecay_workflow_validate_definition"] = runner.ToolPolicy(
-            "tracedecay_workflow_validate_definition", "available", "read", 1_000
-        )
-        original_workflow = runner.prime_workflow_lifecycle
-
-        def mark_workflow_group(*args, **kwargs):
-            fixture["workflow_group_reached"] = True
-
-        runner.prime_workflow_lifecycle = mark_workflow_group
-        try:
-            runner.prime_fixture_values(client, fixture, policies)
-        finally:
-            runner.prime_workflow_lifecycle = original_workflow
-
-        self.assertIn("complete generation identity", fixture["priming_errors"]["code_node"]["message"])
-        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
-        self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
-        self.assertTrue(fixture["workflow_group_reached"])
-
-    def test_non_retryable_graph_failure_does_not_block_independent_groups(self) -> None:
-        """A terminal graph failure only withholds graph-dependent identities."""
+    def test_non_retryable_graph_failure_remains_immediately_fatal(self) -> None:
+        """The warming reason code alone cannot authorize another attempt."""
         runner = load_runner()
         terminal = self.project_route_error(
             "code-graph-unavailable", retryable=False
         )
-        client = self.client([terminal])
-        fixture = {
-            "symbol": "sweep_anchor",
-            "qualified_name": "src/lib.rs::sweep_anchor",
-            "session_id": "session.fixture",
-            "lcm_message": "catalog sweep captured LCM message",
-            "root": "/fixture/root",
-            "commit": "a" * 40,
-        }
+        client = self.client([terminal, self.response('{"node_id":"function:fixture"}')])
 
-        runner.prime_fixture_values(client, fixture, self.policies(runner))
+        with self.assertRaisesRegex(runner.SweepError, "code-graph-unavailable"):
+            runner.prime_fixture_values(
+                client,
+                {
+                    "symbol": "sweep_anchor",
+                    "qualified_name": "src/lib.rs::sweep_anchor",
+                    "session_id": "session.fixture",
+                    "lcm_message": "catalog sweep captured LCM message",
+                    "root": "/fixture/root",
+                    "commit": "a" * 40,
+                },
+                self.policies(runner),
+            )
 
         qualified_name_calls = [
             name for name, _arguments in client.calls
             if name == "tracedecay_by_qualified_name"
         ]
         self.assertEqual(len(qualified_name_calls), 1)
-        self.assertIn("code-graph-unavailable", fixture["priming_errors"]["graph"]["message"])
-        self.assertNotIn("node_id", fixture)
-        self.assertEqual(fixture["handle"], "rh_fixture")
-        self.assertEqual(fixture["code_node_id"], "sym:code")
-        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
-        self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
 
 
 class WorkflowLifecycleTests(unittest.TestCase):
@@ -1760,16 +1645,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
             self.definitions = {}
             self.dispositions = {}
             self.runs = {}
-            self.handoffs = {}
             self.calls = []
-            self.actor = "actor.tool-sweep"
-            self.scope = {
-                "project_id": "project.fixture",
-                "repository_id": "repository.fixture",
-                "worktree_id": "worktree.fixture",
-                "reference": None,
-                "scope_digest": self.owner.SHA_A,
-            }
 
         def response(self, payload):
             return {"payload": payload}
@@ -1817,31 +1693,9 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 }[name]
                 key = (arguments["definition_id"], arguments["definition_version"])
                 self.dispositions[key] = {"state": state, "revision": revision}
-                return {
-                    "payload": {
-                        "definition_id": key[0], "definition_version": key[1],
-                        "state": state, "revision": revision,
-                    },
-                    "receipt": {"actor": self.actor, "scope": self.scope},
-                }
-            if name == "tracedecay_workflow_handoff_issue":
-                grant = {
-                    "scope": arguments["scope"],
-                    "token_digest": self.owner.SHA_B,
-                    "issued_at": 10,
-                    "expires_at": 60_000_010,
-                    "frontier": arguments["frontier"],
-                    "frontier_digest": self.owner.SHA_C,
-                }
-                self.handoffs[arguments["secret"]] = grant
-                return self.response(grant)
-            if name == "tracedecay_workflow_handoff_redeem":
-                grant = self.handoffs.pop(arguments["secret"])
                 return self.response({
-                    "scope": arguments["expected_scope"],
-                    "frontier": grant["frontier"],
-                    "frontier_digest": grant["frontier_digest"],
-                    "redeemed_at": 20,
+                    "definition_id": key[0], "definition_version": key[1],
+                    "state": state, "revision": revision,
                 })
             if name == "tracedecay_workflow_start_run":
                 run = {"run_id": arguments["run_id"], "status": "running", "sequence": 1}
@@ -1893,17 +1747,6 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 "backend": "codex_cli",
                 "model": "fixture-model",
             },
-            "work_task_id": "task.fixture",
-            "work_admitted_version": {"graph_version": 4},
-            "work_attempt_frontier": {
-                "identity": {
-                    "task_id": "task.fixture",
-                    "run_id": "run.fixture",
-                    "attempt_id": "attempt.fixture",
-                },
-                "state": "cancelled",
-                "evidence_digest": None,
-            },
         }
 
     def test_shared_lifecycle_consumes_public_pins_and_reaches_terminal_states(self) -> None:
@@ -1926,17 +1769,6 @@ class WorkflowLifecycleTests(unittest.TestCase):
         self.assertEqual(
             fixture["workflow_definition_v1"]["pinned_catalog_digest"], self.SHA_C
         )
-        self.assertEqual(
-            set(fixture["workflow_read_arguments"]),
-            {
-                "tracedecay_workflow_validate_definition",
-                "tracedecay_workflow_get_definition",
-                "tracedecay_workflow_list_definitions",
-                "tracedecay_workflow_definition_history",
-                "tracedecay_workflow_diff_definition",
-                "tracedecay_workflow_get_run",
-            },
-        )
 
     def test_pause_effect_is_contained_through_resume_cancel_and_retire(self) -> None:
         runner = load_runner()
@@ -1955,23 +1787,6 @@ class WorkflowLifecycleTests(unittest.TestCase):
         self.assertEqual(prepared.settlement, "contained")
         self.assertEqual(effect_run["status"], "cancelled")
         self.assertIn("retired", note)
-
-    def test_every_workflow_effect_has_a_contained_real_journey(self) -> None:
-        runner = load_runner()
-        for name in sorted(runner.WORKFLOW_LIFECYCLE_EFFECTS):
-            with self.subTest(name=name):
-                runtime = self.Runtime(self)
-                fixture = self.fixture()
-                runner.prime_workflow_lifecycle(
-                    fixture, runtime.call, runtime.probe, lambda _name: 1_000, name
-                )
-                prepared = fixture["workflow_effect_journey"]
-
-                response = runtime.call(name, prepared.arguments, 1_000)
-                note = prepared.cleanup(response)
-
-                self.assertEqual(prepared.settlement, "contained")
-                self.assertTrue(note)
 
 
 class MountRetryTests(unittest.TestCase):
@@ -2027,6 +1842,36 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "PASS")
         self.assertEqual(len(client.calls), 3)
 
+    def test_navigation_requires_nonempty_symbol_evidence(self) -> None:
+        runner = load_runner()
+        name = "tracedecay_code_declaration"
+        definition = {
+            "name": name,
+            "inputSchema": {
+                "type": "object",
+                "properties": {"node_id": {"type": "string"}},
+                "required": ["node_id"],
+            },
+        }
+        fixture = {"code_navigation_node_ids": {name: "symbol:fixture"}}
+
+        empty = self.scripted_client(
+            {name: [self.text_response('{"payload":{"items":[]}}')]}
+        )
+        row = runner._read_tool_row(
+            empty, definition, self.policy(runner, name), fixture
+        )
+        self.assertEqual(row["verdict"], "FAIL")
+        self.assertEqual(row["problem_code"], "tool_sweep.navigation_evidence_empty")
+
+        populated = self.scripted_client(
+            {name: [self.text_response('{"payload":{"items":[{"node_id":"symbol:fixture"}]}}')]}
+        )
+        row = runner._read_tool_row(
+            populated, definition, self.policy(runner, name), fixture
+        )
+        self.assertEqual(row["verdict"], "PASS")
+
     def test_persistent_unavailable_still_fails_after_the_budget(self) -> None:
         """The retry is falsifiable: an authority that never mounts stays a FAIL."""
         runner = load_runner()
@@ -2059,9 +1904,29 @@ class MountRetryTests(unittest.TestCase):
         self.assertTrue(row["expected_denial"])
         self.assertEqual(len(client.calls), 1)
 
-    def test_branch_search_no_longer_claims_the_superseded_denial(self) -> None:
+    def test_expected_denial_is_reached_through_its_mounting_window(self) -> None:
+        """Foreign retryable unavailability retries into the exact cataloged denial."""
         runner = load_runner()
-        self.assertNotIn("tracedecay_branch_search", runner.EXPECTED_HERMETIC_DENIALS)
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+        name = "tracedecay_branch_search"
+        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
+        self.assertEqual((kind, code), ("unavailable", "search_failed"))
+        mounting = self.text_response(
+            '{"status":"unavailable","reason":"search_capacity_unavailable","retryable":true}',
+            is_error=True,
+        )
+        terminal = self.text_response(
+            '{"status":"unavailable","reason":"search_failed","retryable":false}',
+            is_error=True,
+        )
+        client = self.scripted_client({name: [mounting, terminal]})
+
+        row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertTrue(row["expected_denial"])
+        self.assertEqual(row["problem_code"], code)
+        self.assertEqual(len(client.calls), 2)
 
     def test_multi_root_probes_reach_the_exact_daemon_denial(self) -> None:
         """Materialized multi-root bodies parse, so the typed owner denial is exact."""
@@ -2129,29 +1994,6 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(fixture["preview_input_id"], "preview.fresh")
         replayed = [arguments for tool, arguments in client.calls if tool == name]
         self.assertEqual(len(replayed), 2)
-
-    def test_git_preview_mints_its_input_immediately_before_consumption(self) -> None:
-        runner = load_runner()
-        name = "tracedecay_git_preview"
-        minted = self.text_response(
-            '{"preview_input_id":"preview.current","hunks":[{"digest":"d1","hunk":{}}]}'
-        )
-        success = self.text_response('{"operation":"stage_hunks","staged":1}')
-        client = self.scripted_client({name: [success], "tracedecay_git_hunks": [minted]})
-        policies = {
-            "tracedecay_git_hunks": self.policy(runner, "tracedecay_git_hunks"),
-            name: self.policy(runner, name),
-        }
-
-        row = runner._read_tool_row(
-            client, self.definition(name), self.policy(runner, name), fixture={}, policies=policies
-        )
-
-        self.assertEqual(row["verdict"], "PASS")
-        self.assertEqual([tool for tool, _ in client.calls], [
-            "tracedecay_git_hunks", "tracedecay_git_preview",
-        ])
-        self.assertEqual(client.calls[1][1]["preview_input_id"], "preview.current")
 
 
 if __name__ == "__main__":
