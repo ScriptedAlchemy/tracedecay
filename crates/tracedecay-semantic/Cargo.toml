@@ -81,9 +81,13 @@ semantic-fastembed = [
     "fastembed/hf-hub-rustls-tls",
 ]
 # GPU execution providers for the FastEmbed/ORT runtime. CoreML needs no
-# companion library; Linux WebGPU links the Dawn shared library shipped in
-# ORT's wgpu distribution. CUDA remains an explicit build choice. Compiled
-# providers auto-select when available and otherwise fall back to CPU.
+# companion library but is explicit opt-in at runtime
+# (`TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml`) until it measures faster than
+# CPU — see `execution_provider::automatic_provider`. Linux WebGPU dynamically
+# loads `libwebgpu_dawn.so`, which ORT's wgpu distribution does not bundle, so
+# it is not in any release feature set. CUDA remains an explicit build choice.
+# Compiled CUDA/WebGPU providers auto-select when available; everything else
+# falls back to CPU.
 semantic-gpu-coreml = ["semantic-fastembed", "dep:ort", "ort/coreml", "ort/tracing"]
 semantic-gpu-cuda = ["semantic-fastembed", "dep:ort", "ort/cuda", "ort/tracing"]
 semantic-gpu-webgpu = ["semantic-fastembed", "dep:ort", "ort/webgpu", "ort/tracing"]

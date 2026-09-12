@@ -1,9 +1,9 @@
 //! GPU execution-provider selection for the FastEmbed/ORT session builder
 //! (CoreML on macOS, CUDA or WebGPU on Linux).
 //!
-//! A compiled `semantic-gpu-coreml` feature enables automatic CoreML probing
-//! on Apple targets, while `semantic-gpu-cuda` and `semantic-gpu-webgpu`
-//! participate in the Linux auto ladder. `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu`
+//! `semantic-gpu-cuda` and `semantic-gpu-webgpu` participate in the Linux auto
+//! ladder. A compiled `semantic-gpu-coreml` feature is explicit opt-in only
+//! (see `automatic_provider` for the measurement). `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu`
 //! opts out; `coreml`, `cuda`, or `webgpu` explicitly requests that provider.
 //!
 //! An unavailable automatic provider is normal and quietly falls back to
@@ -79,13 +79,11 @@ pub(crate) fn resolved_execution_provider() -> EmbeddingExecutionProviderV1 {
 }
 
 fn automatic_provider() -> EmbeddingExecutionProviderV1 {
-    if cfg!(all(
-        feature = "semantic-gpu-coreml",
-        target_vendor = "apple"
-    )) && let Some(provider) = coreml_provider(false)
-    {
-        return provider;
-    }
+    // CoreML is explicit opt-in until it measures faster than CPU: on an Apple
+    // Silicon Mac Studio (2026-09-11, Jina v2 base code, warm sample) CoreML
+    // embedded 0.12 units/s with embed_batch avg 105 s against ~5 units/s and
+    // 7.5 s on the Linux CPU baseline, so auto-selecting it would make every
+    // Mac slower. `TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml` still forces it.
     if cfg!(all(feature = "semantic-gpu-cuda", target_os = "linux"))
         && let Some(provider) = cuda_provider(false)
     {
@@ -399,7 +397,6 @@ mod tests {
     fn auto_without_a_compiled_provider_uses_cpu() {
         with_env(None, || {
             if !cfg!(any(
-                all(feature = "semantic-gpu-coreml", target_vendor = "apple"),
                 all(feature = "semantic-gpu-cuda", target_os = "linux"),
                 feature = "semantic-gpu-webgpu"
             )) {
@@ -409,6 +406,17 @@ mod tests {
                 );
                 assert!(requested_execution_providers().is_empty());
             }
+        });
+    }
+
+    // CoreML is opt-in only: `Auto` must never resolve to it on any build.
+    #[test]
+    fn auto_never_selects_coreml() {
+        with_env(None, || {
+            assert_ne!(
+                resolved_execution_provider(),
+                EmbeddingExecutionProviderV1::CoreMl
+            );
         });
     }
 
