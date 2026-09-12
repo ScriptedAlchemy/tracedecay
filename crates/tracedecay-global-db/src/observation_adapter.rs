@@ -1512,15 +1512,6 @@ impl ObservationStore for GlobalDbObservationStore {
             "advance observation source cursor",
         )
         .await;
-        let outcome = match outcome {
-            Err(error @ ObservationStoreError::CursorAdvanceLedgerDisagreement { .. }) => {
-                return Err(error);
-            }
-            Err(_) if existed_at_next => {
-                return Err(ObservationStoreError::CursorAdvanceCollision);
-            }
-            outcome => outcome,
-        };
         match outcome? {
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
@@ -2233,6 +2224,9 @@ fn map_observation_submit_error(
         StoreRuntimeRegistryFailure::StorageRuntime(error) => match *error {
             StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual } => {
                 ObservationStoreError::CursorConflict { expected, actual }
+            }
+            StorageRuntimeErrorV1::ObservationCursorAdvanceCollision => {
+                ObservationStoreError::CursorAdvanceCollision
             }
             StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement } => {
                 ObservationStoreError::CursorAdvanceLedgerDisagreement { disagreement }
