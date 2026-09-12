@@ -275,13 +275,7 @@ fn cursor_mismatch_and_denied_root_never_become_empty_success() {
     );
 
     let mismatch = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Denied))
-        .execute(request(
-            set,
-            contexts,
-            digest('f'),
-            1,
-            Some(continuation),
-        ))
+        .execute(request(set, contexts, digest('f'), 1, Some(continuation)))
         .unwrap_err();
     assert_eq!(
         mismatch,
