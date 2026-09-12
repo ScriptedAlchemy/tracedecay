@@ -120,7 +120,7 @@ pub const FASTEMBED_RUNTIME_FAMILY_V1: &str = "fastembed-ort";
 /// admission evidence. It must name the crate versions this binary actually
 /// links (`fastembed` is pinned exactly in Cargo.toml); a runtime upgrade must
 /// update this revision so vector generations replay under the new identity.
-pub const FASTEMBED_RUNTIME_BUILD_REVISION_V1: &str = "fastembed-5.17.3+ort-2.0.0-rc.12";
+pub const FASTEMBED_RUNTIME_BUILD_REVISION_V1: &str = "fastembed-6.0.3+ort-2.0.0-rc.13";
 
 impl RuntimeEnvironmentV1 {
     /// Capture runtime identity and host resources independently of an artifact.

@@ -110,7 +110,9 @@ fn coreml_provider(explicit: bool) -> Option<EmbeddingExecutionProviderV1> {
     use ort::execution_providers::{CoreML, ExecutionProvider};
 
     let provider = CoreML::default();
-    if !provider.supported_by_platform() {
+    // ORT rc.13 dropped `ExecutionProvider::supported_by_platform`; this is
+    // the platform predicate rc.12's CoreML provider implemented.
+    if !cfg!(target_vendor = "apple") {
         if explicit {
             tracing::warn!(
                 "TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml requested on a non-Apple build; using cpu"
@@ -162,7 +164,15 @@ fn cuda_provider(explicit: bool) -> Option<EmbeddingExecutionProviderV1> {
     use ort::execution_providers::{CUDA, ExecutionProvider};
 
     let provider = CUDA::default();
-    if !provider.supported_by_platform() {
+    // Platform predicate rc.12's CUDA provider implemented before rc.13
+    // removed `supported_by_platform`.
+    if !cfg!(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(target_os = "windows", target_arch = "x86_64")
+    )) {
         if explicit {
             tracing::warn!(
                 "TRACEDECAY_EMBED_EXECUTION_PROVIDER=cuda requested on an unsupported platform; using cpu"
@@ -217,7 +227,13 @@ fn webgpu_provider(explicit: bool) -> Option<EmbeddingExecutionProviderV1> {
     use ort::execution_providers::{ExecutionProvider, WebGPU};
 
     let provider = WebGPU::default();
-    if !provider.supported_by_platform() {
+    // Platform predicate rc.12's WebGPU provider implemented before rc.13
+    // removed `supported_by_platform`.
+    if !cfg!(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_arch = "wasm32"
+    )) {
         if explicit {
             tracing::warn!(
                 "TRACEDECAY_EMBED_EXECUTION_PROVIDER=webgpu requested on an unsupported platform; using cpu"
