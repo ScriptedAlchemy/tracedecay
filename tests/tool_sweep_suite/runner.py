@@ -550,6 +550,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         + "\n"
     )
     return root, {
+        "binary": str(binary),
         "file": "src/lib.rs",
         "path": "src/lib.rs",
         "directory": "src",
@@ -671,6 +672,153 @@ def prime_github_stack_signal(
                 f"preflight signal: {detail}"
             )
         time.sleep(MOUNT_RETRY_DELAY_S)
+
+
+_SCOUT_ADDRESS_PREFIX = "TraceDecay Context Scout address for authorized operations: "
+
+
+def prime_context_scout(
+    client: McpClient,
+    fixture: dict[str, Any],
+    deadline: Callable[[str], int],
+) -> None:
+    """Produce one real Scout address and pending work through an OpenCode hook."""
+    key = "context_scout.settings.v1"
+    current = _producer_call(
+        client,
+        "tracedecay_configuration_get",
+        {"key": key, "format": "json"},
+        deadline("tracedecay_configuration_get"),
+    )
+    setting = next(
+        (
+            value
+            for value in _objects(current)
+            if value.get("key") == key
+            and isinstance(value.get("effective_value"), dict)
+            and isinstance(value.get("revision_id"), str)
+        ),
+        None,
+    )
+    if setting is None or setting["effective_value"].get("kind") != "context_scout_settings":
+        raise SweepError("Context Scout configuration producer omitted its typed setting")
+    settings = json.loads(json.dumps(setting["effective_value"]))
+    settings["value"]["state"] = "active"
+    settings["value"]["mode"] = "deterministic"
+    settings["value"]["model_path"] = None
+    settings["value"]["model_id"] = None
+    settings["value"]["model_timeout_secs"] = None
+    activation = _producer_call(
+        client,
+        "tracedecay_configuration_set",
+        {
+            "layer": {"kind": "project", "project_id": fixture["project_id"]},
+            "key": key,
+            "value": settings,
+            "expected_revision": setting["revision_id"],
+            "idempotency_key": f"tool-sweep-scout-activate-{time.monotonic_ns()}",
+            "format": "json",
+        },
+        deadline("tracedecay_configuration_set"),
+    )
+    revision = first_value(activation, {"result_revision_id"})
+    if not isinstance(revision, str) or not revision:
+        raise SweepError("Context Scout activation omitted its configuration revision")
+
+    source = Path(fixture["root"]) / "src/scout_error.rs"
+    source.write_text('pub fn scout_type_error() -> i32 { "not an integer" }\n')
+    session_id = f"tool-sweep-scout-{os.getpid()}-{time.monotonic_ns()}"
+    payload = json.dumps(
+        {
+            "input": {
+                "tool": "apply_patch",
+                "sessionID": session_id,
+                "callID": "scout-producer",
+                "args": {"patchText": "*** Begin Patch\n*** Add File: src/scout_error.rs\n*** End Patch"},
+            },
+            "output": {
+                "title": "Added Scout diagnostic fixture",
+                "metadata": {
+                    "files": [
+                        {
+                            "filePath": str(source),
+                            "relativePath": "src/scout_error.rs",
+                            "type": "add",
+                            "additions": 1,
+                            "deletions": 0,
+                        }
+                    ],
+                    "diagnostics": {},
+                    "truncated": False,
+                },
+                "output": "Done",
+            },
+        }
+    )
+    binary = Path(fixture["binary"])
+    _run_checked(
+        [str(binary), "hook-opencode-tool-after"],
+        Path(fixture["root"]),
+        "Context Scout OpenCode producer",
+        timeout_s=60,
+        input_text=payload,
+    )
+    ready_at = time.monotonic() + 60
+    address: dict[str, Any] | None = None
+    while time.monotonic() < ready_at:
+        time.sleep(MOUNT_RETRY_DELAY_S)
+        replay = _run_checked(
+            [str(binary), "hook-opencode-tool-after"],
+            Path(fixture["root"]),
+            "Context Scout OpenCode address replay",
+            timeout_s=60,
+            input_text=payload,
+        )
+        for line in replay.stdout.splitlines():
+            marker = line.find(_SCOUT_ADDRESS_PREFIX)
+            if marker < 0:
+                continue
+            encoded = line[marker + len(_SCOUT_ADDRESS_PREFIX):].strip()
+            candidate = json.loads(encoded)
+            if isinstance(candidate, dict):
+                address = candidate
+                break
+        if address is not None:
+            break
+    if address is None:
+        raise SweepError("OpenCode producer never returned its mounted Context Scout address")
+
+    pending_at = time.monotonic() + 30
+    while True:
+        recent = _producer_call(
+            client,
+            "tracedecay_context_scout_recent",
+            {"address": address, "limit": 8},
+            deadline("tracedecay_context_scout_recent"),
+        )
+        pending = next(
+            (
+                value["pending"]
+                for value in _objects(recent)
+                if isinstance(value.get("pending"), list) and value["pending"]
+            ),
+            None,
+        )
+        if pending is not None and isinstance(pending[0], dict):
+            fixture.update(
+                {
+                    "context_scout_address": address,
+                    "context_scout_revision": revision,
+                    "context_scout_work": pending[0].get("work"),
+                }
+            )
+            if not isinstance(fixture["context_scout_work"], dict):
+                raise SweepError("Context Scout recent producer omitted pending work identity")
+            return
+        if time.monotonic() >= pending_at:
+            raise SweepError("Context Scout producer returned no pending suggestion")
+        time.sleep(MOUNT_RETRY_DELAY_S)
+
 
 
 def prime_fixture_values(
@@ -921,6 +1069,13 @@ def prime_fixture_values(
                 "configuration_rollback_target_revision": seeded_revision,
             }
         )
+
+    if (effect_target is None and "tracedecay_context_scout_status" in policies) or (
+        isinstance(effect_target, str)
+        and effect_target.startswith("tracedecay_context_scout_")
+    ):
+        with prime_group("context_scout"):
+            prime_context_scout(client, fixture, deadline)
 
     if effect_target is None and FACT_READ_TOOLS.intersection(policies):
         with prime_group("facts"):
@@ -1291,13 +1446,6 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(CODE_NAVIGATION_NODE_NAMES)
 # and a hermetic success FAILs with expected_denial_superseded until the entry
 # is removed.
 EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
-    "tracedecay_context_scout_budget": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_context_scout_capability": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_context_scout_explain": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_context_scout_pause": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_context_scout_resume": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_context_scout_recent": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_context_scout_status": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_affected_tests": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_feedback_diagnostics": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_feedback_expand": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
@@ -1318,22 +1466,6 @@ _UNKNOWN_REQUEST_HANDLE_PROBE = {
     "request_handle": "tool-sweep-unknown-request-handle.v1",
     "format": "json",
 }
-# A structurally valid scout address that no host-agent claim has ever minted.
-_UNCLAIMED_SCOUT_ADDRESS = {
-    "profile_id": [0] * 16,
-    "provider_id": [0] * 16,
-    "protected_session_id": [0] * 32,
-    "thread_id": [0] * 16,
-    "turn_id": [0] * 16,
-    "agent_id": [0] * 16,
-    "logical_message_id": [0] * 16,
-    "project_id": [0] * 16,
-}
-_SCOUT_CONTROL_PROBE = {
-    "address": _UNCLAIMED_SCOUT_ADDRESS,
-    "expected_revision": "tool-sweep-unknown-revision.v1",
-    "idempotency_key": "tool-sweep-denial-probe.v1",
-}
 HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "tracedecay_affected_tests": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_feedback_diagnostics": _UNKNOWN_REQUEST_HANDLE_PROBE,
@@ -1341,8 +1473,6 @@ HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "tracedecay_feedback_get": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_feedback_impact": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_feedback_list": _UNKNOWN_REQUEST_HANDLE_PROBE,
-    "tracedecay_context_scout_pause": _SCOUT_CONTROL_PROBE,
-    "tracedecay_context_scout_resume": _SCOUT_CONTROL_PROBE,
 }
 
 
@@ -1363,6 +1493,14 @@ def git_preview_arguments(fixture: dict[str, Any]) -> dict[str, Any]:
 def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, Any]) -> dict[str, Any]:
     """Produce valid ordinary inputs from the negotiated schema; opaque values are never invented."""
     name = definition.get("name")
+    if name in {
+        "tracedecay_context_scout_status",
+        "tracedecay_context_scout_capability",
+        "tracedecay_context_scout_budget",
+    }:
+        return {"address": fixture["context_scout_address"]}
+    if name in {"tracedecay_context_scout_recent", "tracedecay_context_scout_explain"}:
+        return {"address": fixture["context_scout_address"], "limit": 8}
     if isinstance(name, str) and name in fixture.get("fact_read_arguments", {}):
         return dict(fixture["fact_read_arguments"][name])
     if name == "tracedecay_api_migration_plan":

@@ -237,28 +237,6 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "tool_sweep.expected_denial_superseded")
 
-    def test_mutation_denial_probe_passes_exactly_and_needs_no_rollback(self) -> None:
-        """A control mutation denied before admission proves its typed deny path."""
-        runner = load_runner()
-        name = "tracedecay_context_scout_pause"
-        self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
-        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
-        policy = runner.ToolPolicy(
-            name=name, availability="available", effect="administrative", deadline_ms=1_000
-        )
-
-        row = runner.execute_effect(
-            self.client(f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}'),
-            self.definition(name),
-            policy,
-            fixture={},
-            policies={},
-        )
-
-        self.assertEqual(row["verdict"], "PASS")
-        self.assertTrue(row["expected_denial"])
-        self.assertEqual(row["rollback"], "not_required")
-
     def test_mutation_denial_with_a_different_problem_stays_a_failure(self) -> None:
         runner = load_runner()
         name = "tracedecay_context_scout_pause"

@@ -3171,10 +3171,114 @@ def _native_effect(
     return PreparedJourney(dict(arguments), cleanup, "contained")
 
 
+def _scout_claim(fixture: dict[str, Any], call: Call, deadline: Deadline, suffix: str) -> dict[str, Any]:
+    response = call(
+        "tracedecay_context_scout_claim",
+        {"address": fixture["context_scout_address"], "window": "idle_window",
+         "idempotency_key": f"tool-sweep-scout-claim-{suffix}"},
+        deadline("tracedecay_context_scout_claim"),
+    )
+    claimed = next((value for value in objects(response)
+                    if value.get("outcome") == "claimed" and isinstance(value.get("claim"), dict)), None)
+    if claimed is None:
+        raise JourneyError("Context Scout claim did not return its lease")
+    return claimed["claim"]
+
+
+def _prepare_context_scout(name: str, fixture: dict[str, Any], call: Call, deadline: Deadline) -> PreparedJourney:
+    address = fixture["context_scout_address"]
+    key = "context_scout.settings.v1"
+    nonce = str(time.monotonic_ns())
+    if name == "tracedecay_context_scout_pause":
+        arguments = {"address": address, "expected_revision": fixture["context_scout_revision"],
+                     "idempotency_key": f"tool-sweep-scout-pause-{nonce}"}
+        def cleanup(_response: dict[str, Any]) -> str:
+            revision, value = _configuration_setting(call, deadline, key)
+            if value.get("value", {}).get("state") != "paused":
+                raise JourneyError("Context Scout pause did not persist paused state")
+            call("tracedecay_context_scout_resume",
+                 {"address": address, "expected_revision": revision,
+                  "idempotency_key": f"tool-sweep-scout-pause-rollback-{nonce}"},
+                 deadline("tracedecay_context_scout_resume"))
+            return "pause persisted and resume restored the disposable Scout"
+        return PreparedJourney(arguments, cleanup)
+    if name == "tracedecay_context_scout_resume":
+        call("tracedecay_context_scout_pause",
+             {"address": address, "expected_revision": fixture["context_scout_revision"],
+              "idempotency_key": f"tool-sweep-scout-resume-setup-{nonce}"},
+             deadline("tracedecay_context_scout_pause"))
+        revision, _ = _configuration_setting(call, deadline, key)
+        def cleanup(_response: dict[str, Any]) -> str:
+            _, value = _configuration_setting(call, deadline, key)
+            if value.get("value", {}).get("state") != "active":
+                raise JourneyError("Context Scout resume did not restore active state")
+            return "pause prerequisite and active resume state verified"
+        return PreparedJourney({"address": address, "expected_revision": revision,
+                                "idempotency_key": f"tool-sweep-scout-resume-{nonce}"}, cleanup)
+    if name == "tracedecay_context_scout_claim":
+        arguments = {"address": address, "window": "idle_window",
+                     "idempotency_key": f"tool-sweep-scout-claim-{nonce}"}
+        def cleanup(response: dict[str, Any]) -> str:
+            claimed = next((value for value in objects(response)
+                            if value.get("outcome") == "claimed" and isinstance(value.get("claim"), dict)), None)
+            if claimed is None:
+                raise JourneyError("Context Scout claim omitted its lease")
+            call("tracedecay_context_scout_delivery",
+                 {"address": address, "claim": claimed["claim"],
+                  "delivered_at": int(time.time() * 1_000_000), "outcome": "displayed",
+                  "idempotency_key": f"tool-sweep-scout-claim-settle-{nonce}"},
+                 deadline("tracedecay_context_scout_delivery"))
+            return "claim returned a real lease and delivery settled it"
+        return PreparedJourney(arguments, cleanup, settlement="contained")
+    if name in {"tracedecay_context_scout_delivery", "tracedecay_context_scout_feedback"}:
+        claim = _scout_claim(fixture, call, deadline, nonce)
+        delivery_arguments = {"address": address, "claim": claim,
+                              "delivered_at": int(time.time() * 1_000_000), "outcome": "displayed",
+                              "idempotency_key": f"tool-sweep-scout-delivery-{nonce}"}
+        if name == "tracedecay_context_scout_delivery":
+            def cleanup(response: dict[str, Any]) -> str:
+                receipt = _object_field(response, "receipt")
+                if not isinstance(receipt.get("receipt_id"), list):
+                    raise JourneyError("Context Scout delivery omitted daemon receipt")
+                return "real claim lease produced a daemon delivery receipt"
+            return PreparedJourney(delivery_arguments, cleanup, settlement="contained")
+        delivered = call("tracedecay_context_scout_delivery", delivery_arguments,
+                         deadline("tracedecay_context_scout_delivery"))
+        receipt = _object_field(delivered, "receipt")
+        arguments = {"address": address, "receipt": receipt,
+                     "feedback": {"receipt_id": receipt["receipt_id"], "kind": "explicitly_accepted"},
+                     "idempotency_key": f"tool-sweep-scout-feedback-{nonce}"}
+        def cleanup(_response: dict[str, Any]) -> str:
+            recent = call("tracedecay_context_scout_recent", {"address": address, "limit": 8},
+                          deadline("tracedecay_context_scout_recent"))
+            if first_value(recent, {"kind"}) != "explicitly_accepted":
+                raise JourneyError("Context Scout recent omitted recorded feedback")
+            return "delivery receipt produced accepted feedback and recent retained it"
+        return PreparedJourney(arguments, cleanup, settlement="contained")
+    if name == "tracedecay_context_scout_cancel":
+        work = fixture["context_scout_work"]
+        arguments = {"address": address, "work": work,
+                     "idempotency_key": f"tool-sweep-scout-cancel-{nonce}"}
+        def cleanup(_response: dict[str, Any]) -> str:
+            recent = call("tracedecay_context_scout_recent", {"address": address, "limit": 8},
+                          deadline("tracedecay_context_scout_recent"))
+            for value in objects(recent):
+                if isinstance(value.get("pending"), list) and any(
+                    isinstance(item, dict) and item.get("work") == work for item in value["pending"]
+                ):
+                    raise JourneyError("cancelled Context Scout work remained pending")
+            return "pending work identity cancelled and disappeared from recent state"
+        return PreparedJourney(arguments, cleanup, settlement="contained")
+    raise JourneyError(f"unknown Context Scout mutation journey: {name}")
+
+
+
 def prepare(
     name: str, client: Any, fixture: dict[str, str], deadline: Deadline, call: Call,
 ) -> PreparedJourney | None:
     """Prepare only cataloged journeys; unknown mutations stay visible failures."""
+    if name.startswith("tracedecay_context_scout_"):
+        return _prepare_context_scout(name, fixture, call, deadline)
     if name == "tracedecay_dashboard":
         def cleanup(response: dict[str, Any]) -> str:
             url = first_value(response, {"url", "dashboard_url"})
