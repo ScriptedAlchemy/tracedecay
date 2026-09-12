@@ -213,3 +213,158 @@ the maintained bench).
    but still define the graph-ready time when the text build gets faster.
 4. Item 5 (hooked saves reconcile only at the 30 s window, `hook_hint_count: 0`) is untouched by this lane.
 5. CI: the validated `root-daemon-suite` partition from the issue thread should land with the item-4 fix.
+
+## Lane status 2026-09-12 — fable/wave2-root (root crate cleanup, ponytail wave 2)
+
+Worktree `/fast/tmp/td-wave2-root-fable`, base `5292a39d2c` (tip after #1245), target dir
+`/fast/tmp/td-target-wave2-root`. Five commits, one per audit item; each compiles under
+`cargo check -p tracedecay --lib --tests --features test-helpers` and
+`cargo check --workspace --all-targets` (cc-18039) at the branch head.
+
+| item | outcome |
+| --- | --- |
+| 1 alias re-exports | `tracedecay::query` had zero consumers; `tracedecay::code_index` had four (workflow handler digest, CLI blocking-thread sizing, one product-surface test, and the scheduler flight test the root compiled via `#[path]`). All retargeted to the sibling crate; CLI gains the edge with `default-features = false`. Both aliases deleted. |
+| 2 dispatch table | Forwarding arms for graph (18), info (10), analysis (18), git (8), health (7) moved beside their handlers as one `dispatch_tool` per family in `tracedecay-mcp`; the root lends its admission funnel as `VerifiedGraphOpen`. Root `dispatch_groups.rs` 1478→1104 lines. `LegacyToolCompatibilityOwner` kept (see below); its dead `OWNER` label deleted. |
+| 3 in-src tests | 73 `#[cfg(test)]` roots probed by compiling them as an integration target: 66 use private items or sit under private modules, 6 import private `super::` items, 1 (`remote_protocol_tests`, 289 lines) is clean but is the fixture for two blocked siblings. **0 lines movable as pure moves.** Two files the root compiled out of `tracedecay-code-index-runtime/src` via `#[path]` were relocated: the scheduler journeys (2,110 lines) into `tests/daemon_suite/code_index_ignored_dependencies_test`, the census journey (144) into `src/daemon/`. `production_harness` gate moved to the `mod` declaration, deleting 36 per-item repeats and narrowing 3 to `cfg(unix)`. |
+| 4 hook runtime | **False claim.** Root `hook_runtime/` (4.9k, 1.4k tests) is the `tracedecay_hook_runtime` action handler composing `tracedecay-hooks` (ledger, config snapshot, envelope types), host-admission, sessions, and `TraceDecay`; `tracedecay-mcp::hook_runtime` is 62 lines of error mapping the root already calls. Zero shared function names; ripwire clone scan across the three trees found no production clone (one 0.82 near-miss: `hook_v2_family_label` vs `HookEventKind::as_key`, different enums). Nothing folded. |
+| 5 serve stubs, module name | `ensure_initialized*` had no caller beyond three tombstone assertions: stubs, in-src test, and the two integration assertions deleted; `serve` is now crate-private around the URI decoder. `src/tracedecay.rs` → `src/project.rs`; 236 `crate::tracedecay::` and 71 `tracedecay::tracedecay::` paths retargeted (root, suites, benches, CLI). |
+
+### Tip-side reds observed (not this lane's)
+
+- Clippy `-D warnings`: four `clippy::large_futures` errors in `daemon/hook_v2_replay_consumer.rs`
+  (147, 197, 311) and `project_open_owners/advisory_runtime.rs:1520`; identical bytes in the tip's
+  CI Clippy job (run 34696973432). Verified this lane with `-A clippy::large_futures`.
+- Root lib: `mcp::tools::handlers::search_graph_independence_tests::{tracedecay_search_preserves_lexical_results_when_graph_admission_is_missing, tracedecay_search_refuses_foreign_generation_graph_evidence_without_erasing_results}`
+  (`node_id` not null) — FAILED in the tip's `Test Linux root-lib` job.
+- `code_index_ignored_dependencies_test::flight_tests::aborted_flight_owner_wakes_follower_and_allows_a_fresh_owner`
+  is a pre-existing intra-test race (fails alone 1/6, module 3/4 in the tip-equivalent in-lib binary of
+  `/fast/projects/tracedecay` at 5be9a952e7; FAILED in the tip's root-lib CI). Mechanism: after
+  `owner.abort()` + `hold.release()` the orphaned blocking build still publishes, so the fresh owner's
+  `expected_generation` is stale (`IgnoredDependency(StaleGeneration)`). Moving the file did not change it.
+- `daemon::production_harness::lcm_preserved_profile_journey_test::preserved_profile_lcm_discovery_converges_without_blocking_retrieval`
+  went `outcome=stale` once under load 43 alongside 25 harness journeys; passes alone 2/2 (46 s each).
+
+### `LegacyToolCompatibilityOwner` — why it stays
+
+`admits(name)` is advertised-name membership (`get_tool_definitions()`), consulted after the typed
+daemon-surface groups return and before group dispatch. It is not redundant with the binding table:
+`MCP_TOOL_BINDING_SPECS` is a static list, so a bound-but-unadvertised name (host-gated
+`tracedecay_ast_grep_search`/`_rewrite` when ast-grep is absent) is rejected as unknown only by this
+gate. Tools it guards that the root still serves (P0-1 leftovers): `tracedecay_retrieve`,
+`tracedecay_remote_status`, `tracedecay_status`, `tracedecay_active_project`,
+`tracedecay_project_{list,search,context}`, `tracedecay_admin_sync`, `tracedecay_runtime`, admin
+(`hook_runtime`, `admin_cli`, `admin_project`), edit (10 `tracedecay_*_replace/insert/move/rename/rollback/reconcile`),
+memory (`automation_run_*`, `analytics`, `skill_*`, `hermes_skill_bridge`), session-workflow
+(`diagnose`, `run_affected_tests`, `dashboard`), and every retained-application operation.
+
+## P0-1/P0-2 collapse plan
+
+### Dependency direction (cargo tree, normal edges)
+
+`tracedecay-mcp` ← `tracedecay-agent-hosts` ← `tracedecay-daemon-service` ← `tracedecay` ← `tracedecay-cli`.
+`tracedecay-mcp` depends on 25 crates and on none of agent-hosts, daemon-service, daemon-control,
+daemon-identity, host-admission, lsp, automation-runtime. The only agent-hosts → mcp edge is
+`ports/mcp_tools.rs` (`get_tool_definitions`, `format_capable_tool_names`).
+
+Two facts block every "move the rest into tracedecay-mcp":
+
+1. **`TraceDecay` lives in the root** (`src/project/`, 2.8k lines) and is read at 161 sites in
+   `src/mcp/tools`, 52 in `src/mcp/server`, and throughout `src/daemon`. It depends on agent-hosts
+   (context-scout owner lookup), configuration, store-runtime, application, graph-query, and the root's
+   `config`, `runtime_ports`, `project_store_runtime`, `test_support`.
+2. **Cycle** if `tracedecay-mcp` took daemon-service or agent-hosts:
+   `tracedecay-mcp → tracedecay-daemon-service → tracedecay-agent-hosts → tracedecay-mcp`.
+
+Break it first: replace the two `tracedecay_mcp::` calls in `tracedecay-agent-hosts/src/ports/mcp_tools.rs`
+with a tool-name list passed in by the composition root (or sourced from `tracedecay-tool-catalog`). That
+removes agent-hosts → mcp and lets `tracedecay-mcp` depend on agent-hosts and host-admission. Then give
+`TraceDecay` a home below both consumers: new crate `tracedecay-project` = root `project/` + `config.rs`
++ `project_store_runtime.rs` + `runtime_ports.rs` (test fixtures behind `test-helpers`), depending on
+agent-hosts for the scout owner. After that every (c) row below is movable.
+
+### Root `src/mcp/` — 42,256 lines, 12,390 in test files
+
+(a) duplicate of an extracted owner → delete: none remain (this lane removed `effective_path`, four
+`unknown_tool_error` copies, and the forwarding tables). Checked by name overlap and ripwire `--clones`.
+
+(b) movable as-is (target crate):
+
+| module | lines | target | note |
+| --- | ---: | --- | --- |
+| `tools/binding.rs` + `binding/` | 1,630 | tracedecay-mcp | catalog: contracts + tool-catalog; one `resolve_catalog_tool_binding` call to relocate |
+| `tools/handlers/dashboard_lcm.rs` | 1,067 | tracedecay-mcp | needs `tracedecay-lcm`, `tracedecay-session-runtime` edges |
+| `tools/catalog_discovery.rs` | 673 | tracedecay-mcp | two daemon-service calls to lift |
+| `server/routing.rs` + `serve.rs` | 612+59 | tracedecay-mcp | root-URI decoding + scope routing |
+| `tools/handlers/dashboard_delivery.rs` | 564 | tracedecay-daemon-service | already daemon-service shaped |
+| `tool_analytics.rs` | 563 | tracedecay-mcp | one agent-hosts type to check |
+| `scope.rs` | 443 | tracedecay-mcp | memory/storage scope selection |
+| `server/session_refresh.rs` | 393 | tracedecay-mcp | |
+| `server/project_host_admission_replay.rs` | 312 | tracedecay-daemon-service | host-admission + sessions |
+| `tools/dispatch.rs` | 255 | tracedecay-daemon-service | daemon-protocol + daemon-service |
+| `tools/handlers/hook_runtime/envelope.rs` | 222 | tracedecay-hooks | identity minting policy; swap `config_error` for a hooks error |
+| `tools/handlers/session_authorities.rs` | 99 | tracedecay-mcp | |
+| `tools/handlers/dashboard_git_correlation.rs`, `server/status_resource.rs` | 99 | tracedecay-mcp | |
+
+(c) composition-root wiring, stays until `TraceDecay` moves (then → tracedecay-mcp, or a new
+`tracedecay-mcp-daemon` if daemon-service must stay below mcp): `server.rs` (1,546),
+`server/{requests,connection,construction,ledger,rmcp,lifecycle,hook_dispatch,hook_writes}.rs` (6,569),
+`tools/handlers/mod.rs` (`ToolCallRegistryOptions`, 50 daemon-owned authorities), `dispatch_groups.rs`
+(admission funnel, `McpToolContext` binding, retained protocol), `handlers/{edit,workflow,admin_cli,
+admin_project,analytics,skills,automation_runs,dashboard,application_surface,retained_catalog,
+tool_call_support,dispatch_controls}.rs`, `handlers/hook_runtime/` minus `envelope.rs`,
+`handlers/info/` (admin sync), `project_route.rs` (975).
+
+(d) blocked by dependency direction: every (c) module that names `TraceDecay` or `tracedecay_daemon_service`
+(`dispatch_groups.rs` 27/3, `dashboard.rs` 4/11, `mod.rs` 7/4, `construction.rs` 8/2, `edit.rs` 17,
+`hook_runtime/` 38/5) — the cycle above.
+
+### Root `src/daemon/` — 97,528 lines, 46,370 in test files (51,158 production)
+
+(a) duplicate → delete: none at module level. Name overlap with daemon-service is zero for all 23
+production modules checked; ripwire `--clones` over both trees (481 groups) finds 27 cross-tree type-3
+near-misses, all ≤160-token observability/receipt helpers (`observe_remote_deletion_receipt` ~
+`record_query_admission_refusal`, `admission_state` ~ `workflow_topology_problem`) — a shared receipt
+helper in daemon-service, not deletions.
+
+(b) movable as-is → tracedecay-daemon-service (no `TraceDecay`, no `crate::mcp`, no root `config`):
+`shutdown_orchestration.rs` (1,362), `shutdown_coordination.rs` (588), `shutdown_watchdog.rs` (338),
+`invocation_executor.rs` (800; daemon-protocol), `invocation_dispatch.rs` (931), `context_scout_lifecycle/`
+(566 + tests), `remote_deletion.rs` (341), `database_owner_registry.rs` (370), `lsp_sessions.rs` (208),
+`github_credential_lifecycle.rs` (237), `bootstrap_route.rs` (175), `automation_observation.rs` (66),
+`project_delivery_mount.rs` (46), `core_doctor_schema.rs` (22), `http_application_router.rs` (125) —
+≈6.2k lines. `core_lifecycle.rs` (399) and `wire_io.rs` (448) go to daemon-protocol/daemon-control once
+their two `crate::mcp` uses are typed.
+
+(c) composition wiring (stays until `TraceDecay` moves): `branch_admin/` (5,571; TraceDecay 12, mcp 11),
+`scheduler/` (5,016; TraceDecay 44), `project_open_owners/` (4,441), `project_composition/` (3,458;
+`crate::mcp` 64 — it constructs the MCP server), `connection_serving.rs` (2,211), `maintenance.rs`
+(2,040), `engine.rs` (1,480), `pr_autotrack/` (1,379), `project_open_admission/` (1,294),
+`core_{doctor,proxy,admission,client,logging,hooks,handshake}.rs`, `bootstrap.rs`, `dashboard_automation/`,
+`http_application.rs`, `retained_owner/`, `projectless.rs`, `project_open_{orchestration,handshake}.rs`,
+`project_server_lifecycle.rs`, `project_routing.rs`, `branch_add.rs`, `hook_v2_replay_consumer.rs`,
+`graph_resolution.rs`, `automation_effect/`, `adoption_observation.rs`, `store_maintenance/`,
+`invocation_state.rs` (1,662; root `config` ×2), `doctor_kernel/` (1,341; root `config` ×2).
+
+(d) blocked by dependency direction: `project_composition/` and `connection_serving.rs` build the root
+`McpServer`, so they can only move after P0-1; everything naming `TraceDecay` waits on `tracedecay-project`;
+`invocation_state.rs`, `doctor_kernel/`, `core_logging.rs`, `bootstrap.rs` wait on root `config.rs`
+(786 lines: `PinnedUserDataDir`, `user_data_dir`, `DaemonRuntimeConfiguration`) moving with it.
+
+### Order
+
+1. `tracedecay-agent-hosts/src/ports/mcp_tools.rs`: drop the two `tracedecay_mcp::` calls (cycle break).
+2. New `tracedecay-project` (root `project/`, `config.rs`, `project_store_runtime.rs`, `runtime_ports.rs`).
+3. `src/mcp` (b) rows, one commit per target crate; then (c) into tracedecay-mcp behind `McpToolContext`.
+4. `src/daemon` (b) rows into daemon-service; then (c) as `tracedecay-daemon-service::composition`.
+5. Delete `src/mcp/` and `src/daemon/`; the root keeps `lib.rs` re-exports, `product_runtime`, `doctor`,
+   `dashboard`, `version`, and the `test_support` fixture surface.
+
+### Test placement facts (item 3 probe)
+
+`crates/tracedecay/tests/zz_relocation_probe.rs` (temporary, deleted) mounted each of the 73 `#[cfg(test)]`
+module roots under a `pub use tracedecay::<parent>::*` shim and compiled with `test-helpers,test-transport`:
+507 errors — private modules (`daemon::{automation_effect,context_scout_lifecycle,core_doctor,doctor_kernel,
+invocation_executor,production_harness,project_composition,…}` are `pub(crate)`/private), private fields
+(`ToolCallRegistryOptions`, server internals), private fns, and `cfg(test)`-only fixtures
+(`TraceDecay::init_test_fixture_with_registered_runtime`). A test that reaches those must stay in-src; the
+sanctioned fixture surface is `test_support` behind `test-helpers`.
