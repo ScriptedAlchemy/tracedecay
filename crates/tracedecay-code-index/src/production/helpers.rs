@@ -216,7 +216,10 @@ pub(crate) fn edge_order(
 
 pub(crate) fn collect_edge_evidence<T>(
     files: &[T],
-) -> Result<(Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>), CodeIndexProductionErrorV1>
+) -> Result<
+    (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>),
+    CodeIndexProductionErrorV1,
+>
 where
     T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
