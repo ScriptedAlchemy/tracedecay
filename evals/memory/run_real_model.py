@@ -426,6 +426,7 @@ def drive_cursor_agent(args, scenario, fixture, log_dir, eval_env):
             "--plugin-dir",
             str(plugin_dir),
             "--approve-mcps",
+            "--force",
             "--trust",
             "--model",
             args.model,
