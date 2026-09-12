@@ -35,14 +35,17 @@ const TEMPORAL_FTS_SHADOW_TABLES: &[&str] = &[
 
 const SESSION_RELATION_RECEIPTS_TABLE: &str = "session_relation_receipts";
 
-// `session_relation_receipts` as published in beta.37 and carried unchanged
-// into the v4 stores persisted before receipt recovery added its columns.
+// `session_relation_receipts` as published by every v3 release and carried
+// unchanged into the v4 stores persisted before receipt recovery added its
+// columns.
 const SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DIGEST: &str =
     "867dc83c80264f4b13aeab7f1ac51572a88ee5d614739a701ebddbb8dcb84a80";
 
-// Exact normalized CREATE TABLE authority published in v0.1.0-beta.37. The
-// structural PRAGMA contract cannot observe CHECK expressions, so released-v3
-// admission also pins every durable temporal table definition by digest.
+// Exact normalized CREATE TABLE authority published by every v3 release
+// (v0.1.0-beta.25 through v0.1.0-beta.37 ship one byte-identical temporal DDL).
+// The structural PRAGMA contract cannot observe CHECK expressions, so
+// released-v3 admission also pins every durable temporal table definition by
+// digest.
 const RELEASED_V3_TEMPORAL_TABLE_DIGESTS: &[(&str, &str)] = &[
     (
         "session_agents",
@@ -155,7 +158,9 @@ pub(crate) enum SessionTemporalSchemaAdmission {
     /// `session_relation_receipts` still has the exact shape persisted before
     /// receipt recovery added its columns and index.
     WithoutReceiptRecovery,
-    /// The store carries the exact schema shipped through beta.37.
+    /// The store carries the exact session-temporal schema every release that
+    /// persisted marker 3 published: v0.1.0-beta.25 through v0.1.0-beta.37 all
+    /// shipped one identical table and authority-trigger inventory.
     ReleasedV3,
     /// The registered store is proven empty and may receive the final contract.
     Fresh,
