@@ -629,9 +629,9 @@ def prime_fixture_values(
         }
     )
 
-    scalar_key = "mcp.tool_timings"
+    scalar_key = "diagnostics.prewarm.v1"
     if scalar_key not in keys:
-        raise SweepError("configuration list producer omitted mcp.tool_timings")
+        raise SweepError("configuration list producer omitted diagnostics.prewarm.v1")
     scalar = _producer_call(
         client,
         "tracedecay_configuration_get",
