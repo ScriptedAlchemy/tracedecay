@@ -20,11 +20,9 @@
 //! A background warm task runs at dashboard startup so the first paint of
 //! the Savings tab doesn't pay the initial counting cost.
 
-use std::collections::HashMap;
-use std::num::NonZeroUsize;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use clru::CLruCache;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -155,14 +153,47 @@ struct DisplayedCount {
 
 // Retain two maximum-sized timeline pages for each of the most recently used
 // providers. Older entries are derived data and can be recounted after eviction.
-const DISPLAYED_PROVIDER_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(15);
-const DISPLAYED_MESSAGE_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(4_095);
+// ponytail: FIFO eviction at these caps (no get-promotion); a recency index
+// would restore LRU if a long-lived dashboard starts evicting hot providers.
+const DISPLAYED_PROVIDER_CACHE_CAPACITY: usize = 16;
+const DISPLAYED_MESSAGE_CACHE_CAPACITY: usize = 4_096;
 
-type DisplayedMessageCache = CLruCache<String, DisplayedCount>;
-type DisplayedProviderCache = CLruCache<String, DisplayedMessageCache>;
+struct FifoCache<V> {
+    map: HashMap<String, V>,
+    order: VecDeque<String>,
+    cap: usize,
+}
 
-fn displayed_message_cache() -> DisplayedMessageCache {
-    CLruCache::new(DISPLAYED_MESSAGE_CACHE_CAPACITY)
+impl<V> FifoCache<V> {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&V> {
+        self.map.get(key)
+    }
+
+    fn get_or_insert_with(&mut self, key: &str, make: impl FnOnce() -> V) -> Option<&mut V> {
+        if !self.map.contains_key(key) {
+            self.put(key.to_owned(), make());
+        }
+        self.map.get_mut(key)
+    }
+
+    fn put(&mut self, key: String, value: V) {
+        if self.map.insert(key.clone(), value).is_none() {
+            self.order.push_back(key);
+            if self.order.len() > self.cap
+                && let Some(old) = self.order.pop_front()
+            {
+                self.map.remove(&old);
+            }
+        }
+    }
 }
 
 /// Cached non-usage overlay plus the `session_messages` fingerprint it was
@@ -185,7 +216,7 @@ pub struct TokenCountCache {
     /// full `session_messages` scan + fold three times.
     overlay: tokio::sync::Mutex<Option<OverlayCache>>,
     /// Displayed-content counts for the LCM render path, keyed by provider
-    /// then message id and guarded by a content fingerprint. Bounded LRU
+    /// then message id and guarded by a content fingerprint. Bounded FIFO
     /// levels prevent a long-lived dashboard from retaining every message it
     /// has ever rendered. Two levels let a hit borrow the caller's `&str`
     /// keys without allocating — every polled search/session/overview/timeline
@@ -194,7 +225,7 @@ pub struct TokenCountCache {
     /// content with `o200k_base` specifically, while `map` counts stored
     /// text with the model-mapped tokenizer, so entries are not
     /// interchangeable.
-    lcm_display: Mutex<DisplayedProviderCache>,
+    lcm_display: Mutex<FifoCache<FifoCache<DisplayedCount>>>,
 }
 
 impl TokenCountCache {
@@ -202,7 +233,7 @@ impl TokenCountCache {
         Self {
             map: Mutex::new(HashMap::new()),
             overlay: tokio::sync::Mutex::new(None),
-            lcm_display: Mutex::new(CLruCache::new(DISPLAYED_PROVIDER_CACHE_CAPACITY)),
+            lcm_display: Mutex::new(FifoCache::new(DISPLAYED_PROVIDER_CACHE_CAPACITY)),
         }
     }
 
@@ -214,11 +245,11 @@ impl TokenCountCache {
         message_id: &str,
         fingerprint: ContentFingerprint,
     ) -> Option<i64> {
-        let mut map = self
+        let map = self
             .lcm_display
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.get_mut(provider)
+        map.get(provider)
             .and_then(|inner| inner.get(message_id))
             .filter(|cached| cached.fingerprint == fingerprint)
             .map(|cached| cached.tokens)
@@ -235,19 +266,17 @@ impl TokenCountCache {
             .lcm_display
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let provider_cache = map.put_or_modify(
-            provider.to_owned(),
-            |_, ()| displayed_message_cache(),
-            |_, _, ()| {},
-            (),
-        );
-        provider_cache.put(
-            message_id.to_owned(),
-            DisplayedCount {
-                fingerprint,
-                tokens,
-            },
-        );
+        if let Some(inner) =
+            map.get_or_insert_with(provider, || FifoCache::new(DISPLAYED_MESSAGE_CACHE_CAPACITY))
+        {
+            inner.put(
+                message_id.to_owned(),
+                DisplayedCount {
+                    fingerprint,
+                    tokens,
+                },
+            );
+        }
     }
 }
 
@@ -548,7 +577,7 @@ mod tests {
         let cache = TokenCountCache::new();
         let fingerprint = content_fingerprint("content");
 
-        for index in 0..=DISPLAYED_MESSAGE_CACHE_CAPACITY.get() {
+        for index in 0..=DISPLAYED_MESSAGE_CACHE_CAPACITY {
             cache.store_displayed_tokens(
                 "codex",
                 &format!("message.{index}"),
@@ -563,13 +592,13 @@ mod tests {
         assert_eq!(
             cache.displayed_tokens(
                 "codex",
-                &format!("message.{}", DISPLAYED_MESSAGE_CACHE_CAPACITY.get()),
+                &format!("message.{DISPLAYED_MESSAGE_CACHE_CAPACITY}"),
                 fingerprint,
             ),
-            Some(DISPLAYED_MESSAGE_CACHE_CAPACITY.get() as i64),
+            Some(DISPLAYED_MESSAGE_CACHE_CAPACITY as i64),
         );
 
-        for index in 0..=DISPLAYED_PROVIDER_CACHE_CAPACITY.get() {
+        for index in 0..=DISPLAYED_PROVIDER_CACHE_CAPACITY {
             cache.store_displayed_tokens(
                 &format!("provider.{index}"),
                 "message",
@@ -583,11 +612,11 @@ mod tests {
         );
         assert_eq!(
             cache.displayed_tokens(
-                &format!("provider.{}", DISPLAYED_PROVIDER_CACHE_CAPACITY.get()),
+                &format!("provider.{DISPLAYED_PROVIDER_CACHE_CAPACITY}"),
                 "message",
                 fingerprint,
             ),
-            Some(DISPLAYED_PROVIDER_CACHE_CAPACITY.get() as i64),
+            Some(DISPLAYED_PROVIDER_CACHE_CAPACITY as i64),
         );
     }
 
