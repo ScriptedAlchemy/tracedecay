@@ -700,7 +700,7 @@ pub async fn apply_code_generation_retention(
     let replay_reconcile_attemptable = match graph_replay::reconcile_graph_replay_releases(
         lease,
         &store_root,
-        &serving_scope.repository_id,
+        &repository_id,
         observations,
         cancellation,
     )
@@ -958,7 +958,7 @@ pub async fn apply_code_generation_retention(
                 match graph_replay::reconcile_graph_replay_releases(
                     lease,
                     &store_root,
-                    &serving_scope.repository_id,
+                    &repository_id,
                     observations,
                     cancellation,
                 )
