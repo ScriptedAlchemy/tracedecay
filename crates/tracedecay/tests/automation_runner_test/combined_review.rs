@@ -183,7 +183,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(reflector.status, AutomationRunStatus::Succeeded);
     assert_eq!(
         reflector.prompt_version.as_deref(),
-        Some("combined_review:v2")
+        Some("combined_review:v3")
     );
     assert_eq!(reflector.accepted_count, 0);
 
@@ -193,7 +193,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(skill.task_key.as_deref(), Some("skill_writer"));
     assert_eq!(skill.trigger, AutomationTrigger::Scheduler);
     assert_eq!(skill.status, AutomationRunStatus::Succeeded);
-    assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v2"));
+    assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v3"));
     assert_eq!(skill.accepted_count, 0);
 
     // Both halves share the combined request's input hash and correlate
@@ -804,7 +804,7 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     for record in &records {
         assert_eq!(record.status, AutomationRunStatus::Failed);
         assert_eq!(record.trigger, AutomationTrigger::Scheduler);
-        assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v2"));
+        assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v3"));
         assert!(record.error.as_deref().is_some_and(|error| {
             error.contains("combined review output must include a skills array")
         }));
