@@ -28,7 +28,7 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_protocol::{InvocationCancellationPolicy, invocation_now_micros};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use crate::work_cli::application_cli::{WORKFLOW, config_error};
+use crate::application_cli::{WORKFLOW, config_error};
 
 fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
     let operation_id =
