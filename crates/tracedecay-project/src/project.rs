@@ -216,7 +216,7 @@ impl TraceDecay {
     /// hook replay. Public Scout operations still authorize the returned
     /// address against the durable registry; this avoids repeating that store
     /// read inside the bounded hook acknowledgement path.
-    pub(crate) async fn resolve_mounted_context_scout_claim_authority(
+    pub async fn resolve_mounted_context_scout_claim_authority(
         &self,
         lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
