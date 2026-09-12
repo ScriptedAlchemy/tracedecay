@@ -22,22 +22,12 @@ use super::{
     record_workspace_status_analytics, rel_under_root, text_field,
 };
 
-const CODEX_SUBAGENT_START_CONTEXT: &str = "tracedecay MCP tools subagent context: this looks \
-like a new/no-history subagent or code-research subagent. Use the matching TraceDecay \
-workflow before broad file reads: `tracedecay:exploring-code` with \
-`tracedecay_context` for code exploration, `tracedecay_grep` for literal/regex code search, \
-`tracedecay_search` for symbol names, `tracedecay_outline` or `tracedecay_body` before \
-whole-file reads, `tracedecay:tracing-functions` with `tracedecay_find_exact_symbol`, \
-`tracedecay_callers`, and `tracedecay_callees` when asked to trace functions, find callers, \
-or inspect setup/helper/fixture dependencies, `tracedecay:assessing-impact` with \
-`tracedecay_affected` and `tracedecay_test_map` before guessing affected tests, \
-`tracedecay:fixing-build-and-type-errors` before running `cargo check`/`tsc`/`clippy` \
-in the shell or when shell output shows compile errors — paste captured output into \
-`tracedecay_diagnose`, or run `tracedecay_diagnostics` for fresh structured errors \
-mapped to symbols, `tracedecay:project-memory` when project decisions/preferences matter, and \
-`tracedecay:managing-session-context` with `tracedecay_message_search`, \
-`tracedecay_lcm_expand_query`, and `tracedecay_lcm_describe` when prior conversation context \
-may be missing.";
+const CODEX_SUBAGENT_START_CONTEXT: &str = "TraceDecay context for this new or code-research \
+subagent: when the task needs unfamiliar code context, use tracedecay_context for concepts, \
+tracedecay_search for symbols, tracedecay_grep for literal or regex text, and \
+tracedecay_callers/callees or tracedecay_impact for relationships. Use native reads for known \
+files. Load a tracedecay skill only when its specific workflow matches the task; use \
+tracedecay_message_search or tracedecay_lcm_expand_query when prior conversation context matters.";
 
 /// Shipped Codex compatibility name for the shared Claude/Codex
 /// `hookSpecificOutput.additionalContext` stdout shape.

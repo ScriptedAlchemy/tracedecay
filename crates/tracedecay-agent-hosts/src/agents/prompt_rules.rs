@@ -158,20 +158,18 @@ const SKILL_INDEX_START_PREFIX: &str = "<!-- TRACEDECAY MANAGED SKILLS START";
 
 /// Canonical rules paragraphs shared by the standard hosts.
 const STANDARD_PARAGRAPHS: &[&str] = &[
-    "Before reading source files or scanning the codebase, use the tracedecay MCP tools \
-     (`tracedecay_context`, `tracedecay_grep`, `tracedecay_search`, `tracedecay_callers`, \
-     `tracedecay_callees`, `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, \
-     `tracedecay_affected`). Route literal/regex text to `tracedecay_grep`, symbol names \
-     to `tracedecay_search`, and concepts to `tracedecay_context`. They provide instant \
-     semantic results from a pre-built knowledge graph and are faster than file reads.",
+    "Use TraceDecay when its graph, durable memory, or session evidence answers the task. \
+     For unfamiliar code structure or concepts, start with `tracedecay_context`; use \
+     `tracedecay_search` for symbols, `tracedecay_grep` for literal or regex text, and \
+     `tracedecay_callers`, `tracedecay_callees`, or `tracedecay_impact` for relationships. \
+     Known-file reads, ordinary local edits, and non-indexed material can use the host's \
+     native workflow directly.",
     "For project/storage identity questions, use `tracedecay_active_project` \
      or `tracedecay_storage_status` instead of inferring from repo-local marker \
      files or direct DB paths.",
-    "If a code analysis question cannot be fully answered by tracedecay MCP tools, \
-     prefer built-in MCP tools first. If the user explicitly needs raw store \
-     inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
-     rather than a hardcoded repo-local path. Use SQL to answer complex structural \
-     queries that go beyond what the built-in tools expose.",
+    "Read freshness and coverage with graph results; an empty result does not prove \
+     absence. Preserve exact project/worktree selectors and opaque continuation or \
+     mutation identities. Use the selected registered store for cross-project requests.",
     "For durable project/user facts, use `tracedecay_fact_store_add` to persist them and \
      `tracedecay_fact_store_search` to recall or deduplicate them; use \
      `tracedecay_fact_feedback` and read-only `tracedecay_memory_status` over ad-hoc notes. \
@@ -181,11 +179,9 @@ const STANDARD_PARAGRAPHS: &[&str] = &[
      prior conversation context matters. Do not store secrets, credentials, or \
      unnecessary PII in persistent facts.",
     super::CLI_FALLBACK_PROMPT_RULES,
-    "If you discover a gap where an extractor, schema, or tracedecay tool could be \
-     improved to answer a question natively, propose to the user that they open an issue \
-     at https://github.com/ScriptedAlchemy/tracedecay describing the limitation. \
-     **Remind the user to strip any sensitive or proprietary code from the bug description \
-     before submitting.**",
+    "A preview or read result does not authorize mutation. Once the user has authorized a \
+     change, continue through implementation and relevant verification; pause only for a \
+     missing decision or an external or destructive action outside that authority.",
 ];
 
 /// Host-specific knobs for [`standard_prompt_rules`].
