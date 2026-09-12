@@ -58,7 +58,7 @@ pub use connection::{
     RegisteredTestRuntimeFixtureV1, RegisteredTestRuntimeRetirementControlV1,
     TestDatabaseRuntimeMode, TestDatabaseRuntimeScope, TestRuntimeProfileIdentityV1,
 };
-pub use external_source::install_external_source_schema;
+pub use external_source::{install_external_source_schema, migrate_retired_mutation_copy_tables};
 pub use file_identity::{
     SqliteFileIdentityError, SqliteFileIdentityErrorCategory, SqliteFileIdentityOperation,
     sqlite_generation_identity,

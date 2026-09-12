@@ -1320,6 +1320,18 @@ impl ProjectOpenInputs<'_> {
             let remote_operational_status = Arc::clone(&remote_operational_status);
             Arc::new(move || remote_operational_status().doctor_read())
         };
+        // Historical convergence runs in the background after admission, so a
+        // large store can be mid-migration while the daemon serves. Doctor
+        // re-reads that state on every report instead of a snapshot taken
+        // before the migrations were scheduled.
+        let pending_schema_migrations = {
+            let registry = self.store_administration.session_runtime_registry().await?;
+            Arc::new(move || {
+                doctor_kernel::pending_schema_migration_read(
+                    &registry.unconverged_registered_schemas(),
+                )
+            })
+        };
         let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
             self.canonical_project_path.to_path_buf(),
             code_index.project_id.clone(),
@@ -1331,6 +1343,7 @@ impl ProjectOpenInputs<'_> {
             core.profile_identity.profile_root().to_path_buf(),
             core.transcript_source_home.clone(),
             remote_operational_read,
+            pending_schema_migrations,
             cg.get_config().sync.retention.clone(),
             self.invocation.code_index_schedulers.clone(),
             Arc::clone(&core.ports.diagnostic_broker),

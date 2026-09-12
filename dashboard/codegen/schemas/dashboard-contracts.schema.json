@@ -8426,6 +8426,11 @@
           "const": "table_growth",
           "description": "Per-table SQLite payload growth observed between two retained\nwatermarks, including baseline and unavailable measurement states.",
           "type": "string"
+        },
+        {
+          "const": "pending_schema_migration",
+          "description": "A store whose historical schema convergence has not completed: the\nmigrations whose cost scales with store size are still pending, still\nrunning, or stopped on a failure. The daemon serves while they run, so\nthis is the surface that says which store is still migrating and why.",
+          "type": "string"
         }
       ]
     },
