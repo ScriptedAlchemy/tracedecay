@@ -810,3 +810,132 @@ fn installing_a_head_retires_every_superseded_generation_it_no_longer_needs() {
         .unwrap();
     assert_eq!(recovered.generation().as_str(), "sup-g3");
 }
+
+/// A generation large enough that its rows dominate the container.
+fn bulk_manifest(
+    identity: &GraphProjectionIdentity,
+    generation: &str,
+    entities: usize,
+) -> GraphGenerationManifest {
+    let payload = "x".repeat(512);
+    GraphGenerationManifest::new(
+        identity.clone(),
+        GraphGenerationId::new(generation).unwrap(),
+        SourceGeneration::new(format!("source:{generation}")).unwrap(),
+        GraphWatermark::new(format!("watermark:{generation}")).unwrap(),
+        vec![],
+        (0..entities)
+            .map(|index| entity(&format!("entity:{generation}:{index}"), &payload))
+            .collect(),
+        vec![],
+    )
+    .unwrap()
+}
+
+fn staging_container_bytes(root: &std::path::Path) -> u64 {
+    let container = support::graph_path(root);
+    [container.clone(), container.with_extension("grafeo.wal")]
+        .into_iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+/// Deleting a superseded generation's rows is what reclaims the staging
+/// container: Grafeo writes each checkpoint out of place and truncates the
+/// dead generation, so once retirement has removed the rows the file
+/// converges to the live rows within two checkpoints. No compaction or
+/// vacuum is involved; this is the mechanism live-container reclaim rests on.
+#[test]
+fn retiring_superseded_generations_shrinks_the_staging_container_on_checkpoint() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = canonical_projection("worktree.shrink");
+    let root = temp.path();
+
+    let mut expected = None;
+    let mut last_record = None;
+    for (generation, input) in [("shrink-g1", '1'), ("shrink-g2", '2'), ("shrink-g3", '3')] {
+        let manifest = bulk_manifest(&identity, generation, 3_000);
+        let record = stage_manifest(
+            &mut authority,
+            &registered.binding,
+            &manifest,
+            &format!("publish:{generation}"),
+            expected.clone(),
+            input,
+        );
+        let (control, probe) = control_and_probe();
+        let commit = registered
+            .registry
+            .publish_verified(
+                registration(registered.binding.clone(), root),
+                &mut authority,
+                &fresh_context(&control, &probe),
+                &record.publication.key,
+                None,
+            )
+            .unwrap();
+        expected = Some(commit.head.clone());
+        drop(commit);
+        last_record = Some(record);
+    }
+    let head_record = last_record.unwrap();
+
+    // Checkpoint with every generation's rows still present.
+    assert!(registered.close().unwrap());
+    let with_superseded_rows = staging_container_bytes(root);
+    let lease = registered.reopen_lease().unwrap();
+    drop(lease);
+
+    let (control, probe) = control_and_probe();
+    let receipt = registered
+        .registry
+        .retire_superseded_projection_replays(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &head_record.publication.key.projection,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt,
+        SupersededReplayRetirement {
+            retired: 2,
+            retained: 0,
+            pending: 0,
+        },
+        "both superseded generations retire while the engine is open"
+    );
+
+    // Two checkpoints: the first may append the new generation past the dead
+    // one, the second lands below it and truncates.
+    assert!(registered.close().unwrap());
+    let lease = registered.reopen_lease().unwrap();
+    drop(lease);
+    assert!(registered.close().unwrap());
+    let after_retirement = staging_container_bytes(root);
+    println!(
+        "staging container: {with_superseded_rows} bytes with three generations, {after_retirement} bytes after retiring two"
+    );
+    assert!(
+        after_retirement * 2 < with_superseded_rows,
+        "retiring two of three generations must give back more than half of the container: \
+         {with_superseded_rows} -> {after_retirement}"
+    );
+
+    // The head still serves after the rewrite.
+    registered.mount().unwrap();
+    let (control, probe) = control_and_probe();
+    let recovered = registered
+        .registry
+        .recover_verified_snapshot(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &head_record.publication.key.projection,
+        )
+        .unwrap();
+    assert_eq!(recovered.generation().as_str(), "shrink-g3");
+}

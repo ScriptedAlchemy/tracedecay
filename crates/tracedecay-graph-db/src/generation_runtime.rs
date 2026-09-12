@@ -1925,6 +1925,12 @@ impl GraphDb {
             self.delete_staged_generation_rows(locator, check)?,
             StagedGenerationRowsDeletion::RetentionPending
         ) {
+            // The native rows wait for an engine that is already open, but
+            // the sealed artifact needs no engine: the generation is retired
+            // and nothing serves it, so its directory leaves the disk now
+            // instead of waiting — possibly forever, on a project that never
+            // publishes again — behind the deferred row delete.
+            self.retire_sealed_generation_store(locator);
             return Ok(GenerationContentsDeletion::RetentionPending);
         }
         let mut state = self.wait_verified_generations_write()?;

@@ -2686,6 +2686,9 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
         superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
         abandoned_sealed_staging_count: 0,
         abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+        sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+        live_graph_container_bytes: StorageByteSizeV1::ZERO,
+        deferred_native_retirement_count: 0,
     };
     let finding =
         code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
