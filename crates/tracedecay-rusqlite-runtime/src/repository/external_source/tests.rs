@@ -591,7 +591,7 @@ fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM external_source_commit_receipts_v1",
+                "SELECT COUNT(*) FROM external_source_commit_receipts_v2",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -605,7 +605,7 @@ fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
     );
     let mut lookup = connection
         .prepare(
-            "SELECT receipt_json FROM external_source_commit_receipts_v1
+            "SELECT receipt_json FROM external_source_commit_receipts_v2
                  WHERE binding_id = ?1 AND idempotency_key = ?2",
         )
         .unwrap();
@@ -745,7 +745,7 @@ fn stale_source_fork_rejection_preserves_the_committed_pending_chain() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM external_source_commit_receipts_v1",
+                "SELECT COUNT(*) FROM external_source_commit_receipts_v2",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -800,7 +800,7 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM external_source_projection_publications_v1",
+                "SELECT COUNT(*) FROM external_source_projection_publications_v2",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -832,7 +832,7 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM external_source_projection_publications_v1",
+                "SELECT COUNT(*) FROM external_source_projection_publications_v2",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -1056,7 +1056,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM external_source_commit_receipts_v1",
+                "SELECT COUNT(*) FROM external_source_commit_receipts_v2",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -1066,7 +1066,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM external_source_projection_publications_v1",
+                "SELECT COUNT(*) FROM external_source_projection_publications_v2",
                 [],
                 |row| row.get::<_, i64>(0),
             )

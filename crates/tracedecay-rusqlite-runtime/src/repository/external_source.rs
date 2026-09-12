@@ -24,7 +24,10 @@ use super::support::{decode, encode, invalid};
 // its digest. The current-object, projected-object, and projection-effect
 // tables reference it by digest and join for the payload: the earlier shape
 // stored the same ~2 KB encoding in all four tables, which on one store was
-// 2.4 GB of byte-identical copies beside the 1 GB history.
+// 2.4 GB of byte-identical copies beside the 1 GB history. Commit and
+// projection receipts likewise persist slim (see `slim.rs`): their mutations
+// and aggregate frontiers are digests into the history and
+// `external_source_frontiers_v1`, and effects hydrate from the effects table.
 pub const EXTERNAL_SOURCE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS external_source_states_v1 (
     binding_id TEXT PRIMARY KEY,
@@ -67,7 +70,13 @@ CREATE TABLE IF NOT EXISTS external_source_authority_receipts_v1 (
     receipt_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, idempotency_key)
 );
-CREATE TABLE IF NOT EXISTS external_source_commit_receipts_v1 (
+CREATE TABLE IF NOT EXISTS external_source_frontiers_v1 (
+    binding_id TEXT NOT NULL,
+    frontier_digest TEXT NOT NULL,
+    frontier_json TEXT NOT NULL,
+    PRIMARY KEY (binding_id, frontier_digest)
+);
+CREATE TABLE IF NOT EXISTS external_source_commit_receipts_v2 (
     binding_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     request_digest TEXT NOT NULL,
@@ -115,7 +124,7 @@ CREATE TABLE IF NOT EXISTS external_source_pending_projections_v1 (
     UNIQUE (binding_id, successor_frontier_digest),
     UNIQUE (binding_id, source_receipt_digest)
 );
-CREATE TABLE IF NOT EXISTS external_source_projection_publications_v1 (
+CREATE TABLE IF NOT EXISTS external_source_projection_publications_v2 (
     binding_id TEXT NOT NULL,
     projection_digest TEXT NOT NULL,
     source_receipt_digest TEXT NOT NULL,
@@ -677,12 +686,16 @@ fn persist_source_commit(
     persist_definition_and_binding(savepoint, state.definition(), state.binding())?;
     let predecessor = frontier_key(receipt.prior_source_frontier());
     let successor = receipt.source_frontier().digest().as_str();
-    let receipt_json = encode(receipt)?;
+    let slim::SlimReceiptV1 {
+        json: receipt_json,
+        frontiers,
+    } = slim::slim_commit_receipt(receipt)?;
+    persist_frontiers(savepoint, binding.binding_id.as_str(), &frontiers)?;
     // `INSERT OR IGNORE` reports zero changed rows only when a conflict was
     // swallowed; only then can the stored row differ from this write, so the
     // read-back proof is needed only on that path.
     let changed = savepoint.execute(
-        "INSERT OR IGNORE INTO external_source_commit_receipts_v1 (
+        "INSERT OR IGNORE INTO external_source_commit_receipts_v2 (
             binding_id, idempotency_key, request_digest,
             definition_revision, binding_revision,
             predecessor_frontier_digest, successor_frontier_digest,
@@ -706,7 +719,7 @@ fn persist_source_commit(
     if changed == 0 {
         verify_encoded_row(
             savepoint,
-            "SELECT receipt_json FROM external_source_commit_receipts_v1
+            "SELECT receipt_json FROM external_source_commit_receipts_v2
              WHERE binding_id = ?1 AND idempotency_key = ?2",
             binding.binding_id.as_str(),
             receipt.idempotency_key().as_str(),
@@ -838,9 +851,13 @@ fn persist_projection(
     projection.validate().map_err(invalid)?;
     let binding = projection.source_frontier().binding();
     let predecessor = frontier_key(projection.expected_projection_frontier());
-    let encoded = encode(projection)?;
+    let slim::SlimReceiptV1 {
+        json: encoded,
+        frontiers,
+    } = slim::slim_projection_receipt(projection)?;
+    persist_frontiers(savepoint, binding.binding_id.as_str(), &frontiers)?;
     savepoint.execute(
-        "INSERT OR IGNORE INTO external_source_projection_publications_v1 (
+        "INSERT OR IGNORE INTO external_source_projection_publications_v2 (
             binding_id, projection_digest, source_receipt_digest,
             predecessor_frontier_digest, successor_frontier_digest, receipt_json
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -855,7 +872,7 @@ fn persist_projection(
     )?;
     verify_encoded_row(
         savepoint,
-        "SELECT receipt_json FROM external_source_projection_publications_v1
+        "SELECT receipt_json FROM external_source_projection_publications_v2
          WHERE binding_id = ?1 AND projection_digest = ?2",
         binding.binding_id.as_str(),
         projection.receipt_digest().as_str(),
@@ -1211,7 +1228,26 @@ fn validate_revision_collisions(
     Ok(encodings)
 }
 
+/// Store every frontier a receipt referenced, once per digest. An identical
+/// digest already present is the same document by construction.
+fn persist_frontiers(
+    savepoint: &Savepoint<'_>,
+    binding_id: &str,
+    frontiers: &[(String, String)],
+) -> rusqlite::Result<()> {
+    for (digest, frontier_json) in frontiers {
+        savepoint.execute(
+            "INSERT OR IGNORE INTO external_source_frontiers_v1 (
+                binding_id, frontier_digest, frontier_json
+             ) VALUES (?1, ?2, ?3)",
+            params![binding_id, digest, frontier_json],
+        )?;
+    }
+    Ok(())
+}
+
 mod reads;
+mod slim;
 use reads::{
     load_authority_receipt, load_commit_receipt_by_digest, load_commit_receipt_by_idempotency,
     load_next_pending_projection, load_next_pending_projection_any, load_projection_receipt,

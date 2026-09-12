@@ -1228,7 +1228,7 @@ async fn host_observation_journal_resets_with_the_stream() {
                 'project.fixture', 1, 'digest.definition', 1, 'digest.binding',
                 'digest.frontier', '{}', 'digest.receipt'
              );
-             INSERT INTO external_source_commit_receipts_v1 (
+             INSERT INTO external_source_commit_receipts_v2 (
                 binding_id, idempotency_key, request_digest, definition_revision,
                 binding_revision, predecessor_frontier_digest,
                 successor_frontier_digest, receipt_digest, receipt_json
@@ -1249,5 +1249,5 @@ async fn host_observation_journal_resets_with_the_stream() {
         "state and receipt must be accounted for: {report:?}"
     );
     assert_eq!(count(&raw, "external_source_states_v1"), 0);
-    assert_eq!(count(&raw, "external_source_commit_receipts_v1"), 0);
+    assert_eq!(count(&raw, "external_source_commit_receipts_v2"), 0);
 }
