@@ -186,6 +186,64 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
     }
 }
 
+// === Pending schema migrations (Storage family) ==============================
+
+/// Report the shards whose historical schema convergence has not completed.
+///
+/// Convergence carries the migrations whose cost scales with store size — a
+/// full index rebuild, a whole-table rewrite — so on a large store it runs for
+/// minutes after the daemon is already serving. That is deliberate: it runs
+/// after the fail-closed admission checks and outside any caller's write
+/// lease, so it blocks neither admission nor retrieval. What it must not do is
+/// stay invisible. A shard still pending or running reads as `Stale` — the
+/// store is behind its current schema but readable — and one whose migration
+/// failed reads as `Degraded`, carrying the failure the convergence task
+/// recorded. An empty set is absent rather than a healthy claim, since a
+/// daemon with no mounted shard has converged nothing.
+#[must_use]
+pub(in crate::daemon) fn pending_schema_migration_read(
+    unconverged: &[(
+        tracedecay_store::StoreShardIdV1,
+        tracedecay_store_runtime::RegisteredSchemaConvergenceStatus,
+    )],
+) -> DoctorStorageFamilyReadV1 {
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1;
+    use tracedecay_contracts::storage::{StoreKeyV1, pending_schema_migration_finding};
+    use tracedecay_store_runtime::RegisteredSchemaConvergenceStatus;
+
+    let mut findings = Vec::new();
+    for (shard, status) in unconverged {
+        let (state, detail, statement) = match status {
+            RegisteredSchemaConvergenceStatus::Pending => (
+                DoctorEvidenceStateV1::Stale,
+                "queued".to_owned(),
+                "schema migrations are queued and have not started",
+            ),
+            RegisteredSchemaConvergenceStatus::Running => (
+                DoctorEvidenceStateV1::Stale,
+                "running".to_owned(),
+                "schema migrations are running; the store stays served meanwhile",
+            ),
+            RegisteredSchemaConvergenceStatus::Degraded { message } => (
+                DoctorEvidenceStateV1::Degraded,
+                format!("stopped.{message}"),
+                "schema migrations stopped on a failure and left the store behind its schema",
+            ),
+            // Filtered by the authority; a converged shard has nothing to report.
+            RegisteredSchemaConvergenceStatus::Complete => continue,
+        };
+        let Ok(store) = StoreKeyV1::new(format!("{shard:?}")) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let Ok(finding) = pending_schema_migration_finding(&store, state, &detail, statement)
+        else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
 // === Language server/analyzer (LanguageServer family) ========================
 
 /// Map the daemon diagnostic broker's project-active engine statuses.
@@ -942,6 +1000,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
+    pending_schema_migrations: Arc<dyn Fn() -> DoctorStorageFamilyReadV1 + Send + Sync>,
     retention: tracedecay_configuration::RetentionConfig,
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -961,6 +1020,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let profile_root = profile_root.clone();
         let host_home = host_home.clone();
         let remote_operational = Arc::clone(&remote_operational);
+        let pending_schema_migrations = Arc::clone(&pending_schema_migrations);
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
@@ -1164,6 +1224,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 profile_retention_backlog,
                 project_retention_backlog,
                 code_generation_retention,
+                pending_schema_migrations(),
             ]
             .into_iter()
             .reduce(merge_storage_reads)

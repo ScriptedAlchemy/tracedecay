@@ -105,13 +105,6 @@ pub trait Executor: QueryExecutor {
     }
     #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> Result<()>;
-
-    /// Executes a measured bulk migration. Ordinary executors retain the
-    /// bounded batch path; explicit long-lease capabilities may override it.
-    #[hotpath::skip]
-    async fn execute_bulk_migration_batch(&self, sql: &str) -> Result<()> {
-        self.execute_batch(sql).await
-    }
 }
 
 impl Executor for Connection {

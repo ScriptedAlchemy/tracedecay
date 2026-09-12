@@ -191,6 +191,21 @@ impl RegisteredSchemaConvergenceMaintenance {
             .cloned()
     }
 
+    /// Every shard whose historical convergence has not completed.
+    ///
+    /// Convergence carries the migrations whose cost scales with the store, so
+    /// on a large store it can be pending, running, or degraded for a long
+    /// while after the daemon starts serving. Reporting that is what makes the
+    /// daemon's own answer honest: an operator sees which shard is still
+    /// migrating and why, instead of a healthy claim or a crash loop.
+    pub(super) fn unconverged(&self) -> Vec<(StoreShardIdV1, RegisteredSchemaConvergenceStatus)> {
+        lock_registered_schema_convergence_statuses(&self.statuses)
+            .iter()
+            .filter(|(_, status)| **status != RegisteredSchemaConvergenceStatus::Complete)
+            .map(|(shard, status)| (shard.clone(), status.clone()))
+            .collect()
+    }
+
     #[cfg(test)]
     pub(super) fn defer(&self, shard_id: StoreShardIdV1) {
         lock_registered_schema_convergence_statuses(&self.statuses)
@@ -524,6 +539,15 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub fn begin_foreground_project_open(&self) -> Result<ForegroundProjectOpenAdmission> {
         self.registered_schema_convergence
             .begin_foreground_project_open()
+    }
+
+    /// Shards whose historical schema convergence has not completed, with the
+    /// state each one is in. Empty once every mounted shard is converged.
+    #[must_use]
+    pub fn unconverged_registered_schemas(
+        &self,
+    ) -> Vec<(StoreShardIdV1, RegisteredSchemaConvergenceStatus)> {
+        self.registered_schema_convergence.unconverged()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
