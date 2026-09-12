@@ -1,6 +1,6 @@
 ---
 name: inspecting-managed-skills
-description: 'Inspect TraceDecay agent-managed skill proposals, activation state, run evidence, or Hermes bridge health. Bundled skill authoring is a separate workflow.'
+description: Inspect TraceDecay-managed skill proposals, activation, run evidence, or Hermes bridge health.
 ---
 
 # Inspecting managed skills

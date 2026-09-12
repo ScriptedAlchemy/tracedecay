@@ -1,6 +1,6 @@
 ---
 name: editing-safely
-description: Perform structural renames, signature or field changes, symbol moves, or consolidation with TraceDecay mutation operations.
+description: Make structural code edits with TraceDecay preview and mutation operations.
 ---
 
 # Editing safely

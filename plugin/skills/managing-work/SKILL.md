@@ -1,6 +1,6 @@
 ---
 name: managing-work
-description: 'Create or control TraceDecay Work proposals, attempts, graph mutations, placements, or adjudication. Named Workflow definitions and runs are separate.'
+description: Create or control TraceDecay Work tasks, attempts, graph mutations, placements, or adjudication.
 ---
 
 # Managing Work

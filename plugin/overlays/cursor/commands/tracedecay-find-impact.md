@@ -7,7 +7,7 @@ description: Find the blast radius of a change, including impacted symbols, file
 
 Use `tracedecay:assessing-impact`.
 
-- **Args:** interpret `$ARGUMENTS` as the symbol, file, or change to analyze; if absent, use the current working-tree diff.
-- Read-only: shallow `max_depth` first. Identify impact; do not run tests.
-
-Output: impacted symbols + files, the test set to run, and any hub/coupling risk.
+Interpret `$ARGUMENTS` as a symbol, file, or change; if absent, use the current
+diff. This is read-only. Begin with shallow impact and widen only when returned
+dependents or the question require it. Report affected symbols and files,
+candidate tests, coverage limits, and material hub or coupling risk.
