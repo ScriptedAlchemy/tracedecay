@@ -11,14 +11,14 @@ use std::path::PathBuf;
 use serde_json::Value;
 use tracedecay_api::WorkOperation;
 use tracedecay_contracts::{
-    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,
-    ApplicationProblemEnvelope, ApplicationResult, CancelWorkAttemptCommand, CancellationSignal,
-    CreateWorkTaskRequestV1, Deadline, DecideWorkProposalRequestV1,
-    ExecutionTopologyMetricsRequestV1, GenerateProposalRequest, PauseWorkRunCommand,
-    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ResultContractRef, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, RetryWorkAttemptCommandV1, SafeDiagnostic, StartWorkAttemptCommand,
+    AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome,
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, CancelWorkAttemptCommand,
+    CancellationSignal, CreateWorkTaskRequestV1, Deadline, ExecutionTopologyMetricsRequestV1,
+    GenerateProposalRequest, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResultContractRef,
+    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryWorkAttemptCommandV1,
+    ReviewWorkProposalRequestV1, SafeDiagnostic, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
     WorkEvidenceRetrieveRequestV1, WorkExperienceRequestV1, WorkGraphReadRequestV1,
     WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1, WorkProductMutationRequestV1,
@@ -137,9 +137,9 @@ fn decode_work_invocation(
         WorkOperation::Create => {
             decode::<CreateWorkTaskRequestV1>(body).map(WorkApplicationInvocationV1::Create)
         }
-        WorkOperation::ReviewProposal => decode::<DecideWorkProposalRequestV1>(body)
+        WorkOperation::ReviewProposal => decode::<ReviewWorkProposalRequestV1>(body)
             .map(WorkApplicationInvocationV1::ReviewProposal),
-        WorkOperation::AcceptProposal => decode::<DecideWorkProposalRequestV1>(body)
+        WorkOperation::AcceptProposal => decode::<AcceptWorkProposalRequestV1>(body)
             .map(WorkApplicationInvocationV1::AcceptProposal),
         WorkOperation::AdmitExecution => decode::<AdmitWorkExecutionRequestV1>(body)
             .map(WorkApplicationInvocationV1::AdmitExecution),
@@ -600,6 +600,22 @@ mod tests {
             assert!(
                 error.contains(segment),
                 "unknown-operation error must list {segment}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn proposal_routes_refuse_dispositions_owned_by_the_other_route() {
+        for (operation, disposition) in [
+            (WorkOperation::ReviewProposal, "accepted"),
+            (WorkOperation::AcceptProposal, "rejected"),
+        ] {
+            let error = decode_work_invocation(operation, json!({ "disposition": disposition }))
+                .expect_err("the route must reject the other disposition");
+            assert!(
+                error.to_string().contains("unknown variant"),
+                "{} accepted {disposition}: {error}",
+                operation.operation_key()
             );
         }
     }

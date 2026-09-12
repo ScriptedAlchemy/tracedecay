@@ -26,16 +26,17 @@ use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_contracts::{
-    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, ApplicationProblem,
-    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
-    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
-    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
+    ApplicationProblem, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
+    DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
     PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
     ReleaseWorkPlacementCommand, RequestId, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    RetryDirective, RetryWorkAttemptCommandV1, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
-    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    RetryDirective, RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1,
+    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
@@ -284,9 +285,8 @@ impl WorkOperation {
         match self {
             Self::GenerateProposal => schema_name::<GenerateProposalRequest>(),
             Self::Create => schema_name::<CreateWorkTaskRequestV1>(),
-            Self::ReviewProposal | Self::AcceptProposal => {
-                schema_name::<DecideWorkProposalRequestV1>()
-            }
+            Self::ReviewProposal => schema_name::<ReviewWorkProposalRequestV1>(),
+            Self::AcceptProposal => schema_name::<AcceptWorkProposalRequestV1>(),
             Self::AdmitExecution => schema_name::<AdmitWorkExecutionRequestV1>(),
             Self::StartAttempt => schema_name::<StartWorkAttemptCommand>(),
             Self::Synthesize => schema_name::<AdmitWorkSynthesisCommand>(),
@@ -581,14 +581,14 @@ mod tests {
             WorkOperation::Create.request_schema_name(),
             "CreateWorkTaskRequestV1"
         );
-        for operation in [WorkOperation::ReviewProposal, WorkOperation::AcceptProposal] {
-            assert_eq!(
-                operation.request_schema_name(),
-                "DecideWorkProposalRequestV1",
-                "{}",
-                operation.operation_key()
-            );
-        }
+        assert_eq!(
+            WorkOperation::ReviewProposal.request_schema_name(),
+            "ReviewWorkProposalRequestV1"
+        );
+        assert_eq!(
+            WorkOperation::AcceptProposal.request_schema_name(),
+            "AcceptWorkProposalRequestV1"
+        );
         assert_eq!(
             WorkOperation::AdmitExecution.request_schema_name(),
             "AdmitWorkExecutionRequestV1"

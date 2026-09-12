@@ -23,13 +23,14 @@ use crate::capability_manifest::{
 };
 use crate::work_retry::{RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1};
 use crate::{
-    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, CancelWorkAttemptCommand,
-    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
-    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
+    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
+    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
+    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    ReviewWorkProposalRequestV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
     WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
     WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
@@ -230,18 +231,18 @@ fn build_work_executable_binding_registry()
             "tracedecay_contracts::CreateWorkTaskRequestV1",
             "tracedecay_contracts::WorkProductMutationReceiptV1",
         )?,
-        available::<DecideWorkProposalRequestV1, WorkProductMutationReceiptV1>(
+        available::<ReviewWorkProposalRequestV1, WorkProductMutationReceiptV1>(
             "review_proposal",
             "/application/work/review-proposal",
             EffectClass::Administrative,
-            "tracedecay_contracts::DecideWorkProposalRequestV1",
+            "tracedecay_contracts::ReviewWorkProposalRequestV1",
             "tracedecay_contracts::WorkProductMutationReceiptV1",
         )?,
-        available::<DecideWorkProposalRequestV1, WorkProductMutationReceiptV1>(
+        available::<AcceptWorkProposalRequestV1, WorkProductMutationReceiptV1>(
             "accept_proposal",
             "/application/work/accept-proposal",
             EffectClass::Administrative,
-            "tracedecay_contracts::DecideWorkProposalRequestV1",
+            "tracedecay_contracts::AcceptWorkProposalRequestV1",
             "tracedecay_contracts::WorkProductMutationReceiptV1",
         )?,
         available::<AdmitWorkExecutionRequestV1, AdmittedWorkExecutionV1>(

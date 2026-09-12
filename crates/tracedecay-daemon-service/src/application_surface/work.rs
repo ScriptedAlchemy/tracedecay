@@ -9,13 +9,14 @@ use std::sync::Arc;
 use axum::response::Response;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
 use tracedecay_contracts::{
-    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, CancelWorkAttemptCommand,
-    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
-    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, RetryWorkAttemptCommandV1, StartWorkAttemptCommand,
+    AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
+    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
+    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
+    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
     WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
@@ -185,14 +186,14 @@ pub(crate) async fn invoke_work_operation(
         ),
         WorkOperation::ReviewProposal => {
             core!(
-                DecideWorkProposalRequestV1,
+                ReviewWorkProposalRequestV1,
                 ReviewProposal,
                 WorkProductMutationReceiptV1
             )
         }
         WorkOperation::AcceptProposal => {
             core!(
-                DecideWorkProposalRequestV1,
+                AcceptWorkProposalRequestV1,
                 AcceptProposal,
                 WorkProductMutationReceiptV1
             )
