@@ -42,9 +42,6 @@ pub use projection::{
 pub use queries::{
     FileAdjacencyScan, GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1,
 };
-pub use source_authority::{
-    CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
-};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use verified_query::admitted_verified_graph_query_port;
 pub use verified_query::{
