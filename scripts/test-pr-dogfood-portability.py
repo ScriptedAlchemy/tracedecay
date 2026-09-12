@@ -88,6 +88,10 @@ if [[ "${1:-}" == "--version" ]]; then
   echo "tracedecay fake-test"
 elif [[ "${1:-}" == "init" ]]; then
   :
+elif [[ "${1:-} ${2:-}" == "branch add" ]]; then
+  if [[ -n "${FAKE_BRANCH_ADDITIONS:-}" ]]; then
+    echo "$3" >> "$FAKE_BRANCH_ADDITIONS"
+  fi
 elif [[ "${1:-}" == "status" ]]; then
   count=0
   if [[ -f "$FAKE_STATUS_COUNTER" ]]; then
@@ -554,8 +558,18 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             env["TRACEDECAY_BIN"] = str(fake_binary)
             status_counter = tmp_path / "status-counter"
             env["FAKE_STATUS_COUNTER"] = str(status_counter)
+            branch_additions = tmp_path / "branch-additions"
+            env["FAKE_BRANCH_ADDITIONS"] = str(branch_additions)
             env["TRACEDECAY_DOGFOOD_READINESS_TIMEOUT"] = "1"
             env["TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL"] = "0.05"
+            original_branch = subprocess.check_output(
+                ["git", "-C", str(project), "symbolic-ref", "--short", "HEAD"],
+                text=True,
+            ).strip()
+            subprocess.run(
+                ["git", "-C", str(project), "checkout", "--detach", "-q", head_oid],
+                check=True,
+            )
             completed = subprocess.run(
                 [
                     str(DOGFOOD_SCRIPT),
@@ -564,6 +578,8 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                     base_oid,
                     head_oid,
                     str(output),
+                    "master",
+                    "master",
                 ],
                 check=False,
                 capture_output=True,
@@ -573,7 +589,15 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stderr, "")
-            for phase in ("init", "status", "context", "pr_context", "runtime_status"):
+            for phase in (
+                "init",
+                "branch_head",
+                "branch_base",
+                "status",
+                "context",
+                "pr_context",
+                "runtime_status",
+            ):
                 self.assertRegex(
                     completed.stdout,
                     rf"tracedecay_ci_timing phase={phase} elapsed_ms=\d+ status=0",
@@ -594,7 +618,126 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                 r"last_phase=\S+ last_files=\S+ last_graph=ready last_coverage=complete",
             )
             self.assertEqual(status_counter.read_text(encoding="utf-8").strip(), "3")
+            additions = branch_additions.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(additions), 2)
+            self.assertRegex(additions[0], rf"^tracedecay-dogfood/local-0-\d+/head-{head_oid}$")
+            self.assertRegex(additions[1], rf"^tracedecay-dogfood/local-0-\d+/base-{base_oid}$")
+            for addition in additions:
+                self.assertNotEqual(
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(project),
+                            "show-ref",
+                            "--verify",
+                            "--quiet",
+                            f"refs/heads/{addition}",
+                        ],
+                        check=False,
+                    ).returncode,
+                    0,
+                )
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "-C", str(project), "symbolic-ref", "-q", "HEAD"],
+                    check=False,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
+                ).strip(),
+                head_oid,
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(project), "rev-parse", original_branch],
+                    text=True,
+                ).strip(),
+                head_oid,
+            )
+            self.assertIn(
+                f"tracedecay_ci_pr_refs base_oid={base_oid} head_oid={head_oid} "
+                "base_branch=master head_branch=master",
+                completed.stdout,
+            )
             self.assertIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
+
+    def test_run_mode_preserves_a_preexisting_owned_namespace_collision(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dogfood-ref-collision-") as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "output"
+            output.mkdir()
+            project, base_oid, head_oid = make_two_commit_project(tmp_path)
+            collision_path = tmp_path / "collision-ref"
+            original_branch = subprocess.check_output(
+                ["git", "-C", str(project), "symbolic-ref", "--short", "HEAD"],
+                text=True,
+            ).strip()
+            wrapper = textwrap.dedent(
+                """\
+                set -euo pipefail
+                project="$1"
+                base_oid="$2"
+                head_oid="$3"
+                output="$4"
+                collision_path="$5"
+                script="$6"
+                collision="refs/heads/tracedecay-dogfood/local-0-$$/base-$base_oid"
+                git -C "$project" update-ref "$collision" "$base_oid"
+                printf '%s\n' "$collision" >"$collision_path"
+                exec "$script" --run "$project" "$base_oid" "$head_oid" "$output"
+                """
+            )
+            env = os.environ.copy()
+            env.pop("GITHUB_RUN_ID", None)
+            env.pop("GITHUB_RUN_ATTEMPT", None)
+            env["TRACEDECAY_BIN"] = "/bin/true"
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    wrapper,
+                    "dogfood-ref-collision",
+                    str(project),
+                    base_oid,
+                    head_oid,
+                    str(output),
+                    str(collision_path),
+                    str(DOGFOOD_SCRIPT),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=5,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("reference already exists", completed.stderr)
+            collision = collision_path.read_text(encoding="utf-8").strip()
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(project), "rev-parse", collision], text=True
+                ).strip(),
+                base_oid,
+            )
+            head_ref = collision.rsplit("/", 1)[0] + f"/head-{head_oid}"
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "-C", str(project), "show-ref", "--verify", "--quiet", head_ref],
+                    check=False,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(project), "symbolic-ref", "--short", "HEAD"],
+                    text=True,
+                ).strip(),
+                original_branch,
+            )
 
     def test_run_mode_reissues_a_typed_retryable_refusal_once(self) -> None:
         """A self-declared retryable refusal must not lose the whole journey.
@@ -730,6 +873,8 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                       echo "tracedecay fake-test"
                     elif [[ "${1:-}" == "init" ]]; then
                       :
+                    elif [[ "${1:-} ${2:-}" == "branch add" ]]; then
+                      :
                     elif [[ "${1:-}" == "status" ]]; then
                       count=0
                       [[ ! -f "$FAKE_STATUS_COUNTER" ]] || count="$(cat "$FAKE_STATUS_COUNTER")"
@@ -813,6 +958,8 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                     if [[ "${1:-}" == "--version" ]]; then
                       echo "tracedecay fake-test"
                     elif [[ "${1:-}" == "init" ]]; then
+                      :
+                    elif [[ "${1:-} ${2:-}" == "branch add" ]]; then
                       :
                     elif [[ "${1:-}" == "status" ]]; then
                       count=0

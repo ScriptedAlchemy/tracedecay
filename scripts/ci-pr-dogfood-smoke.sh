@@ -12,10 +12,47 @@ DAEMON_HARNESS="$REPO_ROOT/scripts/with-isolated-tracedecay-daemon.sh"
 OUTPUT_VALIDATOR="$REPO_ROOT/scripts/check-pr-dogfood-output.py"
 PROCESS_HELPER="$REPO_ROOT/scripts/lib/portable_process.py"
 WORK_DIR=""
+DOGFOOD_REF_PROJECT=""
+DOGFOOD_BASE_TRACKING_REF=""
+DOGFOOD_BASE_TRACKING_OID=""
+DOGFOOD_HEAD_TRACKING_REF=""
+DOGFOOD_HEAD_TRACKING_OID=""
+DOGFOOD_ORIGINAL_HEAD_REF=""
+DOGFOOD_ORIGINAL_HEAD_OID=""
+DOGFOOD_TRACKING_REFS_CREATED=0
 
 cleanup() {
   local status=$?
+  local current_head_ref delete_head_ref=1
   trap - EXIT
+  if [[ "$DOGFOOD_TRACKING_REFS_CREATED" == 1 ]]; then
+    current_head_ref="$(git -C "$DOGFOOD_REF_PROJECT" symbolic-ref -q HEAD || true)"
+    if [[ "$current_head_ref" == "$DOGFOOD_HEAD_TRACKING_REF" ]]; then
+      if [[ -n "$DOGFOOD_ORIGINAL_HEAD_REF" ]]; then
+        if ! git -C "$DOGFOOD_REF_PROJECT" symbolic-ref HEAD "$DOGFOOD_ORIGINAL_HEAD_REF"; then
+          echo "warning: could not restore dogfood checkout HEAD" >&2
+          delete_head_ref=0
+        fi
+      else
+        if ! git -C "$DOGFOOD_REF_PROJECT" update-ref --no-deref HEAD \
+          "$DOGFOOD_ORIGINAL_HEAD_OID"
+        then
+          echo "warning: could not restore detached dogfood checkout HEAD" >&2
+          delete_head_ref=0
+        fi
+      fi
+    fi
+    if [[ "$delete_head_ref" == 1 ]]; then
+      git -C "$DOGFOOD_REF_PROJECT" update-ref -d "$DOGFOOD_HEAD_TRACKING_REF" \
+        "$DOGFOOD_HEAD_TRACKING_OID" || \
+        echo "warning: dogfood head ref changed before cleanup: $DOGFOOD_HEAD_TRACKING_REF" >&2
+    fi
+    if [[ -n "$DOGFOOD_BASE_TRACKING_REF" ]]; then
+      git -C "$DOGFOOD_REF_PROJECT" update-ref -d "$DOGFOOD_BASE_TRACKING_REF" \
+        "$DOGFOOD_BASE_TRACKING_OID" || \
+        echo "warning: dogfood base ref changed before cleanup: $DOGFOOD_BASE_TRACKING_REF" >&2
+    fi
+  fi
   if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
     rm -rf "$WORK_DIR"
   fi
@@ -409,14 +446,40 @@ run_smoke() {
   local base_ref="$2"
   local head_ref="$3"
   local output_dir="$4"
+  local base_branch="${5:-}"
+  local head_branch="${6:-}"
   local binary="$TRACEDECAY_BIN"
-  local base_oid head_oid merge_base
+  local base_oid head_oid merge_base ref_namespace tracked_base tracked_head
 
   base_oid="$(git -C "$project_root" rev-parse "$base_ref^{commit}")"
   head_oid="$(git -C "$project_root" rev-parse "$head_ref^{commit}")"
   merge_base="$(git -C "$project_root" merge-base "$base_ref" "$head_ref")"
 
+  ref_namespace="tracedecay-dogfood/${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+  tracked_base="$ref_namespace/base-$base_oid"
+  tracked_head="$ref_namespace/head-$head_oid"
+  DOGFOOD_REF_PROJECT="$project_root"
+  DOGFOOD_ORIGINAL_HEAD_REF="$(git -C "$project_root" symbolic-ref -q HEAD || true)"
+  DOGFOOD_ORIGINAL_HEAD_OID="$(git -C "$project_root" rev-parse HEAD)"
+  DOGFOOD_BASE_TRACKING_REF="refs/heads/$tracked_base"
+  DOGFOOD_BASE_TRACKING_OID="$base_oid"
+  DOGFOOD_HEAD_TRACKING_REF="refs/heads/$tracked_head"
+  DOGFOOD_HEAD_TRACKING_OID="$head_oid"
+  git check-ref-format "$DOGFOOD_BASE_TRACKING_REF" >/dev/null
+  git check-ref-format "$DOGFOOD_HEAD_TRACKING_REF" >/dev/null
+  trap cleanup EXIT
+  # Branch enrollment reads local heads. Create both exact PR tips atomically
+  # in this run's owned namespace so ordinary checkout branches are immutable
+  # and same-named fork/base branches remain distinct.
+  printf 'create %s %s\ncreate %s %s\n' \
+    "$DOGFOOD_BASE_TRACKING_REF" "$base_oid" \
+    "$DOGFOOD_HEAD_TRACKING_REF" "$head_oid" | \
+    git -C "$project_root" update-ref --stdin
+  DOGFOOD_TRACKING_REFS_CREATED=1
+  git -C "$project_root" symbolic-ref HEAD "$DOGFOOD_HEAD_TRACKING_REF"
+
   echo "tracedecay_ci_checkout head=$(git -C "$project_root" rev-parse HEAD) base=$base_ref"
+  echo "tracedecay_ci_pr_refs base_oid=$base_oid head_oid=$head_oid base_branch=${base_branch:-unavailable} head_branch=${head_branch:-unavailable}"
   echo "tracedecay_ci_binary path=$binary version=$($binary --version)"
 
   (
@@ -424,6 +487,13 @@ run_smoke() {
     run_timed init 180 "$output_dir/init.stdout" "$output_dir/init.stderr" \
       "$binary" init
   )
+
+  run_timed branch_head 180 "$output_dir/branch-head.stdout" \
+    "$output_dir/branch-head.stderr" \
+    "$binary" branch add "$tracked_head" --path "$project_root"
+  run_timed branch_base 180 "$output_dir/branch-base.stdout" \
+    "$output_dir/branch-base.stderr" \
+    "$binary" branch add "$tracked_base" --path "$project_root"
 
   wait_for_strict_readiness "$project_root" "$output_dir" "$binary"
 
@@ -448,11 +518,13 @@ run_smoke() {
 }
 
 main() {
-  local binary project_root base_ref head_ref checked_out_oid head_oid started_ms status
+  local binary project_root base_ref head_ref base_branch head_branch checked_out_oid head_oid started_ms status
   binary="${TRACEDECAY_BIN:-$REPO_ROOT/target/debug/tracedecay}"
   project_root="${TRACEDECAY_DOGFOOD_PROJECT:-$REPO_ROOT}"
   base_ref="${TRACEDECAY_DOGFOOD_BASE_REF:-}"
   head_ref="${TRACEDECAY_DOGFOOD_HEAD_REF:-HEAD}"
+  base_branch="${TRACEDECAY_DOGFOOD_BASE_BRANCH:-}"
+  head_branch="${TRACEDECAY_DOGFOOD_HEAD_BRANCH:-}"
 
   [[ -x "$binary" ]] || {
     echo "error: TraceDecay binary is not executable: $binary" >&2
@@ -504,7 +576,7 @@ main() {
     "$DAEMON_HARNESS" --bin "$binary" --ready-timeout 60 \
       --lifecycle-label "TraceDecay PR dogfood daemon" -- \
       "$SCRIPT_PATH" --run "$project_root" "$base_ref" "$head_ref" \
-      "$WORK_DIR/output" || status=$?
+      "$WORK_DIR/output" "$base_branch" "$head_branch" || status=$?
   echo "tracedecay_ci_timing phase=total_journey elapsed_ms=$(elapsed_ms "$started_ms") status=$status"
   return "$status"
 }
