@@ -4163,7 +4163,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     arrival.wake_micros().is_some(),
                     matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_)))),
                 ) {
-                    Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                    // This is the one bounded second look for the arrival the
+                    // Noop just consumed. Keep it unattributed: publishing a
+                    // new pending arrival here would satisfy this same
+                    // predicate on every quiet successor and self-requeue
+                    // forever.
+                    worker_wake.notify_one();
                 }
                 if let Ok(Ok(outcome)) = &source_result {
                     Self::record_source_reconcile_observation(
