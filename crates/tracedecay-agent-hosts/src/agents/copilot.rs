@@ -96,11 +96,11 @@ impl AgentIntegration for CopilotIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
-            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle::HostBundleComponentV1::ContextMcp {
+            return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
         copilot_context_mcp_registration_state(&ctx.home)
     }
@@ -117,10 +117,10 @@ impl AgentIntegration for CopilotIntegration {
     /// TraceDecay-written VS Code settings file.
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
             let path = copilot_cli_mcp_config_path(home);
             vec![path.clone(), config_backup_path(&path)]
         } else {
@@ -135,10 +135,10 @@ impl AgentIntegration for CopilotIntegration {
     /// writes it (see the module documentation), so there is nothing to drive.
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             let copilot_cli = require_copilot_cli()?;
             copilot_mcp_add_with(&copilot_cli, &ctx.home, &ctx.tracedecay_bin)?;
         }
@@ -150,10 +150,10 @@ impl AgentIntegration for CopilotIntegration {
     /// deactivation reverses exactly what activation created.
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             let copilot_cli = require_copilot_cli()?;
             copilot_mcp_remove_with(&copilot_cli, &ctx.home)?;
         }
@@ -267,27 +267,27 @@ fn copilot_cli_mcp_config_path(home: &Path) -> PathBuf {
 
 fn copilot_context_mcp_registration_state(
     home: &Path,
-) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+) -> super::host_bundle::HostBundleRegistrationStateV1 {
     let Ok(config_bytes) = std::fs::read(copilot_cli_mcp_config_path(home)) else {
-        return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+        return super::host_bundle::HostBundleRegistrationStateV1::Missing;
     };
     let Ok(config) = serde_json::from_slice::<serde_json::Value>(&config_bytes) else {
-        return super::host_bundle_v2::HostBundleRegistrationStateV1::Corrupt;
+        return super::host_bundle::HostBundleRegistrationStateV1::Corrupt;
     };
     let Some(server) = config
         .pointer("/mcpServers/tracedecay")
         .and_then(serde_json::Value::as_object)
     else {
-        return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+        return super::host_bundle::HostBundleRegistrationStateV1::Missing;
     };
     let command_is_present = server
         .get("command")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|command| !command.is_empty());
     if command_is_present && server_args_are_current(server) {
-        super::host_bundle_v2::HostBundleRegistrationStateV1::Current
+        super::host_bundle::HostBundleRegistrationStateV1::Current
     } else {
-        super::host_bundle_v2::HostBundleRegistrationStateV1::Repairable
+        super::host_bundle::HostBundleRegistrationStateV1::Repairable
     }
 }
 

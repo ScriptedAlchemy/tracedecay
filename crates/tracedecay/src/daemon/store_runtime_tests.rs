@@ -13,6 +13,7 @@ use tracedecay_domain::{
     BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
     FactOwnerV1, FactRelationKindV1,
 };
+use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
@@ -34,7 +35,7 @@ use tracedecay_store::{
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 use tracedecay_store_runtime::{
     DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
-    register_registered_schema_installer, registry_open_error,
+    registry_open_error,
 };
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);

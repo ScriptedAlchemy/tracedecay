@@ -18,7 +18,7 @@ use super::*;
 
 #[test]
 fn configuration_read_from_pin_absent_on_cold_cache() {
-    let missing: Result<crate::config::PinnedRuntimeConfiguration, &str> = Err("cold cache");
+    let missing: Result<crate::config::DaemonRuntimeConfiguration, &str> = Err("cold cache");
     assert_eq!(
         configuration_read_from_pin(&missing),
         ConfigurationAuthorityReadV1::Absent
@@ -35,7 +35,7 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
     let directory = tempfile::TempDir::new().expect("authority audit fixture root");
     let uninitialized_path = directory.path().join("uninitialized.db");
     let database_path = directory.path().join("registry.db");
-    tracedecay_store_runtime::register_registered_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let uninitialized_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &uninitialized_path,
         "doctor uninitialized authority audit fixture",
@@ -79,7 +79,7 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
 #[test]
 fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
     let checked_in =
-        tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleDoctorReportV1::default();
+        tracedecay_agent_hosts::agents::host_bundle::HostBundleDoctorReportV1::default();
     assert_eq!(
         host_integration_read_from_report(&checked_in),
         HostIntegrationReadV1::Absent
@@ -87,13 +87,13 @@ fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
 
     let mut drifted = checked_in;
     drifted.components.push(
-        tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorResultV1 {
+        tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentDoctorResultV1 {
             receipt_path: std::path::PathBuf::from("receipt.fixture.json"),
-            host: Some(tracedecay_agent_hosts::agents::host_bundle_v2::HostKindV1::Codex),
-            component: Some(tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentV1::Core),
-            state: tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorStateV1::Repairable,
+            host: Some(tracedecay_agent_hosts::agents::host_bundle::HostKindV1::Codex),
+            component: Some(tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core),
+            state: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentDoctorStateV1::Repairable,
             registration: Some(
-                tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable,
+                tracedecay_agent_hosts::agents::host_bundle::HostBundleRegistrationStateV1::Repairable,
             ),
             artifacts: Vec::new(),
             repair_action: "repair fixture".to_owned(),

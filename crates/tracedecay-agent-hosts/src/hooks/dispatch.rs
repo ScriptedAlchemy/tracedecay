@@ -24,8 +24,8 @@ use tracedecay_hooks::{
 use tracedecay_hooks::{HookImmediateAdmissionStateV1, HookScopedFeedbackV1};
 
 #[cfg(test)]
-use crate::agents::context_scout_v2::context_scout_delivery_receipt_matches_envelope;
-use crate::agents::context_scout_v2::{
+use crate::agents::context_scout::context_scout_delivery_receipt_matches_envelope;
+use crate::agents::context_scout::{
     ContextScoutDeliveryReceiptHookV1, context_scout_delivery_receipt_id,
 };
 use crate::ports::hook_runtime::HookRuntimeV1;

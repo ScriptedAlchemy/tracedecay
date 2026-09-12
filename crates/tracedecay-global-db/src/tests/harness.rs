@@ -108,7 +108,7 @@ pub(crate) struct RegisteredGlobalDbRetirementHarnessV1 {
 #[cfg(test)]
 impl RegisteredGlobalDbRetirementHarnessV1 {
     pub(crate) async fn open(label: &str) -> Self {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root)
@@ -272,7 +272,7 @@ impl RegisteredGlobalDbTestRuntime {
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
         profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
     ) -> tracedecay_domain::errors::Result<Self> {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         // A profile root is a profile-identity root in production and must be
         // mode 0700; creating it with the ambient umask (0775 under umask 0002)
         // makes identity validation fail, so use the private-store helper
@@ -467,7 +467,7 @@ impl RegisteredGlobalDbHarness {
     /// Opens the registered store without binding the session relation graph,
     /// staging the unbound state doctor health must report as partial.
     pub async fn open_without_relation_graph(label: &str) -> Self {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
         // The profile root must exist on disk before it is canonicalized into
@@ -698,7 +698,7 @@ impl HostAdmissionTestRuntimeV1 {
         profile_root: &std::path::Path,
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_domain::errors::Result<Self> {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         // See the note in `RegisteredGlobalDbTestRuntimeV1::open`: profile
         // identity roots must be 0700 regardless of the ambient umask.
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(profile_root)?;
@@ -1387,7 +1387,7 @@ async fn open_registered_test_database_with_identity(
     write_authority: RegisteredTestWriteAuthority,
     profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
 ) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)> {
-    crate::register_test_schema_installer();
+    crate::register_registered_schema_installer();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

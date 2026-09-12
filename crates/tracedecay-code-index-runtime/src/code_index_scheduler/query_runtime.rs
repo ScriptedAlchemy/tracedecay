@@ -25,9 +25,8 @@ use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
 };
 use tracedecay_query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
-use tracedecay_query::retrieval::graph::{
-    GraphExecutionControl, GraphLaneRequest, GraphLaneRetriever,
-};
+use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
     LexicalRouteReceiptV1, LexicalRoutingV1, merge_lexical_routes,
@@ -536,7 +535,7 @@ impl CodeIndexSchedulerRegistryV1 {
         input: QuerySearchExecutionRequestV1,
     ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1> {
         struct TestGraphControlV1;
-        impl GraphExecutionControl for TestGraphControlV1 {
+        impl RetrievalExecutionControl for TestGraphControlV1 {
             fn is_cancelled(&self) -> bool {
                 false
             }
@@ -557,7 +556,7 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_control: Arc<C>,
     ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
     where
-        C: GraphExecutionControl + 'static,
+        C: RetrievalExecutionControl + 'static,
     {
         scope
             .validate()
@@ -704,7 +703,7 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_control: Arc<C>,
     ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
     where
-        C: GraphExecutionControl + 'static,
+        C: RetrievalExecutionControl + 'static,
     {
         scope
             .validate()
@@ -731,7 +730,7 @@ async fn execute_query_search_on_latest<C>(
     graph_control: Arc<C>,
 ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
 where
-    C: GraphExecutionControl + 'static,
+    C: RetrievalExecutionControl + 'static,
 {
     let text = latest.text_generation_handle();
     execute_query_search_on_text(
@@ -756,7 +755,7 @@ async fn execute_query_search_on_text<C>(
     graph_control: Arc<C>,
 ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
 where
-    C: GraphExecutionControl + 'static,
+    C: RetrievalExecutionControl + 'static,
 {
     let authority = schedulers
         .query_authority_for_scope(scope)

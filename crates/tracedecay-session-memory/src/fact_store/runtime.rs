@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tracedecay_domain::{FactEventId, FactOwnerV1, UtcMicros, canonical_sha256};
+use tracedecay_domain::{FactEventId, FactOwnerV1, UtcMicros, canonical_sha256, sha256_hex_suffix};
 use tracedecay_store::{
     CommandDigestV1, ConsistencyModeV1, DurabilityClassV1, FactCommitConflict, FactCommitOutcome,
     FactCommitReceipt, FactCurrentQuery, FactLineageQuery, FactReadOperationV1, FactReadResultV1,
@@ -428,8 +428,7 @@ fn digest_suffix<'digest>(
     digest: &'digest str,
     operation: &'static str,
 ) -> FactStoreResult<&'digest str> {
-    digest
-        .strip_prefix("sha256:")
+    sha256_hex_suffix(digest)
         .ok_or_else(|| runtime_error(operation, "canonical SHA-256 digest prefix missing"))
 }
 
@@ -644,7 +643,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("readonly-runtime-client.db");
         let authority = DatabaseAuthority::acquire_test(&path, "readonly runtime client").unwrap();
-        tracedecay_global_db::register_test_schema_installer();
+        tracedecay_global_db::register_registered_schema_installer();
         let fixture = Database::publish_registered_test_runtime_with_retirement_control(
             &path,
             &authority,

@@ -73,7 +73,7 @@ pub fn enclosing_node_for_line(spans: &[NodeSpan], line_1based: u32) -> Option<S
         .map(|span| span.qualified_name.clone())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverity {
     Error,

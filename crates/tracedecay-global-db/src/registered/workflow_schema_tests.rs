@@ -13,7 +13,7 @@ use crate::tests::harness::open_registered_test_database_fixture;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 
 async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String) {
-    crate::register_test_schema_installer();
+    crate::register_registered_schema_installer();
     let directory = TempDir::new().unwrap();
     let database_path = directory.path().join("project/sessions.db");
     fs::create_dir_all(database_path.parent().unwrap()).unwrap();

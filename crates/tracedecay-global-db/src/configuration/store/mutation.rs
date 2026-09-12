@@ -402,7 +402,7 @@ where
     T: TryFrom<String>,
     <T as TryFrom<String>>::Error: std::fmt::Display,
 {
-    let digest = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+    let digest = digest.hex_suffix().ok_or_else(|| {
         ConfigurationError::validation_message("configuration digest is missing its sha256 prefix")
     })?;
     T::try_from(format!("{prefix}.{digest}")).map_err(|error| {

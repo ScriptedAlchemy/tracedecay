@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracedecay_domain::{
     ActorId, DomainError, FactEventId, FactId, FactOwnerV1, ProvenanceId, canonical_sha256,
+    sha256_hex_suffix,
 };
 
 use super::super::super::{FactCommitReceipt, FactStoreError, FactStoreResult};
@@ -146,9 +147,7 @@ impl ProjectMemoryFactMergeCommandV1 {
             self.merged_content.as_deref(),
             self.actor.as_ref().map(ActorId::as_str),
         ))?;
-        digest
-            .as_str()
-            .strip_prefix("sha256:")
+        sha256_hex_suffix(digest.as_str())
             .map(ToOwned::to_owned)
             .ok_or_else(|| {
                 FactStoreError::Contract(DomainError::NonCanonical {

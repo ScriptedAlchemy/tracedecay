@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::sha256_hex_suffix;
 
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphIdempotencyKey, GraphNamespace,
@@ -37,7 +38,7 @@ pub struct GraphPublicationInputDigest(String);
 impl GraphPublicationInputDigest {
     pub fn new(value: impl Into<String>) -> Result<Self, GraphDbError> {
         let value = value.into();
-        let Some(hex) = value.strip_prefix("sha256:") else {
+        let Some(hex) = sha256_hex_suffix(&value) else {
             return Err(GraphDbError::invalid(
                 "publication input digest must use the sha256 scheme",
             ));

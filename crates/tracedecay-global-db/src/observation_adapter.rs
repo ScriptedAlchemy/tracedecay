@@ -13,7 +13,7 @@ use tracedecay_domain::{
     RetrievalAnchorRecordV2, SanitizationReceiptV1, canonical_json_bytes,
     canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
     cline_native_source_successor_id, cline_task_native_observation_id,
-    is_canonical_payload_revision_replay, prove_cline_native_source_transition,
+    is_canonical_payload_revision_replay, prove_cline_native_source_transition, sha256_hex_suffix,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
@@ -1631,15 +1631,12 @@ fn dispatch_runtime_observation_read(
 ) -> ObservationStoreResult<ObservationReadResultV1> {
     let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(&operation)
         .map_err(|error| runtime_storage_error("build observation runtime read", error))?;
-    let suffix = command_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or_else(|| {
-            runtime_storage_error(
-                "build observation runtime read",
-                "canonical digest prefix is invalid",
-            )
-        })?;
+    let suffix = sha256_hex_suffix(command_digest.as_str()).ok_or_else(|| {
+        runtime_storage_error(
+            "build observation runtime read",
+            "canonical digest prefix is invalid",
+        )
+    })?;
     let admission_bytes = command_bytes.len();
     let requested_at = now_micros();
     let control = RuntimeRequestControlV1 {
@@ -2181,11 +2178,7 @@ async fn dispatch_runtime_submit(
     transaction_scope: RuntimeTransactionScopeV1,
     operation: &'static str,
 ) -> ObservationStoreResult<RuntimeSubmitOutcomeV1> {
-    let digest_suffix = metadata
-        .idempotency
-        .command_digest
-        .as_str()
-        .strip_prefix("sha256:")
+    let digest_suffix = sha256_hex_suffix(metadata.idempotency.command_digest.as_str())
         .ok_or_else(|| runtime_storage_error(operation, "canonical digest prefix is invalid"))?;
     let deadline = RuntimeDeadlineV1 {
         deadline_id: RuntimeDeadlineIdV1::new(format!("deadline.{digest_suffix}"))
@@ -2290,7 +2283,7 @@ fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult
 }
 
 fn runtime_digest_suffix(digest: &ManifestDigest) -> ObservationStoreResult<&str> {
-    digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+    sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
         runtime_storage_error(
             "derive observation runtime identity",
             "canonical digest prefix is invalid",

@@ -17,12 +17,11 @@ use tracedecay_policy::configuration::{
     ConfigurationMutationPolicyEvaluatorV1, ConfigurationMutationRecheckDispositionV1,
     ConfigurationMutationRecheckInputV1,
 };
-
-use super::ports::{
+use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
     CurrentConfigurationMutationAuthorizationV1,
 };
-use super::types::ConfigurationError;
+use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigurationMutationGrantAuthorityError {

@@ -86,7 +86,7 @@ mod tests {
     #[tokio::test]
     async fn installation_requires_typed_reset_without_mutating_legacy_profile_shape() {
         for daemon_attach in [false, true] {
-            crate::register_test_schema_installer();
+            crate::register_registered_schema_installer();
             let directory = TempDir::new().expect("temporary profile");
             let database_path = directory.path().join("sessions.db");
             {

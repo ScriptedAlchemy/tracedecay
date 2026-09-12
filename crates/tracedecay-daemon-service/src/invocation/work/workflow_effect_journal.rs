@@ -10,7 +10,9 @@ use tracedecay_contracts::{
     WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
     WorkflowEffectTerminalV1,
 };
-use tracedecay_domain::{ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
+};
 use tracedecay_tool_catalog::UseCaseId;
 
 use tracedecay_daemon_protocol::{
@@ -279,12 +281,9 @@ fn workflow_effect_idempotency_key(
         receipt_binding_digest,
     ))?;
     let suffix =
-        digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "Workflow effect idempotency digest",
-            })?;
+        sha256_hex_suffix(digest.as_str()).ok_or(ApplicationContractError::Inconsistent {
+            field: "Workflow effect idempotency digest",
+        })?;
     IdempotencyKey::new(format!("workflow.{operation_key}.{suffix}"))
 }
 
@@ -314,11 +313,10 @@ fn workflow_effect_receipt_context(
         })?,
     )?;
     let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
-    let suffix = input_digest.as_str().strip_prefix("sha256:").ok_or(
-        ApplicationContractError::Inconsistent {
+    let suffix =
+        sha256_hex_suffix(input_digest.as_str()).ok_or(ApplicationContractError::Inconsistent {
             field: "Work input digest",
-        },
-    )?;
+        })?;
     let expected_state = canonical_sha256(&(
         "tracedecay.work.expected-state.v1",
         operation_key,
