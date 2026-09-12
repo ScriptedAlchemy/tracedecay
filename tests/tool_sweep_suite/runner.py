@@ -988,9 +988,6 @@ def prime_fixture_values(
             client, fixture, deadline("tracedecay_code_symbol_search")
         )
 
-    with prime_group("git_preview"):
-        mint_preview_input(client, fixture, deadline("tracedecay_git_hunks"))
-
     with prime_group("work"):
         prime_work_lifecycle(
             fixture,
@@ -1664,6 +1661,11 @@ def _effect_denial_row(
 ) -> dict[str, Any]:
     """Prove a mutation with no hermetic success path denies with its exact typed error."""
     try:
+        if policy.name == "tracedecay_git_preview":
+            hunks_policy = (policies or {}).get("tracedecay_git_hunks")
+            if hunks_policy is None:
+                raise SweepError("git preview consumer has no advertised git_hunks producer")
+            mint_preview_input(client, fixture, hunks_policy.deadline_ms)
         arguments = materialize_tool_arguments(definition, fixture)
     except Exception as error:
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.arguments_unmaterialized", str(error))

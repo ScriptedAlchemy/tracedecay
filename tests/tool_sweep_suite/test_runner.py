@@ -1625,7 +1625,8 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 "tracedecay_code_type_hierarchy": "sym:type",
             },
         )
-        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
+        self.assertNotIn("preview_input_id", fixture)
+        self.assertNotIn("tracedecay_git_hunks", [name for name, _ in client.calls])
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
         self.assertEqual(fixture["lcm_store_id"], 41)
         self.assertEqual(fixture["session_refresh_handle"], "srh_fixture")

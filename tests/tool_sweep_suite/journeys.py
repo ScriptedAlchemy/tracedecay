@@ -1778,14 +1778,17 @@ def _source_apply(call: Call, tool: str, arguments: dict[str, Any], deadline: De
             observed = expected_state(preview)
     if observed is None:
         raise JourneyError(f"{tool} preview did not publish its expected_state")
-    return {
+    apply = {
         **arguments,
         "dry_run": False,
-        "verify": False,
+        "verify": tool == "tracedecay_rename_symbol",
         "idempotency_key": f"tool-sweep-{tool}-{time.monotonic_ns()}",
         "expected_state": observed,
         "format": "json",
     }
+    if tool == "tracedecay_rename_symbol":
+        apply["accepted_preview"] = _rename_acceptance(preview, observed)
+    return apply
 
 
 def _source_rollback(
@@ -1869,19 +1872,69 @@ def _rename_identity(
                 "file": node["file"],
                 "old_name": node["name"],
             }
-            accepted_preview = next(
-                (
-                    candidate["accepted_preview"]
-                    for candidate in objects(preview)
-                    if isinstance(candidate.get("accepted_preview"), dict)
-                ),
-                None,
-            )
-            if accepted_preview is None:
-                raise JourneyError("rename preview omitted its accepted_preview capability")
-            identity["accepted_preview"] = accepted_preview
             return identity
     raise JourneyError("rename preview did not publish the exact symbol identity")
+
+
+def _rename_acceptance(response: dict[str, Any], expected: str) -> dict[str, Any]:
+    """Copy the immutable capability minted by rename_symbol's dry run."""
+    for value in objects(response):
+        preview_id = value.get("preview_id")
+        preview_digest = value.get("preview_digest")
+        plan_digest = value.get("plan_digest")
+        graph_revision = value.get("graph_revision")
+        repository_revision = value.get("repository_revision")
+        if not all(
+            isinstance(candidate, str) and _SHA256.fullmatch(candidate)
+            for candidate in (preview_id, preview_digest, plan_digest, graph_revision)
+        ):
+            continue
+        if repository_revision is not None and not isinstance(repository_revision, str):
+            continue
+        if preview_digest != expected:
+            raise JourneyError("rename dry run published inconsistent preview and expected-state digests")
+        return {
+            "preview_id": preview_id,
+            "preview_digest": preview_digest,
+            "plan_digest": plan_digest,
+            "repository_revision": repository_revision,
+            "graph_revision": graph_revision,
+        }
+    raise JourneyError("rename dry run omitted its accepted_preview capability")
+
+
+def _wait_for_code_symbol(
+    call: Call, deadline: Deadline, name: str, qualified_name: str,
+) -> dict[str, Any]:
+    """Wait for the normal watcher to publish the edit's code generation."""
+    ends_at = time.monotonic() + 30
+    while True:
+        result = call(
+            "tracedecay_code_symbol_search",
+            {
+                "query": name,
+                "lazy_index_ignored_dependencies": False,
+                "scope": {},
+                "meta": {"projection": "summary", "order": "relevance"},
+                "format": "json",
+            },
+            deadline("tracedecay_code_symbol_search"),
+        )
+        match = next(
+            (
+                value
+                for value in objects(result)
+                if value.get("name") == name
+                and value.get("qualified_name") == qualified_name
+                and isinstance(value.get("node_id"), str)
+            ),
+            None,
+        )
+        if match is not None:
+            return match
+        if time.monotonic() >= ends_at:
+            raise JourneyError(f"code index did not publish renamed symbol {qualified_name}")
+        time.sleep(0.25)
 
 
 def _source_edit(
@@ -1986,6 +2039,30 @@ def _source_edit(
         effect_id = first_value(response, {"effect_id"})
         if not isinstance(effect_id, str) or not effect_id:
             raise JourneyError(f"{name} apply omitted its durable effect identity")
+        if name == "tracedecay_rename_symbol":
+            renamed_name = forward["new_name"]
+            renamed_qualified = (
+                f"{forward['qualified_name'].rsplit('::', 1)[0]}::{renamed_name}"
+                if "::" in forward["qualified_name"]
+                else renamed_name
+            )
+            renamed_node = _wait_for_code_symbol(
+                call, deadline, renamed_name, renamed_qualified,
+            )
+            verified = call(
+                "tracedecay_rename_preview",
+                {
+                    "node_id": renamed_node["node_id"],
+                    "new_name": forward["old_name"],
+                    "format": "json",
+                },
+                deadline("tracedecay_rename_preview"),
+            )
+            if not any(
+                value.get("qualified_name") == renamed_qualified
+                for value in objects(verified)
+            ):
+                raise JourneyError("rename preview did not resolve the reindexed symbol")
         replayed = call(name, apply, deadline(name))
         if not has_true(replayed, "replayed"):
             raise JourneyError(f"{name} idempotent retry did not replay its durable receipt")
@@ -1994,6 +2071,11 @@ def _source_edit(
         if name in {"tracedecay_move_symbol", "tracedecay_rename_symbol"}:
             _rollback_effect(call, deadline, response, apply["idempotency_key"])
             _require_snapshot(fixture, original, f"{name} rollback")
+            if name == "tracedecay_rename_symbol":
+                _wait_for_code_symbol(
+                    call, deadline, forward["old_name"], forward["qualified_name"],
+                )
+                return "identity/dry-run/apply/reindex/replay/journaled rollback verified"
             return "preview/apply/consumer/journaled rollback verified"
         rollback_arguments = inverse
         _source_rollback(call, inverse_tool, rollback_arguments, deadline)
