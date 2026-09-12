@@ -31,9 +31,10 @@ use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl, RetrievalPortError,
 };
 use tracedecay_query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, SemanticCodeRetriever, SemanticLaneRetriever, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
-    SemanticRetrievalRequestV1, SemanticVectorReadPort, SemanticVectorReadRequestV1,
-    SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
+    EphemeralQueryEmbeddingV1, SemanticCodeRetriever, SemanticLaneRetriever,
+    SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1, SemanticRetrievalRequestV1,
+    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
+    SemanticVectorScanSummaryV1,
 };
 
 // Row counts stop at the production resident-row cap

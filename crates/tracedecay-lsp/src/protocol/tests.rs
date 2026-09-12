@@ -1,8 +1,8 @@
 use super::context_controller::ContextProjectionCurrentness;
 use super::*;
 use crate::TRACEDECAY_CONTEXT_REVISION;
-use crate::capabilities::SemanticCapability;
 use crate::analyzer::broker::DiagnosticSeverity;
+use crate::capabilities::SemanticCapability;
 use crate::diagnostics::{DiagnosticSource, LspPosition, LspRange};
 use crate::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome, WorkspaceSymbol};
 use crate::overlay::OverlaySnapshot;

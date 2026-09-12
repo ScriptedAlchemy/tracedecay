@@ -11,9 +11,7 @@ pub struct CallableRetrievalExecutionControl {
 }
 
 impl CallableRetrievalExecutionControl {
-    pub fn for_request(
-        request: &RequestContext,
-    ) -> Arc<dyn RetrievalExecutionControl> {
+    pub fn for_request(request: &RequestContext) -> Arc<dyn RetrievalExecutionControl> {
         Arc::new(Self {
             request: request.clone(),
             started_at: Instant::now(),

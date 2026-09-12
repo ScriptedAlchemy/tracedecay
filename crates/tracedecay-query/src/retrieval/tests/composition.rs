@@ -13,8 +13,8 @@ use super::{
 };
 use crate::retrieval::fusion::{CompositionKernel, FusionStageInput};
 use crate::retrieval::hydrate::{
-    CanonicalLateHydration, HydrationAuthorizationV1,
-    HydrationOutcomeV1, HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
+    HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
     HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
 };
 use crate::retrieval::ports::RetrievalExecutionControl;

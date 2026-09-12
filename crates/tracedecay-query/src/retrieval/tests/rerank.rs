@@ -8,12 +8,12 @@ use tracedecay_domain::{
 
 use super::*;
 use crate::retrieval::fusion::{CompositionKernel, FusionStageInput};
+use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1,
     LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankViewOutcomeV1,
     RerankViewPermitV1,
 };
-use crate::retrieval::ports::RetrievalExecutionControl;
 
 fn ranked_candidates() -> Vec<RankedCandidate> {
     CompositionKernel::new(id("ranking.fixture.v1"))

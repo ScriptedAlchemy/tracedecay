@@ -342,17 +342,14 @@ mod tests {
 
     fn request() -> ContextScoutModelRequestV1 {
         ContextScoutModelRequestV1 {
-            candidates: vec![
-                super::super::ContextScoutModelCandidateInputV1 {
-                    dedupe_key: [1; 32],
-                    category:
-                        tracedecay_contracts::context_scout::ContextScoutCategoryV1::Verification,
-                    suggestion_text: "Run the cited focused test.".to_string(),
-                    citation_anchor_ids: vec![
-                        tracedecay_domain::RetrievalAnchorId::new("anchor.model.fixture").unwrap(),
-                    ],
-                },
-            ],
+            candidates: vec![super::super::ContextScoutModelCandidateInputV1 {
+                dedupe_key: [1; 32],
+                category: tracedecay_contracts::context_scout::ContextScoutCategoryV1::Verification,
+                suggestion_text: "Run the cited focused test.".to_string(),
+                citation_anchor_ids: vec![
+                    tracedecay_domain::RetrievalAnchorId::new("anchor.model.fixture").unwrap(),
+                ],
+            }],
         }
     }
 

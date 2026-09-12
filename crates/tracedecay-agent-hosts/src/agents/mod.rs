@@ -19,8 +19,8 @@ pub mod devin;
 pub use cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER;
 pub mod gemini;
 pub mod hermes;
-pub mod host_bundle_registry;
 pub mod host_bundle;
+pub mod host_bundle_registry;
 pub(crate) mod host_cli;
 pub mod host_component_registration;
 pub mod kilo;
@@ -674,9 +674,7 @@ fn devin_is_a_registered_independent_agent() {
 pub fn integration_id_for_host(host: host_bundle::HostKindV1) -> &'static str {
     match host {
         host_bundle::HostKindV1::ClaudeCode => "claude",
-        host_bundle::HostKindV1::CursorDesktop | host_bundle::HostKindV1::CursorCloud => {
-            "cursor"
-        }
+        host_bundle::HostKindV1::CursorDesktop | host_bundle::HostKindV1::CursorCloud => "cursor",
         host_bundle::HostKindV1::Codex => "codex",
         host_bundle::HostKindV1::Devin => "devin",
         host_bundle::HostKindV1::Zed => "zed",
@@ -728,8 +726,7 @@ pub fn inspect_receipt_backed_host_components(
     context: &HealthcheckContext,
     lifecycle_root: &Path,
     generator_commit: &str,
-) -> std::result::Result<host_bundle::HostBundleDoctorReportV1, host_bundle::HostBundleError>
-{
+) -> std::result::Result<host_bundle::HostBundleDoctorReportV1, host_bundle::HostBundleError> {
     host_bundle::inspect_installed_host_bundle_components_at(
         &context.home,
         lifecycle_root,

@@ -1230,20 +1230,19 @@ fn feedback_request(
     })?;
     Ok(
         tracedecay_agent_hosts::agents::host_bundle::HostBundleExecutionRequestV1 {
-            lifecycle:
-                tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleRequestV1 {
-                    operation,
-                    expected_host: manifest.host,
-                    expected_component: manifest.component,
-                    explicit_confirmation: confirmed,
-                    hermes_profile_bindings: u8::from(
-                        manifest.host
-                            == tracedecay_agent_hosts::agents::host_bundle::HostKindV1::Hermes,
-                    ),
-                    // Feedback rollback only ever moves between receipt-owned
-                    // Core deployments; it never claims receiptless files.
-                    adopt_receiptless: false,
-                },
+            lifecycle: tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleRequestV1 {
+                operation,
+                expected_host: manifest.host,
+                expected_component: manifest.component,
+                explicit_confirmation: confirmed,
+                hermes_profile_bindings: u8::from(
+                    manifest.host
+                        == tracedecay_agent_hosts::agents::host_bundle::HostKindV1::Hermes,
+                ),
+                // Feedback rollback only ever moves between receipt-owned
+                // Core deployments; it never claims receiptless files.
+                adopt_receiptless: false,
+            },
             operation_id,
         },
     )
@@ -2028,15 +2027,12 @@ fn feedback_rollback_dry_run(agent_id: &str) -> tracedecay_domain::errors::Resul
     )?;
     let (manifest_observed, orphan_observed) =
         feedback_observed(&home, &target.manifest, &previous_receipt)?;
-    let lifecycle =
-        tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleRuntimeV1::new(
-            verifier,
-            FeedbackPreviewStorage,
-        );
+    let lifecycle = tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleRuntimeV1::new(
+        verifier,
+        FeedbackPreviewStorage,
+    );
     let rollback =
-        tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRollbackSwitchV1::new(
-            lifecycle,
-        );
+        tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRollbackSwitchV1::new(lifecycle);
     let preview = rollback
         .feedback_rollback_switch_dry_run(
             &previous,
@@ -2114,19 +2110,17 @@ fn feedback_rollback_apply(
         &state.registration_files,
     )?;
 
-    let writer = tracedecay_agent_hosts::agents::host_bundle::HostBundleWriterV1::open_with_lifecycle_root(
-        &home,
-        &lifecycle_root,
-    )
-    .map_err(host_bundle_error)?;
-    let lifecycle =
-        tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleRuntimeV1::new(
-            verifier, writer,
-        );
+    let writer =
+        tracedecay_agent_hosts::agents::host_bundle::HostBundleWriterV1::open_with_lifecycle_root(
+            &home,
+            &lifecycle_root,
+        )
+        .map_err(host_bundle_error)?;
+    let lifecycle = tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleRuntimeV1::new(
+        verifier, writer,
+    );
     let mut rollback =
-        tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRollbackSwitchV1::new(
-            lifecycle,
-        );
+        tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRollbackSwitchV1::new(lifecycle);
     state.effect_started = true;
     persist_feedback_state(state_path, &lifecycle_root, &state)?;
     let switch_receipt = rollback
@@ -2317,11 +2311,12 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
             &switch_receipt.apply_receipt,
         )?;
     }
-    let writer = tracedecay_agent_hosts::agents::host_bundle::HostBundleWriterV1::open_with_lifecycle_root(
-        &home,
-        &lifecycle_root,
-    )
-    .map_err(host_bundle_error)?;
+    let writer =
+        tracedecay_agent_hosts::agents::host_bundle::HostBundleWriterV1::open_with_lifecycle_root(
+            &home,
+            &lifecycle_root,
+        )
+        .map_err(host_bundle_error)?;
     let previous_manifest_digest = state
         .previous_manifest
         .canonical_digest()
@@ -2472,14 +2467,11 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
         state.restore_effect_started = true;
         persist_feedback_state(state_path, &lifecycle_root, &state)?;
     }
-    let lifecycle =
-        tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleRuntimeV1::new(
-            verifier, writer,
-        );
+    let lifecycle = tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleRuntimeV1::new(
+        verifier, writer,
+    );
     let mut rollback =
-        tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRollbackSwitchV1::new(
-            lifecycle,
-        );
+        tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRollbackSwitchV1::new(lifecycle);
     let restore = if let Some(restore_receipt) = committed_restore_receipt {
         tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRestoreReceiptV1 {
             switch_operation_id: switch_receipt.apply_receipt.operation_id,
@@ -2595,8 +2587,8 @@ fn handle_host_bundle_recovery_command_inner(
         let lifecycle_root =
             tracedecay_agent_hosts::agents::host_bundle::resolved_host_bundle_lifecycle_root()
                 .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            })?;
+                    message: format!("could not resolve host lifecycle root: {error}"),
+                })?;
         let mut writer =
             tracedecay_agent_hosts::agents::host_bundle::HostBundleWriterV1::open_with_lifecycle_root(
                 &home,
@@ -2725,9 +2717,7 @@ fn host_bundle_error_for_agent(
     agent_id: &str,
     error: tracedecay_agent_hosts::agents::host_bundle::HostBundleError,
 ) -> tracedecay_domain::errors::TraceDecayError {
-    if error
-        == tracedecay_agent_hosts::agents::host_bundle::HostBundleError::NativeUpdateRequired
-    {
+    if error == tracedecay_agent_hosts::agents::host_bundle::HostBundleError::NativeUpdateRequired {
         let message = match agent_id {
             "claude" => {
                 "Claude Code's loaded TraceDecay cache is stale. Run `claude plugin update \
@@ -2746,7 +2736,8 @@ fn host_bundle_error_for_agent(
         };
     }
     if agent_id == "codex"
-        && error == tracedecay_agent_hosts::agents::host_bundle::HostBundleError::UnsupportedCapability
+        && error
+            == tracedecay_agent_hosts::agents::host_bundle::HostBundleError::UnsupportedCapability
     {
         return tracedecay_domain::errors::TraceDecayError::Config {
             message: "Codex plugin activation could not be completed through `codex plugin add`. \
@@ -5991,7 +5982,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             registration.preflight(&component_set.component_set, &request),
-            Err(tracedecay_agent_hosts::agents::host_bundle::HostBundleError::UnsupportedCapability)
+            Err(
+                tracedecay_agent_hosts::agents::host_bundle::HostBundleError::UnsupportedCapability
+            )
         );
         assert_eq!(std::fs::read(installed_path).unwrap(), original);
         assert!(

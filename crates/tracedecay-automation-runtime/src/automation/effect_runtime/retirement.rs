@@ -898,7 +898,10 @@ mod tests {
         RetirementPlan {
             binding: RetirementBinding {
                 source_digest: digest.clone(),
-                archive_name: format!("fact_proposals.{}.json", sha256_hex_suffix(&digest).unwrap()),
+                archive_name: format!(
+                    "fact_proposals.{}.json",
+                    sha256_hex_suffix(&digest).unwrap()
+                ),
             },
             source_path: root.join("fact_proposals.json"),
             source_bytes: bytes.to_vec(),

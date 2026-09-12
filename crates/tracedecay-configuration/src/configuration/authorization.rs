@@ -12,16 +12,16 @@ use tracedecay_domain::configuration::{
     ConfigurationGrantId, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
 };
-use tracedecay_policy::configuration::{
-    ConfigurationMutationGrantSnapshotV1, ConfigurationMutationPolicyEvaluator,
-    ConfigurationMutationPolicyEvaluatorV1, ConfigurationMutationRecheckDispositionV1,
-    ConfigurationMutationRecheckInputV1,
-};
 use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
     CurrentConfigurationMutationAuthorizationV1,
 };
 use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
+use tracedecay_policy::configuration::{
+    ConfigurationMutationGrantSnapshotV1, ConfigurationMutationPolicyEvaluator,
+    ConfigurationMutationPolicyEvaluatorV1, ConfigurationMutationRecheckDispositionV1,
+    ConfigurationMutationRecheckInputV1,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigurationMutationGrantAuthorityError {

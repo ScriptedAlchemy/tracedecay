@@ -194,33 +194,17 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         .await
         .map_err(|error| {
             let outcome = match &error {
-                ConfigurationError::TargetUnavailable => {
-                    "target_unavailable"
-                }
-                ConfigurationError::AuthorizedTargetAmbiguous => {
-                    "target_ambiguous"
-                }
-                ConfigurationError::RevisionConflict => {
-                    "revision_conflict"
-                }
+                ConfigurationError::TargetUnavailable => "target_unavailable",
+                ConfigurationError::AuthorizedTargetAmbiguous => "target_ambiguous",
+                ConfigurationError::RevisionConflict => "revision_conflict",
                 ConfigurationError::PlanExpired => "plan_expired",
                 ConfigurationError::PlanStale => "plan_stale",
-                ConfigurationError::PolicyWideningForbidden => {
-                    "policy_widening_forbidden"
-                }
-                ConfigurationError::ProjectlessProfileRequired => {
-                    "projectless_profile_required"
-                }
-                ConfigurationError::IdempotencyConflict => {
-                    "idempotency_conflict"
-                }
-                ConfigurationError::MutationAuthorityRejected => {
-                    "mutation_authority_rejected"
-                }
+                ConfigurationError::PolicyWideningForbidden => "policy_widening_forbidden",
+                ConfigurationError::ProjectlessProfileRequired => "projectless_profile_required",
+                ConfigurationError::IdempotencyConflict => "idempotency_conflict",
+                ConfigurationError::MutationAuthorityRejected => "mutation_authority_rejected",
                 ConfigurationError::Validation(_) => "validation",
-                ConfigurationError::ResetRequired { .. } => {
-                    "reset_required"
-                }
+                ConfigurationError::ResetRequired { .. } => "reset_required",
                 ConfigurationError::Unavailable => "unavailable",
             };
             tracing::warn!(
@@ -232,9 +216,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                 ConfigurationError::RevisionConflict => {
                     SemanticConfigurationBackendErrorV1::Conflict
                 }
-                ConfigurationError::Unavailable => {
-                    SemanticConfigurationBackendErrorV1::Unavailable
-                }
+                ConfigurationError::Unavailable => SemanticConfigurationBackendErrorV1::Unavailable,
                 _ => SemanticConfigurationBackendErrorV1::Rejected,
             }
         })?;
@@ -572,9 +554,7 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
                 ConfigurationError::RevisionConflict => {
                     SemanticConfigurationBackendErrorV1::Conflict
                 }
-                ConfigurationError::Unavailable => {
-                    SemanticConfigurationBackendErrorV1::Unavailable
-                }
+                ConfigurationError::Unavailable => SemanticConfigurationBackendErrorV1::Unavailable,
                 _ => SemanticConfigurationBackendErrorV1::RejectedAt(
                     "commit_linked_transition.central_commit",
                 ),

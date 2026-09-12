@@ -4,11 +4,6 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_agent_hosts::agents::host_bundle_registry::{
-    HostBundleRegistryError, RECEIPT_BACKED_HOST_KINDS, default_components,
-    unsupported_host_component_set_reason, verified_embedded_default_host_component_set,
-    verified_embedded_host_bundle, verified_embedded_host_component_set,
-};
 use tracedecay_agent_hosts::agents::host_bundle::{
     ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
     HostBundleComponentV1, HostBundleError, HostBundleExecutionRequestV1,
@@ -22,6 +17,11 @@ use tracedecay_agent_hosts::agents::host_bundle::{
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
     supported_host_edit_stop_conformance_evidence,
+};
+use tracedecay_agent_hosts::agents::host_bundle_registry::{
+    HostBundleRegistryError, RECEIPT_BACKED_HOST_KINDS, default_components,
+    unsupported_host_component_set_reason, verified_embedded_default_host_component_set,
+    verified_embedded_host_bundle, verified_embedded_host_component_set,
 };
 use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay_agent_hosts::agents::{
