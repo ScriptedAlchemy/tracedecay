@@ -1,6 +1,6 @@
 use super::{LedgerError, sqlite::LedgerTransaction};
 
-const LEDGER_SCHEMA: &str = r#"
+pub const RUNTIME_LEDGER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS td_runtime_writer_checkpoint_v1 (
     shard_json TEXT NOT NULL,
     incarnation INTEGER NOT NULL CHECK (incarnation > 0),
@@ -104,32 +104,83 @@ CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1
 ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
 "#;
 
-/// Moves the WITHOUT ROWID idempotency ledger a store may still carry into the
-/// rowid shape and drops the old table, in the caller's transaction. A store
-/// created at the current shape has no `_v1` table and skips this.
-const MIGRATE_IDEMPOTENCY_V1: &str = r#"
-INSERT OR IGNORE INTO td_runtime_writer_idempotency_v2 (
+pub const RETIRED_IDEMPOTENCY_LEDGER_PRESENT_SQL: &str = r#"
+SELECT 1 FROM sqlite_master
+WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'
+"#;
+
+/// Copies one bounded page whose key has not reached the current authority.
+/// A key already present with different content remains in V1 and makes the
+/// convergence caller fail closed instead of choosing either receipt.
+pub const COPY_RETIRED_IDEMPOTENCY_LEDGER_PAGE_SQL: &str = r#"
+WITH retired_page AS MATERIALIZED (
+    SELECT shard_json, incarnation, authority_epoch, idempotency_key,
+           request_digest, original_receipt_json, transaction_scope_json,
+           operation_id, durability_json, committed_at_micros
+    FROM td_runtime_writer_idempotency_v1
+    ORDER BY shard_json, incarnation, authority_epoch, idempotency_key
+    LIMIT 1024
+)
+INSERT INTO td_runtime_writer_idempotency_v2 (
     shard_json, incarnation, authority_epoch, idempotency_key, request_digest,
     original_receipt_json, transaction_scope_json, operation_id, durability_json,
     committed_at_micros
 )
-SELECT shard_json, incarnation, authority_epoch, idempotency_key, request_digest,
-       original_receipt_json, transaction_scope_json, operation_id, durability_json,
-       committed_at_micros
-FROM td_runtime_writer_idempotency_v1;
-DROP TABLE td_runtime_writer_idempotency_v1;
+SELECT retired.shard_json, retired.incarnation, retired.authority_epoch,
+       retired.idempotency_key, retired.request_digest,
+       retired.original_receipt_json, retired.transaction_scope_json,
+       retired.operation_id, retired.durability_json, retired.committed_at_micros
+FROM retired_page AS retired
+WHERE NOT EXISTS (
+    SELECT 1 FROM td_runtime_writer_idempotency_v2 AS current
+    WHERE current.shard_json = retired.shard_json
+      AND current.incarnation = retired.incarnation
+      AND current.authority_epoch = retired.authority_epoch
+      AND current.idempotency_key = retired.idempotency_key
+)
 "#;
 
+/// Retires only rows now represented byte-for-byte by the current authority.
+pub const DELETE_CONVERGED_IDEMPOTENCY_LEDGER_PAGE_SQL: &str = r#"
+WITH retired_page AS MATERIALIZED (
+    SELECT shard_json, incarnation, authority_epoch, idempotency_key,
+           request_digest, original_receipt_json, transaction_scope_json,
+           operation_id, durability_json, committed_at_micros
+    FROM td_runtime_writer_idempotency_v1
+    ORDER BY shard_json, incarnation, authority_epoch, idempotency_key
+    LIMIT 1024
+)
+DELETE FROM td_runtime_writer_idempotency_v1
+WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
+    SELECT retired.shard_json, retired.incarnation, retired.authority_epoch,
+           retired.idempotency_key
+    FROM retired_page AS retired
+    JOIN td_runtime_writer_idempotency_v2 AS current
+      ON current.shard_json = retired.shard_json
+     AND current.incarnation = retired.incarnation
+     AND current.authority_epoch = retired.authority_epoch
+     AND current.idempotency_key = retired.idempotency_key
+     AND current.request_digest = retired.request_digest
+     AND current.original_receipt_json = retired.original_receipt_json
+     AND current.transaction_scope_json = retired.transaction_scope_json
+     AND current.operation_id = retired.operation_id
+     AND current.durability_json = retired.durability_json
+     AND current.committed_at_micros = retired.committed_at_micros
+)
+"#;
+
+pub const DROP_RETIRED_IDEMPOTENCY_LEDGER_SQL: &str = "DROP TABLE td_runtime_writer_idempotency_v1";
+
 pub(crate) fn initialize_schema(transaction: &impl LedgerTransaction) -> Result<(), LedgerError> {
-    transaction.execute_batch(LEDGER_SCHEMA)?;
-    let retired_ledger_present = transaction
-        .prepare(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'",
-        )?
-        .exists([])?;
-    if retired_ledger_present {
-        transaction.execute_batch(MIGRATE_IDEMPOTENCY_V1)?;
-    }
-    Ok(())
+    transaction
+        .execute_batch(RUNTIME_LEDGER_SCHEMA)
+        .map_err(Into::into)
+}
+
+pub(crate) fn retired_idempotency_ledger_present(
+    transaction: &impl LedgerTransaction,
+) -> Result<bool, LedgerError> {
+    Ok(transaction
+        .prepare(RETIRED_IDEMPOTENCY_LEDGER_PRESENT_SQL)?
+        .exists([])?)
 }

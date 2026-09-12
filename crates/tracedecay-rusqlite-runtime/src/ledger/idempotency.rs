@@ -17,6 +17,13 @@ FROM td_runtime_writer_idempotency_v2
 WHERE shard_json = ?1 AND incarnation = ?2 AND authority_epoch = ?3
   AND idempotency_key = ?4
 "#;
+const SELECT_RETIRED_IDEMPOTENCY: &str = r#"
+SELECT request_digest, original_receipt_json, transaction_scope_json,
+       operation_id, durability_json, committed_at_micros
+FROM td_runtime_writer_idempotency_v1
+WHERE shard_json = ?1 AND incarnation = ?2 AND authority_epoch = ?3
+  AND idempotency_key = ?4
+"#;
 const INSERT_IDEMPOTENCY: &str = r#"
 INSERT OR IGNORE INTO td_runtime_writer_idempotency_v2 (
     shard_json, incarnation, authority_epoch, idempotency_key, request_digest,
@@ -33,6 +40,7 @@ pub(crate) enum LedgerDisposition {
     Conflict(StoreCommitReceiptV1),
 }
 
+#[derive(PartialEq)]
 struct IdempotencyRecord {
     request_digest: CommandDigestV1,
     receipt: StoreCommitReceiptV1,
@@ -76,8 +84,28 @@ pub(crate) fn lookup_receipt(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
     idempotency: &IdempotencyIdentityV1,
+    include_retired: bool,
 ) -> Result<Option<StoreCommitReceiptV1>, LedgerError> {
-    Ok(load(transaction, binding, &idempotency.key)?.map(|record| record.receipt))
+    let current = load(transaction, binding, &idempotency.key)?;
+    let retired = if include_retired {
+        load_from(
+            transaction,
+            binding,
+            &idempotency.key,
+            SELECT_RETIRED_IDEMPOTENCY,
+            "td_runtime_writer_idempotency_v1",
+        )?
+    } else {
+        None
+    };
+    match (current, retired) {
+        (Some(current), Some(retired)) if current != retired => Err(LedgerError::Corrupt {
+            table: IDEMPOTENCY_TABLE,
+            field: "retired/current idempotency disagreement",
+        }),
+        (Some(record), _) | (None, Some(record)) => Ok(Some(record.receipt)),
+        (None, None) => Ok(None),
+    }
 }
 
 #[hotpath::measure(label = "rusqlite.ledger.idempotency_insert")]
@@ -113,9 +141,25 @@ fn load(
     binding: &StoreRuntimeBindingV1,
     key: &StoreIdempotencyKeyV1,
 ) -> Result<Option<IdempotencyRecord>, LedgerError> {
+    load_from(
+        transaction,
+        binding,
+        key,
+        SELECT_IDEMPOTENCY,
+        IDEMPOTENCY_TABLE,
+    )
+}
+
+fn load_from(
+    transaction: &impl LedgerTransaction,
+    binding: &StoreRuntimeBindingV1,
+    key: &StoreIdempotencyKeyV1,
+    sql: &str,
+    table: &'static str,
+) -> Result<Option<IdempotencyRecord>, LedgerError> {
     let binding_key = BindingKey::from_binding(binding)?;
     let authority_epoch = sqlite_u64(binding.authority_epoch.get(), "authority epoch")?;
-    let mut statement = transaction.prepare(SELECT_IDEMPOTENCY)?;
+    let mut statement = transaction.prepare(sql)?;
     let mut rows = statement.query(params![
         &binding_key.shard_json,
         binding_key.incarnation_sql,
@@ -125,10 +169,10 @@ fn load(
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    let record = decode_row(row, binding, key)?;
+    let record = decode_row(row, binding, key, table)?;
     if rows.next()?.is_some() {
         return Err(LedgerError::Corrupt {
-            table: IDEMPOTENCY_TABLE,
+            table,
             field: "duplicate idempotency identity",
         });
     }
@@ -139,32 +183,24 @@ fn decode_row(
     row: &Row<'_>,
     binding: &StoreRuntimeBindingV1,
     key: &StoreIdempotencyKeyV1,
+    table: &'static str,
 ) -> Result<IdempotencyRecord, LedgerError> {
     let request_digest =
         CommandDigestV1::new(row.get::<_, String>(0)?).map_err(|_| LedgerError::Corrupt {
-            table: IDEMPOTENCY_TABLE,
+            table,
             field: "request_digest",
         })?;
-    let receipt: StoreCommitReceiptV1 = decode_json(
-        &row.get::<_, String>(1)?,
-        IDEMPOTENCY_TABLE,
-        "original_receipt_json",
-    )?;
-    let transaction_scope: RuntimeTransactionScopeV1 = decode_json(
-        &row.get::<_, String>(2)?,
-        IDEMPOTENCY_TABLE,
-        "transaction_scope_json",
-    )?;
+    let receipt: StoreCommitReceiptV1 =
+        decode_json(&row.get::<_, String>(1)?, table, "original_receipt_json")?;
+    let transaction_scope: RuntimeTransactionScopeV1 =
+        decode_json(&row.get::<_, String>(2)?, table, "transaction_scope_json")?;
     let operation_id =
         StoreOperationIdV1::new(row.get::<_, String>(3)?).map_err(|_| LedgerError::Corrupt {
-            table: IDEMPOTENCY_TABLE,
+            table,
             field: "operation_id",
         })?;
-    let durability: DurabilityClassV1 = decode_json(
-        &row.get::<_, String>(4)?,
-        IDEMPOTENCY_TABLE,
-        "durability_json",
-    )?;
+    let durability: DurabilityClassV1 =
+        decode_json(&row.get::<_, String>(4)?, table, "durability_json")?;
     let committed_at_micros: i64 = row.get(5)?;
     let receipt_binding = StoreRuntimeBindingV1::new(
         receipt.shard_id.clone(),
@@ -181,7 +217,7 @@ fn decode_row(
         || transaction_scope.compatibility.durability != durability
     {
         return Err(LedgerError::Corrupt {
-            table: IDEMPOTENCY_TABLE,
+            table,
             field: "original receipt binding",
         });
     }
