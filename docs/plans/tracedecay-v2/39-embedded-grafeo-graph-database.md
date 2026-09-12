@@ -1009,6 +1009,10 @@ The decision above rests on a wrong premise. Read against the pinned fork:
    (`retire_superseded_projection_replays_with_lease` after
    `publish_journaled`), so an active project converges to one-to-two
    generations of container within two checkpoints of its next publish.
+   Landed: a deferred retirement still deletes the generation's sealed
+   artifact on the first pass — the directory needs no engine, and on the
+   measured project that is 9.5 GB of the 20 GB the project holds — while
+   the tombstone keeps the native row delete queued for the next open.
    Landed: the Doctor `RetentionBacklog` finding carries the live container
    bytes, the sealed heads' bytes, and the deferred native retirement count,
    and reads Stale when retirements are deferred and the container exceeds
