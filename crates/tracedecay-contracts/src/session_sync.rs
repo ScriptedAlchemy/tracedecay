@@ -344,7 +344,13 @@ impl SessionSyncJournalV1 {
                 SessionSyncOutcomeV1::Joined(self.admission.clone())
             }
             (SessionSyncJournalStatusV1::Complete, Some(receipt)) => {
-                SessionSyncOutcomeV1::Complete(receipt.clone())
+                if receipt.coverage.is_empty() {
+                    SessionSyncOutcomeV1::Unavailable {
+                        reason_code: "session_sync_terminal_coverage_unavailable",
+                    }
+                } else {
+                    SessionSyncOutcomeV1::Complete(receipt.clone())
+                }
             }
             (SessionSyncJournalStatusV1::Complete, None) => SessionSyncOutcomeV1::Unavailable {
                 reason_code: "session_sync_journal_incomplete",
@@ -510,5 +516,39 @@ mod tests {
                 if receipt.admission.idempotency_key.as_str() == "session-sync.alias"
                     && receipt.coalesced_primary == Some(primary)
         ));
+    }
+
+    #[test]
+    fn completed_journal_without_coverage_is_unavailable() {
+        let request = SessionSyncRequestV1::new(
+            RequestId::new("session-sync.invalid-terminal").unwrap(),
+            IdempotencyKey::new("session-sync.invalid-terminal").unwrap(),
+            SessionSyncScopeV1::new(
+                ProjectId::new("project.fixture").unwrap(),
+                UserProfileId::new("profile.fixture").unwrap(),
+            ),
+            Deadline::new(UtcMicros(200)).unwrap(),
+            CancellationSignal::active("session-sync.invalid-terminal").unwrap(),
+            SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
+        );
+        let mut journal = SessionSyncJournalV1::queued(&request, UtcMicros(10));
+        journal.status = SessionSyncJournalStatusV1::Complete;
+        journal.completion = Some(SessionSyncCompletionReceiptV1 {
+            admission: journal.admission.clone(),
+            coalesced_primary: None,
+            completed_at: UtcMicros(20),
+            termination: OperationTermination::Completed,
+            stats: Default::default(),
+            coverage: Vec::new(),
+            source_frontiers: Vec::new(),
+            failure_codes: Vec::new(),
+        });
+
+        assert_eq!(
+            journal.outcome(),
+            SessionSyncOutcomeV1::Unavailable {
+                reason_code: "session_sync_terminal_coverage_unavailable"
+            }
+        );
     }
 }
