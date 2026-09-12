@@ -1973,7 +1973,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "navigation identities",
             fixture["priming_errors"]["code_navigation"]["message"],
         )
-        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
+        self.assertNotIn("preview_input_id", fixture)
         self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
         self.assertTrue(fixture["workflow_group_reached"])
 
@@ -2014,7 +2014,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 "tracedecay_code_type_hierarchy": "sym:type",
             },
         )
-        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
+        self.assertNotIn("preview_input_id", fixture)
         self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
 
 
