@@ -350,7 +350,12 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         fixture = {
             "configuration_key": "work.topology_policy.v1",
             "configuration_revision": "configuration.fixture.v1",
-            "configuration_topology_policy": {"collision_threshold_millionths": 500_000},
+            "configuration_topology_policy": {
+                "review_topology": {
+                    "allowed": ["no_review", "independent_review", "standard_pull_requests"]
+                }
+            },
+            "configuration_rollback_target_revision": "configuration.fixture.previous",
         }
         placeholder = {"type": "object", "properties": {}, "required": []}
 
@@ -372,10 +377,14 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             protected["change"],
             {
                 "kind": "replace_work_topology_policy",
-                "value": {"collision_threshold_millionths": 500_000},
+                "value": {
+                    "review_topology": {"allowed": ["no_review", "independent_review"]}
+                },
             },
         )
-        self.assertEqual(rollback["target_revision_id"], "configuration.fixture.v1")
+        self.assertEqual(
+            rollback["target_revision_id"], "configuration.fixture.previous"
+        )
 
     def test_topology_metrics_materializes_a_valid_bounded_horizon(self) -> None:
         runner = load_runner()
@@ -388,6 +397,32 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         )
         self.assertLess(arguments["horizon"]["since_micros"], arguments["horizon"]["until_micros"])
         self.assertGreater(arguments["max_events"], 0)
+
+    def test_automation_view_consumes_the_list_producer_run_id(self) -> None:
+        runner = load_runner()
+        arguments = runner.materialize_tool_arguments(
+            {
+                "name": "tracedecay_automation_run_view",
+                "inputSchema": {"type": "object", "properties": {}, "required": []},
+            },
+            {"automation_run_id": "automation.run.fixture"},
+        )
+        self.assertEqual(
+            arguments, {"run_id": "automation.run.fixture", "format": "json"}
+        )
+
+    def test_lcm_expand_consumes_the_captured_message_store_id(self) -> None:
+        runner = load_runner()
+        arguments = runner.materialize_tool_arguments(
+            {
+                "name": "tracedecay_lcm_expand",
+                "inputSchema": {"type": "object", "properties": {}, "required": []},
+            },
+            {"session_id": "session.fixture", "lcm_store_id": 41},
+        )
+        self.assertEqual(arguments["provider"], "codex")
+        self.assertEqual(arguments["session_id"], "session.fixture")
+        self.assertEqual(arguments["target"], {"kind": "raw_message", "store_id": 41})
 
 
 class NegotiatedSurfaceTests(unittest.TestCase):
@@ -503,6 +538,184 @@ class MutationJourneyTests(unittest.TestCase):
 
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "tool_sweep.effect_journey_unavailable")
+
+    def test_git_apply_consumes_preview_and_verifies_its_inverse(self) -> None:
+        runner = load_runner()
+        calls = []
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_git_hunks":
+                scope = arguments["scope"]
+                if scope == "staged" and sum(
+                    1 for called, _ in calls if called == "tracedecay_git_apply"
+                ) >= 2:
+                    return self.response('{"hunks":[]}')
+                return self.response(
+                    '{"preview_input_id":"preview.input.' + scope + '","hunks":'
+                    '[{"digest":"sha256:' + scope + '","hunk":{}}]}'
+                )
+            if tool == "tracedecay_git_preview":
+                operation = arguments["operation"]
+                self.assertEqual(
+                    arguments["preview_input_id"],
+                    "preview.input.working_tree" if operation == "stage_hunks" else "preview.input.staged",
+                )
+                return self.response(
+                    '{"outcome":"preview","preview_id":"preview.' + operation + '",'
+                    '"preview_digest":"sha256:' + operation + '"}'
+                )
+            self.assertEqual(tool, "tracedecay_git_apply")
+            inverse = arguments["preview_id"] == "preview.unstage_hunks"
+            return self.response(
+                '{"outcome":"effect","effect_id":"'
+                + ("effect.inverse" if inverse else "effect.stage") + '"}'
+            )
+
+        prepared = runner.prepare_journey(
+            "tracedecay_git_apply", object(), {}, lambda _tool: 1_000, call
+        )
+        self.assertEqual(prepared.arguments["preview_id"], "preview.stage_hunks")
+        note = prepared.cleanup(
+            self.response('{"outcome":"effect","effect_id":"effect.stage"}')
+        )
+
+        self.assertIn("inverse verified", note)
+        self.assertEqual(
+            [args["operation"] for tool, args in calls if tool == "tracedecay_git_preview"],
+            ["stage_hunks", "unstage_hunks"],
+        )
+
+    def test_configuration_set_consumes_revision_and_restores_the_default(self) -> None:
+        runner = load_runner()
+        baseline = {"kind": "boolean", "value": False}
+        changed = {"kind": "boolean", "value": True}
+        state = {"revision": "configuration.r1", "value": baseline}
+        calls = []
+
+        def effect(receipt, base, result):
+            return self.response(json.dumps({
+                "outcome": "effect",
+                "value": {"payload": {
+                    "receipt_id": receipt,
+                    "base_revision_id": base,
+                    "result_revision_id": result,
+                }},
+            }))
+
+        def setting():
+            return self.response(json.dumps({"payload": {
+                "key": "mcp.tool_timings",
+                "revision_id": state["revision"],
+                "effective_value": state["value"],
+            }}))
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_configuration_get":
+                return setting()
+            if tool == "tracedecay_configuration_set":
+                if state["revision"] == "configuration.r1":
+                    state.update(revision="configuration.r2", value=changed)
+                return effect("receipt.set", "configuration.r1", "configuration.r2")
+            self.assertEqual(tool, "tracedecay_configuration_unset")
+            state.update(revision="configuration.r3", value=baseline)
+            return effect("receipt.unset", "configuration.r2", "configuration.r3")
+
+        prepared = runner.prepare_journey(
+            "tracedecay_configuration_set",
+            object(),
+            {
+                "configuration_scalar_key": "mcp.tool_timings",
+                "configuration_scalar_value": baseline,
+                "project_id": "project.fixture",
+            },
+            lambda _tool: 1_000,
+            call,
+        )
+        self.assertEqual(prepared.arguments["expected_revision"], "configuration.r1")
+        self.assertEqual(prepared.arguments["value"], changed)
+        note = prepared.cleanup(effect("receipt.set", "configuration.r1", "configuration.r2"))
+
+        self.assertIn("inverse verified", note)
+        self.assertEqual(state["value"], baseline)
+        self.assertEqual(
+            [tool for tool, _ in calls],
+            [
+                "tracedecay_configuration_get",
+                "tracedecay_configuration_set",
+                "tracedecay_configuration_get",
+                "tracedecay_configuration_unset",
+                "tracedecay_configuration_get",
+            ],
+        )
+
+    def test_protected_configuration_apply_rolls_back_through_its_plan(self) -> None:
+        runner = load_runner()
+        policy = {
+            "review_topology": {
+                "allowed": ["no_review", "independent_review", "standard_pull_requests"]
+            }
+        }
+        changed = {
+            "review_topology": {"allowed": ["no_review", "independent_review"]}
+        }
+        state = {"revision": "configuration.r1", "policy": policy}
+
+        def setting():
+            return self.response(json.dumps({"payload": {
+                "key": "work.topology_policy.v1",
+                "revision_id": state["revision"],
+                "effective_value": {"kind": "work_topology_policy", "value": state["policy"]},
+            }}))
+
+        def plan(plan_id, base):
+            return self.response(json.dumps({
+                "plan_id": plan_id,
+                "base_revision_id": base,
+                "operation_digest": "sha256:" + "4" * 64,
+            }))
+
+        def effect(receipt, base, result):
+            return self.response(json.dumps({
+                "outcome": "effect",
+                "value": {"payload": {
+                    "receipt_id": receipt,
+                    "base_revision_id": base,
+                    "result_revision_id": result,
+                }},
+            }))
+
+        def call(tool, arguments, _deadline_ms):
+            if tool == "tracedecay_configuration_get":
+                return setting()
+            if tool == "tracedecay_configuration_protected_preview":
+                self.assertEqual(arguments["change"]["value"], changed)
+                return plan("plan.protected", "configuration.r1")
+            if tool == "tracedecay_configuration_protected_apply":
+                return effect("receipt.protected", "configuration.r1", "configuration.r2")
+            if tool == "tracedecay_configuration_rollback_preview":
+                self.assertEqual(arguments["target_revision_id"], "configuration.r1")
+                return plan("plan.rollback", "configuration.r2")
+            self.assertEqual(tool, "tracedecay_configuration_rollback_apply")
+            state.update(revision="configuration.r3", policy=policy)
+            return effect("receipt.rollback", "configuration.r2", "configuration.r3")
+
+        prepared = runner.prepare_journey(
+            "tracedecay_configuration_protected_apply",
+            object(),
+            {"configuration_key": "work.topology_policy.v1"},
+            lambda _tool: 1_000,
+            call,
+        )
+        self.assertEqual(prepared.arguments["plan_id"], "plan.protected")
+        state.update(revision="configuration.r2", policy=changed)
+        note = prepared.cleanup(
+            effect("receipt.protected", "configuration.r1", "configuration.r2")
+        )
+
+        self.assertIn("rollback verified", note)
+        self.assertEqual(state, {"revision": "configuration.r3", "policy": policy})
 
     @staticmethod
     def response(payload: str):
@@ -938,13 +1151,31 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 '[{"digest":"sha256:fixture","hunk":{}}]}'
             ),
             "tracedecay_configuration_list": cls.response(
-                '{"payload":[{"key":"work.topology_policy.v1"}]}'
+                '{"payload":[{"key":"work.topology_policy.v1"},{"key":"mcp.tool_timings"}]}'
             ),
             "tracedecay_configuration_get": cls.response(
                 '{"payload":{"key":"work.topology_policy.v1",'
                 '"revision_id":"configuration.fixture.v1",'
                 '"effective_value":{"kind":"work_topology_policy",'
-                '"value":{"collision_threshold_millionths":500000}}}}'
+                '"value":{"review_topology":{"allowed":'
+                '["no_review","independent_review","standard_pull_requests"]}}}}}'
+            ),
+            "tracedecay_automation_run_list": cls.response(
+                '{"runs":[{"run_id":"automation.run.fixture"}]}'
+            ),
+            "tracedecay_lcm_load_session": cls.response(
+                '{"messages":[{"store_id":41,"content":"catalog sweep captured LCM message"}]}'
+            ),
+            "tracedecay_admin_cli": cls.response(
+                '{"project_id":"project.fixture"}'
+            ),
+            "tracedecay_configuration_set": cls.response(
+                '{"outcome":"effect","value":{"payload":'
+                '{"result_revision_id":"configuration.fixture.seeded"}}}'
+            ),
+            "tracedecay_configuration_unset": cls.response(
+                '{"outcome":"effect","value":{"payload":'
+                '{"result_revision_id":"configuration.fixture.restored"}}}'
             ),
         }
 
@@ -957,6 +1188,12 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 self.calls.append((name, arguments))
                 if name == "tracedecay_by_qualified_name":
                     return self.qualified_name_responses.pop(0), 3
+                if name == "tracedecay_configuration_get" and arguments["key"] == "mcp.tool_timings":
+                    return cls.response(
+                        '{"payload":{"key":"mcp.tool_timings",'
+                        '"revision_id":"configuration.fixture.v1",'
+                        '"effective_value":{"kind":"boolean","value":false}}}'
+                    ), 3
                 return responses[name], 3
 
         return Client()
@@ -970,6 +1207,11 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_retrieve",
             "tracedecay_code_symbol_search",
             "tracedecay_git_hunks",
+            "tracedecay_automation_run_list",
+            "tracedecay_lcm_load_session",
+            "tracedecay_admin_cli",
+            "tracedecay_configuration_set",
+            "tracedecay_configuration_unset",
             "tracedecay_configuration_list",
             "tracedecay_configuration_get",
         )
@@ -990,6 +1232,9 @@ class FixturePrimingRetryTests(unittest.TestCase):
         fixture = {
             "symbol": "sweep_anchor",
             "qualified_name": "src/lib.rs::sweep_anchor",
+            "session_id": "session.fixture",
+            "lcm_message": "catalog sweep captured LCM message",
+            "root": "/fixture/root",
         }
 
         runner.prime_fixture_values(client, fixture, self.policies(runner))
@@ -1008,7 +1253,16 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(fixture["node_id"], "function:fixture")
         self.assertEqual(fixture["code_node_id"], "sym:code")
         self.assertEqual(fixture["preview_input_id"], "preview.fixture")
-        self.assertEqual(fixture["configuration_revision"], "configuration.fixture.v1")
+        self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
+        self.assertEqual(fixture["lcm_store_id"], 41)
+        self.assertEqual(fixture["project_id"], "project.fixture")
+        self.assertEqual(fixture["configuration_scalar_value"], {"kind": "boolean", "value": False})
+        self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
+        self.assertEqual(
+            fixture["configuration_rollback_target_revision"],
+            "configuration.fixture.seeded",
+        )
+        self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
 
     def test_non_retryable_graph_failure_remains_immediately_fatal(self) -> None:
         """The warming reason code alone cannot authorize another attempt."""
@@ -1024,6 +1278,9 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 {
                     "symbol": "sweep_anchor",
                     "qualified_name": "src/lib.rs::sweep_anchor",
+                    "session_id": "session.fixture",
+                    "lcm_message": "catalog sweep captured LCM message",
+                    "root": "/fixture/root",
                 },
                 self.policies(runner),
             )
