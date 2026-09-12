@@ -6037,6 +6037,30 @@ mod tests {
 
         struct DeterministicEncoder;
 
+        /// Fixture tokenizer: one token per whitespace-separated word, capped at the
+        /// admitted truncation length. The double has no model; grouping only needs a
+        /// length that varies with the document and can be predicted from a fixture.
+        impl tracedecay_semantic::projector::CanonicalChunkTokenLengthsV1 for DeterministicEncoder {
+            fn document_token_lengths(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                chunks: &[&CodeSearchChunkV1],
+            ) -> Result<Vec<usize>, String> {
+                let truncation_length = key.truncation_length as usize;
+                Ok(chunks
+                    .iter()
+                    .map(|chunk| {
+                        chunk
+                            .sanitized_text
+                            .as_str()
+                            .split_whitespace()
+                            .count()
+                            .clamp(1, truncation_length)
+                    })
+                    .collect())
+            }
+        }
+
         impl CanonicalChunkVectorEncoderV1 for DeterministicEncoder {
             fn encode(
                 &mut self,

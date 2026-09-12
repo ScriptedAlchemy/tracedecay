@@ -750,6 +750,22 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
     }
 }
 
+impl<E> crate::projector::CanonicalChunkTokenLengthsV1
+    for CachedSemanticEvaluationChunkEncoderV1<'_, E>
+where
+    E: CanonicalChunkVectorEncoderV1,
+{
+    /// The cache stores vectors, not lengths, so this is the wrapped
+    /// encoder's own tokenizer either way.
+    fn document_token_lengths(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        self.inner.document_token_lengths(key, chunks)
+    }
+}
+
 impl<E> CanonicalChunkVectorEncoderV1 for CachedSemanticEvaluationChunkEncoderV1<'_, E>
 where
     E: CanonicalChunkVectorEncoderV1,
@@ -1129,6 +1145,30 @@ struct CancelAfterFirstModelBatchV1 {
     progress: Arc<SemanticRuntimeScheduleCancellationV1>,
 }
 
+/// Fixture tokenizer: one token per whitespace-separated word, capped at the
+/// admitted truncation length. The double has no model; grouping only needs a
+/// length that varies with the document and can be predicted from a fixture.
+impl super::projector::CanonicalChunkTokenLengthsV1 for CancelAfterFirstModelBatchV1 {
+    fn document_token_lengths(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        let truncation_length = key.truncation_length as usize;
+        Ok(chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .sanitized_text
+                    .as_str()
+                    .split_whitespace()
+                    .count()
+                    .clamp(1, truncation_length)
+            })
+            .collect())
+    }
+}
+
 impl super::projector::CanonicalChunkVectorEncoderV1 for CancelAfterFirstModelBatchV1 {
     fn encode(
         &mut self,
@@ -1361,6 +1401,30 @@ mod tests {
         }
     }
 
+    /// Fixture tokenizer: one token per whitespace-separated word, capped at the
+    /// admitted truncation length. The double has no model; grouping only needs a
+    /// length that varies with the document and can be predicted from a fixture.
+    impl crate::projector::CanonicalChunkTokenLengthsV1 for CountingEncoderV1 {
+        fn document_token_lengths(
+            &mut self,
+            key: &EmbeddingProjectionKeyV1,
+            chunks: &[&CodeSearchChunkV1],
+        ) -> Result<Vec<usize>, String> {
+            let truncation_length = key.truncation_length as usize;
+            Ok(chunks
+                .iter()
+                .map(|chunk| {
+                    chunk
+                        .sanitized_text
+                        .as_str()
+                        .split_whitespace()
+                        .count()
+                        .clamp(1, truncation_length)
+                })
+                .collect())
+        }
+    }
+
     impl CanonicalChunkVectorEncoderV1 for CountingEncoderV1 {
         fn encode(
             &mut self,
@@ -1418,6 +1482,30 @@ mod tests {
     struct CancellingEncoderV1 {
         inner: CountingEncoderV1,
         cancellation: Arc<TriggeredCancellation>,
+    }
+
+    /// Fixture tokenizer: one token per whitespace-separated word, capped at the
+    /// admitted truncation length. The double has no model; grouping only needs a
+    /// length that varies with the document and can be predicted from a fixture.
+    impl crate::projector::CanonicalChunkTokenLengthsV1 for CancellingEncoderV1 {
+        fn document_token_lengths(
+            &mut self,
+            key: &EmbeddingProjectionKeyV1,
+            chunks: &[&CodeSearchChunkV1],
+        ) -> Result<Vec<usize>, String> {
+            let truncation_length = key.truncation_length as usize;
+            Ok(chunks
+                .iter()
+                .map(|chunk| {
+                    chunk
+                        .sanitized_text
+                        .as_str()
+                        .split_whitespace()
+                        .count()
+                        .clamp(1, truncation_length)
+                })
+                .collect())
+        }
     }
 
     impl CanonicalChunkVectorEncoderV1 for CancellingEncoderV1 {
@@ -2383,6 +2471,30 @@ mod tests {
             release: mpsc::Receiver<()>,
         }
 
+        /// Fixture tokenizer: one token per whitespace-separated word, capped at the
+        /// admitted truncation length. The double has no model; grouping only needs a
+        /// length that varies with the document and can be predicted from a fixture.
+        impl crate::projector::CanonicalChunkTokenLengthsV1 for GatedEncoderV1 {
+            fn document_token_lengths(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                chunks: &[&CodeSearchChunkV1],
+            ) -> Result<Vec<usize>, String> {
+                let truncation_length = key.truncation_length as usize;
+                Ok(chunks
+                    .iter()
+                    .map(|chunk| {
+                        chunk
+                            .sanitized_text
+                            .as_str()
+                            .split_whitespace()
+                            .count()
+                            .clamp(1, truncation_length)
+                    })
+                    .collect())
+            }
+        }
+
         impl CanonicalChunkVectorEncoderV1 for GatedEncoderV1 {
             fn encode(
                 &mut self,
@@ -2856,6 +2968,30 @@ mod tests {
     fn memory_accounting_includes_composed_lookup_keys_during_model_work() {
         struct ObservingEncoderV1<'a> {
             store: &'a SemanticEvaluationProjectionBatchStoreV1,
+        }
+
+        /// Fixture tokenizer: one token per whitespace-separated word, capped at the
+        /// admitted truncation length. The double has no model; grouping only needs a
+        /// length that varies with the document and can be predicted from a fixture.
+        impl crate::projector::CanonicalChunkTokenLengthsV1 for ObservingEncoderV1<'_> {
+            fn document_token_lengths(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                chunks: &[&CodeSearchChunkV1],
+            ) -> Result<Vec<usize>, String> {
+                let truncation_length = key.truncation_length as usize;
+                Ok(chunks
+                    .iter()
+                    .map(|chunk| {
+                        chunk
+                            .sanitized_text
+                            .as_str()
+                            .split_whitespace()
+                            .count()
+                            .clamp(1, truncation_length)
+                    })
+                    .collect())
+            }
         }
 
         impl CanonicalChunkVectorEncoderV1 for ObservingEncoderV1<'_> {

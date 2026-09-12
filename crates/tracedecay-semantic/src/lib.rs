@@ -592,14 +592,21 @@ impl DaemonSemanticRuntimeHandleV1 {
                 // the live float set is bounded by one batch rather than by
                 // the corpus, and a crash resumes from the last committed
                 // checkpoint instead of re-embedding everything.
+                let mut splitter = RuntimeChunkVectorEncoderV1::new(
+                    Arc::clone(&candidate),
+                    Arc::clone(&progress),
+                    authority.embedding_execution_plan(),
+                    Arc::clone(&request.documents),
+                );
                 let batches = split_projection_request(
                     &request.projection_request,
                     &request.canonical_chunks,
                     request.max_embeds_per_batch,
-                    authority.projection().embedding_key().inference_batch_size as usize,
-                    authority.projection().embedding_key().inference_batch_bytes as usize,
+                    authority.projection().embedding_key(),
+                    &mut splitter,
                 )
                 .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+                drop(splitter);
                 drop(request.canonical_chunks);
                 let committed_batches = completed_batch_offset(resume, batches.len())?
                     .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
@@ -1167,6 +1174,29 @@ fn compose_group_documents(
         .collect()
 }
 
+impl<R> projector::CanonicalChunkTokenLengthsV1 for RuntimeChunkVectorEncoderV1<R>
+where
+    R: EmbeddingRuntime + Send + Sync + 'static,
+{
+    /// Measure on the *composed* documents, not the raw chunk text: the
+    /// composition is what the tensor sees, and a rendered symbol header adds
+    /// tokens the chunk body does not carry.
+    fn document_token_lengths(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_sessions(1)?;
+        let texts = compose_group_documents(key, chunks, self.documents.as_ref())?;
+        self.sessions[0]
+            .encoded_token_lengths(&texts)
+            .map_err(|error| error.to_string())
+    }
+}
+
 impl<R> CanonicalChunkVectorEncoderV1 for RuntimeChunkVectorEncoderV1<R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
@@ -1511,7 +1541,12 @@ mod loadable_lifecycle_tests {
             LoadedSemanticArtifactV1::from_lifecycle_projection(
                 &owner,
                 &projection,
-                SemanticResourceCeilings::default(),
+                SemanticResourceCeilings {
+                    max_resident_bytes: Some(
+                        tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES,
+                    ),
+                    ..SemanticResourceCeilings::default()
+                },
             ),
             Err(SemanticRuntimeScheduleFailureV1::Artifact)
         ));

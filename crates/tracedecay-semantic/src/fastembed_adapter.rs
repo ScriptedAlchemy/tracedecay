@@ -101,6 +101,15 @@ pub enum EmbedError {
     TooManyTexts { presented: usize, max: usize },
     /// The batch exceeded the manifest's bounded total sanitized bytes.
     BatchBytesExceeded { presented: usize, max: usize },
+    /// The tensor this batch would build spends more attention-score
+    /// positions than the admitted quadratic budget. Grouping is supposed to
+    /// make this unreachable; reaching it means the grouping seam and the
+    /// embed seam disagree about how long the documents tokenize.
+    AttentionBudgetExceeded {
+        rows: u64,
+        padded_tokens: u64,
+        budget: u64,
+    },
     /// A produced vector does not match the manifest's declared dimension.
     DimensionMismatch { expected: u32, actual: usize },
     /// A produced vector contains NaN or infinite values.
@@ -123,6 +132,14 @@ impl fmt::Display for EmbedError {
             Self::BatchBytesExceeded { presented, max } => write!(
                 f,
                 "batch of {presented} bytes exceeds the manifest bound of {max}"
+            ),
+            Self::AttentionBudgetExceeded {
+                rows,
+                padded_tokens,
+                budget,
+            } => write!(
+                f,
+                "a batch of {rows} rows padded to {padded_tokens} tokens spends more than the admitted attention budget of {budget} token-pair positions"
             ),
             Self::DimensionMismatch { expected, actual } => write!(
                 f,
@@ -222,20 +239,50 @@ const RESIDENT_ESTIMATE_HEADROOM_DENOMINATOR: u64 = 4;
 const FASTEMBED_ATTENTION_HEADS: u64 = 12;
 const FASTEMBED_HIDDEN_SIZE: u64 = 768;
 const FASTEMBED_ACTIVATION_SCALAR_BYTES: u64 = size_of::<f32>() as u64;
-const ATTENTION_BUDGET_BASELINE_SEQUENCE: u64 = 512;
+/// Padded sequence length of the historical worst-case batch, the one the
+/// quadratic budget preserves. Sole definition; the projector's grouping seam
+/// and the reservation arithmetic both spend against it.
+pub(crate) const ATTENTION_BUDGET_BASELINE_SEQUENCE: u64 = 512;
 
-fn fastembed_worst_batch_activation_bytes(max_batch_size: u32, max_sequence_length: u32) -> u64 {
-    let batch_size = u64::from(max_batch_size);
-    let sequence_length = u64::from(max_sequence_length);
-    let attention_positions = batch_size
+/// The quadratic attention-score budget one forward pass may spend, counted in
+/// `rows × padded_tokens²` token-pair positions.
+///
+/// It is the larger of the historical 32-by-512 batch and one row at the full
+/// admitted sequence, because a document longer than the baseline still has to
+/// be embeddable and can only run alone. Everything else about the sizing
+/// follows from this one number: grouping refuses to exceed it,
+/// [`FastEmbedEmbeddingSession::embed_batch`] proves the tensor it actually
+/// builds stays inside it, and the reservation below charges exactly it.
+pub(crate) fn attention_token_square_budget(
+    inference_batch_size: u64,
+    truncation_length: u64,
+) -> u64 {
+    inference_batch_size
         .saturating_mul(ATTENTION_BUDGET_BASELINE_SEQUENCE.pow(2))
-        .max(sequence_length.pow(2));
+        .max(truncation_length.saturating_mul(truncation_length))
+}
+
+/// Activation bytes of the largest forward pass the attention budget admits.
+///
+/// `truncation_length` — not the configured sequence ceiling — is the bound
+/// that matters: it is `min(model.max_length, max_sequence_length)`, the
+/// length the tokenizer will actually truncate to, so a model whose own
+/// maximum is shorter reserves less.
+///
+/// Attention scores are `[rows, heads, longest, longest]`, whose worst case is
+/// the budget itself. Hidden states are `[rows, longest, hidden]`, and
+/// `rows × longest` is maximised at the baseline sequence — a longer row must
+/// run with proportionally fewer rows, so widening past the baseline shrinks
+/// this term rather than growing it.
+fn fastembed_worst_batch_activation_bytes(max_batch_size: u32, truncation_length: u32) -> u64 {
+    let batch_size = u64::from(max_batch_size);
+    let truncation_length = u64::from(truncation_length);
     let attention_bytes = FASTEMBED_ATTENTION_HEADS
-        .saturating_mul(attention_positions)
+        .saturating_mul(attention_token_square_budget(batch_size, truncation_length))
         .saturating_mul(FASTEMBED_ACTIVATION_SCALAR_BYTES);
     let hidden_rows = batch_size
-        .saturating_mul(sequence_length.min(ATTENTION_BUDGET_BASELINE_SEQUENCE))
-        .max(sequence_length);
+        .saturating_mul(truncation_length.min(ATTENTION_BUDGET_BASELINE_SEQUENCE))
+        .max(truncation_length);
     let hidden_bytes = hidden_rows
         .saturating_mul(FASTEMBED_HIDDEN_SIZE)
         .saturating_mul(FASTEMBED_ACTIVATION_SCALAR_BYTES);
@@ -249,7 +296,7 @@ fn fastembed_worst_batch_activation_bytes(max_batch_size: u32, max_sequence_leng
 fn resident_bytes_estimate_for(
     member_bytes: u64,
     max_batch_size: u32,
-    max_sequence_length: u32,
+    truncation_length: u32,
     resident_byte_ceiling: u64,
 ) -> u64 {
     if member_bytes == 0 {
@@ -261,7 +308,7 @@ fn resident_bytes_estimate_for(
         .unwrap_or(resident_byte_ceiling)
         .saturating_add(fastembed_worst_batch_activation_bytes(
             max_batch_size,
-            max_sequence_length,
+            truncation_length,
         ))
         .clamp(1, resident_byte_ceiling.max(1))
 }
@@ -269,7 +316,7 @@ fn resident_bytes_estimate_for(
 /// The resident ceiling a composed configuration resolved against its host.
 ///
 /// An unresolved ceiling is a typed refusal, not a number to invent: the
-/// reservation arithmetic above clamps into it, so substituting a default here
+/// reservation arithmetic below clamps into it, so substituting a default here
 /// would silently re-admit the sessions the host cannot hold.
 fn resolved_resident_ceiling(resources: SemanticResourceCeilings) -> Result<u64, EmbedError> {
     resources.resolved_max_resident_bytes().map_err(|_| {
@@ -575,7 +622,7 @@ impl AdmittedProjectionArtifactV1 {
                 resident_bytes_estimate: resident_bytes_estimate_for(
                     declared_member_bytes,
                     payload.resource_ceiling.max_batch_size,
-                    payload.resource_ceiling.max_sequence_length,
+                    projection.embedding_key().truncation_length,
                     payload.resource_ceiling.max_resident_bytes,
                 ),
                 load_deadline_ms: payload.resource_ceiling.load_deadline_ms,
@@ -612,6 +659,7 @@ impl AdmittedProjectionArtifactV1 {
         let tokenizer = member("tokenizer")?;
         let config = member("config")?;
         let resident_byte_ceiling = resolved_resident_ceiling(resources)?;
+        let truncation_length = projection.embedding_key().truncation_length;
         let lifecycle_install = LifecycleInstallArtifactV1 {
             root: install_path.to_path_buf(),
             members: model.members.clone(),
@@ -655,7 +703,7 @@ impl AdmittedProjectionArtifactV1 {
                 resident_bytes_estimate: resident_bytes_estimate_for(
                     model_member.length.saturating_add(tokenizer.length),
                     resources.max_batch_size,
-                    resources.max_sequence_length,
+                    truncation_length,
                     resident_byte_ceiling,
                 ),
                 load_deadline_ms: resources.load_deadline_ms,
@@ -1160,6 +1208,15 @@ pub trait EmbeddingSession: Send {
         batch: &BoundedSanitizedTextBatchV1,
         authority: &dyn SemanticExecutionAuthority,
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError>;
+    /// Token count of each composed document under this session's own
+    /// tokenizer, after the admitted projection's truncation.
+    ///
+    /// This is the only truthful input to batch grouping: the padded length of
+    /// a group is `max` of these, and attention cost is quadratic in it, so a
+    /// bytes-per-token estimate is wrong by the square of its error. Callers
+    /// pass composed documents, not raw chunk text, because composition is
+    /// what the tensor sees.
+    fn encoded_token_lengths(&mut self, texts: &[String]) -> Result<Vec<usize>, EmbedError>;
 }
 
 /// The root-private embedding runtime port (Plan 31: load verified artifact
@@ -1258,6 +1315,10 @@ impl EmbeddingSession for UnavailableEmbeddingSession {
         _batch: &BoundedSanitizedTextBatchV1,
         _authority: &dyn SemanticExecutionAuthority,
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
+        match *self {}
+    }
+
+    fn encoded_token_lengths(&mut self, _texts: &[String]) -> Result<Vec<usize>, EmbedError> {
         match *self {}
     }
 }
@@ -1462,8 +1523,20 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
         batch: &BoundedSanitizedTextBatchV1,
         authority: &dyn SemanticExecutionAuthority,
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
-        let artifact = self.authority.runtime_artifact();
-        validate_batch_limits(batch, artifact)?;
+        let (max_batch_texts, truncation_length, dimensions, metric, normalization) = {
+            let artifact = self.authority.runtime_artifact();
+            validate_batch_limits(batch, artifact)?;
+            (
+                artifact.max_batch_texts(),
+                self.authority
+                    .projection()
+                    .embedding_key()
+                    .truncation_length,
+                artifact.dimensions(),
+                artifact.metric(),
+                artifact.normalization(),
+            )
+        };
         hotpath::gauge!("semantic_embed_batch_size").set(batch.len());
         // Sanitized input volume — the tokenizer's cost driver. FastEmbed
         // fuses tokenization into `semantic.embed.infer`, so bytes-in is the
@@ -1471,6 +1544,25 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
         hotpath::gauge!("semantic_embed_batch_bytes").set(batch.total_bytes());
 
         check_execution_authority(authority)?;
+        // Prove the tensor this call is about to build stays inside the
+        // attention budget grouping promised. FastEmbed pads to
+        // `BatchLongest` inside `embed`, so the shape is decided here and
+        // nowhere else; measuring it costs one tokenizer pass over text the
+        // very next line tokenizes again.
+        let token_lengths = self.encoded_token_lengths(batch.texts())?;
+        let longest = token_lengths.iter().copied().max().unwrap_or(0) as u64;
+        let rows = batch.len() as u64;
+        let spent = rows.saturating_mul(longest).saturating_mul(longest);
+        let budget =
+            attention_token_square_budget(u64::from(max_batch_texts), u64::from(truncation_length));
+        hotpath::gauge!("semantic_embed_batch_padded_tokens").set(longest);
+        if spent > budget {
+            return Err(EmbedError::AttentionBudgetExceeded {
+                rows,
+                padded_tokens: longest,
+                budget,
+            });
+        }
         // FastEmbed/ORT inference is synchronous. Keep batches small at the
         // projector boundary, then perform one tensor invocation per admitted
         // batch instead of one invocation per text.
@@ -1506,14 +1598,48 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
             }
             let vector = EmbeddingVectorV1 {
                 values,
-                dimensions: artifact.dimensions(),
-                metric: artifact.metric(),
-                normalization: artifact.normalization(),
+                dimensions,
+                metric,
+                normalization,
             };
             vector.validate()?;
             vectors.push(vector);
         }
         Ok(vectors)
+    }
+
+    fn encoded_token_lengths(&mut self, texts: &[String]) -> Result<Vec<usize>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        // `encode_batch` pads to the batch's longest row, so the padded ids
+        // are not the answer; the attention mask is, and it is exactly what
+        // the model will attend over. Truncation is already configured on
+        // this tokenizer from the admitted `truncation_length`.
+        hotpath::measure_block!("semantic.embed.tokenize", {
+            let inputs = texts.iter().map(String::as_str).collect::<Vec<_>>();
+            let encodings = self
+                .embedding
+                .tokenizer
+                .encode_batch(inputs, true)
+                .map_err(|error| {
+                    fastembed_error(
+                        RuntimeFailureKindV1::EmbedFailed,
+                        "FastEmbed tokenization failed for the verified artifact",
+                        &error,
+                    )
+                })?;
+            Ok(encodings
+                .iter()
+                .map(|encoding| {
+                    encoding
+                        .get_attention_mask()
+                        .iter()
+                        .filter(|attended| **attended != 0)
+                        .count()
+                })
+                .collect())
+        })
     }
 }
 
@@ -1770,6 +1896,27 @@ impl EmbeddingSession for FakeEmbeddingSession {
         }
         self.counters.embed_calls.fetch_add(1, Ordering::SeqCst);
         Ok(out)
+    }
+
+    /// One token per whitespace-separated word, capped at the admitted
+    /// truncation length. The fake has no tokenizer; what the projector's
+    /// tests need is a length authority that varies with the text and can be
+    /// predicted from a fixture, which this is.
+    fn encoded_token_lengths(&mut self, texts: &[String]) -> Result<Vec<usize>, EmbedError> {
+        let truncation_length = self
+            .authority
+            .projection()
+            .embedding_key()
+            .truncation_length as usize;
+        Ok(texts
+            .iter()
+            .map(|text| {
+                text.split_whitespace()
+                    .count()
+                    .max(1)
+                    .min(truncation_length)
+            })
+            .collect())
     }
 }
 

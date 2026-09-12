@@ -4,9 +4,9 @@
 //! product without exposing database-engine connections or SQL primitives.
 
 pub use tracedecay_semantic::projector::{
-    CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, ProjectedChunkVectorV1,
-    ProjectionRequestBatchV1, SemanticProjectionErrorV1, prepare_vector_generation,
-    prepare_vector_generation_async, split_projection_request,
+    CanonicalChunkTokenLengthsV1, CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1,
+    ProjectedChunkVectorV1, ProjectionRequestBatchV1, SemanticProjectionErrorV1,
+    prepare_vector_generation, prepare_vector_generation_async, split_projection_request,
 };
 
 pub use tracedecay_application::store::vector_generations::{
