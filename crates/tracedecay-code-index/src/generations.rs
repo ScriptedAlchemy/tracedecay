@@ -742,7 +742,7 @@ mod tests {
         SensitivityLevelV1, SourceSpan,
     };
 
-    use crate::capabilities::{BaseCapabilityEmitter, CodeIndexCapabilityEmitter};
+    use crate::capabilities::BaseCapabilityEmitter;
     use crate::chunks::CodeSearchEligibilityV1;
     use crate::languages::StaticLanguageRegistry;
     use tracedecay_domain::{CoverageSummaryV1, LanguageDescriptorV1};
