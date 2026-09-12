@@ -66,7 +66,7 @@ pub use types::*;
 
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
-use command::TransactionCommand;
+use command::{TransactionCommand, TransactionLeaseState};
 use guard::{AuthorizedDatabaseOperation, InsertTracker, with_exact_sql_guard};
 
 type ExactSqlQuery = dyn Fn(ExactSqlStatement, OperationPriorityV1, Duration) -> Result<ExactSqlRows, ExactSqlError>
@@ -605,7 +605,7 @@ impl ExactSqlHandle {
     > {
         let (commands, receiver) = mpsc::sync_channel(1);
         let (reply, response) = async_channel::bounded(1);
-        let expired = Arc::new(AtomicBool::new(false));
+        let lease = Arc::new(TransactionLeaseState::default());
         self.writer
             .as_ref()
             .ok_or(ExactSqlError::WriterUnavailable)?
@@ -615,14 +615,14 @@ impl ExactSqlHandle {
                 receiver,
                 reply,
                 last_insert_rowid: Arc::clone(&self.last_insert_rowid),
-                expired: Arc::clone(&expired),
+                lease: Arc::clone(&lease),
                 authority: self.write_authority.clone(),
             })
             .map_err(map_writer_send_error)?;
         Ok((
             ExactSqlTransaction {
                 commands: Some(commands),
-                expired,
+                lease,
                 policy,
             },
             response,
@@ -719,8 +719,16 @@ impl ExactSqlReadSnapshot {
 
 pub struct ExactSqlTransaction {
     commands: Option<mpsc::SyncSender<TransactionCommand>>,
-    expired: Arc<AtomicBool>,
+    lease: Arc<TransactionLeaseState>,
     policy: TransactionPolicy,
+}
+
+enum RollbackDispatch {
+    Awaiting {
+        lease: Arc<TransactionLeaseState>,
+        response: async_channel::Receiver<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
+    },
+    Settled(Result<ExactSqlRollbackReceipt, ExactSqlError>),
 }
 
 impl ExactSqlTransaction {
@@ -735,25 +743,25 @@ impl ExactSqlTransaction {
         let (reply, response) = async_channel::bounded(1);
         sender
             .try_send(TransactionCommand::Attach { attachment, reply })
-            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
+            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
         Ok(response)
     }
     pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
-        let expired = Arc::clone(&self.expired);
+        let lease = Arc::clone(&self.lease);
         self.enqueue_attach_database(attachment)?
             .recv_blocking()
-            .map_err(|_| transaction_terminal_error(&expired))?
+            .map_err(|_| transaction_terminal_error(&lease))?
     }
 
     pub async fn attach_database_async(
         &self,
         attachment: ExactSqlAttachment,
     ) -> Result<(), ExactSqlError> {
-        let expired = Arc::clone(&self.expired);
+        let lease = Arc::clone(&self.lease);
         self.enqueue_attach_database(attachment)?
             .recv()
             .await
-            .map_err(|_| transaction_terminal_error(&expired))?
+            .map_err(|_| transaction_terminal_error(&lease))?
     }
 
     pub fn validate(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
@@ -881,22 +889,22 @@ impl ExactSqlTransaction {
         let (reply, response) = async_channel::bounded(1);
         sender
             .try_send(TransactionCommand::Commit { reply })
-            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
+            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
         Ok(response)
     }
     pub fn commit(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
-        let expired = Arc::clone(&self.expired);
+        let lease = Arc::clone(&self.lease);
         self.enqueue_commit()?
             .recv_blocking()
-            .map_err(|_| transaction_terminal_error(&expired))?
+            .map_err(|_| transaction_terminal_error(&lease))?
     }
 
     pub async fn commit_async(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
-        let expired = Arc::clone(&self.expired);
+        let lease = Arc::clone(&self.lease);
         self.enqueue_commit()?
             .recv()
             .await
-            .map_err(|_| transaction_terminal_error(&expired))?
+            .map_err(|_| transaction_terminal_error(&lease))?
     }
 
     fn enqueue_rollback(
@@ -912,22 +920,39 @@ impl ExactSqlTransaction {
         let (reply, response) = async_channel::bounded(1);
         sender
             .try_send(TransactionCommand::Rollback { reply })
-            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
+            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
         Ok(response)
     }
+    /// Decides, once for both callers, whether a rollback still has a writer
+    /// to ask or has already been answered by a writer-side release.
+    fn begin_rollback(self) -> RollbackDispatch {
+        let lease = Arc::clone(&self.lease);
+        match self.enqueue_rollback() {
+            Ok(response) => RollbackDispatch::Awaiting { lease, response },
+            Err(ExactSqlError::TransactionClosed | ExactSqlError::TransactionExpired) => {
+                RollbackDispatch::Settled(settled_rollback_or_terminal_error(&lease))
+            }
+            Err(error) => RollbackDispatch::Settled(Err(error)),
+        }
+    }
+
     pub fn rollback(self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
-        let expired = Arc::clone(&self.expired);
-        self.enqueue_rollback()?
-            .recv_blocking()
-            .map_err(|_| transaction_terminal_error(&expired))?
+        match self.begin_rollback() {
+            RollbackDispatch::Awaiting { lease, response } => response
+                .recv_blocking()
+                .unwrap_or_else(|_| settled_rollback_or_terminal_error(&lease)),
+            RollbackDispatch::Settled(result) => result,
+        }
     }
 
     pub async fn rollback_async(self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
-        let expired = Arc::clone(&self.expired);
-        self.enqueue_rollback()?
-            .recv()
-            .await
-            .map_err(|_| transaction_terminal_error(&expired))?
+        match self.begin_rollback() {
+            RollbackDispatch::Awaiting { lease, response } => response
+                .recv()
+                .await
+                .unwrap_or_else(|_| settled_rollback_or_terminal_error(&lease)),
+            RollbackDispatch::Settled(result) => result,
+        }
     }
 
     fn dispatch(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
@@ -959,7 +984,7 @@ impl ExactSqlTransaction {
                 execution_policy,
                 reply,
             })
-            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
+            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
         Ok(response)
     }
     fn dispatch_with_policy(
@@ -969,7 +994,7 @@ impl ExactSqlTransaction {
     ) -> Result<SqlResult, ExactSqlError> {
         self.enqueue_transaction_request(request, execution_policy)?
             .recv_blocking()
-            .map_err(|_| transaction_terminal_error(&self.expired))?
+            .map_err(|_| transaction_terminal_error(&self.lease))?
     }
 
     async fn dispatch_with_policy_async(
@@ -980,7 +1005,7 @@ impl ExactSqlTransaction {
         self.enqueue_transaction_request(request, execution_policy)?
             .recv()
             .await
-            .map_err(|_| transaction_terminal_error(&self.expired))?
+            .map_err(|_| transaction_terminal_error(&self.lease))?
     }
 
     async fn dispatch_async(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
@@ -1326,21 +1351,35 @@ fn map_writer_send_error(error: tokio_mpsc::error::TrySendError<WriterCommand>) 
     }
 }
 
-fn transaction_terminal_error(expired: &AtomicBool) -> ExactSqlError {
-    if expired.load(Ordering::Acquire) {
+fn transaction_terminal_error(lease: &TransactionLeaseState) -> ExactSqlError {
+    if lease.is_expired() {
         ExactSqlError::TransactionExpired
     } else {
         ExactSqlError::TransactionClosed
     }
 }
 
+/// Answers a caller's rollback for a transaction the writer already released.
+///
+/// Every writer-side release rolls back and publishes its receipt before
+/// dropping the command channel, so the honest answer here is that rollback —
+/// not a rollback failure. Only a genuinely failed `SQLite` rollback, or a
+/// release that published nothing, surfaces as an error.
+fn settled_rollback_or_terminal_error(
+    lease: &TransactionLeaseState,
+) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
+    lease
+        .settled_rollback()
+        .unwrap_or_else(|| Err(transaction_terminal_error(lease)))
+}
+
 fn map_transaction_send_error(
     error: mpsc::TrySendError<TransactionCommand>,
-    expired: &AtomicBool,
+    lease: &TransactionLeaseState,
 ) -> ExactSqlError {
     match error {
         mpsc::TrySendError::Full(_) => ExactSqlError::Busy,
-        mpsc::TrySendError::Disconnected(_) => transaction_terminal_error(expired),
+        mpsc::TrySendError::Disconnected(_) => transaction_terminal_error(lease),
     }
 }
 
