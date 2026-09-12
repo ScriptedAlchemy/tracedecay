@@ -11,6 +11,23 @@ pub(super) fn decode<T: DeserializeOwned>(value: String) -> rusqlite::Result<T> 
     serde_json::from_str(&value).map_err(|error| conversion(error.to_string()))
 }
 
+/// Two persisted encodings agree when they denote the same JSON document. A
+/// row migrated or hydrated in SQL is minified differently from one serde
+/// wrote, so a byte comparison would report a collision on an idempotent
+/// replay of a pre-migration write.
+pub(super) fn same_json(stored: &str, expected: &str) -> bool {
+    if stored == expected {
+        return true;
+    }
+    match (
+        serde_json::from_str::<serde_json::Value>(stored),
+        serde_json::from_str::<serde_json::Value>(expected),
+    ) {
+        (Ok(stored), Ok(expected)) => stored == expected,
+        _ => false,
+    }
+}
+
 pub(super) fn canonical_digest<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
     let value = serde_json::to_value(value).map_err(|error| conversion(error.to_string()))?;
     tracedecay_domain::canonical_sha256(&value)
