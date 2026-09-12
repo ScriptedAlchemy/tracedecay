@@ -81,7 +81,7 @@ mod workflow;
 
 use configuration_wire::{
     CONFIGURATION_WIRE_OPERATIONS, build_configuration_wire_schema_registry,
-    configuration_invocation_payload, is_configuration_operation, validate_configuration_outcome,
+    configuration_invocation_payload, is_configuration_operation, validate_application_outcome,
 };
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
@@ -1901,7 +1901,7 @@ pub async fn execute_application_surface(
             Ok(response) => match response
                 .envelope()
                 .filter(|envelope| {
-                    validate_configuration_outcome(
+                    validate_application_outcome(
                         operation,
                         &envelope.outcome,
                         &cancellation_contract,
@@ -2254,7 +2254,7 @@ pub async fn execute_application_surface(
                 scope,
                 outcome,
             } => {
-                if validate_configuration_outcome(
+                if validate_application_outcome(
                     operation,
                     &outcome,
                     &cancellation_contract,
