@@ -45,7 +45,7 @@ pub use schema::CodeLexicalArtifactWriterRevisionV1;
 /// allocator metadata overhead are unaccounted.
 pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 1536 * 1024 * 1024;
 const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_FRACTION_DENOMINATOR_V1: u64 = 8;
-const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1: u64 = 16 * 1024 * 1024 * 1024;
+pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1: usize = 16 * 1024 * 1024 * 1024;
 
 /// Host-derived lexical artifact build budget.
 ///
@@ -58,7 +58,7 @@ pub fn code_lexical_artifact_build_memory_budget_for(admitted_process_bytes: u64
     usize::try_from(
         (admitted_process_bytes / CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_FRACTION_DENOMINATOR_V1)
             .max(floor)
-            .min(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1),
+            .min(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1 as u64),
     )
     .unwrap_or(usize::MAX)
 }
