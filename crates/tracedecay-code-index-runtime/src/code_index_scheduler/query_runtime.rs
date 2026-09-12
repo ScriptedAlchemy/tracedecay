@@ -26,11 +26,11 @@ use tracedecay_query::retrieval::exact::{
 };
 use tracedecay_query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
 use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
-use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
     LexicalRouteReceiptV1, LexicalRoutingV1, merge_lexical_routes,
 };
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::{
     AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
     RetrievalPortError, SanitizedRetrievalRequestV1,

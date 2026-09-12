@@ -80,7 +80,8 @@ impl RetrievalExecutionControl for FixtureRetrievalExecutionControl {
     }
 }
 
-pub(crate) static ACTIVE_CONTROL: FixtureRetrievalExecutionControl = FixtureRetrievalExecutionControl;
+pub(crate) static ACTIVE_CONTROL: FixtureRetrievalExecutionControl =
+    FixtureRetrievalExecutionControl;
 
 struct ArtifactControl {
     cancelled: bool,

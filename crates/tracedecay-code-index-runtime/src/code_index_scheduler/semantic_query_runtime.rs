@@ -36,8 +36,8 @@ use tracedecay_query::retrieval::fusion::{CompositionOutputV1, digest_candidate_
 use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::semantic::{
     SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCompositionExecutionAuthorityV1,
-    SemanticCompositionExecutionOutcomeV1, SemanticQueryModeV1,
-    SemanticQueryServiceError, SemanticRetrievalRequestV1, apply_bounded_rerank_outcome,
+    SemanticCompositionExecutionOutcomeV1, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticRetrievalRequestV1, apply_bounded_rerank_outcome,
 };
 
 #[derive(Clone)]

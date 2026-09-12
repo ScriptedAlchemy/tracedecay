@@ -227,9 +227,7 @@ impl ProjectContextScoutOwnerV1 {
             || registry
                 .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
                 .await
-                != super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                    address,
-                )
+                != super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(address)
         {
             return ContextScoutClaimAdmissionV1::Rejected;
         }
@@ -280,11 +278,8 @@ impl ProjectContextScoutOwnerV1 {
             .registry
             .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
             .await;
-        (resolved
-            == super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                mounted.address,
-            ))
-        .then_some((mounted.address, mounted.input_watermark))
+        (resolved == super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(mounted.address))
+            .then_some((mounted.address, mounted.input_watermark))
     }
 
     pub async fn mounted_claim_pin(

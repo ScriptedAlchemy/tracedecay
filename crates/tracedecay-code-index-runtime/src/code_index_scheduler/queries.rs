@@ -146,7 +146,9 @@ fn empty_callable_page() -> PageState {
 }
 
 mod graph_control;
-use graph_control::{CallableRetrievalExecutionControl, current_utc_micros, graph_budget_for_request};
+use graph_control::{
+    CallableRetrievalExecutionControl, current_utc_micros, graph_budget_for_request,
+};
 
 /// The reserved [`CodeGenerationId`] a caller supplies to request ordinary
 /// (unpinned) search: it pins no specific immutable generation, so the serving

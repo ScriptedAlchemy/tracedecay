@@ -2610,7 +2610,11 @@ mod operation_label_tests {
                 DaemonInvocationOperation::PrimitiveAffectedTests,
             ),
         ] {
-            assert_ne!(feedback.as_str(), primitive.as_str(), "{feedback:?} vs {primitive:?}");
+            assert_ne!(
+                feedback.as_str(),
+                primitive.as_str(),
+                "{feedback:?} vs {primitive:?}"
+            );
         }
     }
 }

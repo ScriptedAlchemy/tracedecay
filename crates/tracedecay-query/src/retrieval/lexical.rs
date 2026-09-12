@@ -20,8 +20,7 @@ use tracedecay_domain::{
 use super::ports::{
     CodeCandidateBindingV1, LaneBoundEvidence, LaneEvidenceRejections, LexicalPostingReadPort,
     RetrievalExecutionControl, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
-    contract_error,
-    lane_bound_evidence, lane_candidate_cap,
+    contract_error, lane_bound_evidence, lane_candidate_cap,
 };
 
 mod projection;

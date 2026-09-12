@@ -22,9 +22,8 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationCurrentStateV1,
-    ConfigurationMutationAuthorizationPort,
-    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
+    CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
@@ -540,8 +539,7 @@ impl ConfigurationMutationAuthorizationPort for SharedMutationAuthorization {
         sink: tracedecay_domain::configuration::ConfigurationMutationSinkV1,
         effect: tracedecay_domain::configuration::ConfigurationMutationEffectV1,
         now: UtcMicros,
-    ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1>
-    {
+    ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1> {
         let Ok(authorization) = self.0.installed_mutation_authorization() else {
             return Box::pin(async { Err(ConfigurationError::Unavailable) });
         };
@@ -598,10 +596,7 @@ mod tests {
             _sink: tracedecay_domain::configuration::ConfigurationMutationSinkV1,
             _effect: tracedecay_domain::configuration::ConfigurationMutationEffectV1,
             _now: UtcMicros,
-        ) -> ConfigurationOperationFuture<
-            'a,
-            CurrentConfigurationMutationAuthorizationV1,
-        > {
+        ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1> {
             unreachable!("authority installation test does not invoke the authorization port")
         }
     }

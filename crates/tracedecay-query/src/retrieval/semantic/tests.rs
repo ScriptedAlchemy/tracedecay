@@ -970,7 +970,9 @@ fn omitted_request_deadline_uses_crate_exact_flat_default() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Arc::new(AtomicU64::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
+        elapsed_micros: Arc::new(AtomicU64::new(
+            SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1,
+        )),
         ..FixedExecutionControl::default()
     };
 
@@ -1010,7 +1012,9 @@ fn request_deadline_overrides_crate_exact_flat_default() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Arc::new(AtomicU64::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
+        elapsed_micros: Arc::new(AtomicU64::new(
+            SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1,
+        )),
         ..FixedExecutionControl::default()
     };
     let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)

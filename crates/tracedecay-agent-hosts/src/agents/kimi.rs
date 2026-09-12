@@ -188,9 +188,7 @@ impl AgentIntegration for KimiIntegration {
         component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::{
-            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
-        };
+        use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1 as State};
 
         let code_home = kimi_code_home(&ctx.home);
         let installed_path = kimi_installed_json_path(&code_home);
