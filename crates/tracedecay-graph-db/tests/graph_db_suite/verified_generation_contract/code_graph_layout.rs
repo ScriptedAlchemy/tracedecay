@@ -939,3 +939,94 @@ fn retiring_superseded_generations_shrinks_the_staging_container_on_checkpoint()
         .unwrap();
     assert_eq!(recovered.generation().as_str(), "shrink-g3");
 }
+
+fn staging_engine_is_open(registered: &RegisteredGraph, root: &std::path::Path) -> bool {
+    let probe = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), root))
+        .unwrap();
+    probe.staging_engine_is_open()
+}
+
+/// Superseded retirement on a hibernated engine opens it once for the row
+/// deletes and hibernates it again, instead of deferring to a publication
+/// that an inactive project never makes. A clean projection opens nothing.
+#[test]
+fn superseded_retirement_opens_a_hibernated_engine_once_and_rehibernates() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted_lazy(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = canonical_projection("worktree.hibernated-retire");
+    let root = temp.path();
+
+    let (_, g1_commit) = publish_generation(
+        &registered,
+        root,
+        &mut authority,
+        &identity,
+        "hib-g1",
+        None,
+        '1',
+    );
+    let g1_head = g1_commit.head.clone();
+    drop(g1_commit);
+    let (g2_record, g2_commit) = publish_generation(
+        &registered,
+        root,
+        &mut authority,
+        &identity,
+        "hib-g2",
+        Some(g1_head),
+        '2',
+    );
+    drop(g2_commit);
+    assert!(
+        !staging_engine_is_open(&registered, root),
+        "dropping the last commit hibernates the lazy engine"
+    );
+    assert_eq!(sealed_generation_count(root), 2);
+
+    let (control, probe) = control_and_probe();
+    let receipt = registered
+        .registry
+        .retire_superseded_projection_replays(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &g2_record.publication.key.projection,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt,
+        SupersededReplayRetirement {
+            retired: 1,
+            retained: 0,
+            pending: 0,
+        },
+        "the pass opens the engine for the row delete instead of deferring"
+    );
+    assert_eq!(sealed_generation_count(root), 1);
+    assert!(
+        !staging_engine_is_open(&registered, root),
+        "the engine opened for retirement hibernates again"
+    );
+
+    // Nothing left to retire: the pass must not open the engine to find out.
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered
+            .registry
+            .retire_superseded_projection_replays(
+                registration(registered.binding.clone(), root),
+                &mut authority,
+                &fresh_context(&control, &probe),
+                &g2_record.publication.key.projection,
+            )
+            .unwrap(),
+        SupersededReplayRetirement::default()
+    );
+    assert!(
+        !staging_engine_is_open(&registered, root),
+        "a clean projection never opens a hibernated engine"
+    );
+}

@@ -54,16 +54,16 @@ fn try_persist_workflow_fan_out_census(
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let workflow_use_case = tracedecay_tool_catalog::UseCaseId::new("use-case.work.mutate_graph")
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;
-    let snapshot = match super::preparation::current_work_product_snapshot(
+    // An unavailable projection is reported below as the typed
+    // `WorkProjectionUnavailable` census evidence, not swallowed.
+    let snapshot = super::preparation::current_work_product_snapshot(
         registered,
         context,
         "capability.work.mutate_graph",
         &workflow_use_case,
         observed_at,
-    ) {
-        Ok(snapshot) => Some(snapshot),
-        Err(_) => None,
-    };
+    )
+    .ok();
     let topology_generation = match super::preparation::current_work_product_attempt_topology(
         registered,
         context,

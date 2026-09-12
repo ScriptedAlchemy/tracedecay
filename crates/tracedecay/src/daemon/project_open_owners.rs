@@ -18,7 +18,9 @@ use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 
 use super::DaemonInvocationState;
 use crate::mcp::McpServer;
-use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationAnalysisV1;
+use tracedecay_agent_hosts::native_integration::{
+    DaemonNativeIntegrationAnalysisV1, NativeIntegrationTargetV1,
+};
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::primitives::admitted_root_uri_for_project;
 use tracedecay_application::semantic_runtime::{
@@ -385,10 +387,12 @@ pub(super) async fn register_project_open_production_owners(
                 let native_owner = native_integration
                     .ensure(
                         session_db.clone(),
-                        repository_root,
-                        scope.project_id.clone(),
-                        scope.repository_id.clone(),
-                        configuration_policy_digest.clone(),
+                        NativeIntegrationTargetV1 {
+                            repository_root,
+                            project_id: scope.project_id.clone(),
+                            repository_id: scope.repository_id.clone(),
+                            policy_digest: configuration_policy_digest.clone(),
+                        },
                         now_micros(),
                         analysis,
                     )

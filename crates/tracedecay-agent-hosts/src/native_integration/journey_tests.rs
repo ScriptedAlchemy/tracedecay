@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::analysis::DaemonNativeIntegrationAnalysisV1;
-use super::registry::DaemonNativeIntegrationServiceRegistry;
+use super::registry::{DaemonNativeIntegrationServiceRegistry, NativeIntegrationTargetV1};
 use super::stack_signals::signal_from_preflight;
 use tracedecay_application::native_integration::{
     GixNativeIntegrationAdapter, NativeApplyEffectV1, NativeIntegrationAnalysisPort,
@@ -512,10 +512,12 @@ async fn mount(
     let owner = registry
         .ensure(
             database,
-            repository_root,
-            project_id,
-            identity.repository_id().clone(),
-            digest('d'),
+            NativeIntegrationTargetV1 {
+                repository_root,
+                project_id,
+                repository_id: identity.repository_id().clone(),
+                policy_digest: digest('d'),
+            },
             OBSERVED_AT,
             analysis.clone(),
         )
