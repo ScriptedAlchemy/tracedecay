@@ -449,13 +449,13 @@ async fn run_authenticated_multi_root_journey() {
             if engine
                 .invocation
                 .code_index_schedulers
-                .latest_generation_id(first.path())
+                .latest_complete_ready(first.path())
                 .await
                 .is_some()
                 && engine
                     .invocation
                     .code_index_schedulers
-                    .latest_generation_id(second.path())
+                    .latest_complete_ready(second.path())
                     .await
                     .is_some()
             {
@@ -717,14 +717,13 @@ async fn run_authenticated_multi_root_journey() {
 
     let operation = MultiRootOperationV1::Query {
         request: json!({
-            "operation": "code_phrase_search",
+            "operation": "code_signature_search",
             "request": {
-                "query": "multi-root-page-marker",
-                "phrases": ["multi-root-page-marker"],
-                "field_filters": [],
-                "fuzzy_budget": 0,
-                "scope": {"generation": "code-generation:unpinned-latest.v1", "path_prefix": null},
-                "meta": {"projection": "summary", "order": "relevance", "cursor": null}
+                "returns": "str",
+                "params": [],
+                "is_async": null,
+                "scope": {"path_prefix": null},
+                "meta": {"projection": "summary", "order": "source_position", "cursor": null}
             }
         }),
     };
@@ -763,6 +762,16 @@ async fn run_authenticated_multi_root_journey() {
         first_page.roots[0].scope_digest,
         first_page.roots[1].scope_digest
     );
+    for root in &first_page.roots {
+        let tracedecay_domain::ScopeOutcome::Exact(values) = &root.outcome else {
+            panic!("each root must return an exact first page")
+        };
+        assert_eq!(
+            values[0]["items"].as_array().map(Vec::len),
+            Some(100),
+            "each child must fill the first 100-item page"
+        );
+    }
     let continuation = first_page
         .continuation
         .clone()
@@ -799,6 +808,16 @@ async fn run_authenticated_multi_root_journey() {
     };
     let second_page = second_evidence.payload.expect("second page payload");
     assert_ne!(first_page.roots, second_page.roots);
+    for root in &second_page.roots {
+        let tracedecay_domain::ScopeOutcome::Exact(values) = &root.outcome else {
+            panic!("each root must return an exact second page")
+        };
+        assert_eq!(
+            values[0]["items"].as_array().map(Vec::len),
+            Some(20),
+            "each child must return only its remaining 20 items"
+        );
+    }
     assert!(second_page.continuation.is_none());
 
     // Every operation family fans out over the authorized scope set.
