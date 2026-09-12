@@ -237,13 +237,13 @@ const NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE: &str =
 const OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES: &[&str] = &[
     "DELETE FROM external_source_acquisition_queue_v1",
     "DELETE FROM external_source_pending_projections_v1",
-    "DELETE FROM external_source_projection_effects_v1",
+    "DELETE FROM external_source_projection_effects_v2",
     "DELETE FROM external_source_projection_lineage_v1",
-    "DELETE FROM external_source_projected_objects_v1",
+    "DELETE FROM external_source_projected_objects_v2",
     "DELETE FROM external_source_projection_publications_v1",
     "DELETE FROM external_source_mutations_v1",
     "DELETE FROM external_source_lineage_v1",
-    "DELETE FROM external_source_objects_v1",
+    "DELETE FROM external_source_objects_v2",
     "DELETE FROM external_source_commit_receipts_v1",
     "DELETE FROM external_source_authority_receipts_v1",
     "DELETE FROM external_source_states_v1",
@@ -255,7 +255,7 @@ const OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES: &[&str] = &[
 /// conflict even after the receipt tables are empty. Other ledger keys —
 /// including newer or foreign markers — are not named here.
 const EXTERNAL_SOURCE_RUNTIME_IDEMPOTENCY_DELETE: &str =
-    "DELETE FROM td_runtime_writer_idempotency_v1 WHERE idempotency_key LIKE 'external-source.%'";
+    "DELETE FROM td_runtime_writer_idempotency_v2 WHERE idempotency_key LIKE 'external-source.%'";
 
 /// Preserved rows that would be orphaned by the reset, with the authority
 /// they would be orphaned from.
@@ -677,14 +677,14 @@ fn clear_observation_derived_external_source(
             }
         })?);
     }
-    if table_exists(transaction, "td_runtime_writer_idempotency_v1")? {
+    if table_exists(transaction, "td_runtime_writer_idempotency_v2")? {
         let deleted = transaction
             .execute(EXTERNAL_SOURCE_RUNTIME_IDEMPOTENCY_DELETE, [])
             .map_err(reset_storage)?;
         cleared = cleared.saturating_add(u64::try_from(deleted).map_err(|_| {
             TraceDecayError::Database {
                 operation: OPERATION.to_string(),
-                message: "td_runtime_writer_idempotency_v1 delete count overflowed".to_string(),
+                message: "td_runtime_writer_idempotency_v2 delete count overflowed".to_string(),
             }
         })?);
     }

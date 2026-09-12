@@ -52,6 +52,76 @@ fn ledger_records_share_the_callers_transaction_boundary() {
     );
 }
 
+/// A store that still carries the WITHOUT ROWID ledger keeps every receipt
+/// across the cutover: the rows move into the rowid table, the old table is
+/// gone, and a replay of a migrated key is still recognized.
+#[test]
+fn initialize_schema_migrates_the_without_rowid_ledger_in_place() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let metadata = metadata("operation.migrated", "key.migrated", 'a');
+    let binding = binding(&metadata);
+    // Seed the retired shape exactly as an older binary created it, then
+    // commit one receipt into it through the current ledger code by
+    // temporarily giving the old table the current name.
+    let transaction = connection.transaction().unwrap();
+    initialize_schema(&transaction).unwrap();
+    assert!(matches!(
+        record_commit(&transaction, &metadata, &scope(&metadata), None).unwrap(),
+        LedgerDisposition::Committed(_)
+    ));
+    transaction
+        .execute_batch(
+            "CREATE TABLE td_runtime_writer_idempotency_v1 (
+                shard_json TEXT NOT NULL,
+                incarnation INTEGER NOT NULL,
+                authority_epoch INTEGER NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_digest TEXT NOT NULL,
+                original_receipt_json TEXT NOT NULL,
+                transaction_scope_json TEXT NOT NULL,
+                operation_id TEXT NOT NULL,
+                durability_json TEXT NOT NULL,
+                committed_at_micros INTEGER NOT NULL,
+                PRIMARY KEY (shard_json, incarnation, authority_epoch, idempotency_key)
+             ) WITHOUT ROWID;
+             INSERT INTO td_runtime_writer_idempotency_v1
+                SELECT * FROM td_runtime_writer_idempotency_v2;
+             DROP TABLE td_runtime_writer_idempotency_v2;",
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+
+    let transaction = connection.transaction().unwrap();
+    initialize_schema(&transaction).unwrap();
+    let retired_present: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retired_present, 0, "the WITHOUT ROWID ledger is dropped");
+    let migrated: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM td_runtime_writer_idempotency_v2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(migrated, 1);
+    assert!(
+        matches!(
+            record_commit(&transaction, &metadata, &scope(&metadata), None).unwrap(),
+            LedgerDisposition::Replay(_)
+        ),
+        "a receipt written before the cutover still dedupes its replay"
+    );
+    // Re-running the initializer on the migrated store is a no-op.
+    initialize_schema(&transaction).unwrap();
+    assert!(current_watermark(&transaction, &binding).unwrap().is_some());
+}
+
 #[test]
 fn commit_uses_one_replay_and_conflict_disposition() {
     let mut connection = Connection::open_in_memory().unwrap();
@@ -85,7 +155,7 @@ fn malformed_canonical_json_fails_closed() {
     transaction.commit().unwrap();
     connection
         .execute(
-            "UPDATE td_runtime_writer_idempotency_v1 SET original_receipt_json = '{}'",
+            "UPDATE td_runtime_writer_idempotency_v2 SET original_receipt_json = '{}'",
             [],
         )
         .unwrap();
@@ -205,7 +275,7 @@ fn at_authority(
 fn idempotency_rows(transaction: &rusqlite::Transaction<'_>) -> Vec<(i64, i64)> {
     transaction
         .prepare(
-            "SELECT incarnation, authority_epoch FROM td_runtime_writer_idempotency_v1
+            "SELECT incarnation, authority_epoch FROM td_runtime_writer_idempotency_v2
              ORDER BY incarnation, authority_epoch",
         )
         .unwrap()
