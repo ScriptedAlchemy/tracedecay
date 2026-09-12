@@ -1644,7 +1644,7 @@ mod tests {
                 })
             },
         );
-        let freshness: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        let freshness: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |_| {
                 let freshness_order = std::sync::Arc::clone(&freshness_order);
                 Box::pin(async move {

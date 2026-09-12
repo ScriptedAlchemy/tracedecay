@@ -16,9 +16,8 @@ use tracedecay_domain::configuration::{
     SourceKindV1, resolve_restrictive_capabilities,
 };
 use tracedecay_domain::{ActorId, CapabilityId as DomainCapabilityId, ManifestDigest, UtcMicros};
+use tracedecay_global_db::configuration::contracts::ConfigurationControlStore;
 use tracedecay_tool_catalog::CapabilityId;
-
-use super::configuration::ConfigurationControlStore;
 
 /// Non-disclosing denial returned for missing, stale, ambiguous, or denied
 /// project-source access.

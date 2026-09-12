@@ -656,15 +656,16 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                             rebuild_in_flight: bool| {
         let latest_generation_id = latest_generation_id.map(str::to_owned);
         let staleness_state = staleness_state.map(str::to_owned);
-        let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
-                let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                    worktree_root: worktree_root.display().to_string(),
-                    latest_generation_id: latest_generation_id.clone(),
-                    staleness_state: staleness_state.clone(),
-                    rebuild_in_flight,
-                    ..Default::default()
-                };
+                let freshness =
+                    tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                        worktree_root: worktree_root.display().to_string(),
+                        latest_generation_id: latest_generation_id.clone(),
+                        staleness_state: staleness_state.clone(),
+                        rebuild_in_flight,
+                        ..Default::default()
+                    };
                 Box::pin(async move { Some(freshness) })
             });
         reader
@@ -744,9 +745,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     run_git_in(&project, &["checkout", "-b", "public-feature"]);
     let public_revision = git_stdout_in(&project, &["rev-parse", "HEAD"]);
     let public_freshness_reader = |revision: Option<String>, staleness: &'static str| {
-        let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
-                let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                     worktree_root: worktree_root.display().to_string(),
                     source_reference: Some("refs/heads/public-feature".to_owned()),
                     source_revision: revision.clone(),
@@ -754,7 +755,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                         "generation.status-serving-truth.public-feature".to_owned(),
                     ),
                     code_graph_serving: Some(
-                        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
+                        tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
                     ),
                     coverage: if staleness == "fresh" {
                         "complete".to_owned()
@@ -886,16 +887,15 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
     ));
     let feature_reference = feature_reference.to_owned();
-    let feature_reader:
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+    let feature_reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
         std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
-            let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+            let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: worktree_root.display().to_string(),
                 source_reference: Some(feature_reference.clone()),
                 source_revision: Some(feature_revision.clone()),
                 latest_generation_id: Some("generation.status-serving-truth.feature".to_owned()),
                 code_graph_serving: Some(
-                    tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
+                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
                 ),
                 staleness_state: Some("fresh".to_owned()),
                 ..Default::default()
@@ -1000,10 +1000,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         .unwrap()
         .as_micros() as i64
         - 3 * 86_400 * 1_000_000;
-    let aged_reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+    let aged_reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
         std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
             let freshness =
-                tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                     worktree_root: worktree_root.display().to_string(),
                     latest_generation_id: Some("generation.status-serving-truth.1".to_owned()),
                     sealed_at_micros: Some(sealed_at_micros),

@@ -27,7 +27,7 @@ use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId, Ut
 use tracedecay_graph_query::{
     CodeGraphReadFreshnessV1, CodeGraphReadRequest, request_graph_cancellation,
 };
-use tracedecay_session_memory::runtime_telemetry::{
+use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
@@ -1083,7 +1083,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
                 generation_id: seeded_generation_id.as_str().to_owned(),
                 freshness: GenerationCensusServingFreshness::Current,
                 statistics:
-                    tracedecay_session_memory::runtime_telemetry::GenerationCensusStatistics {
+                    tracedecay_runtime_core::runtime_telemetry::GenerationCensusStatistics {
                         source_total_bytes: seeded_statistics.source_total_bytes,
                         symbol_count: seeded_statistics.symbol_count,
                         edge_count: seeded_statistics.edge_count,

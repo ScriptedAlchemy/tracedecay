@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
+use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
-use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
 
 use crate::tools::render::Md;
 use crate::{
@@ -105,17 +105,13 @@ struct ReadyServingSourceV1<'a> {
 }
 
 fn ready_serving_source(
-    payload: Option<
-        &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessPayloadV1,
-    >,
+    payload: Option<&tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1>,
 ) -> Option<ReadyServingSourceV1<'_>> {
     let freshness = payload?.worktrees.first()?;
     if freshness.latest_generation_id.is_none()
         || !matches!(
             freshness.code_graph_serving,
-            Some(
-                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
-            )
+            Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready)
         )
     {
         return None;
@@ -187,7 +183,7 @@ fn attach_full_branch_status(
 
 /// Serialize the generation census exactly as the CLI decoder reads it back.
 ///
-/// [`tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
+/// [`tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
 /// authority for the `graph_statistics` field: this route serializes it and
 /// `tracedecay status` deserializes the same Rust type, so the two sides
 /// cannot drift.
@@ -195,7 +191,7 @@ pub fn graph_statistics_value(census: Option<&GenerationCensusSnapshot>) -> Resu
     let census = census.cloned().unwrap_or(
         GenerationCensusSnapshot::Unavailable {
             reason:
-                tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+                tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
         },
     );
     Ok(serde_json::to_value(&census)?)
@@ -433,7 +429,7 @@ pub async fn handle_status(
 /// the warning carries the exact reason and remediation instead of a
 /// wait-longer message.
 fn code_index_freshness_projection(
-    freshness: &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
+    freshness: &tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1,
 ) -> (&'static str, Option<String>) {
     let authoritative = freshness.latest_generation_id.is_some()
         && freshness.coverage == "complete"
@@ -697,7 +693,7 @@ mod tests {
     use tracedecay_global_db::{
         SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     };
-    use tracedecay_session_memory::runtime_telemetry::{
+    use tracedecay_runtime_core::runtime_telemetry::{
         GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusStatistics,
         GenerationCensusUnavailableReason,
     };
@@ -755,23 +751,22 @@ mod tests {
 
     #[test]
     fn a_parked_deterministic_violation_reports_parked_not_warming() {
-        let freshness =
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                worktree_root: "/project".to_owned(),
-                staleness_state: Some("parked".to_owned()),
-                coverage: "complete".to_owned(),
-                parked: Some(
-                    tracedecay_dashboard_api::code_index_freshness_api::CodeIndexConvergenceParkedV1 {
-                        reason: "code text artifacts root is not owner-private (mode 775, need 700)"
-                            .to_owned(),
-                        remediation: "restore owner-only access".to_owned(),
-                        parked_at_micros: 42,
-                        observed_passes: 3,
-                        retries_on_wake: true,
-                    },
-                ),
-                ..Default::default()
-            };
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            staleness_state: Some("parked".to_owned()),
+            coverage: "complete".to_owned(),
+            parked: Some(
+                tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+                    reason: "code text artifacts root is not owner-private (mode 775, need 700)"
+                        .to_owned(),
+                    remediation: "restore owner-only access".to_owned(),
+                    parked_at_micros: 42,
+                    observed_passes: 3,
+                    retries_on_wake: true,
+                },
+            ),
+            ..Default::default()
+        };
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
@@ -783,14 +778,13 @@ mod tests {
 
     #[test]
     fn status_freshness_preserves_typed_graph_serving_readiness() {
-        let freshness =
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                worktree_root: "/project".to_owned(),
-                code_graph_serving: Some(
-                    tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
-                ),
-                ..Default::default()
-            };
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            code_graph_serving: Some(
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
+            ),
+            ..Default::default()
+        };
 
         let value = serde_json::to_value(freshness).expect("freshness serializes");
         assert_eq!(
@@ -801,23 +795,22 @@ mod tests {
 
     #[test]
     fn a_serving_worktree_with_a_parked_newer_build_stays_current_but_warns() {
-        let freshness =
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                worktree_root: "/project".to_owned(),
-                latest_generation_id: Some("generation.fixture".to_owned()),
-                staleness_state: Some("fresh".to_owned()),
-                coverage: "complete".to_owned(),
-                parked: Some(
-                    tracedecay_dashboard_api::code_index_freshness_api::CodeIndexConvergenceParkedV1 {
-                        reason: "code text artifacts root is not owner-private".to_owned(),
-                        remediation: "restore owner-only access".to_owned(),
-                        parked_at_micros: 42,
-                        observed_passes: 1,
-                        retries_on_wake: true,
-                    },
-                ),
-                ..Default::default()
-            };
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some("fresh".to_owned()),
+            coverage: "complete".to_owned(),
+            parked: Some(
+                tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+                    reason: "code text artifacts root is not owner-private".to_owned(),
+                    remediation: "restore owner-only access".to_owned(),
+                    parked_at_micros: 42,
+                    observed_passes: 1,
+                    retries_on_wake: true,
+                },
+            ),
+            ..Default::default()
+        };
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
@@ -827,13 +820,12 @@ mod tests {
 
     #[test]
     fn an_unparked_incomplete_read_stays_warming() {
-        let freshness =
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                worktree_root: "/project".to_owned(),
-                staleness_state: Some("indexing".to_owned()),
-                coverage: "complete".to_owned(),
-                ..Default::default()
-            };
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            staleness_state: Some("indexing".to_owned()),
+            coverage: "complete".to_owned(),
+            ..Default::default()
+        };
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
@@ -847,14 +839,13 @@ mod tests {
 
     #[test]
     fn a_ready_generation_under_source_verification_is_stale_not_warming() {
-        let freshness =
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                worktree_root: "/project".to_owned(),
-                latest_generation_id: Some("generation.fixture".to_owned()),
-                staleness_state: Some("verifying".to_owned()),
-                coverage: "partial_source_verification".to_owned(),
-                ..Default::default()
-            };
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some("verifying".to_owned()),
+            coverage: "partial_source_verification".to_owned(),
+            ..Default::default()
+        };
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
