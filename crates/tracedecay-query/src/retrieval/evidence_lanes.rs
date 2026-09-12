@@ -21,7 +21,7 @@ use tracedecay_domain::{
     ManifestDigest, ProviderId, RetrievalAnchorId, RetrievalBudgetUsage, RetrievalFailure,
     RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
     RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceInstanceKey, SourceNamespace,
-    SourceOccurrenceId, canonical_sha256,
+    SourceOccurrenceId, TemporalLaneEvidenceV1, canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
@@ -29,9 +29,6 @@ use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 use super::ports::{RetrievalPortError, contract_error};
 
 pub use super::task_session::*;
-pub use tracedecay_domain::{
-    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
-};
 
 /// Process-local cooperative controls inherited from daemon admission.
 #[derive(Clone, Debug)]

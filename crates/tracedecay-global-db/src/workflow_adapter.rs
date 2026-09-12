@@ -44,68 +44,6 @@ where
         self.db.borrow()
     }
 
-    pub fn matches_project_sessions_authority(&self, project_id: &ProjectId) -> bool {
-        matches!(
-            &self.db().binding().shard_id.scope,
-            StoreShardScopeV1::ProjectSessions {
-                project_id: authority_project_id,
-            } if authority_project_id == project_id
-        )
-    }
-
-    #[hotpath::measure(label = "global_db.workflow.read_watermark", future = true)]
-    pub async fn read_ingest_watermark(&self) -> Option<i64> {
-        let Ok(snapshot) = self.db().read_snapshot().await else {
-            return None;
-        };
-        // `None` means the snapshot could not be opened; a missing watermark
-        // key still returns `Some(0)` so the sweep can proceed.
-        Some(read_ingest_watermark(&snapshot, INGEST_WATERMARK_KEY).await)
-    }
-
-    #[hotpath::measure(label = "global_db.workflow.upsert_run", future = true)]
-    pub async fn upsert_workflow_run(
-        &self,
-        run: &WorkflowRun,
-        agents: &[WorkflowAgent],
-    ) -> Result<(), WorkflowIndexError> {
-        let transaction = self
-            .db()
-            .begin_write_transaction()
-            .await
-            .map_err(|error| WorkflowIndexError::Db(error.to_string()))?;
-        upsert_run(&transaction, run).await?;
-        for agent in agents {
-            upsert_agent(&transaction, agent).await?;
-        }
-        WorkflowIngestWriteTxn::commit(transaction).await
-    }
-
-    #[hotpath::measure(label = "global_db.workflow.bump_watermark", future = true)]
-    pub async fn bump_ingest_watermark(&self, value: i64) {
-        let Ok(transaction) = self.db().begin_write_transaction().await else {
-            tracing::debug!("workflow ingest writer unavailable");
-            return;
-        };
-        let write = async {
-            transaction
-                .execute(
-                    "INSERT INTO workflow_index_meta(key, value)
-                         VALUES (?1, ?2)
-                         ON CONFLICT(key) DO UPDATE SET
-                             value = MAX(value, excluded.value),
-                             updated_at = unixepoch()",
-                    params![INGEST_WATERMARK_KEY, value],
-                )
-                .await?;
-            RegisteredGlobalDbWriteTransaction::commit(transaction).await
-        }
-        .await;
-        if let Err(err) = write {
-            tracing::debug!(error = %err, "workflow ingest watermark not advanced");
-        }
-    }
-
     #[hotpath::measure(label = "global_db.workflow.index_snapshot", future = true)]
     pub async fn open_workflow_index_snapshot(
         &self,
@@ -160,25 +98,64 @@ where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
     fn matches_project_sessions_authority(&self, project_id: &ProjectId) -> bool {
-        GlobalDbWorkflowStore::matches_project_sessions_authority(self, project_id)
+        matches!(
+            &self.db().binding().shard_id.scope,
+            StoreShardScopeV1::ProjectSessions {
+                project_id: authority_project_id,
+            } if authority_project_id == project_id
+        )
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "global_db.workflow.read_watermark", future = true)]
     async fn read_ingest_watermark(&self) -> Option<i64> {
-        GlobalDbWorkflowStore::read_ingest_watermark(self).await
+        let Ok(snapshot) = self.db().read_snapshot().await else {
+            return None;
+        };
+        // `None` means the snapshot could not be opened; a missing watermark
+        // key still returns `Some(0)` so the sweep can proceed.
+        Some(read_ingest_watermark(&snapshot, INGEST_WATERMARK_KEY).await)
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "global_db.workflow.bump_watermark", future = true)]
     async fn bump_ingest_watermark(&self, value: i64) {
-        GlobalDbWorkflowStore::bump_ingest_watermark(self, value).await;
+        let Ok(transaction) = self.db().begin_write_transaction().await else {
+            tracing::debug!("workflow ingest writer unavailable");
+            return;
+        };
+        let write = async {
+            transaction
+                .execute(
+                    "INSERT INTO workflow_index_meta(key, value)
+                         VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET
+                             value = MAX(value, excluded.value),
+                             updated_at = unixepoch()",
+                    params![INGEST_WATERMARK_KEY, value],
+                )
+                .await?;
+            RegisteredGlobalDbWriteTransaction::commit(transaction).await
+        }
+        .await;
+        if let Err(err) = write {
+            tracing::debug!(error = %err, "workflow ingest watermark not advanced");
+        }
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "global_db.workflow.upsert_run", future = true)]
     async fn upsert_workflow_run(
         &self,
         run: &WorkflowRun,
         agents: &[WorkflowAgent],
     ) -> Result<(), WorkflowIndexError> {
-        GlobalDbWorkflowStore::upsert_workflow_run(self, run, agents).await
+        let transaction = self
+            .db()
+            .begin_write_transaction()
+            .await
+            .map_err(|error| WorkflowIndexError::Db(error.to_string()))?;
+        upsert_run(&transaction, run).await?;
+        for agent in agents {
+            upsert_agent(&transaction, agent).await?;
+        }
+        WorkflowIngestWriteTxn::commit(transaction).await
     }
 }

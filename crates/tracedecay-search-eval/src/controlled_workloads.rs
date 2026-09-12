@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_capture::{cursor, cursor_composer, parse_normalized_observation_record_v1};
-use tracedecay_domain::{ClaudeByteRangeV1, ObservationOrderingDomainV1};
+use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write, read_bounded, sync_directory, truncate_file,
 };
@@ -249,7 +249,7 @@ fn compose_cursor_batch(records: &[Vec<u8>]) -> std::io::Result<(u64, Option<Str
     let mut bytes = 0_u64;
     for record in records {
         let end = offset.saturating_add(record.len() as u64);
-        let range = ClaudeByteRangeV1::new(offset, end).map_err(|error| {
+        let range = ObservationSourceRangeV1::new(offset, end).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
         })?;
         let parsed = parse_normalized_observation_record_v1(
@@ -283,7 +283,7 @@ fn compose_composer_batch(records: &[Vec<u8>]) -> std::io::Result<(u64, Option<S
     let mut bytes = 0_u64;
     for (index, record) in records.iter().enumerate() {
         let end = offset.saturating_add(record.len() as u64);
-        let range = ClaudeByteRangeV1::new(offset, end).map_err(|error| {
+        let range = ObservationSourceRangeV1::new(offset, end).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
         })?;
         let position = index as u64 + 1;

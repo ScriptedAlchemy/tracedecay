@@ -4,7 +4,7 @@
 /// `table`, and `table_array_element` nodes. Tables and table-arrays are
 /// emitted as `Module` nodes; key-value pairs become `Const` nodes
 /// parented to their enclosing table (or to the file if at top level).
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
@@ -27,10 +27,7 @@ struct ExtractionState<'s> {
 
 impl<'s> ExtractionState<'s> {
     fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = crate::common::unix_timestamp_secs();
         let file_node_id = generate_node_id(file_path, &NodeKind::File, file_path, 0);
         Self {
             nodes: Vec::new(),
@@ -48,29 +45,6 @@ impl<'s> ExtractionState<'s> {
 }
 
 impl TomlExtractor {
-    pub fn extract_toml(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse(source) {
-            Ok(tree) => tree,
-            Err(_msg) => {
-                return Self::build_result(
-                    Self::initialize_state(
-                        file_path,
-                        source,
-                        crate::common::unparsed_file_end_line(source),
-                    ),
-                    Instant::now(),
-                );
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -139,10 +113,6 @@ impl TomlExtractor {
             errors: Vec::new(),
             duration_ms: start.elapsed().as_millis() as u64,
         }
-    }
-
-    fn parse(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("toml", "TOML", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -327,17 +297,16 @@ impl crate::LanguageExtractor for TomlExtractor {
         "TOML"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_toml(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

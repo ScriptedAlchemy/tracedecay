@@ -13,8 +13,10 @@ use serde_json::{Value, json};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-// The transport-neutral handle authority lives in `tracedecay-application`. This
-// module keeps the MCP telemetry and adapters.
+// The transport-neutral handle authority lives in
+// `tracedecay_session_memory::response_handles`. This module wraps it with the
+// MCP telemetry counters and re-exports the record types so MCP callers import
+// the authority and its telemetry-wrapped operations from one path.
 pub use tracedecay_session_memory::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, ResponseHandleRecord,
 };

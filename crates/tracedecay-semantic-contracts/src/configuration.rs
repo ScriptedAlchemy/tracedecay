@@ -7,6 +7,8 @@ use tracedecay_domain::{
     ComponentRevision, EmbeddingDocumentCompositionV1, ManifestDigest, host_cpu_target,
 };
 
+use crate::manifest::ResourceCeilingV1;
+
 /// Catalog ids of the shipped embedding models. These name the catalog
 /// entries; whether a `selected_model` is actually cataloged is decided by
 /// the production catalog in `tracedecay-semantic`, not here — settings
@@ -94,6 +96,25 @@ impl SemanticResourceCeilings {
             config_error(
                 "semantic resident ceiling was read before composition resolved it against the host",
             )
+        })
+    }
+}
+
+/// A manifest ceiling needs every bound pinned, so this bridge carries the
+/// same typed failure as [`SemanticResourceCeilings::resolved_max_resident_bytes`]
+/// for a configuration that was never composed against its host.
+impl TryFrom<SemanticResourceCeilings> for ResourceCeilingV1 {
+    type Error = TraceDecayError;
+
+    fn try_from(ceilings: SemanticResourceCeilings) -> Result<Self> {
+        Ok(Self {
+            max_model_bytes: ceilings.max_model_bytes,
+            max_tokenizer_bytes: ceilings.max_tokenizer_bytes,
+            max_resident_bytes: ceilings.resolved_max_resident_bytes()?,
+            max_threads: ceilings.max_threads,
+            max_batch_size: ceilings.max_batch_size,
+            max_sequence_length: ceilings.max_sequence_length,
+            load_deadline_ms: ceilings.load_deadline_ms,
         })
     }
 }

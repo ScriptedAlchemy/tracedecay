@@ -150,7 +150,7 @@ pub enum CatalogValidationError {
     DigestSerialization { reason: String },
 }
 
-#[hotpath::measure(label = "tool_catalog.validate")]
+#[cfg_attr(feature = "hotpath", hotpath::measure(label = "tool_catalog.validate"))]
 pub(crate) fn validate_catalog(
     contributions: &[CatalogContributionV1],
     profiles: &[ProfileDefinition],

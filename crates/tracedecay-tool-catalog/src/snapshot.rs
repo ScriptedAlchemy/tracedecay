@@ -3,6 +3,7 @@ use std::io;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::ManifestDigest;
 
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
 use crate::executable::ExecutableSchemaAuthority;
@@ -67,6 +68,31 @@ pub struct CatalogContributionInputV1 {
     pub capabilities: Vec<CapabilityManifestV1>,
     pub retrieval_primitives: Vec<RetrievalPrimitiveManifestV1>,
     pub bindings: Vec<SurfaceBindingV1>,
+}
+
+impl CatalogContributionInputV1 {
+    pub fn new(
+        contribution_id: ContributionId,
+        depends_on: Vec<ContributionId>,
+        capabilities: Vec<CapabilityManifestV1>,
+        bindings: Vec<SurfaceBindingV1>,
+    ) -> Self {
+        Self {
+            contribution_id,
+            depends_on,
+            capabilities,
+            retrieval_primitives: Vec::new(),
+            bindings,
+        }
+    }
+
+    pub fn with_retrieval_primitives(
+        mut self,
+        retrieval_primitives: Vec<RetrievalPrimitiveManifestV1>,
+    ) -> Self {
+        self.retrieval_primitives = retrieval_primitives;
+        self
+    }
 }
 
 /// A reviewed, application-owned set of inert catalog records.
@@ -211,7 +237,10 @@ impl CatalogSnapshotBuilderV1 {
         self
     }
 
-    #[hotpath::measure(label = "tool_catalog.snapshot.build")]
+    #[cfg_attr(
+        feature = "hotpath",
+        hotpath::measure(label = "tool_catalog.snapshot.build")
+    )]
     pub fn build(self) -> Result<CatalogSnapshotV1, CatalogValidationError> {
         // Duplicate and reference validation runs over the borrowed input
         // first, so no map insertion below can silently overwrite a record.
@@ -313,8 +342,8 @@ pub struct CatalogSnapshotV1 {
 }
 
 impl CatalogSnapshotV1 {
-    pub const fn digest(&self) -> CatalogDigest {
-        self.digest
+    pub fn digest(&self) -> CatalogDigest {
+        self.digest.clone()
     }
 
     pub fn capability(&self, capability_id: &CapabilityId) -> Option<&CapabilityManifestV1> {
@@ -357,7 +386,10 @@ impl CatalogSnapshotV1 {
 
     /// Resolves metadata only. `None` deliberately covers unknown, unavailable,
     /// feature-incompatible, profile-hidden, and protocol-incompatible entries.
-    #[hotpath::measure(label = "tool_catalog.snapshot.resolve_binding")]
+    #[cfg_attr(
+        feature = "hotpath",
+        hotpath::measure(label = "tool_catalog.snapshot.resolve_binding")
+    )]
     pub fn resolve_binding(
         &self,
         profile_id: &ProfileId,
@@ -432,7 +464,10 @@ impl CatalogSnapshotV1 {
     /// The caller supplies its already-resolved scope and authorization
     /// intersection. This keeps transport adapters from publishing a static
     /// superset and preserves indistinguishable omission for hidden entries.
-    #[hotpath::measure(label = "tool_catalog.snapshot.visible_bindings")]
+    #[cfg_attr(
+        feature = "hotpath",
+        hotpath::measure(label = "tool_catalog.snapshot.visible_bindings")
+    )]
     #[allow(clippy::too_many_arguments)]
     pub fn visible_bindings<'a>(
         &'a self,
@@ -525,7 +560,16 @@ fn calculate_digest(
             reason: error.to_string(),
         }
     })?;
-    Ok(CatalogDigest::from_bytes(hasher.0.finalize().into()))
+    let digest = ManifestDigest::from_sha256_bytes(&hasher.0.finalize()).map_err(|error| {
+        CatalogValidationError::DigestSerialization {
+            reason: error.to_string(),
+        }
+    })?;
+    CatalogDigest::from_manifest_digest(digest).map_err(|error| {
+        CatalogValidationError::DigestSerialization {
+            reason: error.to_string(),
+        }
+    })
 }
 
 struct DigestWriter(Sha256);

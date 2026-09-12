@@ -10,7 +10,11 @@ use tracedecay_domain::{
 };
 use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
-use crate::{ObservationRecordParseErrorV1, parse_cursor_human_timestamp};
+use crate::git_facts::append_diff_and_pull_request_facts;
+use crate::{
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
+    parse_cursor_human_timestamp,
+};
 
 pub fn normalize_cursor_observation(
     native: &Value,
@@ -432,35 +436,22 @@ fn append_cursor_git_facts(native: &Value, facts: &mut Vec<CanonicalObservationF
             content: None,
         });
     }
-    if native
+    let has_diffs = native
         .get("gitDiffs")
         .and_then(Value::as_array)
-        .is_some_and(|diffs| !diffs.is_empty())
-    {
-        facts.push(CanonicalObservationFactV1::Git {
-            evidence_kind: CanonicalGitEvidenceKindV1::Diff,
-            reference: None,
-            content: None,
-        });
-    }
-    if let Some(pull_requests) = native.get("pullRequests").and_then(Value::as_array) {
-        for pull_request in pull_requests {
-            let reference = ["url", "htmlUrl", "html_url", "id"]
+        .is_some_and(|diffs| !diffs.is_empty());
+    let pull_request_references = native
+        .get("pullRequests")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|pull_request| {
+            ["url", "htmlUrl", "html_url", "id"]
                 .into_iter()
                 .find_map(|key| pull_request.get(key).and_then(Value::as_str))
-                .map(str::to_string);
-            facts.push(CanonicalObservationFactV1::Git {
-                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
-                reference: reference.clone(),
-                content: None,
-            });
-            facts.push(CanonicalObservationFactV1::Workflow {
-                evidence_kind: CanonicalWorkflowEvidenceKindV1::PullRequest,
-                reference,
-                content: None,
-            });
-        }
-    }
+                .map(str::to_string)
+        });
+    append_diff_and_pull_request_facts(facts, has_diffs, pull_request_references);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -524,7 +515,7 @@ pub fn observation_native_record_id(
         hasher.update(native_id.as_bytes());
         return ObservationId::new(format!(
             "{provider}.native.sha256:{}",
-            hex::encode(hasher.finalize())
+            sha256_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed);
     }
@@ -539,7 +530,7 @@ pub fn observation_native_record_id(
     );
     ObservationId::new(format!(
         "{provider}.native.sha256:{}",
-        hex::encode(hasher.finalize())
+        sha256_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
@@ -593,14 +584,6 @@ fn canonical_native_observation_id(
     native_id
         .and_then(|id| ObservationId::new(id).ok())
         .unwrap_or_else(|| fallback.clone())
-}
-
-fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
 }
 
 fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {

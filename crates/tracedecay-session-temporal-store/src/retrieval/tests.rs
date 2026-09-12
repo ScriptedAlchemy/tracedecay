@@ -381,8 +381,8 @@ struct RegisteredTemporalRead {
 }
 
 impl RegisteredTemporalRead {
-    fn adapter(&self) -> GlobalDbTemporalReadPort<'_> {
-        GlobalDbTemporalReadPort::new_registered(&self.read)
+    fn adapter(&self) -> SessionTemporalReadPort<'_> {
+        SessionTemporalReadPort::new_registered(&self.read)
     }
 
     async fn record_kinds(
@@ -1292,7 +1292,7 @@ async fn duplicate_frozen_generation_rows_fail_closed_as_not_unique() {
     .await
     .expect("ambiguous generation fixture");
 
-    let adapter = GlobalDbTemporalReadPort::new(&conn);
+    let adapter = SessionTemporalReadPort::new(&conn);
     let error = adapter
         .validate_snapshot(&snapshot(1))
         .await

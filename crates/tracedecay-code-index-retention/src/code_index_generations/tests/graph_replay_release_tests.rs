@@ -6,11 +6,12 @@ use super::*;
 #[test]
 fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
     let (store, generations) = fixture_store(3);
-    let plan = plan_next_code_generation_retention_cancellable(
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan retention");
     let deleted = plan.collectable_generations[0].clone();
@@ -43,11 +44,12 @@ fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
 fn graph_release_queue_pages_more_than_one_retention_batch() {
     let (store, _) = fixture_store(70);
     loop {
-        let plan = plan_next_code_generation_retention_cancellable(
+        let plan = prepare_next_code_generation_retention_cancellable(
             store.path(),
             &BTreeSet::new(),
             DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             &|| false,
+            None,
         )
         .expect("plan retention");
         if plan.collectable_generations.is_empty() {
@@ -84,11 +86,12 @@ fn graph_release_queue_pages_more_than_one_retention_batch() {
 #[test]
 fn graph_release_queue_rejects_corrupt_and_oversize_evidence() {
     let (store, _) = fixture_store(4);
-    let plan = plan_next_code_generation_retention_cancellable(
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan retention");
     execute_code_generation_retention(
@@ -377,11 +380,12 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
 #[test]
 fn graph_release_queue_rejects_symlink_evidence() {
     let (store, _) = fixture_store(4);
-    let plan = plan_next_code_generation_retention_cancellable(
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan retention");
     let report = execute_code_generation_retention(

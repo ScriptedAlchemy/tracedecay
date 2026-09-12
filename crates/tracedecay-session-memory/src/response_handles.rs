@@ -3,7 +3,6 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::UtcMicros;
@@ -508,10 +507,16 @@ fn with_exclusive_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) ->
         .write(true)
         .open(&path)
         .map_err(|error| file_error(&path, "open response-handle lock", error))?;
-    lock.try_lock_exclusive()
-        .map_err(|error| file_error(&path, "acquire response-handle lock", error))?;
+    lock.try_lock().map_err(|error| {
+        file_error(
+            &path,
+            "acquire response-handle lock",
+            try_lock_io_error(error),
+        )
+    })?;
     let result = operation();
-    let unlock = FileExt::unlock(&lock)
+    let unlock = lock
+        .unlock()
         .map_err(|error| file_error(&path, "release response-handle lock", error));
     match (result, unlock) {
         (Ok(value), Ok(())) => Ok(value),
@@ -565,6 +570,15 @@ fn remove_failed_fresh_publish(path: &Path, expected: &StoredResponseHandleRecor
         .map_err(|error| file_error(path, "durably remove failed publication", error))
 }
 
+fn try_lock_io_error(error: std::fs::TryLockError) -> std::io::Error {
+    match error {
+        std::fs::TryLockError::WouldBlock => {
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "lock would block")
+        }
+        std::fs::TryLockError::Error(error) => error,
+    }
+}
+
 fn file_error(path: &Path, operation: &str, error: std::io::Error) -> TraceDecayError {
     TraceDecayError::File {
         message: format!("failed to {operation}: {error}"),
@@ -593,8 +607,6 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
-
-    use fs2::FileExt;
 
     use super::*;
     use tracedecay_runtime_core::storage::{
@@ -667,7 +679,7 @@ mod tests {
             .write(true)
             .open(lock_path)
             .unwrap();
-        held.lock_exclusive().unwrap();
+        held.lock().unwrap();
 
         let worker_root = root.path().to_path_buf();
         let (sent, received) = mpsc::channel();
@@ -675,7 +687,7 @@ mod tests {
             let _ = sent.send(inventory_response_handles_in_root(&worker_root));
         });
         let early = received.recv_timeout(Duration::from_millis(250));
-        FileExt::unlock(&held).unwrap();
+        held.unlock().unwrap();
         let result = match early {
             Ok(result) => result,
             Err(error) => {
@@ -792,11 +804,11 @@ mod tests {
             .write(true)
             .open(lock_path)
             .unwrap();
-        held.lock_exclusive().unwrap();
+        held.lock().unwrap();
 
         let lookup = retrieve_from_root(root.path(), &record.handle, 10);
         let missing = retrieve_from_root(root.path(), "rh_000000000000000000000000", 10);
-        FileExt::unlock(&held).unwrap();
+        held.unlock().unwrap();
 
         assert!(matches!(
             lookup.unwrap(),

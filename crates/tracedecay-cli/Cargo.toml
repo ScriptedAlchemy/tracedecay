@@ -16,6 +16,7 @@ include = [
     "/src/**",
     "/tests/**",
     "/dashboard/app-dist/**",
+    "!/src/resources/logo.png",
 ]
 
 [[bin]]
@@ -145,7 +146,6 @@ flate2 = "1"
 futures-util = "0.3.33"
 hex = "0.4"
 hotpath.workspace = true
-open = "5.3"
 rayon = "1"
 regex = { version = "1.12.3", optional = true }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }

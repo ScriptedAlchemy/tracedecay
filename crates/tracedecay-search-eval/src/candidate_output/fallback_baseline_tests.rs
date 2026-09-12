@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use super::*;
-use tracedecay_query::search_quality::semantic_native::SemanticNativeQueryInputV1;
+use tracedecay_query::search_quality::semantic_native::{
+    SemanticNativeQueryInputV1, evaluate_native_query,
+};
 
 fn admitted_scope(_repo_root: &Path) -> Option<ResolvedScope> {
     ResolvedScope::new(

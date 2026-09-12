@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     CalleeV1, CalleesSurfaceRequestV1, ImpactNodeV1, ImpactResultV1, ImpactSurfaceRequestV1,
     NodeDetailsV1, NodeExpansionCostV1, NodeSurfaceRequestV1,
@@ -10,7 +11,7 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use crate::{
     ToolResult, decode_primitive_request, generic_tool_result, require_node_id, text_tool_result,

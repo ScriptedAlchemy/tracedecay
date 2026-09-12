@@ -167,7 +167,7 @@ fn map_checked_in_claude_fixture(
     context: &ClaudeRecordContext<'_>,
 ) -> SessionMessageRecord {
     let bytes = std::fs::read(path).unwrap();
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
     let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
@@ -657,7 +657,7 @@ fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
         env!("CARGO_MANIFEST_DIR")
     );
     let bytes = std::fs::read(&path).unwrap();
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
     let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
@@ -714,7 +714,7 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
     let bytes = include_bytes!(
         "../../../../../../tests/fixtures/provider_normalization/claude/assistant_thinking_text_tool_use.input.json"
     );
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
     let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         bytes,
         range,
@@ -794,7 +794,7 @@ fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
         env!("CARGO_MANIFEST_DIR")
     );
     let bytes = std::fs::read(&path).unwrap();
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
     let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
@@ -878,7 +878,7 @@ fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
         }
     });
     let bytes = serde_json::to_vec(&record).unwrap();
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
     let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,

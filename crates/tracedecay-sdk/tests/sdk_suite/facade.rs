@@ -1,8 +1,10 @@
+use tracedecay_contracts as contracts;
+use tracedecay_domain as domain;
 use tracedecay_sdk::operations::UNAVAILABLE_OPERATIONS;
 use tracedecay_sdk::{
-    CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, contracts,
-    domain, operation,
+    CancellationContext, CancellationSignal, CancellationState, CancellationTokenId,
 };
+use tracedecay_tool_catalog as operation;
 
 #[test]
 fn cancellation_types_are_the_canonical_application_types() {

@@ -1,4 +1,4 @@
-use tracedecay_code_extraction::{LanguageRegistry, RustExtractor};
+use tracedecay_code_extraction::{LanguageExtractor, LanguageRegistry, RustExtractor};
 use tracedecay_domain::*;
 
 #[test]
@@ -7,7 +7,7 @@ fn test_extract_derive_macros() {
 #[derive(Debug, Clone, Serialize)]
 pub struct Config { pub name: String }
 "#;
-    let result = RustExtractor::extract("src/config.rs", source);
+    let result = RustExtractor.extract("src/config.rs", source);
     let derives: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -30,7 +30,7 @@ mod server {
     pub fn handle_request() {}
 }
 "#;
-    let result = RustExtractor::extract("src/lib.rs", source);
+    let result = RustExtractor.extract("src/lib.rs", source);
     let fns: Vec<_> = result
         .nodes
         .iter()

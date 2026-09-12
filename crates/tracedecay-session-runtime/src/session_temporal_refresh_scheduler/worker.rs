@@ -26,7 +26,7 @@ use super::wake::{
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_temporal_store::{
-    GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
+    SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalStore,
 };
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
@@ -599,7 +599,7 @@ fn classify_store_error(error: &SessionStoreError) -> SessionTemporalRefreshRetr
 }
 
 pub async fn process_refresh_begin_requests(
-    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     limit: usize,
     report: &mut SessionTemporalRefreshPassReport,
@@ -643,7 +643,7 @@ pub async fn process_refresh_begin_requests(
 )]
 pub async fn begin_admitted_session_refreshes(
     database: &RegisteredGlobalDb,
-    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     limit: usize,
     report: &mut SessionTemporalRefreshPassReport,
@@ -683,7 +683,7 @@ pub async fn begin_admitted_session_refreshes(
 }
 
 async fn complete_ready_refresh(
-    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     recovery: &SessionRefreshRecoveryV1,
     report: &mut SessionTemporalRefreshPassReport,
@@ -749,7 +749,7 @@ fn record_projector_error(
 }
 
 pub async fn apply_refresh_effect(
-    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     recovery: &SessionRefreshRecoveryV1,
     effect: SessionTemporalRefreshEffect,
@@ -804,7 +804,7 @@ pub async fn apply_refresh_effect(
 
 async fn project_running_refresh(
     database: &RegisteredGlobalDbLeaseV1,
-    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     projector: &dyn SessionTemporalRefreshProjector,
     policy: SessionTemporalRefreshPolicy,
@@ -915,7 +915,7 @@ pub async fn run_session_temporal_refresh_pass(
     projector: &dyn SessionTemporalRefreshProjector,
     policy: SessionTemporalRefreshPolicy,
 ) -> SessionTemporalRefreshPassReport {
-    let store = GlobalDbSessionTemporalStore::new(database.as_ref());
+    let store = SessionTemporalStore::new(database.as_ref());
     let mut report = SessionTemporalRefreshPassReport::default();
     if state.cancelled.load(Ordering::Acquire) {
         return report;

@@ -6,9 +6,8 @@ use super::{
     ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationCommitV1,
     ConfigurationMutationAuthority, ConfigurationMutationReceiptV1,
     ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
-    ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationSqlStore,
-    ConfigurationValueV1, Connection, GlobalDbConfigurationControlStore, ManifestDigest,
-    TestConnection, TransactionBehavior, ensure_configuration_schema,
+    ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationValueV1,
+    GlobalDbConfigurationControlStore, ManifestDigest, TestConnection,
 };
 use crate::configuration::contracts::ScopeRevalidationEvidenceV1;
 use crate::configuration::registry::ConfigurationRegistry;
@@ -27,23 +26,6 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256,
 };
-
-async fn setup() -> (tempfile::TempDir, TestConnection) {
-    let directory = tempfile::tempdir().unwrap();
-    let connection = TestConnection::open(&directory.path().join("configuration.db"));
-    connection
-        .execute_batch("PRAGMA foreign_keys = ON;")
-        .await
-        .unwrap();
-    let fresh = super::super::schema::fresh_configuration_store_evidence(&*connection)
-        .await
-        .unwrap()
-        .expect("test connection is fresh");
-    ensure_configuration_schema(&*connection, Some(&fresh))
-        .await
-        .unwrap();
-    (directory, connection)
-}
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -122,7 +104,10 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
     validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
 }
 
-async fn count(connection: &Connection, table: &str) -> i64 {
+async fn count(
+    connection: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
+    table: &str,
+) -> i64 {
     let mut rows = connection
         .query(&format!("SELECT COUNT(*) FROM {table}"), ())
         .await
@@ -267,15 +252,6 @@ fn protected_commit(
             audit_event,
         },
     )
-}
-
-async fn seed_revision(connection: &Connection, revision: &ConfigurationRevisionRecordV1) {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .unwrap();
-    insert_revision(&transaction, revision).await.unwrap();
-    transaction.commit().await.unwrap();
 }
 
 async fn global_setup() -> (

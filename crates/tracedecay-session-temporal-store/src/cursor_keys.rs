@@ -27,7 +27,7 @@ const CURSOR_KEY_MATERIAL_BYTES: usize = 32;
 const CURSOR_KEY_RETENTION_MICROS: i64 = CURSOR_LIFETIME_MICROS + CURSOR_CLOCK_SKEW_MICROS;
 
 #[derive(Debug, Error)]
-pub enum GlobalDbCursorKeyProviderError {
+pub enum SessionTemporalCursorKeyProviderError {
     #[error("no pre-provisioned active cursor authentication key is available")]
     ActiveKeyMissing,
     #[error("frozen snapshot does not select a cursor authentication key")]
@@ -57,7 +57,7 @@ pub enum GlobalDbCursorKeyProviderError {
     },
 }
 
-pub struct GlobalDbCursorKeyProvider {
+pub struct SessionTemporalCursorKeyProvider {
     active_key: SignedCursorKeyRefV1,
     authenticators: Vec<(SignedCursorKeyRefV1, InMemoryCursorAuthenticator)>,
 }
@@ -197,11 +197,11 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
     Ok(key)
 }
 
-impl GlobalDbCursorKeyProvider {
+impl SessionTemporalCursorKeyProvider {
     #[hotpath::skip]
     pub async fn from_registered_active(
         read: &DatabaseEngineReadSnapshot,
-    ) -> Result<Self, GlobalDbCursorKeyProviderError> {
+    ) -> Result<Self, SessionTemporalCursorKeyProviderError> {
         let mut rows = read
             .query(
                 "SELECT key_id, key_version
@@ -217,17 +217,17 @@ impl GlobalDbCursorKeyProvider {
             .next()
             .await
             .map_err(storage)?
-            .ok_or(GlobalDbCursorKeyProviderError::ActiveKeyMissing)?;
+            .ok_or(SessionTemporalCursorKeyProviderError::ActiveKeyMissing)?;
         if rows.next().await.map_err(storage)?.is_some() {
-            return Err(GlobalDbCursorKeyProviderError::MultipleActiveKeys { count: 2 });
+            return Err(SessionTemporalCursorKeyProviderError::MultipleActiveKeys { count: 2 });
         }
         let key_id = SessionCursorKeyIdV1::new(row.get::<String>(0).map_err(storage)?)
-            .map_err(|_| GlobalDbCursorKeyProviderError::InvalidKeyId)?;
+            .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidKeyId)?;
         let version_value = row.get::<i64>(1).map_err(storage)?;
         let version = u16::try_from(version_value)
             .ok()
             .and_then(|value| SessionCursorVersionV1::new(value).ok())
-            .ok_or(GlobalDbCursorKeyProviderError::InvalidKeyVersion {
+            .ok_or(SessionTemporalCursorKeyProviderError::InvalidKeyVersion {
                 value: version_value,
             })?;
         drop(rows);
@@ -242,7 +242,7 @@ impl GlobalDbCursorKeyProvider {
     pub async fn from_registered_key_ref(
         read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,
-    ) -> Result<Self, GlobalDbCursorKeyProviderError> {
+    ) -> Result<Self, SessionTemporalCursorKeyProviderError> {
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
@@ -250,11 +250,11 @@ impl GlobalDbCursorKeyProvider {
     pub async fn from_registered_snapshot(
         read: &DatabaseEngineReadSnapshot,
         snapshot: &TemporalExecutionSnapshot,
-    ) -> Result<Self, GlobalDbCursorKeyProviderError> {
+    ) -> Result<Self, SessionTemporalCursorKeyProviderError> {
         let expected = snapshot
             .cursor_key()
             .cloned()
-            .ok_or(GlobalDbCursorKeyProviderError::SnapshotKeyUnavailable)?;
+            .ok_or(SessionTemporalCursorKeyProviderError::SnapshotKeyUnavailable)?;
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
@@ -263,7 +263,7 @@ impl GlobalDbCursorKeyProvider {
         read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,
         now_micros: i64,
-    ) -> Result<Self, GlobalDbCursorKeyProviderError> {
+    ) -> Result<Self, SessionTemporalCursorKeyProviderError> {
         let retention_cutoff = now_micros.saturating_sub(CURSOR_KEY_RETENTION_MICROS);
         let mut rows = read
             .query(
@@ -282,15 +282,15 @@ impl GlobalDbCursorKeyProvider {
         while let Some(row) = rows.next().await.map_err(storage)? {
             let count = row.get::<i64>(4).map_err(storage)?;
             if count != 1 {
-                return Err(GlobalDbCursorKeyProviderError::MultipleActiveKeys { count });
+                return Err(SessionTemporalCursorKeyProviderError::MultipleActiveKeys { count });
             }
             let key_id = SessionCursorKeyIdV1::new(row.get::<String>(0).map_err(storage)?)
-                .map_err(|_| GlobalDbCursorKeyProviderError::InvalidKeyId)?;
+                .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidKeyId)?;
             let version_value = row.get::<i64>(1).map_err(storage)?;
             let version = u16::try_from(version_value)
                 .ok()
                 .and_then(|value| SessionCursorVersionV1::new(value).ok())
-                .ok_or(GlobalDbCursorKeyProviderError::InvalidKeyVersion {
+                .ok_or(SessionTemporalCursorKeyProviderError::InvalidKeyVersion {
                     value: version_value,
                 })?;
             let key = SignedCursorKeyRefV1 { key_id, version };
@@ -301,14 +301,14 @@ impl GlobalDbCursorKeyProvider {
             expected_loaded |= key == expected;
             let material = row.get::<Vec<u8>>(2).map_err(storage)?;
             let authenticator = InMemoryCursorAuthenticator::new(key.clone(), material)
-                .map_err(|_| GlobalDbCursorKeyProviderError::InvalidKeyMaterial)?;
+                .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidKeyMaterial)?;
             authenticators.push((key, authenticator));
         }
         if !expected_loaded {
-            return Err(GlobalDbCursorKeyProviderError::ActiveKeyUnavailable { expected });
+            return Err(SessionTemporalCursorKeyProviderError::ActiveKeyUnavailable { expected });
         }
-        let active_key =
-            active_key.ok_or(GlobalDbCursorKeyProviderError::ActiveKeyUnavailable { expected })?;
+        let active_key = active_key
+            .ok_or(SessionTemporalCursorKeyProviderError::ActiveKeyUnavailable { expected })?;
         Ok(Self {
             active_key,
             authenticators,
@@ -317,23 +317,25 @@ impl GlobalDbCursorKeyProvider {
     pub fn retrieval_keyring(
         &self,
         privacy_domain: PrivacyDomainId,
-    ) -> Result<RetrievalCursorKeyringV1, GlobalDbCursorKeyProviderError> {
+    ) -> Result<RetrievalCursorKeyringV1, SessionTemporalCursorKeyProviderError> {
         let derivation_context =
             canonical_sha256(&("tracedecay.query-cursor-key.v1", &privacy_domain))
-                .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+                .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidRetrievalKey)?;
         let active_authenticator = self
             .authenticators
             .iter()
             .find(|(key, _)| key == &self.active_key)
-            .ok_or_else(|| GlobalDbCursorKeyProviderError::ActiveKeyUnavailable {
-                expected: self.active_key.clone(),
-            })?;
+            .ok_or_else(
+                || SessionTemporalCursorKeyProviderError::ActiveKeyUnavailable {
+                    expected: self.active_key.clone(),
+                },
+            )?;
         let active_id = retrieval_key_id(&self.active_key)?;
         let active_epoch = u64::from(self.active_key.version.value());
         let active_material = active_authenticator
             .1
             .derive_key_material(&self.active_key, derivation_context.as_str().as_bytes())
-            .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+            .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidRetrievalKey)?;
         let mut keyring = RetrievalCursorKeyringV1::new(
             privacy_domain,
             active_id,
@@ -341,21 +343,21 @@ impl GlobalDbCursorKeyProvider {
             active_material.to_vec(),
             QUERY_CURSOR_TTL_MICROS_V1,
         )
-        .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+        .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidRetrievalKey)?;
         for (key, authenticator) in &self.authenticators {
             if key == &self.active_key {
                 continue;
             }
             let material = authenticator
                 .derive_key_material(key, derivation_context.as_str().as_bytes())
-                .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+                .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidRetrievalKey)?;
             keyring
                 .retain(
                     retrieval_key_id(key)?,
                     u64::from(key.version.value()),
                     material.to_vec(),
                 )
-                .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+                .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidRetrievalKey)?;
         }
         Ok(keyring)
     }
@@ -363,15 +365,15 @@ impl GlobalDbCursorKeyProvider {
 
 fn retrieval_key_id(
     key: &SignedCursorKeyRefV1,
-) -> Result<RetrievalCursorKeyId, GlobalDbCursorKeyProviderError> {
+) -> Result<RetrievalCursorKeyId, SessionTemporalCursorKeyProviderError> {
     RetrievalCursorKeyId::new(key.key_id.as_str())
-        .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)
+        .map_err(|_| SessionTemporalCursorKeyProviderError::InvalidRetrievalKey)
 }
 
-impl fmt::Debug for GlobalDbCursorKeyProvider {
+impl fmt::Debug for SessionTemporalCursorKeyProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GlobalDbCursorKeyProvider")
+            .debug_struct("SessionTemporalCursorKeyProvider")
             .field("active_key", &self.active_key)
             .field("verification_key_count", &self.authenticators.len())
             .field("secret", &"REDACTED")
@@ -379,7 +381,7 @@ impl fmt::Debug for GlobalDbCursorKeyProvider {
     }
 }
 
-impl SessionCursorAuthenticator for GlobalDbCursorKeyProvider {
+impl SessionCursorAuthenticator for SessionTemporalCursorKeyProvider {
     fn sign(
         &self,
         key: &SignedCursorKeyRefV1,
@@ -411,8 +413,10 @@ impl SessionCursorAuthenticator for GlobalDbCursorKeyProvider {
     }
 }
 
-fn storage(source: tracedecay_runtime_core::db::engine::Error) -> GlobalDbCursorKeyProviderError {
-    GlobalDbCursorKeyProviderError::Storage {
+fn storage(
+    source: tracedecay_runtime_core::db::engine::Error,
+) -> SessionTemporalCursorKeyProviderError {
+    SessionTemporalCursorKeyProviderError::Storage {
         operation: LOAD_OPERATION,
         source,
     }

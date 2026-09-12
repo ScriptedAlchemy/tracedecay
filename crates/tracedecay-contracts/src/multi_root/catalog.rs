@@ -2,12 +2,11 @@
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
-    CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError,
-    CodecBindingKey, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    IdempotencyContract, LifecycleClass, OperationId, PaginationContract, PrivacyClass, ProfileId,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    AvailabilityContract, BindingId, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestV1, CatalogValidationError, CodecBindingKey, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
+    ExecutableBindingRegistryV1, ExecutableBindingV1, LifecycleClass, OperationId,
+    PaginationContract, PrivacyClass, ProfileId, RevalidationContract, RevalidationPoint,
     RouteExposureV1, RoutingContractV1, SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension,
     ScopeRequirement, ServiceId, StreamingContract, TerminalState, TerminalStateContract,
     UseCaseId,
@@ -16,6 +15,9 @@ use tracedecay_tool_catalog::{
 use super::{
     AuthorizedScopeSet, MultiRootExecuteRequestV1, MultiRootQueryPageV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
+};
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
 };
 
 const MULTI_ROOT_SERVICE_ID: &str = "service.multi_root";
@@ -157,7 +159,7 @@ fn manifest(
     operation: MultiRootApplicationOperation,
 ) -> Result<CapabilityManifestV1, CatalogValidationError> {
     let read_only = operation.effect().is_read_only();
-    CapabilityManifestV1::new(CapabilityManifestInputV1 {
+    application_capability_manifest(ApplicationCapabilityManifestInput {
         capability_id: catalog_id(
             CapabilityId::new(format!(
                 "capability.multi_root.{}",
@@ -186,7 +188,6 @@ fn manifest(
             ScopeDimension::Repository,
             ScopeDimension::Worktree,
         ])?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Stateless,
@@ -216,34 +217,13 @@ fn manifest(
         pagination: read_only
             .then(|| PaginationContract::new(100, 1_000, 60_000))
             .transpose()?,
-        idempotency: if read_only {
-            IdempotencyContract::NotRequired
-        } else {
-            IdempotencyContract::Required
-        },
-        inverse: if read_only {
-            tracedecay_tool_catalog::InverseContract::NotApplicable
-        } else {
-            tracedecay_tool_catalog::InverseContract::Unavailable {
-                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
-            }
-        },
+        inverse: None,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
             RevalidationPoint::Policy,
             RevalidationPoint::ExpectedState,
         ])?,
-        reconciliation: if read_only {
-            ReconciliationContract::NotRequired
-        } else {
-            ReconciliationContract::Required
-        },
-        receipt: if read_only {
-            ReceiptContract::Operation
-        } else {
-            ReceiptContract::DurableEffect
-        },
         terminal_states: TerminalStateContract::new(terminal_states(read_only))?,
         availability: AvailabilityContract::Available,
         binding_ids: vec![binding_id(operation)?],

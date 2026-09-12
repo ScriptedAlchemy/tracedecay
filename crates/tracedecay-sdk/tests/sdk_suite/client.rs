@@ -391,7 +391,7 @@ fn curate_requires_and_sends_the_stable_replay_handle() {
     ))
     .build()
     .unwrap();
-    let request = tracedecay_sdk::contracts::retained_surfaces::FactStoreCurateRequestV1::default();
+    let request = tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1::default();
 
     assert!(matches!(
         client.execute::<ApplicationFactStoreCurate>(&request),
@@ -408,8 +408,7 @@ fn curate_requires_and_sends_the_stable_replay_handle() {
             &request,
             OperationRequestOptions {
                 request_id: Some(
-                    tracedecay_sdk::contracts::RequestId::new("request.sdk.curate")
-                        .expect("request id"),
+                    tracedecay_contracts::RequestId::new("request.sdk.curate").expect("request id"),
                 ),
                 ..OperationRequestOptions::default()
             },
@@ -446,14 +445,13 @@ fn curate_rejects_a_problem_bound_to_a_foreign_replay_handle() {
     let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
         .build()
         .unwrap();
-    let request = tracedecay_sdk::contracts::retained_surfaces::FactStoreCurateRequestV1::default();
+    let request = tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1::default();
     let error = client
         .execute_with_options::<ApplicationFactStoreCurate>(
             &request,
             OperationRequestOptions {
                 request_id: Some(
-                    tracedecay_sdk::contracts::RequestId::new("request.sdk.curate")
-                        .expect("request id"),
+                    tracedecay_contracts::RequestId::new("request.sdk.curate").expect("request id"),
                 ),
                 ..OperationRequestOptions::default()
             },

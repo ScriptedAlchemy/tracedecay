@@ -269,7 +269,7 @@ fn transcript_source_contract_failures_are_bounded_and_permanent() {
     let errors = [
         source::TranscriptIngestError::Domain(tracedecay_domain::SessionId::new("").unwrap_err()),
         source::TranscriptIngestError::ObservationContract(
-            tracedecay_domain::ClaudeFileGenerationV1::new(0).unwrap_err(),
+            tracedecay_domain::ObservationSourceGenerationV1::new(0).unwrap_err(),
         ),
         source::TranscriptIngestError::InvalidFrameState {
             provider: "private provider detail",
