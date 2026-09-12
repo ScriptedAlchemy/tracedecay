@@ -12,7 +12,7 @@ use tracedecay_contracts::session_sync::{
 use tracedecay_contracts::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
@@ -892,7 +892,7 @@ mod tests {
         let graph = runtime
             .initialize_project_graph_for_test(
                 root,
-                crate::tracedecay::TraceDecayOpenOptions {
+                crate::project::TraceDecayOpenOptions {
                     profile_root: Some(profile.to_owned()),
                     global_db_path: None,
                 },

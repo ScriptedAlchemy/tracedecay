@@ -24,7 +24,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 

@@ -13,6 +13,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
 use crate::ToolResult;
+use crate::handlers::support::unknown_tool_error;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
     DaemonInvocationExecutor, InvocationCancellationPolicy, invocation_now_micros,
@@ -41,9 +42,7 @@ pub async fn handle_multi_root(
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
 ) -> Result<ToolResult> {
-    let operation = operation_for_tool(tool_name).ok_or_else(|| TraceDecayError::Config {
-        message: format!("unknown tool: {tool_name}"),
-    })?;
+    let operation = operation_for_tool(tool_name).ok_or_else(|| unknown_tool_error(tool_name))?;
     let request_id = match protocol_request_id {
         Some(request_id) => request_id,
         None => mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| {

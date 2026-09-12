@@ -437,7 +437,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let cg = host_runtime
         .initialize_project_graph_for_test(
             &project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions {
+            tracedecay::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: None,
             },

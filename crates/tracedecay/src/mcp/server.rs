@@ -15,7 +15,7 @@ use crate::mcp::project_route::{
 use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -1152,7 +1152,7 @@ impl McpServer {
         tokio::task::spawn_blocking(move || {
             let _ = cleanup_expired_response_handles(
                 &response_handle_project_root,
-                crate::tracedecay::current_timestamp(),
+                crate::project::current_timestamp(),
             );
         });
         if own_project_host_admission_replay

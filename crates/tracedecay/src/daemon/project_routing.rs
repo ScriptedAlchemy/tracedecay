@@ -170,7 +170,7 @@ pub(super) async fn resolved_project_server_key(
         return Ok(None);
     }
     let registry_database = store_administration.registered_profile_database().await?;
-    let Ok(layout) = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+    let Ok(layout) = crate::project::TraceDecay::resolve_registered_configuration_layout(
         canonical_project_path,
         &crate::daemon::handshake_open_options(handshake),
         registry_database.as_ref(),
@@ -185,7 +185,7 @@ pub(super) async fn resolved_project_server_key(
         .or_else(|| {
             tracedecay_runtime_core::worktree::detached_worktree_graph_scope(canonical_project_path)
         });
-    let (graph_db_path, _, fallback_warning) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
+    let (graph_db_path, _, fallback_warning) = crate::project::TraceDecay::resolve_db_for_branch(
         canonical_project_path,
         &layout.data_root,
         graph_scope.as_deref(),

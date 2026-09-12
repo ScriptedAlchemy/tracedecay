@@ -6149,6 +6149,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-code-index",
  "tracedecay-configuration",
  "tracedecay-contracts",
  "tracedecay-daemon-control",

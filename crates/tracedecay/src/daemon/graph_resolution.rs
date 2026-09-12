@@ -11,11 +11,8 @@ use super::*;
 use tracedecay_daemon_identity::authority;
 
 fn sole_mounted_server_matching(
-    servers: &[(
-        Arc<crate::mcp::McpServer>,
-        Arc<crate::tracedecay::TraceDecay>,
-    )],
-    predicate: impl Fn(&crate::tracedecay::TraceDecay) -> bool,
+    servers: &[(Arc<crate::mcp::McpServer>, Arc<crate::project::TraceDecay>)],
+    predicate: impl Fn(&crate::project::TraceDecay) -> bool,
 ) -> std::result::Result<Option<Arc<crate::mcp::McpServer>>, ()> {
     let mut matches = servers
         .iter()
@@ -119,13 +116,13 @@ pub(super) fn retained_project_server_resolver(
                                 })
                     })
                     .collect::<Vec<_>>();
-                let branch_matches = |graph: &crate::tracedecay::TraceDecay| {
+                let branch_matches = |graph: &crate::project::TraceDecay| {
                     request.requested_branch.as_deref().is_some_and(|branch| {
                         graph.serving_branch() == Some(branch)
                             || graph.active_branch() == Some(branch)
                     })
                 };
-                let root_matches = |graph: &crate::tracedecay::TraceDecay, root: &Path| {
+                let root_matches = |graph: &crate::project::TraceDecay, root: &Path| {
                     authority::canonical_identity_path(graph.project_root()).ok()
                         == Some(root.to_path_buf())
                 };

@@ -28,8 +28,8 @@ pub fn handshake_for_current_client(
 
 pub fn handshake_open_options(
     handshake: &DaemonHandshake,
-) -> crate::tracedecay::TraceDecayOpenOptions {
-    crate::tracedecay::TraceDecayOpenOptions {
+) -> crate::project::TraceDecayOpenOptions {
+    crate::project::TraceDecayOpenOptions {
         profile_root: Some(handshake.client_identity.profile_root.clone()),
         global_db_path: Some(handshake.client_identity.global_db_path.clone()),
     }
