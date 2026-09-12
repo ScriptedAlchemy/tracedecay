@@ -29,6 +29,7 @@ pub mod workflow_family;
 
 pub use bounded_search::run_bounded_search;
 pub use multi_root::handle_multi_root;
+pub(crate) use multi_root::multi_root_operation_for_tool;
 pub use retained_response::{
     retained_problem_envelope, retained_safe_diagnostic, validated_retained_response,
 };

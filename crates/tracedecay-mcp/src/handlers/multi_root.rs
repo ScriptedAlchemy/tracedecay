@@ -42,7 +42,8 @@ pub async fn handle_multi_root(
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
 ) -> Result<ToolResult> {
-    let operation = operation_for_tool(tool_name).ok_or_else(|| unknown_tool_error(tool_name))?;
+    let operation =
+        multi_root_operation_for_tool(tool_name).ok_or_else(|| unknown_tool_error(tool_name))?;
     let request_id = match protocol_request_id {
         Some(request_id) => request_id,
         None => mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| {
@@ -147,7 +148,14 @@ pub async fn handle_multi_root(
     )
 }
 
-fn operation_for_tool(tool_name: &str) -> Option<MultiRootApplicationOperation> {
+/// The multi-root operation a tool name resolves to, if any.
+///
+/// The three multi-root tools are daemon-owned: they carry no application
+/// surface binding, so the binding table takes their contract from the
+/// multi-root capability catalog through this lookup.
+pub(crate) fn multi_root_operation_for_tool(
+    tool_name: &str,
+) -> Option<MultiRootApplicationOperation> {
     match tool_name {
         "tracedecay_multi_root_scope_set_read" => Some(MultiRootApplicationOperation::ScopeSetRead),
         "tracedecay_multi_root_scope_set_compare_and_swap" => {

@@ -33,8 +33,8 @@ use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_store_runtime::retained_memory::MemoryTargetAccessV1;
 
-use super::support::tool_json_with_md;
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::tool_json_with_md;
 use tracedecay_mcp::tools::renderers;
 
 /// Bound on how many automation run-ledger rows a single call will scan.

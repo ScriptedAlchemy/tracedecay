@@ -10,9 +10,9 @@ use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, public_retrieve_error, retrieve_response_handle,
 };
 
-use super::support;
-use super::support::registered_project_context;
+use super::support::{registered_project_context, validate_registered_project_selector_aliases};
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::{text_tool_result as text_result, tool_json};
 use tracedecay_mcp::tools::binding::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
 };
@@ -22,7 +22,7 @@ const RETRIEVE_PAGE_HEADER_ALLOWANCE: usize = 2_048;
 const RETRIEVE_FRAME_RESERVED_BYTES: usize = 256;
 
 pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
-    support::text_tool_result(text, Vec::new())
+    text_result(text, Vec::new())
 }
 
 pub(in crate::mcp::tools) fn json_result(value: &Value) -> ToolResult {
@@ -52,7 +52,7 @@ pub(crate) async fn resolve_registered_project_route_for_tool(
     let semantic_top_level_fields =
         crate::mcp::project_route::semantic_route_argument_fields(&tool_name);
     if tool_accepts_registered_project_selector(&tool_name) {
-        support::validate_registered_project_selector_aliases(&args, semantic_top_level_fields)?;
+        validate_registered_project_selector_aliases(&args, semantic_top_level_fields)?;
     }
     if !tool_dispatches_registered_project_reader(&tool_name) {
         return Ok(None);
@@ -228,7 +228,7 @@ pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<Too
             "expires_at": expires_at,
         }),
     };
-    Ok(support::tool_json(Some(cg.project_root()), args, &payload))
+    Ok(tool_json(Some(cg.project_root()), args, &payload))
 }
 
 fn optional_usize_argument(args: &Value, field: &str) -> Result<Option<usize>> {

@@ -1,142 +1,13 @@
-//! Shared helpers for MCP tool handlers.
+//! Registered-project selector helpers for the root's MCP tool handlers.
 //!
-//! Keep this module free of tool dispatch logic. Handler modules use it for
-//! argument normalization, scope filtering, and registered-project selection.
+//! Result shaping (`tool_json`, `generic_tool_result`, ...) lives in
+//! `tracedecay_mcp::handlers::support`; this module keeps only the selector
+//! validation that needs the daemon's project registry.
 
-use std::collections::HashSet;
-use std::path::Path;
-
-#[cfg(test)]
-use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::tools::render;
-
-/// Key under which context handlers stash analytics that must reach the server
-/// but never the client. [`rendered_tool_result`] is the one place it is lifted
-/// back out, so no handler has to remember to strip it.
-pub(super) const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
-
-/// The single wrapper every MCP tool handler returns through.
-///
-/// Lifts internal analytics out of `value` so they travel beside the result
-/// instead of inside the client payload, renders the default-format (markdown)
-/// body with `md`, and records `touched_files`. The `format:"json"` path is
-/// unaffected — [`render::finalize`] serializes `value` compactly there.
-pub(super) fn rendered_tool_result<F: FnOnce() -> String>(
-    project_root: Option<&Path>,
-    args: &Value,
-    value: &Value,
-    touched_files: Vec<String>,
-    md: F,
-) -> ToolResult {
-    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
-    let public_value = internal_analytics
-        .as_ref()
-        .and_then(|_| public_value_without_internal_context_memory_analytics(value));
-    let value = public_value.as_ref().unwrap_or(value);
-    let text = render::finalize(project_root, args, value, md);
-    let result = text_tool_result(&text, touched_files);
-    if let Some(internal_analytics) = internal_analytics {
-        result.with_internal_analytics(internal_analytics)
-    } else {
-        result
-    }
-}
-
-fn public_value_without_internal_context_memory_analytics(value: &Value) -> Option<Value> {
-    let mut value = value.clone();
-    take_internal_context_memory_analytics(&mut value).map(|_| value)
-}
-
-pub(super) fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value> {
-    value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
-}
-
-pub(super) fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files,
-    )
-}
-
-/// [`rendered_tool_result`] for handlers that touch no files.
-pub(super) fn tool_json_with_md<F: FnOnce() -> String>(
-    project_root: Option<&Path>,
-    args: &Value,
-    value: &Value,
-    md: F,
-) -> ToolResult {
-    rendered_tool_result(project_root, args, value, Vec::new(), md)
-}
-
-/// [`rendered_tool_result`] for handlers that don't need a custom markdown
-/// renderer — the default body is [`render::generic_md`] over the same value.
-pub(super) fn generic_tool_result(
-    project_root: Option<&Path>,
-    args: &Value,
-    value: &Value,
-    touched_files: Vec<String>,
-) -> ToolResult {
-    rendered_tool_result(project_root, args, value, touched_files, || {
-        render::generic_md(value)
-    })
-}
-
-/// [`generic_tool_result`] for handlers that touch no files.
-pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    generic_tool_result(project_root, args, value, Vec::new())
-}
-
-/// Rejects tool arguments that are not a JSON object.
-///
-/// The argument value comes straight off the wire (an MCP client, the
-/// `tracedecay tool --args` CLI, or an internal dispatch probe), so a scalar
-/// or array is caller error, not a broken invariant — asserting it would
-/// panic the daemon's client task and the caller would see only a dropped
-/// connection.
-#[cfg(test)]
-pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
-    if args.is_object() {
-        return Ok(());
-    }
-    Err(TraceDecayError::Config {
-        message: format!("invalid arguments: {tool_name} expects a JSON object"),
-    })
-}
-
-/// Decode one catalog-owned primitive request after removing keys owned by
-/// the MCP transport rather than the application operation.
-#[cfg(test)]
-pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
-    args: &Value,
-    tool_name: &str,
-) -> Result<T> {
-    require_object_args(args, tool_name)?;
-    let mut request = args.clone();
-    if let Some(object) = request.as_object_mut() {
-        for key in ["format", "__mcp_request_id", "project_selector"] {
-            object.remove(key);
-        }
-    }
-    serde_json::from_value(request).map_err(|error| TraceDecayError::Config {
-        message: format!("invalid arguments for {tool_name}: {error}"),
-    })
-}
-
-pub(super) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-    for p in paths {
-        if seen.insert(p) {
-            result.push(p.to_string());
-        }
-    }
-    result
-}
 
 fn invalid_registered_project_selector(detail: impl Into<String>) -> TraceDecayError {
     TraceDecayError::project_route("project_route_invalid_selector", false, detail.into())
@@ -203,41 +74,4 @@ pub(super) async fn registered_project_context(
                 ),
             )
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::decode_primitive_request;
-    use tracedecay_contracts::retrieval::NodeSurfaceRequestV1;
-
-    #[test]
-    fn primitive_request_decode_strips_transport_keys_and_rejects_legacy_aliases() {
-        let decoded = decode_primitive_request::<NodeSurfaceRequestV1>(
-            &json!({
-                "node_id": "function:canonical",
-                "format": "json",
-                "project_selector": {"project_id": "project.fixture"},
-                "__mcp_request_id": "request.fixture",
-            }),
-            "tracedecay_node",
-        )
-        .expect("transport keys must not enter the canonical request body");
-        assert_eq!(decoded.node_id, "function:canonical");
-
-        let error = decode_primitive_request::<NodeSurfaceRequestV1>(
-            &json!({"node_id": "function:canonical", "project_id": "project.legacy"}),
-            "tracedecay_node",
-        )
-        .expect_err("the top-level project id alias is not a transport key");
-        assert!(error.to_string().contains("unknown field `project_id`"));
-
-        let error = decode_primitive_request::<NodeSurfaceRequestV1>(
-            &json!({"id": "function:legacy"}),
-            "tracedecay_node",
-        )
-        .expect_err("the unreleased id alias is not part of the canonical request");
-        assert!(error.to_string().contains("unknown field `id`"));
-    }
 }
