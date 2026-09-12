@@ -59,7 +59,7 @@ pub async fn handle_test_map(
     _scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let source_nodes = hotpath::measure_block!("mcp.health.test_map.graph", {
-        let source_nodes = match test_map_target(&args)? {
+        match test_map_target(&args)? {
             TestMapTarget::File(file) => {
                 let nodes = graph.symbols_in_logical_file(file, MAX_TEST_MAP_FILE_SYMBOLS + 1)?;
                 if nodes.len() > MAX_TEST_MAP_FILE_SYMBOLS {
@@ -77,8 +77,7 @@ pub async fn handle_test_map(
                 })?;
                 graph.symbol_summary(&occurrence)?.into_iter().collect()
             }
-        };
-        source_nodes
+        }
     });
 
     let test_callers = batched_test_callers(graph, &source_nodes)?;
@@ -177,7 +176,7 @@ fn batched_test_callers(
             node.metadata
                 .as_ref()
                 .and_then(|metadata| NodeKind::from_str(&metadata.kind))
-                .filter(|kind| kind.is_callable_kind())
+                .filter(NodeKind::is_callable_kind)
                 .map(|_| node.occurrence.clone())
         })
         .collect::<Vec<_>>();
