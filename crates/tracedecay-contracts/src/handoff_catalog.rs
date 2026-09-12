@@ -1,15 +1,16 @@
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, CancellationContract, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogValidationError, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
-    ExecutableBindingRegistryV1, ExecutableBindingV1, IdempotencyContract, IdentifierError,
-    LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1,
-    SchemaBodyAuthorityV1, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    TerminalState, TerminalStateContract,
+    AvailabilityContract, CancellationContract, CapabilityManifestV1, CatalogValidationError,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    IdentifierError, LifecycleClass, PaginationContract, PrivacyClass, RevalidationContract,
+    RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaBodyAuthorityV1, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
 };
 
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::{
     IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1, ListTaskHandoffsRequestV1,
     ListTaskHandoffsResultV1, OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1,
@@ -146,7 +147,7 @@ fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVali
             vec![format!("Open {operation}")],
         )?
     };
-    CapabilityManifestV1::new(CapabilityManifestInputV1 {
+    application_capability_manifest(ApplicationCapabilityManifestInput {
         capability_id: identifier(
             format!("capability.handoff.{operation}"),
             "handoff capability ID",
@@ -168,7 +169,6 @@ fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVali
             ScopeDimension::Repository,
             ScopeDimension::Worktree,
         ])?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Stateless,
@@ -191,37 +191,13 @@ fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVali
         // reaching it on the result, but serves no cursor. Declaring a
         // pagination contract would promise a continuation that does not exist.
         pagination: None::<PaginationContract>,
-        idempotency: if reads {
-            IdempotencyContract::NotRequired
-        } else {
-            IdempotencyContract::Required
-        },
-        // A read has nothing to undo, so an inverse is not merely unshipped but
-        // meaningless — and the catalog validator refuses a read-only
-        // capability that advertises one.
-        inverse: if reads {
-            tracedecay_tool_catalog::InverseContract::NotApplicable
-        } else {
-            tracedecay_tool_catalog::InverseContract::Unavailable {
-                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
-            }
-        },
+        inverse: None,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
             RevalidationPoint::Policy,
             RevalidationPoint::ExpectedState,
         ])?,
-        reconciliation: if reads {
-            ReconciliationContract::NotRequired
-        } else {
-            ReconciliationContract::Required
-        },
-        receipt: if reads {
-            ReceiptContract::Operation
-        } else {
-            ReceiptContract::DurableEffect
-        },
         // `Partial` is retained for the read: hitting the enumeration ceiling
         // is exactly a partial answer. `EffectUnknown` is not — it is the state
         // of an effect whose commit is in doubt, and an operation that writes

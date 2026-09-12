@@ -20,6 +20,7 @@ pub mod advisory;
 pub mod authorization;
 mod bearer_token;
 pub mod branch_snapshots;
+mod capability_manifest;
 pub mod catalog_composition;
 pub mod clock;
 pub mod configuration;
