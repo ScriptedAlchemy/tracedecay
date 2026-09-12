@@ -7,7 +7,7 @@ use clap::{
 };
 use tracedecay_api::{WorkOperation, WorkflowOperation};
 
-pub(super) trait ApplicationOperation:
+pub(crate) trait ApplicationOperation:
     Clone + Send + Sync + 'static + FromStr<Err = String>
 {
     const HELP: &'static str;
