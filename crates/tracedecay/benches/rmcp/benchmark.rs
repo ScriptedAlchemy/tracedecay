@@ -29,8 +29,8 @@ use tracedecay_domain::ProjectId;
 
 use super::{BrokerStreamTransport, DaemonLifecycle, serve_routed_rmcp_connection};
 use crate::mcp::McpServer;
+use crate::project::TraceDecayOpenOptions;
 use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use crate::tracedecay::TraceDecayOpenOptions;
 
 pub const PERSISTENT_WARMUP_REQUESTS: usize = 8;
 pub const PERSISTENT_MEASURED_REQUESTS: usize = 64;

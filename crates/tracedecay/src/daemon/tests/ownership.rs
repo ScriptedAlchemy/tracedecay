@@ -1042,9 +1042,9 @@ async fn failed_rekey_cancels_the_route_waiters_but_not_project_open() {
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
     let graph = Arc::new(
-        crate::tracedecay::TraceDecay::open_with_options(
+        crate::project::TraceDecay::open_with_options(
             &project,
-            crate::tracedecay::TraceDecayOpenOptions {
+            crate::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: Some(client_identity.global_db_path.clone()),
             },

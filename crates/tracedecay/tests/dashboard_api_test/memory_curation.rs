@@ -324,7 +324,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             .host_runtime
             .open_project_graph_for_test(
                 &fixture.project_root,
-                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+                tracedecay::project::TraceDecayOpenOptions::default(),
             )
             .await
             .unwrap_or_else(|error| panic!("open dashboard fixture project: {error}"));

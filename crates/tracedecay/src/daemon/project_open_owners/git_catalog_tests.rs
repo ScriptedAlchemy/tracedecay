@@ -52,7 +52,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     let graph = fixture
         .initialize_project_graph_for_test(
             &project_root,
-            crate::tracedecay::TraceDecayOpenOptions {
+            crate::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root),
                 global_db_path: None,
             },

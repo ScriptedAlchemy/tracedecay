@@ -104,7 +104,7 @@ async fn tick(
 ) {
     let window = 14 * 86_400;
     let cap = 64;
-    let cutoff = crate::tracedecay::current_timestamp().saturating_sub(window);
+    let cutoff = crate::project::current_timestamp().saturating_sub(window);
     let Ok(records) = database.list_code_projects(cap).await else {
         return;
     };
@@ -156,7 +156,7 @@ async fn tick(
 async fn retained_project_graph(
     administration: &StoreAdministration,
     project_root: &Path,
-) -> Option<Arc<crate::tracedecay::TraceDecay>> {
+) -> Option<Arc<crate::project::TraceDecay>> {
     let canonical = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());

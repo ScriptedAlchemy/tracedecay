@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::project::TraceDecay;
 
 use super::daemon::daemon_tool_json;
 
@@ -119,7 +119,7 @@ fn moved_store_adoption_request(
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
-) -> tracedecay_domain::errors::Result<tracedecay::tracedecay::MovedStoreAdoption> {
+) -> tracedecay_domain::errors::Result<tracedecay::project::MovedStoreAdoption> {
     if fresh && adopt_project.is_some() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "--fresh mints a new project identity and contradicts --adopt-project; \
@@ -128,12 +128,10 @@ fn moved_store_adoption_request(
         });
     }
     Ok(match (adopt_project, fresh, assume_yes) {
-        (Some(project_id), _, _) => {
-            tracedecay::tracedecay::MovedStoreAdoption::AdoptNamed(project_id)
-        }
-        (None, true, _) => tracedecay::tracedecay::MovedStoreAdoption::Never,
-        (None, false, true) => tracedecay::tracedecay::MovedStoreAdoption::AdoptUnique,
-        (None, false, false) => tracedecay::tracedecay::MovedStoreAdoption::OfferCandidates,
+        (Some(project_id), _, _) => tracedecay::project::MovedStoreAdoption::AdoptNamed(project_id),
+        (None, true, _) => tracedecay::project::MovedStoreAdoption::Never,
+        (None, false, true) => tracedecay::project::MovedStoreAdoption::AdoptUnique,
+        (None, false, false) => tracedecay::project::MovedStoreAdoption::OfferCandidates,
     })
 }
 
@@ -284,7 +282,7 @@ mod init_bootstrap_tests {
             client_instance_id: "commands-init-test".to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
-            moved_store_adoption: tracedecay::tracedecay::MovedStoreAdoption::Never,
+            moved_store_adoption: tracedecay::project::MovedStoreAdoption::Never,
         }
     }
 

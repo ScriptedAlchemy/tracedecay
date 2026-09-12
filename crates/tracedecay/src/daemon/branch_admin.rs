@@ -87,7 +87,7 @@ pub(super) fn owner_writer_scope(key: &ProjectServerKey) -> WriterScope {
 
 /// [`store_writer_scope`] for the store an open graph is serving.
 pub(super) fn graph_writer_scope(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     class: StoreWriterClass,
 ) -> WriterScope {
     store_writer_scope(&cg.store_layout().data_root, class)
@@ -964,7 +964,7 @@ impl StoreAdministration {
     }
 
     #[hotpath::measure(label = "daemon.branch_admin.mounted_project_graphs", future = true)]
-    pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::tracedecay::TraceDecay>> {
+    pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::project::TraceDecay>> {
         let servers = self.mounted_project_servers().await;
         let mut graphs = Vec::with_capacity(servers.len());
         for server in &servers {

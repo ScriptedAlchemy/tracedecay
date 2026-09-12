@@ -2025,7 +2025,7 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
 
     let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
         &profile_root(home.path()),
-        tracedecay::tracedecay::current_timestamp(),
+        tracedecay::project::current_timestamp(),
     );
     assert_eq!(report.plans.len(), 1, "{report:#?}");
     assert_eq!(

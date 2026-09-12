@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::project::TraceDecay;
 use tracedecay_application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_application::advisory::ci_runtime::{

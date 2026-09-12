@@ -9,7 +9,7 @@ use tracedecay_domain::ExactClass;
 use tracedecay_mcp::ToolResult;
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 
 fn completed_sparse_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     completed_sparse_search_for_generation("generation.mcp-verified-graph-fixture.1")

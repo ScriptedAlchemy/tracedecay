@@ -64,7 +64,7 @@ pub fn register_test_schema_installer() {
 }
 
 pub(crate) fn dashboard_project_context(
-    graph: &crate::tracedecay::TraceDecay,
+    graph: &crate::project::TraceDecay,
 ) -> DashboardProjectContext {
     DashboardProjectContext {
         store_layout: graph.store_layout().clone(),
@@ -85,7 +85,7 @@ pub struct DashboardTestProjectGraphsV1 {
 
 #[cfg(feature = "test-transport")]
 impl DashboardTestProjectGraphsV1 {
-    pub fn register(&self, graph: std::sync::Arc<crate::tracedecay::TraceDecay>) {
+    pub fn register(&self, graph: std::sync::Arc<crate::project::TraceDecay>) {
         self.contexts
             .register(std::sync::Arc::new(dashboard_project_context(&graph)));
     }
@@ -95,7 +95,7 @@ impl DashboardTestProjectGraphsV1 {
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
-    graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    graph: std::sync::Arc<crate::project::TraceDecay>,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
     endpoint: DashboardTestEndpointV1<'_>,
@@ -129,7 +129,7 @@ where
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub async fn dashboard_automation_authority_for_test(
-    cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    cg: std::sync::Arc<crate::project::TraceDecay>,
     profile_root: impl AsRef<std::path::Path>,
 ) -> tracedecay_domain::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)>
 {
@@ -219,7 +219,7 @@ pub async fn dashboard_automation_authority_for_test(
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub async fn dashboard_configuration_authorities_for_test(
-    cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    cg: std::sync::Arc<crate::project::TraceDecay>,
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> tracedecay_domain::errors::Result<(
     std::sync::Arc<dyn DashboardApplicationRuntime>,
@@ -236,7 +236,7 @@ pub async fn dashboard_configuration_authorities_for_test(
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub async fn dashboard_lcm_read_authority_for_test(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     registry: &tracedecay_global_db::RegisteredGlobalDb,
     project_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {

@@ -13,7 +13,7 @@ use super::{
     settle_scheduler_retained_automation,
 };
 use crate::daemon::automation_effect::prepare as prepare_automation_effect;
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority,
 };
@@ -111,7 +111,7 @@ async fn fixed_task_schedule_decision(
 )]
 pub(super) async fn scheduler_automation_effect(
     engine: &DaemonEngine,
-    memory: &crate::tracedecay::TraceDecay,
+    memory: &crate::project::TraceDecay,
     run_control: &AutomationRunControl,
     project_path: &Path,
     dashboard_root: &Path,

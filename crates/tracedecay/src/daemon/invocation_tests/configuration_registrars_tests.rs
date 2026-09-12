@@ -15,18 +15,17 @@ use tracedecay_global_db::configuration::contracts::types::{
 async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
-    let (graph, runtime) =
-        crate::tracedecay::TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.configuration.read-only-worker-plan",
-        )
-        .await
-        .expect("registered graph");
+    let (graph, runtime) = crate::project::TraceDecay::init_test_fixture_with_registered_runtime(
+        project.path(),
+        "project.configuration.read-only-worker-plan",
+    )
+    .await
+    .expect("registered graph");
     graph.close();
     let read_only = runtime
         .open_project_graph_read_only_for_test(
             project.path(),
-            crate::tracedecay::TraceDecayOpenOptions {
+            crate::project::TraceDecayOpenOptions {
                 profile_root: Some(
                     tracedecay_runtime_core::storage::default_profile_root()
                         .expect("default profile root"),

@@ -16,7 +16,7 @@ use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMu
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_contracts::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,

@@ -2,6 +2,7 @@
 
 mod context_markdown;
 mod context_support;
+mod dispatch;
 mod lexical_routing;
 mod navigation;
 mod primitive_surface;
@@ -10,6 +11,7 @@ mod search_evidence;
 mod search_freshness;
 mod verified;
 
+pub use dispatch::dispatch_tool;
 pub use navigation::{
     handle_by_qualified_name, handle_callees, handle_callers, handle_callers_for, handle_derives,
     handle_impact, handle_implementations, handle_impls, handle_node, handle_signature,

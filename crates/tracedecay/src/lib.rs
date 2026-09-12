@@ -36,15 +36,13 @@
 pub mod bench;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(clippy::too_many_lines)]
-pub mod test_support;
-pub use tracedecay_code_index as code_index;
-pub use tracedecay_query as query;
 pub mod config;
 pub mod daemon;
 pub mod dashboard;
 pub mod doctor;
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::too_many_lines)]
+pub mod test_support;
 pub use tracedecay_application::git_query;
 mod hooks;
 #[cfg(test)]
@@ -58,14 +56,14 @@ pub use product_runtime::{
 mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports, session_review_port};
-pub mod serve;
+mod serve;
 // Session-temporal harness lives under `benches/`; the lib only paths it in
 // when a bench target or integration lane asks for `test-helpers`.
+pub mod project;
 #[cfg(any(test, feature = "test-helpers"))]
 #[path = "../benches/session_temporal/harness.rs"]
 #[allow(clippy::too_many_lines)]
 pub mod session_temporal_benchmark;
-pub mod tracedecay;
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub mod vector_generation_test_support;
