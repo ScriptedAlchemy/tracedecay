@@ -51,12 +51,13 @@ use super::{
     LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
     registry::{UniqueMountedWorktree, latest_matches_scope_identity, unique_mounted_for_scope},
 };
-use tracedecay_graph_db::GraphCancellation;
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
 };
-use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
+use tracedecay_query::retrieval::graph::{
+    GraphLaneRequest, GraphLaneRetriever, graph_read_cancellation,
+};
 use tracedecay_query::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest,
 };
@@ -1401,31 +1402,6 @@ enum DispatchExpansionStop {
     Unavailable,
 }
 
-struct DispatchGraphCancellation {
-    control: Arc<dyn RetrievalExecutionControl>,
-    budget: RetrievalBudget,
-}
-
-impl GraphCancellation for DispatchGraphCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.control.is_cancelled()
-            || self
-                .budget
-                .deadline_micros
-                .is_some_and(|deadline| self.control.elapsed_micros() >= deadline)
-    }
-}
-
-fn dispatch_graph_cancellation(
-    control: &Arc<dyn RetrievalExecutionControl>,
-    budget: RetrievalBudget,
-) -> Arc<dyn GraphCancellation> {
-    Arc::new(DispatchGraphCancellation {
-        control: Arc::clone(control),
-        budget,
-    })
-}
-
 fn dispatch_read_stop(
     control: &dyn RetrievalExecutionControl,
     budget: RetrievalBudget,
@@ -1470,7 +1446,10 @@ fn visit_trait_dispatch_targets(
 ) -> Result<bool, DispatchExpansionStop> {
     check_dispatch_control(control.as_ref(), budget)?;
     let Some(callee_summary) = reader
-        .symbol_summary(callee, dispatch_graph_cancellation(control, budget))
+        .symbol_summary(
+            callee,
+            graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
+        )
         .map_err(|_| dispatch_read_stop(control.as_ref(), budget))?
     else {
         return Ok(true);
@@ -1489,7 +1468,7 @@ fn visit_trait_dispatch_targets(
         std::slice::from_ref(callee),
         &[RelationEdgeKindV1::Contains],
         relation_limit,
-        dispatch_graph_cancellation(control, budget),
+        graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
     ) {
         Ok(batches) => batches,
         Err(
@@ -1526,7 +1505,7 @@ fn visit_trait_dispatch_targets(
         &traits,
         &[RelationEdgeKindV1::Implements],
         relation_limit,
-        dispatch_graph_cancellation(control, budget),
+        graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
     ) {
         Ok(batches) => batches,
         Err(
@@ -1554,7 +1533,7 @@ fn visit_trait_dispatch_targets(
         &implementors,
         &[RelationEdgeKindV1::Contains],
         relation_limit,
-        dispatch_graph_cancellation(control, budget),
+        graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
     ) {
         Ok(batches) => batches,
         Err(

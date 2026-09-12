@@ -55,11 +55,8 @@ fn read_graph_evidence(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
-        Arc::new(GraphTraversalCancellationV1 {
-            control: Arc::clone(&control),
-            deadline_micros: request.budget.deadline_micros,
-        });
+    let cancellation =
+        graph_read_cancellation(Arc::clone(&control), request.budget.deadline_micros);
     let raw = hotpath::measure_block!("query.graph.traverse", {
         reader
             .traverse(
@@ -209,6 +206,17 @@ impl tracedecay_graph_db::GraphCancellation for GraphTraversalCancellationV1 {
                 .deadline_micros
                 .is_some_and(|deadline| self.control.elapsed_micros() >= deadline)
     }
+}
+
+/// Adapts query cancellation and its monotonic deadline to graph reads.
+pub fn graph_read_cancellation(
+    control: Arc<dyn RetrievalExecutionControl>,
+    deadline_micros: Option<u64>,
+) -> Arc<dyn tracedecay_graph_db::GraphCancellation> {
+    Arc::new(GraphTraversalCancellationV1 {
+        control,
+        deadline_micros,
+    })
 }
 
 fn check_request_control(
