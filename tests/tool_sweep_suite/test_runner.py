@@ -937,10 +937,60 @@ class MutationJourneyTests(unittest.TestCase):
     def response(payload: str):
         return {"result": {"content": [{"type": "text", "text": payload}]}}
 
+    def test_fact_reads_consume_one_seeded_connected_graph(self) -> None:
+        runner = load_runner()
+        fixture = {}
+        produced = iter(("fact.v1.alpha", "fact.v1.related"))
+
+        def call(tool, arguments, _deadline_ms):
+            self.assertEqual(tool, "tracedecay_fact_store_add")
+            fact_id = next(produced)
+            return self.response(json.dumps({
+                "fact": {"fact": {
+                    "fact_id": fact_id,
+                    "content": arguments["content"],
+                    "entities": arguments["entities"],
+                }},
+            }))
+
+        runner.prime_fact_read_lifecycle(fixture, call, lambda _tool: 1_000)
+
+        self.assertEqual(
+            fixture["fact_read_arguments"]["tracedecay_fact_store_get"]["fact_id"],
+            "fact.v1.alpha",
+        )
+        response = self.response(json.dumps({"facts": [
+            {"fact_id": "fact.v1.alpha", "content": fixture["fact_content"]},
+            {
+                "fact_id": "fact.v1.related",
+                "content": fixture["fact_related_content"],
+            },
+        ]}))
+        runner.validate_fact_read_response(
+            "tracedecay_fact_store_related", response, fixture
+        )
+        with self.assertRaisesRegex(Exception, "shared entity"):
+            runner.validate_fact_read_response(
+                "tracedecay_fact_store_related",
+                self.response(json.dumps({"facts": [{
+                    "fact_id": "fact.v1.alpha",
+                    "content": fixture["fact_content"],
+                }]})),
+                fixture,
+            )
+
     def test_fact_feedback_journey_requires_a_real_trust_change(self) -> None:
         """Helpful feedback must move the seeded fact's trust, then remove the fact."""
         runner = load_runner()
         state = {"trust_millionths": 500_000, "removed": False}
+
+        def commit(disposition, event_id):
+            return {
+                "fact_id": "fact.v1.fixture",
+                "disposition": disposition,
+                "last_event_id": event_id,
+                "committed_event_ids": [event_id],
+            }
 
         def call(tool, arguments, _deadline_ms):
             if tool == "tracedecay_fact_store_add":
@@ -951,13 +1001,26 @@ class MutationJourneyTests(unittest.TestCase):
                     + arguments["content"] + '"}}}}'
                 )
             if tool == "tracedecay_fact_store_get":
+                if state["removed"]:
+                    return self.response(json.dumps({
+                        "fact": {"kind": "unavailable", "status": {
+                            "fact_id": "fact.v1.fixture", "payload_access": "deleted",
+                        }},
+                    }))
                 return self.response(
                     '{"fact":{"fact_id":"fact.v1.fixture","trust_score_millionths":'
                     + str(state["trust_millionths"]) + "}}"
                 )
             if tool == "tracedecay_fact_store_remove":
                 state["removed"] = True
-                return self.response('{"removed":true}')
+                return self.response(json.dumps({
+                    "outcome": "removed",
+                    "commit": commit("committed", "fact-event.v1.remove"),
+                }))
+            if tool == "tracedecay_fact_feedback":
+                return self.response(json.dumps({
+                    "commit": commit("idempotent_replay", "fact-event.v1.feedback"),
+                }))
             raise AssertionError(tool)
 
         prepared = runner.prepare_journey(
@@ -973,14 +1036,63 @@ class MutationJourneyTests(unittest.TestCase):
 
         state["trust_millionths"] = 550_000
         note = prepared.cleanup(
-            self.response(
-                '{"outcome":"effect","value":{"payload":{"feedback":'
-                '{"fact_id":"fact.v1.fixture","action":"helpful",'
-                '"old_trust_millionths":500000,"new_trust_millionths":550000}}}}'
-            )
+            self.response(json.dumps({
+                "outcome": "effect",
+                "value": {"payload": {
+                    "feedback": {
+                        "fact_id": "fact.v1.fixture",
+                        "action": "helpful",
+                        "old_trust_millionths": 500_000,
+                        "new_trust_millionths": 550_000,
+                    },
+                    "commit": commit("committed", "fact-event.v1.feedback"),
+                }},
+            }))
         )
         self.assertIn("trust", note)
         self.assertTrue(state["removed"])
+
+    def test_fact_remove_journey_proves_tombstone_and_idempotent_replay(self) -> None:
+        runner = load_runner()
+        event_id = "fact-event.v1.remove"
+
+        def removal(disposition):
+            return self.response(json.dumps({
+                "outcome": "removed",
+                "commit": {
+                    "fact_id": "fact.v1.remove",
+                    "disposition": disposition,
+                    "last_event_id": event_id,
+                    "committed_event_ids": [event_id],
+                },
+            }))
+
+        def call(tool, arguments, _deadline_ms):
+            if tool == "tracedecay_fact_store_add":
+                return self.response(json.dumps({"fact": {"fact": {
+                    "fact_id": "fact.v1.remove",
+                    "content": arguments["content"],
+                }}}))
+            if tool == "tracedecay_fact_store_get":
+                return self.response(json.dumps({"fact": {
+                    "kind": "unavailable",
+                    "status": {
+                        "fact_id": "fact.v1.remove",
+                        "payload_access": "deleted",
+                    },
+                }}))
+            if tool == "tracedecay_fact_store_list":
+                return self.response('{"facts":[]}')
+            self.assertEqual(tool, "tracedecay_fact_store_remove")
+            return removal("idempotent_replay")
+
+        prepared = runner.prepare_journey(
+            "tracedecay_fact_store_remove", object(), {}, lambda _tool: 1_000, call
+        )
+        note = prepared.cleanup(removal("committed"))
+
+        self.assertEqual(prepared.settlement, "irreversible_verified")
+        self.assertIn("tombstone/default-absence/replay", note)
 
     def test_fact_supersede_journey_retires_default_but_preserves_exact_history(self) -> None:
         runner = load_runner()
@@ -1015,11 +1127,12 @@ class MutationJourneyTests(unittest.TestCase):
             self.assertEqual(tool, "tracedecay_fact_store_supersede")
             return self.response(json.dumps({
                 "outcome": "superseded",
-                "fact_id": "fact.v1.retired",
                 "superseded_by": "fact.v1.successor",
                 "commit": {
+                    "fact_id": "fact.v1.retired",
                     "disposition": "idempotent_replay",
                     "last_event_id": "fact-event.v1.retirement",
+                    "committed_event_ids": ["fact-event.v1.retirement"],
                 },
             }))
 
@@ -1033,9 +1146,13 @@ class MutationJourneyTests(unittest.TestCase):
         })
         note = prepared.cleanup(self.response(json.dumps({
             "outcome": "superseded",
-            "fact_id": "fact.v1.retired",
             "superseded_by": "fact.v1.successor",
-            "commit": {"last_event_id": "fact-event.v1.retirement"},
+            "commit": {
+                "fact_id": "fact.v1.retired",
+                "disposition": "committed",
+                "last_event_id": "fact-event.v1.retirement",
+                "committed_event_ids": ["fact-event.v1.retirement"],
+            },
         })))
 
         self.assertIn("exact-get/replay", note)
@@ -1050,6 +1167,34 @@ class MutationJourneyTests(unittest.TestCase):
             ],
         )
 
+    def test_fact_curate_journey_consumes_its_durable_run(self) -> None:
+        runner = load_runner()
+
+        def call(tool, arguments, _deadline_ms):
+            if tool == "tracedecay_fact_store_add":
+                return self.response(json.dumps({"fact": {"fact": {
+                    "fact_id": "fact.v1.curator",
+                    "content": arguments["content"],
+                }}}))
+            self.assertEqual(tool, "tracedecay_automation_run_view")
+            self.assertEqual(arguments["run_id"], "automation.run.curator")
+            return self.response(json.dumps({
+                "run_id": "automation.run.curator",
+                "task": "memory_curator",
+                "status": "succeeded",
+            }))
+
+        prepared = runner.prepare_journey(
+            "tracedecay_fact_store_curate", object(), {}, lambda _tool: 1_000, call
+        )
+        note = prepared.cleanup(self.response(json.dumps({
+            "run_id": "automation.run.curator",
+            "task": "memory_curator",
+        })))
+
+        self.assertEqual(prepared.settlement, "isolated")
+        self.assertIn("retained terminal succeeded", note)
+
     def test_memory_status_journey_counts_the_seeded_fact(self) -> None:
         """The repaired status must truthfully count the seeded fact before rollback."""
         runner = load_runner()
@@ -1059,8 +1204,22 @@ class MutationJourneyTests(unittest.TestCase):
                 return self.response(
                     '{"fact":{"fact_id":3,"content":"' + arguments["content"] + '"}}'
                 )
-            self.assertEqual(tool, "tracedecay_fact_store_remove")
-            return self.response('{"removed":true}')
+            if tool == "tracedecay_fact_store_remove":
+                return self.response(json.dumps({
+                    "outcome": "removed",
+                    "commit": {
+                        "fact_id": 3,
+                        "disposition": "committed",
+                        "last_event_id": "fact-event.v1.remove",
+                        "committed_event_ids": ["fact-event.v1.remove"],
+                    },
+                }))
+            self.assertEqual(tool, "tracedecay_fact_store_get")
+            return self.response(json.dumps({
+                "fact": {"kind": "unavailable", "status": {
+                    "fact_id": 3, "payload_access": "deleted",
+                }},
+            }))
 
         prepared = runner.prepare_journey(
             "tracedecay_memory_status", object(), {}, lambda _tool: 1_000, call
@@ -1294,31 +1453,40 @@ class MutationJourneyTests(unittest.TestCase):
                 "node_id": "function:fixture",
             }
             accepted = {
-                "preview_id": "rename.preview.fixture",
+                "preview_id": "sha256:" + "0" * 64,
                 "preview_digest": "sha256:" + "1" * 64,
                 "plan_digest": "sha256:" + "2" * 64,
-                "graph_revision": "graph.fixture.v1",
+                "graph_revision": "sha256:" + "3" * 64,
                 "repository_revision": "repository.fixture.v1",
             }
+            calls = []
 
             def call(tool, arguments, _deadline_ms):
+                calls.append((tool, dict(arguments)))
                 if tool == "tracedecay_rename_preview":
                     return self.response(
                         '{"node":{"id":"function:fixture",'
                         '"qualified_name":"src/lib.rs::sweep_anchor","kind":"function",'
-                        '"file":"src/lib.rs","name":"sweep_anchor"},'
-                        f'"accepted_preview":{json.dumps(accepted)}}}'
+                        '"file":"src/lib.rs","name":"sweep_anchor"}}'
                     )
                 self.assertEqual(tool, "tracedecay_rename_symbol")
                 self.assertIs(arguments["dry_run"], True)
-                self.assertEqual(arguments["accepted_preview"], accepted)
-                return self.response('{"expected_state":"sha256:' + "3" * 64 + '"}')
+                self.assertNotIn("accepted_preview", arguments)
+                return self.response(json.dumps({
+                    **accepted,
+                    "expected_state": accepted["preview_digest"],
+                }))
 
             prepared = runner.prepare_journey(
                 "tracedecay_rename_symbol", object(), fixture, lambda _tool: 1_000, call
             )
 
         self.assertEqual(prepared.arguments["accepted_preview"], accepted)
+        self.assertEqual(prepared.arguments["expected_state"], accepted["preview_digest"])
+        self.assertTrue(prepared.arguments["verify"])
+        self.assertEqual([tool for tool, _ in calls], [
+            "tracedecay_rename_preview", "tracedecay_rename_symbol",
+        ])
 
     def test_source_edit_journey_replays_receipt_and_restores_exact_source(self) -> None:
         runner = load_runner()

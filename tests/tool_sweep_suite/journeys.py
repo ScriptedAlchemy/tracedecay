@@ -50,15 +50,23 @@ def _fact_trust(response: dict[str, Any], fact_id: str | int) -> float | None:
     return None
 
 
-def _seeded_fact(call: Call, deadline: Deadline, content: str) -> str | int:
+def _seeded_fact(
+    call: Call,
+    deadline: Deadline,
+    content: str,
+    *,
+    entities: list[str] | None = None,
+    trust: float = 0.5,
+) -> str | int:
     """Produce one real isolated fact and return its structured identity."""
     added = call(
         "tracedecay_fact_store_add",
         {
             "content": content,
             "category": "tool",
-            "trust": 0.5,
+            "trust": trust,
             "source_label": "catalog_sweep",
+            "entities": entities or [],
             "format": "json",
         },
         deadline("tracedecay_fact_store_add"),
@@ -69,14 +77,139 @@ def _seeded_fact(call: Call, deadline: Deadline, content: str) -> str | int:
     return fact_id
 
 
-def _remove_seeded_fact(call: Call, deadline: Deadline, fact_id: str | int) -> None:
+def _fact_commit(
+    response: dict[str, Any], fact_id: str | int, dispositions: set[str]
+) -> dict[str, Any]:
+    for value in objects(response):
+        if value.get("fact_id") != fact_id or value.get("disposition") not in dispositions:
+            continue
+        event_id = value.get("last_event_id")
+        event_ids = value.get("committed_event_ids")
+        if (
+            isinstance(event_id, str)
+            and event_id
+            and isinstance(event_ids, list)
+            and event_id in event_ids
+        ):
+            return value
+    raise JourneyError("fact mutation omitted its exact retained commit receipt")
+
+
+def _fact_outcome(
+    response: dict[str, Any], outcome: str, fact_id: str | int
+) -> dict[str, Any]:
+    for value in objects(response):
+        commit = value.get("commit")
+        if (
+            value.get("outcome") == outcome
+            and isinstance(commit, dict)
+            and commit.get("fact_id") == fact_id
+        ):
+            return value
+    raise JourneyError(f"fact mutation omitted its {outcome} outcome")
+
+
+def _fact_unavailable(response: dict[str, Any], fact_id: str | int) -> bool:
+    return any(
+        value.get("fact_id") == fact_id and value.get("payload_access") == "deleted"
+        for value in objects(response)
+    )
+
+
+def _remove_seeded_fact(call: Call, deadline: Deadline, fact_id: str | int) -> str:
     removed = call(
         "tracedecay_fact_store_remove",
         {"fact_id": fact_id, "format": "json"},
         deadline("tracedecay_fact_store_remove"),
     )
-    if not has_true(removed, "removed"):
-        raise JourneyError("fact rollback did not confirm removal")
+    _fact_outcome(removed, "removed", fact_id)
+    commit = _fact_commit(removed, fact_id, {"committed", "idempotent_replay"})
+    fetched = call(
+        "tracedecay_fact_store_get",
+        {"fact_id": fact_id, "format": "json"},
+        deadline("tracedecay_fact_store_get"),
+    )
+    if not _fact_unavailable(fetched, fact_id):
+        raise JourneyError("fact removal did not preserve its exact deleted tombstone")
+    return commit["last_event_id"]
+
+
+FACT_READ_TOOLS = frozenset(
+    {
+        "tracedecay_fact_store_get",
+        "tracedecay_fact_store_list",
+        "tracedecay_fact_store_probe",
+        "tracedecay_fact_store_reason",
+        "tracedecay_fact_store_related",
+        "tracedecay_fact_store_search",
+    }
+)
+
+
+def prime_fact_read_lifecycle(
+    fixture: dict[str, Any], call: Call, deadline: Deadline
+) -> None:
+    """Seed one connected fact pair for the public fact read surfaces."""
+    suffix = str(time.monotonic_ns())
+    alpha = f"tool-sweep-alpha-{suffix}"
+    beta = f"tool-sweep-beta-{suffix}"
+    gamma = f"tool-sweep-gamma-{suffix}"
+    content = f"catalog sweep constellation {suffix} alpha beta"
+    related_content = f"catalog sweep constellation {suffix} beta gamma"
+    fact_id = _seeded_fact(
+        call, deadline, content, entities=[alpha, beta], trust=0.8
+    )
+    related_fact_id = _seeded_fact(
+        call, deadline, related_content, entities=[beta, gamma], trust=0.7
+    )
+    fixture.update(
+        {
+            "fact_id": fact_id,
+            "fact_content": content,
+            "fact_related_id": related_fact_id,
+            "fact_related_content": related_content,
+            "fact_read_arguments": {
+                "tracedecay_fact_store_get": {"fact_id": fact_id, "format": "json"},
+                "tracedecay_fact_store_list": {
+                    "category": "tool", "limit": 200, "format": "json"
+                },
+                "tracedecay_fact_store_search": {
+                    "query": f"constellation {suffix} alpha",
+                    "limit": 20,
+                    "format": "json",
+                },
+                "tracedecay_fact_store_probe": {
+                    "entity": alpha, "limit": 20, "format": "json"
+                },
+                "tracedecay_fact_store_related": {
+                    "entity": alpha, "limit": 20, "format": "json"
+                },
+                "tracedecay_fact_store_reason": {
+                    "entities": [alpha, beta], "limit": 20, "format": "json"
+                },
+            },
+        }
+    )
+
+
+def validate_fact_read_response(
+    name: str, response: dict[str, Any], fixture: dict[str, Any]
+) -> None:
+    """Require each fact read to consume the exact sweep-produced graph."""
+    if name not in FACT_READ_TOOLS:
+        return
+    fact_id = fixture.get("fact_id")
+    content = fixture.get("fact_content")
+    if not isinstance(content, str) or not content or not isinstance(fact_id, (str, int)):
+        raise JourneyError(f"{name} has no sweep-produced fact input")
+    if fact_id_with_content(response, content) != fact_id:
+        raise JourneyError(f"{name} did not return the sweep-produced fact")
+    if name == "tracedecay_fact_store_related":
+        related_content = fixture.get("fact_related_content")
+        if not isinstance(related_content, str) or fact_id_with_content(
+            response, related_content
+        ) != fixture.get("fact_related_id"):
+            raise JourneyError("fact related did not traverse the seeded shared entity")
 
 
 def _object_field(response: dict[str, Any], name: str) -> dict[str, Any]:
@@ -2516,21 +2649,30 @@ def prepare(
             )
             if fact_id_with_content(fetched, content) != fact_id:
                 raise JourneyError("fact get did not consume the added fact identity")
-            removed = call(
-                "tracedecay_fact_store_remove",
-                {"fact_id": fact_id, "format": "json"},
-                deadline("tracedecay_fact_store_remove"),
+            commit = _fact_commit(response, fact_id, {"committed", "idempotent_replay"})
+            replayed = call(
+                "tracedecay_fact_store_add",
+                {
+                    "content": content,
+                    "category": "tool",
+                    "trust": 0.5,
+                    "source_label": "catalog_sweep",
+                    "format": "json",
+                },
+                deadline("tracedecay_fact_store_add"),
             )
-            if not has_true(removed, "removed"):
-                raise JourneyError("fact rollback did not confirm removal")
+            replay = _fact_commit(replayed, fact_id, {"idempotent_replay"})
+            if replay["last_event_id"] != commit["last_event_id"]:
+                raise JourneyError("fact add retry appended a second retained event")
+            _remove_seeded_fact(call, deadline, fact_id)
             listed = call(
                 "tracedecay_fact_store_list",
                 {"limit": 5, "format": "json"},
                 deadline("tracedecay_fact_store_list"),
             )
             if fact_id_with_content(listed, content) == fact_id:
-                raise JourneyError("fact rollback did not verify absence")
-            return "fact add/get/remove/absence verified"
+                raise JourneyError("fact containment did not verify default absence")
+            return "fact add/get/replay/remove/tombstone/default-absence verified"
         return PreparedJourney(
             {
                 "content": content,
@@ -2540,6 +2682,7 @@ def prepare(
                 "format": "json",
             },
             cleanup,
+            settlement="contained",
         )
     if name == "tracedecay_fact_store_update":
         original = "catalog sweep temporary fact before update"
@@ -2556,20 +2699,37 @@ def prepare(
             )
             if fact_id_with_content(fetched, updated) != fact_id:
                 raise JourneyError("fact get did not observe the updated content")
+            commit = _fact_commit(response, fact_id, {"committed", "idempotent_replay"})
+            replayed = call(
+                "tracedecay_fact_store_update",
+                {"fact_id": fact_id, "content": updated, "format": "json"},
+                deadline("tracedecay_fact_store_update"),
+            )
+            replay = _fact_commit(replayed, fact_id, {"idempotent_replay"})
+            if replay["last_event_id"] != commit["last_event_id"]:
+                raise JourneyError("fact update retry appended a second retained event")
             _remove_seeded_fact(call, deadline, fact_id)
-            return "fact update/get verified; seeded fact removed"
+            return "fact update/get/replay verified; disposable fact contained by removal"
 
         return PreparedJourney(
             {"fact_id": fact_id, "content": updated, "format": "json"},
             cleanup,
+            settlement="contained",
         )
     if name == "tracedecay_fact_store_remove":
         content = "catalog sweep temporary fact for removal"
         fact_id = _seeded_fact(call, deadline, content)
 
         def cleanup(response: dict[str, Any]) -> str:
-            if not has_true(response, "removed"):
-                raise JourneyError("fact remove did not confirm removal")
+            outcome = _fact_outcome(response, "removed", fact_id)
+            commit = _fact_commit(response, fact_id, {"committed", "idempotent_replay"})
+            fetched = call(
+                "tracedecay_fact_store_get",
+                {"fact_id": fact_id, "format": "json"},
+                deadline("tracedecay_fact_store_get"),
+            )
+            if not _fact_unavailable(fetched, fact_id):
+                raise JourneyError("fact remove did not preserve its deleted tombstone")
             listed = call(
                 "tracedecay_fact_store_list",
                 {"limit": 200, "format": "json"},
@@ -2577,9 +2737,22 @@ def prepare(
             )
             if fact_id_with_content(listed, content) == fact_id:
                 raise JourneyError("fact remove did not verify absence")
-            return "fact remove/absence verified"
+            replayed = call(
+                "tracedecay_fact_store_remove",
+                {"fact_id": fact_id, "format": "json"},
+                deadline("tracedecay_fact_store_remove"),
+            )
+            _fact_outcome(replayed, outcome["outcome"], fact_id)
+            replay = _fact_commit(replayed, fact_id, {"idempotent_replay"})
+            if replay["last_event_id"] != commit["last_event_id"]:
+                raise JourneyError("fact remove retry appended a second retained event")
+            return "irreversible fact remove/tombstone/default-absence/replay verified"
 
-        return PreparedJourney({"fact_id": fact_id, "format": "json"}, cleanup)
+        return PreparedJourney(
+            {"fact_id": fact_id, "format": "json"},
+            cleanup,
+            settlement="irreversible_verified",
+        )
     if name == "tracedecay_fact_store_supersede":
         retired_content = "catalog sweep fact before supersession"
         successor_content = "catalog sweep fact after supersession"
@@ -2592,15 +2765,11 @@ def prepare(
         }
 
         def cleanup(response: dict[str, Any]) -> str:
-            if (
-                first_value(response, {"outcome"}) != "superseded"
-                or first_value(response, {"fact_id"}) != retired_id
-                or first_value(response, {"superseded_by"}) != successor_id
-            ):
-                raise JourneyError("fact supersede omitted its exact retirement receipt")
-            last_event_id = first_value(response, {"last_event_id"})
-            if not isinstance(last_event_id, str) or not last_event_id:
-                raise JourneyError("fact supersede omitted its retained event identity")
+            outcome = _fact_outcome(response, "superseded", retired_id)
+            if outcome.get("superseded_by") != successor_id:
+                raise JourneyError("fact supersede omitted its exact successor identity")
+            commit = _fact_commit(response, retired_id, {"committed", "idempotent_replay"})
+            last_event_id = commit["last_event_id"]
 
             listed = call(
                 "tracedecay_fact_store_list",
@@ -2638,14 +2807,12 @@ def prepare(
                 arguments,
                 deadline("tracedecay_fact_store_supersede"),
             )
-            if (
-                first_value(replayed, {"last_event_id"}) != last_event_id
-                or first_value(replayed, {"disposition"}) != "idempotent_replay"
-            ):
+            replay = _fact_commit(replayed, retired_id, {"idempotent_replay"})
+            if replay["last_event_id"] != last_event_id:
                 raise JourneyError("fact supersede retry appended a second retirement event")
             return "fact add/supersede/list/exact-get/replay verified in disposable store"
 
-        return PreparedJourney(arguments, cleanup)
+        return PreparedJourney(arguments, cleanup, settlement="isolated")
     if name == "tracedecay_fact_feedback":
         content = "catalog sweep temporary feedback fact"
         fact_id = _seeded_fact(call, deadline, content)
@@ -2675,12 +2842,74 @@ def prepare(
                 raise JourneyError(
                     f"helpful feedback did not raise trust above its 0.5 baseline (observed {trust})"
                 )
+            commit = _fact_commit(response, fact_id, {"committed", "idempotent_replay"})
+            replayed = call(
+                "tracedecay_fact_feedback",
+                {
+                    "fact_id": fact_id,
+                    "action": "helpful",
+                    "source_label": "catalog_sweep",
+                    "format": "json",
+                },
+                deadline("tracedecay_fact_feedback"),
+            )
+            replay = _fact_commit(replayed, fact_id, {"idempotent_replay"})
+            if replay["last_event_id"] != commit["last_event_id"]:
+                raise JourneyError("fact feedback retry appended a second retained event")
             _remove_seeded_fact(call, deadline, fact_id)
-            return "helpful feedback raised the seeded fact's trust; producer fact removed"
+            return "helpful feedback trust change/replay verified; disposable fact contained"
 
         return PreparedJourney(
             {"fact_id": fact_id, "action": "helpful", "source_label": "catalog_sweep", "format": "json"},
             cleanup,
+            settlement="contained",
+        )
+    if name == "tracedecay_fact_store_curate":
+        suffix = str(time.monotonic_ns())
+        _seeded_fact(
+            call,
+            deadline,
+            f"catalog sweep curator fact {suffix}",
+            entities=[f"curator-alpha-{suffix}", f"curator-beta-{suffix}"],
+            trust=0.8,
+        )
+
+        def cleanup(response: dict[str, Any]) -> str:
+            run_id = first_value(response, {"run_id"})
+            if not isinstance(run_id, str) or not run_id:
+                raise JourneyError("fact curator omitted its durable run identity")
+            if not any(
+                value.get("run_id") == run_id and value.get("task") == "memory_curator"
+                for value in objects(response)
+            ):
+                raise JourneyError("fact curator run is not bound to the Memory Curator")
+            viewed = call(
+                "tracedecay_automation_run_view",
+                {"run_id": run_id, "format": "json"},
+                deadline("tracedecay_automation_run_view"),
+            )
+            summary = next(
+                (
+                    value
+                    for value in objects(viewed)
+                    if value.get("run_id") == run_id
+                    and value.get("task") == "memory_curator"
+                    and value.get("status") in {"succeeded", "skipped"}
+                ),
+                None,
+            )
+            if summary is None:
+                raise JourneyError("automation run view omitted the curator terminal")
+            return f"Memory Curator run {run_id} retained terminal {summary['status']} evidence"
+
+        return PreparedJourney(
+            {
+                "fact_review_limit": 24,
+                "min_confidence_millionths": 720_000,
+                "format": "json",
+            },
+            cleanup,
+            settlement="isolated",
         )
     if name == "tracedecay_memory_status":
         content = "catalog sweep temporary status fact"
