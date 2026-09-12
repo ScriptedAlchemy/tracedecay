@@ -8487,6 +8487,162 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
     registry.shutdown().await;
 }
 
+/// A publication can finish source capture long before its text artifact is
+/// ready. The serving swap must reverify after that projection, otherwise the
+/// exact active generation seats after its bounded proof expires and every
+/// graph readiness probe keeps an unchanged-source Noop loop alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_settles() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let (projection_started, release_projection) = registry
+        .pause_next_published_text_projection(canonical_root)
+        .await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    tokio::time::timeout(Duration::from_secs(10), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("publication projection gate stays armed");
+
+    let identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("mounted worktree identity");
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source fence");
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the pre-projection proof");
+    }
+    release_projection
+        .send(())
+        .expect("release publication projection");
+
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("post-projection source proof never admitted the exact active generation");
+    let generation = ready.generation().manifest().generation_id.clone();
+
+    // Exercise the ordinary expiry path too: one readiness request starts a
+    // real Noop, and a read during that owner pass records one BusyFollowUp.
+    // Both passes must settle because the existing seat keeps its exact
+    // witness while the source proof is renewed.
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the seated proof");
+    }
+    registry.clear_pending_wake_for_scope(&scope).await;
+    let receipts_before = registry.event_to_ready_receipts().len();
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "the expired proof declines before the worker renews it"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await
+        {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("readiness did not start a source-verification pass");
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "readiness stays fail-closed while the Noop owns verification"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let receipts = registry.event_to_ready_receipts();
+            let settled = !registry
+                .reconcile_in_progress_for_test(fixture.path())
+                .await
+                && registry.pending_wake_micros_for_scope(&scope).await == Some(0);
+            let new = &receipts[receipts_before.min(receipts.len())..];
+            if settled
+                && new.iter().any(|receipt| {
+                    receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp && receipt.is_noop()
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the real Noop and its single busy follow-up did not settle");
+    assert_eq!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .expect("renewed seat is ready")
+            .generation()
+            .manifest()
+            .generation_id,
+        generation
+    );
+
+    fixture.edit("src/lib.rs", "pub fn changed_after_seat() {}\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        "changed source reaches the mounted owner"
+    );
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "a real source change still refuses the old seat"
+    );
+
+    registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
