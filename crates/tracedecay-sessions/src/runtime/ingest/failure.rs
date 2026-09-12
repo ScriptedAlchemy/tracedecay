@@ -74,6 +74,14 @@ impl TranscriptCatchUpFailure {
         Self::new("scheduler", "frontier", "ingest_frontier_unavailable", true)
     }
 
+    /// The authority carries no session review scheduler, so the user pass
+    /// could ingest transcripts it can never hand to review. A composition
+    /// defect, not a transient condition.
+    #[hotpath::skip]
+    pub(super) const fn session_review_unwired() -> Self {
+        Self::new("scheduler", "session_review", "session_review_unwired", false)
+    }
+
     #[hotpath::skip]
     pub(super) const fn source_discovery_partial(provider: &'static str) -> Self {
         Self::new(provider, "discovery", "source_discovery_partial", true)

@@ -1,9 +1,10 @@
 //! The composition-root authority one bounded transcript ingest pass runs on.
 //!
-//! Catch-up needs four things that only the composition root can build: the
+//! Catch-up needs five things that only the composition root can build: the
 //! registered shard identity it is bound to, an admission facade over that
 //! authority, the transcript/git/workflow store adapters that write through it,
-//! and the registry read that enumerates registered project roots.
+//! the registry read that enumerates registered project roots, and the
+//! post-ingest session review scheduler.
 //!
 //! Every one of those is produced from `RegisteredGlobalDb`, which sits above
 //! this crate. Rather than depend on it, ingest states what it needs as this
@@ -16,6 +17,7 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_store::StoreShardIdV1;
 
 use crate::admission::HostAdmission;
+use crate::host_ports::session_review::SessionReviewPort;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::runtime::git_correlation::GitCorrelationSessionStore;
 use crate::runtime::store_port::TranscriptIngestStore;
@@ -66,4 +68,12 @@ pub trait SessionIngestAuthority: Sync {
     /// registry. `None` means the registry could not be read, which is
     /// distinct from "no projects are registered".
     fn registered_project_roots(&self) -> impl Future<Output = Option<Vec<PathBuf>>> + Send;
+
+    /// The root-owned post-ingest session review scheduler.
+    ///
+    /// `None` is the typed unwired state: a user-global pass refuses to run
+    /// and reports `session_review_unwired` instead of ingesting transcripts
+    /// whose review it could never schedule. Read-only and project-scoped
+    /// callers never consult it.
+    fn session_review(&self) -> Option<SessionReviewPort>;
 }

@@ -1,10 +1,13 @@
 //! Composition-root wiring for the capabilities the extracted crates invert.
 //!
-//! Two shapes live here. The hook runtime is an explicit value: [`hook_runtime`]
-//! builds the [`HookRuntimeV1`] handle from root adapters and the CLI passes it
-//! into every `tracedecay_agent_hosts::hooks::hook_*` entry point, so a hook
-//! path cannot run without a complete handle and two fixtures can hold two
-//! different handles in one process.
+//! Two shapes live here. The hook runtime and the session review port are
+//! explicit values: [`hook_runtime`] builds the [`HookRuntimeV1`] handle from
+//! root adapters and the CLI passes it into every
+//! `tracedecay_agent_hosts::hooks::hook_*` entry point, and
+//! [`session_review_port`] builds the [`SessionReviewPort`] the daemon hands
+//! its profile ingestor. A hook path or user ingest pass cannot run without a
+//! complete handle, and two fixtures can hold two different handles in one
+//! process.
 //!
 //! The remaining capabilities (`tracedecay_sessions::host_ports` and the
 //! automation host-I/O bundle) are still process-global `OnceLock` slots that
@@ -26,6 +29,7 @@ use serde_json::Value;
 
 use tracedecay_agent_hosts::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_domain::errors::Result;
+use tracedecay_sessions::host_ports::session_review::SessionReviewPort;
 
 /// Installs every root-owned runtime port. Idempotent; first call wins.
 ///
@@ -62,8 +66,16 @@ fn register_session_ports() {
     host_ports::hermes_profile_pin::register(
         tracedecay_agent_hosts::agents::hermes::read_config_pinned_project_root,
     );
-    host_ports::session_review::register(schedule_user_session_review);
     host_ports::unregistered_admission::register(unregistered_admission);
+}
+
+/// The root's session review port: the post-ingest review hint routed through
+/// the daemon client. The daemon hands it to the profile ingestor at
+/// construction, so a user pass without one is a typed refusal in
+/// `tracedecay-sessions`, never a silent skip.
+#[must_use]
+pub const fn session_review_port() -> SessionReviewPort {
+    SessionReviewPort::new(schedule_user_session_review)
 }
 
 fn schedule_user_session_review<'a>(
