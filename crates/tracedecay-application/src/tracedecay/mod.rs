@@ -140,12 +140,11 @@ pub fn build_branch_diagnostics(
     serving_branch: Option<String>,
     fallback_warning: Option<String>,
     serving_db_path: PathBuf,
-    serving_source: Option<(&str, Option<&str>)>,
-    serving_source_is_current: bool,
+    serving_source: Option<(&str, Option<&str>, bool)>,
 ) -> BranchDiagnostics {
     let meta = branch_meta::load_branch_meta(data_root);
     let current_branch = branch::current_branch(project_root);
-    let published_serving_branch = serving_source.and_then(|(reference, revision)| {
+    let published_serving_branch = serving_source.and_then(|(reference, revision, _)| {
         revision.and_then(|revision| {
             meta.as_ref().and_then(|meta| {
                 meta.branches.iter().find_map(|(name, entry)| {
@@ -163,8 +162,8 @@ pub fn build_branch_diagnostics(
         })
     });
     let current_source_branch = serving_source
-        .filter(|_| serving_source_is_current)
-        .and_then(|(reference, _)| reference.strip_prefix("refs/heads/"))
+        .filter(|(_, _, is_current)| *is_current)
+        .and_then(|(reference, _, _)| reference.strip_prefix("refs/heads/"))
         .filter(|name| current_branch.as_deref() == Some(*name))
         .map(str::to_owned);
     let observed_serving_branch = published_serving_branch.or(current_source_branch);
