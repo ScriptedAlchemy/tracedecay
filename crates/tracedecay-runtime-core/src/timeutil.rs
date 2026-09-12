@@ -7,8 +7,6 @@
 //! ingest accepted, and adds the formatting and relative-filter parsing that
 //! only the executable needs.
 
-use chrono::{DateTime, Utc};
-
 pub use tracedecay_capture::{
     parse_cursor_human_timestamp, parse_rfc3339_timestamp, parse_yyyy_mm_dd_utc_start,
 };
@@ -93,28 +91,18 @@ fn bound_day_timestamp(day_start: i64, bound: SearchTimeBound) -> i64 {
 
 /// Formats "days since 1970-01-01 UTC" as `YYYY-MM-DD`.
 pub fn format_yyyy_mm_dd(days: i64) -> String {
-    days.checked_mul(86_400)
-        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
-        .map_or_else(
-            || format_calendar_day(days),
-            |timestamp| timestamp.format("%Y-%m-%d").to_string(),
-        )
+    format_calendar_day(days)
 }
 
 /// Formats Unix seconds as `YYYY-MM-DD HH:MM:SSZ`.
 pub fn humanize_unix_secs(secs: i64) -> String {
-    DateTime::<Utc>::from_timestamp(secs, 0).map_or_else(
-        || {
-            let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
-            let seconds_of_day = secs.rem_euclid(86_400);
-            format!(
-                "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}Z",
-                hour = seconds_of_day / 3_600,
-                minute = (seconds_of_day / 60) % 60,
-                second = seconds_of_day % 60,
-            )
-        },
-        |timestamp| timestamp.format("%Y-%m-%d %H:%M:%SZ").to_string(),
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    let seconds_of_day = secs.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}Z",
+        hour = seconds_of_day / 3_600,
+        minute = (seconds_of_day / 60) % 60,
+        second = seconds_of_day % 60,
     )
 }
 
@@ -123,8 +111,7 @@ fn format_calendar_day(days: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// Converts a Unix-day count to a proleptic Gregorian date outside Chrono's
-/// representable range, preserving the established formatting contract.
+/// Converts a Unix-day count to a proleptic Gregorian date.
 fn civil_from_days(days: i64) -> (i128, u32, u32) {
     let z = i128::from(days) + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -194,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_days_beyond_chrono_range_with_prior_bytes() {
+    fn formats_far_future_days_with_prior_bytes() {
         assert_eq!(format_yyyy_mm_dd(100_000_000), "275760-09-13");
         assert_eq!(
             humanize_unix_secs(8_640_000_000_000),

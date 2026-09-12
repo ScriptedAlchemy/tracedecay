@@ -33,7 +33,6 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 
-chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 dirs = "6"
 fs2 = "0.4"
 getrandom = "0.2"
