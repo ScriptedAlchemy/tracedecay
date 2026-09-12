@@ -37,6 +37,7 @@ static MIMALLOC_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod agent_cmd;
 mod analytics_cmd;
+mod application_cli;
 mod automation_cli;
 mod cli;
 mod cloud;
