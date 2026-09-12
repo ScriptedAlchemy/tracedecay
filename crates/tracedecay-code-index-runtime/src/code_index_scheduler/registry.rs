@@ -4815,7 +4815,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .await;
                                 match renewed {
                                     Ok(Ok(Some(CodeIndexReconcileOutcomeV1::Noop(_)))) => {}
-                                    Ok(Ok(Some(_))) | Ok(Ok(None)) => tracing::info!(
+                                    Ok(Ok(Some(_) | None)) => tracing::info!(
                                         event = "code_index_post_projection_source_unverified",
                                         "source moved while text projection ran; the completed generation may only take a stale seat"
                                     ),

@@ -268,8 +268,13 @@ impl McpAdmittedProjectV1 {
             self.identity.serving_branch.clone(),
             self.identity.fallback_warning.clone(),
             self.graph_db_path.clone(),
-            serving_source_reference.map(|reference| (reference, serving_source_revision)),
-            serving_source_is_current,
+            serving_source_reference.map(|reference| {
+                tracedecay_application::tracedecay::ServingGraphSource {
+                    reference,
+                    revision: serving_source_revision,
+                    is_current: serving_source_is_current,
+                }
+            }),
         )
     }
 
