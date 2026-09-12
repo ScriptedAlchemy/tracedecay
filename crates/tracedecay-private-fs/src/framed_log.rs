@@ -481,6 +481,26 @@ pub fn atomic_write(
     )
 }
 
+/// Atomically replaces a rebuildable accelerator without durability barriers.
+///
+/// Readers must treat a missing or invalid file as a cache miss. The durable
+/// authority must live elsewhere, so a crash during this publication can only
+/// make the next read rebuild the accelerator.
+#[hotpath::measure(label = "private_fs.framed_log.write_accelerator")]
+pub fn atomic_write_accelerator(destination: &Path, kind: &str, bytes: &[u8]) -> io::Result<()> {
+    validate_regular_or_missing(destination)?;
+    let (temporary, mut output) = create_owned_temp(destination, kind)?;
+    let result = (|| {
+        output.write_all(bytes)?;
+        drop(output);
+        replace_via_rename(&temporary, destination)
+    })();
+    if result.is_err() {
+        remove_owned_temp(&temporary);
+    }
+    result
+}
+
 #[hotpath::measure(label = "private_fs.framed_log.write_prepared")]
 pub fn atomic_write_prepared(
     destination: &Path,
@@ -746,7 +766,23 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{DIRECTORY_SYNC_CALLS, DirectorySyncPolicy, append_durable, atomic_write_prepared};
+    use super::{
+        DIRECTORY_SYNC_CALLS, DirectorySyncPolicy, append_durable, atomic_write_accelerator,
+        atomic_write_prepared,
+    };
+
+    #[test]
+    fn rebuildable_accelerators_publish_without_directory_sync() {
+        let root = tempfile::tempdir().expect("accelerator fixture root");
+        let path = root.path().join("checkpoint.bin");
+        DIRECTORY_SYNC_CALLS.with(|calls| calls.set(0));
+
+        atomic_write_accelerator(&path, "checkpoint", b"first").expect("publish accelerator");
+        atomic_write_accelerator(&path, "checkpoint", b"second").expect("replace accelerator");
+
+        assert_eq!(std::fs::read(path).expect("read accelerator"), b"second");
+        assert_eq!(DIRECTORY_SYNC_CALLS.with(std::cell::Cell::get), 0);
+    }
 
     #[test]
     fn appends_sync_the_directory_only_when_creating_the_log() {
