@@ -1075,13 +1075,14 @@ fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
     std::fs::write(unreadable.join("generation.grafeo"), b"no receipt").unwrap();
 
     let heads = std::collections::BTreeSet::from(["census-g2".to_owned()]);
-    let census = tracedecay_graph_db::census_sealed_store(
-        &support::graph_path(temp.path()),
-        &heads,
-    )
-    .unwrap();
+    let census =
+        tracedecay_graph_db::census_sealed_store(&support::graph_path(temp.path()), &heads)
+            .unwrap();
     assert_eq!(census.head_count, 1);
-    assert_eq!(census.superseded_count, 1, "g1 is sealed but no longer the head");
+    assert_eq!(
+        census.superseded_count, 1,
+        "g1 is sealed but no longer the head"
+    );
     assert_eq!(census.abandoned_staging_count, 1);
     assert_eq!(census.abandoned_staging_bytes, 4096);
     assert_eq!(census.unrecognized_count, 1);
