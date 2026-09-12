@@ -19,6 +19,12 @@ use super::support::{decode, encode, invalid};
 // Immutable histories stay append-only until the canonical retention policy
 // explicitly covers external-source receipts. Current-state reads and writes
 // use only primary-key/index probes and normalized current rows.
+//
+// A mutation's JSON lives once, in `external_source_mutations_v1`, keyed by
+// its digest. The current-object, projected-object, and projection-effect
+// tables reference it by digest and join for the payload: the earlier shape
+// stored the same ~2 KB encoding in all four tables, which on one store was
+// 2.4 GB of byte-identical copies beside the 1 GB history.
 pub const EXTERNAL_SOURCE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS external_source_states_v1 (
     binding_id TEXT PRIMARY KEY,
@@ -92,12 +98,11 @@ CREATE TABLE IF NOT EXISTS external_source_lineage_v1 (
     lineage_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, lineage_digest)
 );
-CREATE TABLE IF NOT EXISTS external_source_objects_v1 (
+CREATE TABLE IF NOT EXISTS external_source_objects_v2 (
     binding_id TEXT NOT NULL,
     native_object_digest TEXT NOT NULL,
     partition_digest TEXT NOT NULL,
     mutation_digest TEXT NOT NULL,
-    mutation_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, native_object_digest)
 );
 CREATE TABLE IF NOT EXISTS external_source_pending_projections_v1 (
@@ -121,13 +126,13 @@ CREATE TABLE IF NOT EXISTS external_source_projection_publications_v1 (
     UNIQUE (binding_id, source_receipt_digest),
     UNIQUE (binding_id, successor_frontier_digest)
 );
-CREATE TABLE IF NOT EXISTS external_source_projection_effects_v1 (
+CREATE TABLE IF NOT EXISTS external_source_projection_effects_v2 (
     binding_id TEXT NOT NULL,
     projection_digest TEXT NOT NULL,
     effect_index INTEGER NOT NULL CHECK (effect_index >= 0),
     native_object_digest TEXT NOT NULL,
+    mutation_digest TEXT NOT NULL,
     effect_json TEXT NOT NULL,
-    mutation_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, projection_digest, effect_index)
 );
 CREATE TABLE IF NOT EXISTS external_source_projection_lineage_v1 (
@@ -138,10 +143,10 @@ CREATE TABLE IF NOT EXISTS external_source_projection_lineage_v1 (
     lineage_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, projection_digest, lineage_index)
 );
-CREATE TABLE IF NOT EXISTS external_source_projected_objects_v1 (
+CREATE TABLE IF NOT EXISTS external_source_projected_objects_v2 (
     binding_id TEXT NOT NULL,
     native_object_digest TEXT NOT NULL,
-    mutation_json TEXT NOT NULL,
+    mutation_digest TEXT NOT NULL,
     PRIMARY KEY (binding_id, native_object_digest)
 );
 CREATE TABLE IF NOT EXISTS external_source_acquisition_queue_v1 (
@@ -565,12 +570,12 @@ fn load_state(
         .flatten();
     let observed = load_current_mutations(
         connection,
-        "external_source_objects_v1",
+        "external_source_objects_v2",
         binding.binding_id.as_str(),
     )?;
     let projected = load_current_mutations(
         connection,
-        "external_source_projected_objects_v1",
+        "external_source_projected_objects_v2",
         binding.binding_id.as_str(),
     )?;
     let state = SourceStoreStateV1::restore(
@@ -624,18 +629,36 @@ fn load_current_mutations(
     table: &str,
     binding_id: &str,
 ) -> rusqlite::Result<Vec<SourceObjectMutationV1>> {
+    // LEFT JOIN so a current row whose digest names no history row surfaces
+    // as corruption instead of silently vanishing from the current state.
     let sql = match table {
-        "external_source_objects_v1" => {
-            "SELECT mutation_json FROM external_source_objects_v1 WHERE binding_id = ?1"
+        "external_source_objects_v2" => {
+            "SELECT history.mutation_json
+             FROM external_source_objects_v2 AS current
+             LEFT JOIN external_source_mutations_v1 AS history
+               ON history.binding_id = current.binding_id
+              AND history.mutation_digest = current.mutation_digest
+             WHERE current.binding_id = ?1"
         }
-        "external_source_projected_objects_v1" => {
-            "SELECT mutation_json FROM external_source_projected_objects_v1 WHERE binding_id = ?1"
+        "external_source_projected_objects_v2" => {
+            "SELECT history.mutation_json
+             FROM external_source_projected_objects_v2 AS current
+             LEFT JOIN external_source_mutations_v1 AS history
+               ON history.binding_id = current.binding_id
+              AND history.mutation_digest = current.mutation_digest
+             WHERE current.binding_id = ?1"
         }
         _ => return Err(invalid("unknown external source current-object table")),
     };
     let mut statement = connection.prepare_cached(sql)?;
     statement
-        .query_map([binding_id], |row| decode(row.get::<_, String>(0)?))?
+        .query_map([binding_id], |row| {
+            let encoded: Option<String> = row.get(0)?;
+            let encoded = encoded.ok_or_else(|| {
+                invalid("external source current object names a mutation absent from history")
+            })?;
+            decode(encoded)
+        })?
         .collect()
 }
 
@@ -726,20 +749,17 @@ fn persist_source_commit(
             )?;
         }
         savepoint.execute(
-            "INSERT INTO external_source_objects_v1 (
-                binding_id, native_object_digest, partition_digest,
-                mutation_digest, mutation_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO external_source_objects_v2 (
+                binding_id, native_object_digest, partition_digest, mutation_digest
+             ) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(binding_id, native_object_digest) DO UPDATE SET
                 partition_digest = excluded.partition_digest,
-                mutation_digest = excluded.mutation_digest,
-                mutation_json = excluded.mutation_json",
+                mutation_digest = excluded.mutation_digest",
             params![
                 binding.binding_id.as_str(),
                 native_object.digest().as_str(),
                 mutation.evidence().partition().digest().as_str(),
                 mutation.mutation_digest().as_str(),
-                mutation_json,
             ],
         )?;
     }
@@ -852,31 +872,47 @@ fn persist_projection(
             invalid("external source projection effect index exceeds SQLite INTEGER")
         })?;
         let effect_json = encode(effect)?;
-        let mutation_json = encode(mutation)?;
+        // The projection applies the commit's own mutations, so each one is
+        // already in the history table under this binding; a digest with no
+        // history row is a corrupt projection, refused before any row lands.
+        let mutation_recorded = savepoint
+            .prepare_cached(
+                "SELECT 1 FROM external_source_mutations_v1
+                 WHERE binding_id = ?1 AND mutation_digest = ?2",
+            )?
+            .exists(params![
+                binding.binding_id.as_str(),
+                mutation.mutation_digest().as_str()
+            ])?;
+        if !mutation_recorded {
+            return Err(invalid(
+                "external source projection names a mutation absent from history",
+            ));
+        }
         savepoint.execute(
-            "INSERT INTO external_source_projection_effects_v1 (
+            "INSERT INTO external_source_projection_effects_v2 (
                 binding_id, projection_digest, effect_index,
-                native_object_digest, effect_json, mutation_json
+                native_object_digest, mutation_digest, effect_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 binding.binding_id.as_str(),
                 projection.receipt_digest().as_str(),
                 index,
                 mutation.observation().native_object().digest().as_str(),
+                mutation.mutation_digest().as_str(),
                 effect_json,
-                mutation_json,
             ],
         )?;
         savepoint.execute(
-            "INSERT INTO external_source_projected_objects_v1 (
-                binding_id, native_object_digest, mutation_json
+            "INSERT INTO external_source_projected_objects_v2 (
+                binding_id, native_object_digest, mutation_digest
              ) VALUES (?1, ?2, ?3)
              ON CONFLICT(binding_id, native_object_digest) DO UPDATE SET
-                mutation_json = excluded.mutation_json",
+                mutation_digest = excluded.mutation_digest",
             params![
                 binding.binding_id.as_str(),
                 mutation.observation().native_object().digest().as_str(),
-                mutation_json,
+                mutation.mutation_digest().as_str(),
             ],
         )?;
     }
