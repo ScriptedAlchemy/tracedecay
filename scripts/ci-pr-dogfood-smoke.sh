@@ -409,30 +409,12 @@ run_smoke() {
   local base_ref="$2"
   local head_ref="$3"
   local output_dir="$4"
-  local base_branch="${5:-}"
-  local head_branch="${6:-}"
   local binary="$TRACEDECAY_BIN"
   local base_oid head_oid merge_base
 
   base_oid="$(git -C "$project_root" rev-parse "$base_ref^{commit}")"
   head_oid="$(git -C "$project_root" rev-parse "$head_ref^{commit}")"
   merge_base="$(git -C "$project_root" merge-base "$base_ref" "$head_ref")"
-
-  if [[ -n "$base_branch" || -n "$head_branch" ]]; then
-    [[ -n "$base_branch" && -n "$head_branch" ]] || {
-      echo "error: dogfood base and head branch names must be supplied together" >&2
-      return 2
-    }
-    git check-ref-format --branch "$base_branch" >/dev/null
-    git check-ref-format --branch "$head_branch" >/dev/null
-    if [[ "$base_branch" == "$head_branch" && "$base_oid" != "$head_oid" ]]; then
-      echo "error: dogfood base and head use the same branch name at different commits" >&2
-      return 2
-    fi
-    git -C "$project_root" update-ref "refs/heads/$base_branch" "$base_oid"
-    git -C "$project_root" update-ref "refs/heads/$head_branch" "$head_oid"
-    git -C "$project_root" symbolic-ref HEAD "refs/heads/$head_branch"
-  fi
 
   echo "tracedecay_ci_checkout head=$(git -C "$project_root" rev-parse HEAD) base=$base_ref"
   echo "tracedecay_ci_binary path=$binary version=$($binary --version)"
@@ -442,17 +424,6 @@ run_smoke() {
     run_timed init 180 "$output_dir/init.stdout" "$output_dir/init.stderr" \
       "$binary" init
   )
-
-  if [[ -n "$head_branch" ]]; then
-    run_timed branch_head 180 "$output_dir/branch-head.stdout" \
-      "$output_dir/branch-head.stderr" \
-      "$binary" branch add "$head_branch" --path "$project_root"
-    if [[ "$base_branch" != "$head_branch" ]]; then
-      run_timed branch_base 180 "$output_dir/branch-base.stdout" \
-        "$output_dir/branch-base.stderr" \
-        "$binary" branch add "$base_branch" --path "$project_root"
-    fi
-  fi
 
   wait_for_strict_readiness "$project_root" "$output_dir" "$binary"
 
@@ -477,13 +448,11 @@ run_smoke() {
 }
 
 main() {
-  local binary project_root base_ref head_ref base_branch head_branch checked_out_oid head_oid started_ms status
+  local binary project_root base_ref head_ref checked_out_oid head_oid started_ms status
   binary="${TRACEDECAY_BIN:-$REPO_ROOT/target/debug/tracedecay}"
   project_root="${TRACEDECAY_DOGFOOD_PROJECT:-$REPO_ROOT}"
   base_ref="${TRACEDECAY_DOGFOOD_BASE_REF:-}"
   head_ref="${TRACEDECAY_DOGFOOD_HEAD_REF:-HEAD}"
-  base_branch="${TRACEDECAY_DOGFOOD_BASE_BRANCH:-}"
-  head_branch="${TRACEDECAY_DOGFOOD_HEAD_BRANCH:-}"
 
   [[ -x "$binary" ]] || {
     echo "error: TraceDecay binary is not executable: $binary" >&2
@@ -495,10 +464,6 @@ main() {
   }
   [[ -n "$base_ref" ]] || {
     echo "error: TRACEDECAY_DOGFOOD_BASE_REF is required" >&2
-    return 2
-  }
-  [[ -n "$base_branch" && -n "$head_branch" ]] || {
-    echo "error: TRACEDECAY_DOGFOOD_BASE_BRANCH and TRACEDECAY_DOGFOOD_HEAD_BRANCH are required" >&2
     return 2
   }
   command -v python3 >/dev/null 2>&1 || {
@@ -539,7 +504,7 @@ main() {
     "$DAEMON_HARNESS" --bin "$binary" --ready-timeout 60 \
       --lifecycle-label "TraceDecay PR dogfood daemon" -- \
       "$SCRIPT_PATH" --run "$project_root" "$base_ref" "$head_ref" \
-      "$WORK_DIR/output" "$base_branch" "$head_branch" || status=$?
+      "$WORK_DIR/output" || status=$?
   echo "tracedecay_ci_timing phase=total_journey elapsed_ms=$(elapsed_ms "$started_ms") status=$status"
   return "$status"
 }
