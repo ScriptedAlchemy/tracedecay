@@ -679,8 +679,15 @@ fn installing_a_head_retires_every_superseded_generation_it_no_longer_needs() {
     let identity = canonical_projection("worktree.superseded");
     let root = temp.path();
 
-    let (g1_record, g1_commit) =
-        publish_generation(&registered, root, &mut authority, &identity, "sup-g1", None, '1');
+    let (g1_record, g1_commit) = publish_generation(
+        &registered,
+        root,
+        &mut authority,
+        &identity,
+        "sup-g1",
+        None,
+        '1',
+    );
     let g1_head = g1_commit.head.clone();
     let (g2_record, g2_commit) = publish_generation(
         &registered,
@@ -704,7 +711,11 @@ fn installing_a_head_retires_every_superseded_generation_it_no_longer_needs() {
     );
     let g3_head = g3_commit.head.clone();
     drop(g3_commit);
-    assert_eq!(sealed_generation_count(root), 3, "every publish sealed its generation");
+    assert_eq!(
+        sealed_generation_count(root),
+        3,
+        "every publish sealed its generation"
+    );
 
     // g1's publication snapshot is still alive: it is a live reader, so the
     // first pass retires only g2.
@@ -767,7 +778,11 @@ fn installing_a_head_retires_every_superseded_generation_it_no_longer_needs() {
         Some(&g3_head),
         "the installed head is never a retirement candidate"
     );
-    assert_eq!(sealed_generation_count(root), 1, "only the head's sealed artifact remains");
+    assert_eq!(
+        sealed_generation_count(root),
+        1,
+        "only the head's sealed artifact remains"
+    );
 
     // A clean projection is a no-op, and the head still serves.
     let (control, probe) = control_and_probe();

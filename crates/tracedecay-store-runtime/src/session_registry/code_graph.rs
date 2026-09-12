@@ -1058,13 +1058,17 @@ impl RetainedVerifiedGraphRuntimeV1 {
         // projection. Inline manifests have no code-index owner whose
         // retention would ever reclaim them, so this publish is their only
         // retirement path.
-        match self.graph_registry.retire_superseded_projection_replays_with_lease(
-            &graph,
-            &mut storage,
-            &context,
-            &relational_projection,
-        ) {
-            Ok(receipt) if receipt != tracedecay_graph_db::SupersededReplayRetirement::default() => {
+        match self
+            .graph_registry
+            .retire_superseded_projection_replays_with_lease(
+                &graph,
+                &mut storage,
+                &context,
+                &relational_projection,
+            ) {
+            Ok(receipt)
+                if receipt != tracedecay_graph_db::SupersededReplayRetirement::default() =>
+            {
                 tracing::info!(
                     event = "graph_superseded_replays_retired",
                     stage = "publish_manifest",

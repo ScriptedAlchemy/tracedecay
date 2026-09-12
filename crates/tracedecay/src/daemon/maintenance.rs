@@ -1307,7 +1307,11 @@ mod tests {
         for _ in 0..3 {
             wake.request_due();
             tokio::task::yield_now().await;
-            assert_eq!(ticks.load(Ordering::SeqCst), 1, "a due request never runs early");
+            assert_eq!(
+                ticks.load(Ordering::SeqCst),
+                1,
+                "a due request never runs early"
+            );
         }
         tokio::time::advance(Duration::from_secs(59)).await;
         tokio::task::yield_now().await;

@@ -572,8 +572,7 @@ pub(super) fn plan_scope_root_retention_from_hashes(
         // again, so its index is debris the moment the root is gone. The age
         // gate exists for the other case: a root that still exists but no
         // authority currently names.
-        if !root_missing
-            && now_secs.saturating_sub(newest_mtime_secs) < minimum_stranding_age_secs
+        if !root_missing && now_secs.saturating_sub(newest_mtime_secs) < minimum_stranding_age_secs
         {
             plan.retained_immature_scopes.push(scope);
             continue;

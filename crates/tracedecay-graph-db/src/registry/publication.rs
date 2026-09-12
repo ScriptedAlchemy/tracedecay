@@ -1221,9 +1221,9 @@ impl GraphDbRegistry {
                         head_generation = head.key.generation.as_str(),
                         "superseded graph replay retired behind the installed head"
                     );
-                    self.finish_retired_replay(
+                    Self::finish_retired_replay(
                         &database,
-                        operation,
+                        &|| operation.check(self, context),
                         authority,
                         context,
                         &locator,
@@ -1251,8 +1251,7 @@ impl GraphDbRegistry {
                 GraphReplayRetirementOutcomeV1::Missing => {
                     clear_retiring_fence(&database, &locator)?;
                     return Err(GraphDbError::Corrupt {
-                        message: "graph replay disappeared during superseded retirement"
-                            .to_owned(),
+                        message: "graph replay disappeared during superseded retirement".to_owned(),
                     });
                 }
             }
@@ -1261,9 +1260,9 @@ impl GraphDbRegistry {
             if locator == head_locator {
                 continue;
             }
-            self.finish_retired_replay(
+            Self::finish_retired_replay(
                 &database,
-                operation,
+                &|| operation.check(self, context),
                 authority,
                 context,
                 &locator,
@@ -1280,18 +1279,15 @@ impl GraphDbRegistry {
     /// point; a failure here leaks derived bytes the next pass reclaims but
     /// never the source of an active replay.
     fn finish_retired_replay(
-        &self,
         database: &GraphDb,
-        operation: &RegisteredGraphDbOperationV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         locator: &GenerationLocator,
         retirement: &GraphPublicationReplayRetirementV1,
         receipt: &mut SupersededReplayRetirement,
     ) -> Result<(), GraphDbError> {
-        let deletion = match database
-            .delete_generation_contents(locator, &|| operation.check(self, context))
-        {
+        let deletion = match database.delete_generation_contents(locator, check) {
             Ok(deletion) => deletion,
             Err(error) => {
                 clear_retiring_fence(database, locator)?;
