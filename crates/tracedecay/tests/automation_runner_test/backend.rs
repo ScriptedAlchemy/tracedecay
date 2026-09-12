@@ -68,7 +68,7 @@ fn combined_review_contract_requires_both_arrays_with_deterministic_input_hash()
     );
 
     assert_eq!(request.contract.task_key, "combined_review");
-    assert_eq!(request.contract.prompt_version, "combined_review:v2");
+    assert_eq!(request.contract.prompt_version, "combined_review:v3");
     assert!(request.contract.strict_json);
     assert_eq!(
         request.contract.response_schema["required"],
@@ -364,7 +364,7 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
     assert_eq!(backend_request["contract"]["task_key"], "skill_writer");
     assert_eq!(
         backend_request["contract"]["prompt_version"],
-        "skill_writer:v3"
+        "skill_writer:v4"
     );
     assert_eq!(backend_request["evidence_hash"], "sha256:evidence");
     assert_eq!(backend_request["prompt"], r#"{"skills":[]}"#);

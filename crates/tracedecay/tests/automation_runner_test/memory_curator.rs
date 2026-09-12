@@ -183,7 +183,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     );
     assert_eq!(
         run.ledger_record.prompt_version.as_deref(),
-        Some("memory_curator:v1")
+        Some("memory_curator:v2")
     );
     assert_eq!(run.ledger_record.accepted_count, 1);
     assert_eq!(run.ledger_record.rejected_count, 0);

@@ -75,7 +75,7 @@ impl AgentTaskBackend for ContentBackend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::UserJob);
         assert!(request.contract.task_key.starts_with("user_job:"));
-        assert_eq!(request.contract.prompt_version, "user_job:v1");
+        assert_eq!(request.contract.prompt_version, "user_job:v2");
         assert!(!request.contract.strict_json);
         assert!(request.prompt.contains("## Job prompt"));
         Ok(AgentTaskResponse {
@@ -437,7 +437,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
     let record = &run.ledger_record;
     assert_eq!(record.task, AgentTaskKind::UserJob);
     assert_eq!(record.task_key.as_deref(), Some("user_job:daily-digest"));
-    assert_eq!(record.prompt_version.as_deref(), Some("user_job:v1"));
+    assert_eq!(record.prompt_version.as_deref(), Some("user_job:v2"));
     assert_eq!(record.status, AutomationRunStatus::Succeeded);
     assert_eq!(record.trigger, AutomationTrigger::Dashboard);
     let kinds: Vec<&str> = record
