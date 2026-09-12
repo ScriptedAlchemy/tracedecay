@@ -52,14 +52,14 @@ pub use locking::{
     try_acquire_code_generation_store_lock,
 };
 pub use scope_roots::{
-    RefusedCodeIndexScopeV1, ScopeRootAuthorityReceiptV1, ScopeRootBindingCleanupReplayV1,
-    ScopeRootCandidateBindingV1, ScopeRootLivenessProofV1, ScopeRootRetentionPlanV1,
-    ScopeRootRetentionReceiptV1, ScopeRootRetentionReportV1, StrandedCodeIndexScopeV1,
-    StrandedScopeRefusalV1, code_index_scope_store_root, code_index_store_root,
-    complete_scope_root_binding_cleanup, execute_scope_root_retention,
+    RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,
+    ScopeRootBindingCleanupReplayV1, ScopeRootCandidateBindingV1, ScopeRootLivenessProofV1,
+    ScopeRootRetentionPlanV1, ScopeRootRetentionReceiptV1, ScopeRootRetentionReportV1,
+    StrandedCodeIndexScopeV1, StrandedScopeRefusalV1, code_index_scope_store_root,
+    code_index_store_root, complete_scope_root_binding_cleanup, execute_scope_root_retention,
     git_worktree_scope_root_inventory, insert_live_root_variants, plan_scope_root_retention,
     plan_scope_root_retention_with_liveness_proof, prepare_scope_root_binding_cleanup,
-    recover_scope_root_binding_cleanup, recover_scope_root_retention,
+    record_scope_root, recover_scope_root_binding_cleanup, recover_scope_root_retention,
     resolve_live_code_index_roots,
 };
 pub use text_artifacts::{
