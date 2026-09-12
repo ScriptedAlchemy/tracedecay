@@ -473,6 +473,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
         "directory": "src",
         "source_dir": "src",
         "symbol": "sweep_anchor",
+        "qualified_name": "src/lib.rs::sweep_anchor",
         "query": "sweep_anchor",
         "pattern": "sweep_anchor",
         "literal": "sweep_anchor",
@@ -522,7 +523,7 @@ def prime_fixture_values(
     node_id: str | None = None
     while node_id is None:
         resolved, elapsed_ms = client.call_tool(
-            "tracedecay_by_qualified_name", {"qualified_name": fixture["symbol"]}, deadline("tracedecay_by_qualified_name")
+            "tracedecay_by_qualified_name", {"qualified_name": fixture["qualified_name"]}, deadline("tracedecay_by_qualified_name")
         )
         if resolved.get("error") is not None or (
             isinstance(resolved.get("result"), dict) and resolved["result"].get("isError") is True

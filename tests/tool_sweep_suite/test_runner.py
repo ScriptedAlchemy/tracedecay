@@ -783,15 +783,24 @@ class FixturePrimingRetryTests(unittest.TestCase):
         )
         ready = self.response('{"node_id":"function:fixture"}')
         client = self.client([warming, ready])
-        fixture = {"symbol": "sweep_anchor"}
+        fixture = {
+            "symbol": "sweep_anchor",
+            "qualified_name": "src/lib.rs::sweep_anchor",
+        }
 
         runner.prime_fixture_values(client, fixture, self.policies(runner))
 
         qualified_name_calls = [
-            name for name, _arguments in client.calls
+            arguments for name, arguments in client.calls
             if name == "tracedecay_by_qualified_name"
         ]
-        self.assertEqual(len(qualified_name_calls), 2)
+        self.assertEqual(
+            qualified_name_calls,
+            [
+                {"qualified_name": "src/lib.rs::sweep_anchor"},
+                {"qualified_name": "src/lib.rs::sweep_anchor"},
+            ],
+        )
         self.assertEqual(fixture["node_id"], "function:fixture")
         self.assertEqual(fixture["code_node_id"], "sym:code")
         self.assertEqual(fixture["preview_input_id"], "preview.fixture")
@@ -806,7 +815,12 @@ class FixturePrimingRetryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(runner.SweepError, "code-graph-unavailable"):
             runner.prime_fixture_values(
-                client, {"symbol": "sweep_anchor"}, self.policies(runner)
+                client,
+                {
+                    "symbol": "sweep_anchor",
+                    "qualified_name": "src/lib.rs::sweep_anchor",
+                },
+                self.policies(runner),
             )
 
         qualified_name_calls = [
