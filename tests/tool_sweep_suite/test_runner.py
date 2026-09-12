@@ -424,6 +424,22 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         self.assertEqual(arguments["session_id"], "session.fixture")
         self.assertEqual(arguments["target"], {"kind": "raw_message", "store_id": 41})
 
+    def test_session_refresh_status_consumes_the_begin_producer_handle(self) -> None:
+        runner = load_runner()
+        arguments = runner.materialize_tool_arguments(
+            {
+                "name": "tracedecay_session_refresh_status",
+                "inputSchema": {"type": "object", "properties": {}, "required": []},
+            },
+            {
+                "session_id": "session.fixture",
+                "session_refresh_handle": "srh_fixture",
+            },
+        )
+        self.assertEqual(arguments["handle"], "srh_fixture")
+        self.assertEqual(arguments["scope"], {"kind": "profile"})
+        self.assertEqual(arguments["session"], {"id": "session.fixture"})
+
 
 class NegotiatedSurfaceTests(unittest.TestCase):
     def test_resources_and_prompts_are_exercised_from_live_discovery(self) -> None:
@@ -1228,6 +1244,10 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_lcm_load_session": cls.response(
                 '{"messages":[{"store_id":41,"content":"catalog sweep captured LCM message"}]}'
             ),
+            "tracedecay_session_refresh_begin": cls.response(
+                '{"outcome":"started","handle":"srh_fixture",'
+                '"operation_id":"refresh.operation.fixture"}'
+            ),
             "tracedecay_active_project": cls.response(
                 '{"project_id":"project.fixture"}'
             ),
@@ -1274,6 +1294,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_git_hunks",
             "tracedecay_automation_run_list",
             "tracedecay_lcm_load_session",
+            "tracedecay_session_refresh_begin",
             "tracedecay_active_project",
             "tracedecay_configuration_set",
             "tracedecay_configuration_unset",
@@ -1320,6 +1341,11 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(fixture["preview_input_id"], "preview.fixture")
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
         self.assertEqual(fixture["lcm_store_id"], 41)
+        self.assertEqual(fixture["session_refresh_handle"], "srh_fixture")
+        self.assertEqual(
+            fixture["session_refresh_operation_id"],
+            "refresh.operation.fixture",
+        )
         self.assertEqual(fixture["project_id"], "project.fixture")
         self.assertIn(
             ("tracedecay_active_project", {"format": "json"}),
