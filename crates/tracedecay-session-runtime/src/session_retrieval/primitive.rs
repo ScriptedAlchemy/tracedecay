@@ -18,7 +18,7 @@ use tracedecay_tool_catalog::SortContractId;
 
 use super::{
     APPLICATION_RETRIEVAL_MAX_BYTES, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
-    SessionRetrievalServiceOutcome, admitted_browse_execution_limits,
+    SessionRetrievalServiceOutcome, admitted_execution_limits,
 };
 
 const SESSION_LOOKUP_SORT: &str = "sort.session.temporal.anchor.v1";
@@ -70,7 +70,7 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
                     },
                 )
                 .map_err(|_| TemporalRetrievalFailure::Unavailable)?
-                .with_execution_limits(admitted_browse_execution_limits(limit));
+                .with_execution_limits(admitted_execution_limits(limit));
                 let outcome = self
                     .retrieval
                     .retrieve_admitted(context.request, query)

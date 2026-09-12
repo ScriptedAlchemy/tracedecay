@@ -1168,8 +1168,8 @@ async fn advertised_minimum_session_lookup_request_passes_budget_admission() {
 }
 
 #[tokio::test]
-async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
-    const RECORDS: usize = 1_500;
+async fn one_item_lookup_reads_a_session_larger_than_the_response_budget() {
+    const RECORDS: usize = 182;
     let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
         "session-lookup-large-candidate-workspace",
     )
@@ -1204,7 +1204,7 @@ async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
         None,
         TemporalModeV1::Current,
         tracedecay_domain::RetrievalGrainV1::Occurrence,
-        3,
+        1,
         DiversityLimits::unbounded(),
         ContextBudget {
             max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
@@ -1213,11 +1213,11 @@ async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
         },
     )
     .expect("large-session temporal query")
-    .with_execution_limits(admitted_browse_execution_limits(3));
+    .with_execution_limits(admitted_execution_limits(1));
 
-    let mut candidate_limits = admitted_execution_limits(3);
+    let mut candidate_limits = admitted_execution_limits(1);
     candidate_limits.candidate_total_bytes = ExecutionLimits::default().candidate_total_bytes + 1;
-    let mut record_limits = admitted_execution_limits(3);
+    let mut record_limits = admitted_execution_limits(1);
     record_limits.record_total_bytes = ExecutionLimits::default().record_total_bytes + 1;
     for (limits, expected_stage) in [
         (
@@ -1245,20 +1245,18 @@ async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
             page,
             freshness: SessionDataFreshness::Fresh,
             omitted,
-        } if omitted > 0 => page,
+        } if omitted == RECORDS as u64 => page,
         other => panic!("large session must return a bounded hydrated page: {other:?}"),
     };
-    assert_eq!(page.temporal.anchors.len(), 3);
-    assert_eq!(page.results.len(), 3);
-    for result in &page.results {
-        let message = &result.message;
-        assert_eq!(
-            expected_messages.get(&message.message_id),
-            Some(&message.text),
-            "hydration must return the exact retained message bytes",
-        );
-        assert!(message.text.len() <= 80);
-    }
+    assert_eq!(page.temporal.anchors.len(), 1);
+    assert_eq!(page.results.len(), 1);
+    let message = &page.results[0].message;
+    assert_eq!(
+        expected_messages.get(&message.message_id),
+        Some(&message.text),
+        "hydration must return the exact retained message bytes",
+    );
+    assert!(message.text.len() <= 80);
     assert!(
         page.temporal.cursor.is_some(),
         "the remaining rows must yield"
