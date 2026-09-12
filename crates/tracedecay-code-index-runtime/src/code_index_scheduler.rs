@@ -94,6 +94,7 @@ use crate::{
         },
         graph::{GraphLane, production_code_index_freshness},
         lexical::{
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
             CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
@@ -138,46 +139,24 @@ const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
-/// Measured on a 4379-file corpus with `journal_mode=DELETE`: each
-/// `query.artifact.batch.sqlite` transaction pays a fixed commit cost
-/// (journal fsync + page-cache flush) independent of its row count, and
-/// postings inserts alone were 73-76% of that phase (~212-245s of a ~7min
-/// batch phase). Doubling the page/work caps here roughly halves the number
-/// of commits paid for the same corpus while staying far inside both the
-/// 2M-row prepared-batch cap and the 1536MiB
-/// `CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1` ledger (see
-/// `TEXT_ARTIFACT_BATCH_BYTES_V1` below for the unchanged byte bound that
-/// still caps any single batch regardless of this page count).
-///
-/// Re-measured on this repository's 4925-file checkout (2.6GiB staging
-/// artifact, ~3900 committed pages, one `tracedecay status` sample every 10s
-/// through a `scripts/ci-pr-dogfood-smoke.sh` run) before raising anything
-/// further: the per-transaction cost is not fully fixed. At a constant
-/// 64-page batch `last_commit_latency_micros` rose from 567ms at 64 committed
-/// pages to 4881ms at 2006 in a `dev`-profile binary, and from 861ms at 115
-/// pages to ~1686ms at 3678 in a `release` binary -- with `journal_mode=DELETE`
-/// and a 64MiB page cache, each commit journals and re-flushes every
-/// posting/exact index page the batch dirtied, and that page set widens as the
-/// B-trees outgrow the cache. Even so the whole batch phase was only ~66s of
-/// the 262s source phase (release) / ~118s of 403s (dev), so raising the page
-/// cap again is worth at most a tenth of one phase and was deliberately not
-/// done here. Both timings are dwarfed by the code-graph activation that
-/// strict readiness also requires, which is where the dogfood budget actually
-/// goes. Whoever does raise it must raise the caller hint with it
-/// (`registry::TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1`): the sealed source
-/// offers `min(hint, TEXT_ARTIFACT_BATCH_PAGES_V1)` pages, so a stale hint
-/// silently keeps the old batch size. Offering more pages is otherwise safe by
-/// construction -- [`CodeLexicalArtifactBuilderV1::prepare_admissible_page_prefix`]
-/// returns an accepted prefix clamped against the row cap and the memory
-/// ledger, so the cap is an upper offer, never a reservation.
-const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 64;
-const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
+const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
+const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
+const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
-/// overflow and every expensive loop retains cancellation checkpoints.
-/// Doubled alongside `TEXT_ARTIFACT_BATCH_PAGES_V1` (see its comment) so one
-/// wake can still commit two full-sized batches under the raised page cap.
-const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 128;
+/// overflow and every expensive loop retains cancellation checkpoints. The
+/// runtime narrows this ceiling to two host-sized batches, preserving 128
+/// operations at the 1.5 GiB floor.
+const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize =
+    2 * TEXT_ARTIFACT_BASE_BATCH_PAGES_V1 * TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1;
+
+fn text_artifact_source_batch_limits(build_memory_budget: usize) -> (usize, usize, usize) {
+    let scale = (build_memory_budget / CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+        .clamp(1, TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1);
+    let pages = TEXT_ARTIFACT_BASE_BATCH_PAGES_V1 * scale;
+    let bytes = TEXT_ARTIFACT_BASE_BATCH_BYTES_V1 * scale;
+    (pages, bytes, pages * 2)
+}
 /// Cancellation-checkpoint cadence for a wake parked behind another wake's
 /// corpus-sized verified head open. The parked wake re-checks its typed
 /// cancellation state at this interval, so shutdown or supersession surfaces
@@ -4702,9 +4681,11 @@ impl LatestCodeTextGenerationV1 {
         let build_memory_budget = code_lexical_artifact_build_memory_budget_for(
             store.resident_memory.snapshot().limit_bytes,
         );
+        let (source_batch_pages, source_batch_bytes, _) =
+            text_artifact_source_batch_limits(build_memory_budget);
         hotpath::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget);
-        hotpath::gauge!("query.artifact.source_batch_pages_max").set(TEXT_ARTIFACT_BATCH_PAGES_V1);
-        hotpath::gauge!("query.artifact.source_batch_bytes_max").set(TEXT_ARTIFACT_BATCH_BYTES_V1);
+        hotpath::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages);
+        hotpath::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes);
         let generation_id = self.metadata.manifest().generation_id.clone();
         if let Some(descriptor) = store.published_descriptor(&generation_id)? {
             // Durable-head reopen: a restart serves the published
@@ -4923,12 +4904,17 @@ impl LatestCodeTextGenerationV1 {
                 "code-index text artifact build state is missing".to_owned(),
             ));
         };
-        let mut remaining = maximum_work.min(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1);
+        let build_memory_budget = code_lexical_artifact_build_memory_budget_for(
+            store.resident_memory.snapshot().limit_bytes,
+        );
+        let (source_batch_pages, source_batch_bytes, source_work_limit) =
+            text_artifact_source_batch_limits(build_memory_budget);
+        let mut remaining = maximum_work.min(source_work_limit);
         while remaining > 0 && artifact_build.source_receipt.is_none() {
-            let maximum_batch_pages = remaining.clamp(1, TEXT_ARTIFACT_BATCH_PAGES_V1);
+            let maximum_batch_pages = remaining.clamp(1, source_batch_pages);
             let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
                 maximum_batch_pages,
-                TEXT_ARTIFACT_BATCH_BYTES_V1,
+                source_batch_bytes,
             )
             .map_err(map_sealed_page_source_error)?;
             #[cfg(feature = "hotpath")]
