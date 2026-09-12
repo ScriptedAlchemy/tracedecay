@@ -599,6 +599,80 @@ def _probe_call(client: McpClient, tool: str, arguments: dict[str, Any], deadlin
     return response
 
 
+STACK_SIGNAL_READY_TIMEOUT_S = 10
+
+
+def _expanded_stack_signal(response: dict[str, Any]) -> dict[str, Any] | None:
+    """Return one complete evidence identity from the public expansion result."""
+    return next(
+        (
+            value
+            for value in _objects(response)
+            if isinstance(value.get("signal_id"), str)
+            and value["signal_id"]
+            and isinstance(value.get("watermark_id"), str)
+            and value["watermark_id"]
+            and isinstance(value.get("native_source"), dict)
+        ),
+        None,
+    )
+
+
+def prime_github_stack_signal(
+    client: McpClient, fixture: dict[str, Any], deadline_ms: int
+) -> None:
+    """Consume the durable signal emitted by the native preflight producer."""
+    ready_at = time.monotonic() + STACK_SIGNAL_READY_TIMEOUT_S
+    while True:
+        response, elapsed_ms = client.call_tool(
+            "tracedecay_github_stack_signal_expand", {"format": "json"}, deadline_ms
+        )
+        row = response_row(
+            "tool",
+            "tracedecay_github_stack_signal_expand",
+            response,
+            elapsed_ms,
+            deadline_ms,
+        )
+        if duration_us(response) is None:
+            raise SweepError(
+                "tracedecay_github_stack_signal_expand producer omitted the enabled "
+                "_meta.duration_us receipt"
+            )
+        evidence = _expanded_stack_signal(response)
+        if row["verdict"] == "PASS" and evidence is not None:
+            fixture["github_stack_signal_arguments"] = {
+                "signal_id": evidence["signal_id"],
+                "expected_watermark_id": evidence["watermark_id"],
+                "format": "json",
+            }
+            return
+
+        unavailable = next(
+            (
+                value
+                for value in _objects(response)
+                if value.get("outcome") == "unavailable"
+                and isinstance(value.get("reason"), str)
+            ),
+            None,
+        )
+        kind, _code = response_problem_code(response)
+        retryable = kind == "unavailable" or (
+            unavailable is not None
+            and unavailable["reason"] in {"concealed", "authority_unmounted"}
+        )
+        if not retryable or time.monotonic() >= ready_at:
+            detail = row["problem_code"] or (
+                unavailable["reason"] if unavailable is not None else row["note"]
+            )
+            raise SweepError(
+                "tracedecay_github_stack_signal_expand did not expose the native "
+                f"preflight signal: {detail}"
+            )
+        time.sleep(MOUNT_RETRY_DELAY_S)
+
+
 def prime_fixture_values(
     client: McpClient,
     fixture: dict[str, Any],
@@ -1069,6 +1143,16 @@ def prime_fixture_values(
             deadline,
             effect_target,
         )
+        if "tracedecay_github_stack_signal_expand" in policies:
+            prime_github_stack_signal(
+                client,
+                fixture,
+                deadline("tracedecay_github_stack_signal_expand"),
+            )
+    elif "tracedecay_github_stack_signal_expand" in policies:
+        raise SweepError(
+            "GitHub stack signal expansion has no native integration producer"
+        )
 
     with prime_group("workflow"):
         if "tracedecay_workflow_validate_definition" in policies:
@@ -1415,6 +1499,14 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
             "run_id": fixture["work_run_id"],
             "format": "json",
         }
+    if name == "tracedecay_github_stack_signal_expand":
+        arguments = fixture.get("github_stack_signal_arguments")
+        if not isinstance(arguments, dict):
+            raise SweepError(
+                "tracedecay_github_stack_signal_expand: native preflight minted no "
+                "durable signal identity"
+            )
+        return dict(arguments)
     if isinstance(name, str) and name in fixture.get("native_read_arguments", {}):
         return dict(fixture["native_read_arguments"][name])
     probe = HERMETIC_DENIAL_PROBE_ARGUMENTS.get(name) if isinstance(name, str) else None

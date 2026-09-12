@@ -2028,6 +2028,69 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
 
 
+class GitHubStackSignalPrimingTests(unittest.TestCase):
+    @staticmethod
+    def response(payload):
+        return {
+            "result": {
+                "_meta": {"duration_us": 5},
+                "content": [{"type": "text", "text": json.dumps(payload)}],
+            }
+        }
+
+    def test_native_signal_is_consumed_then_replayed_by_exact_durable_identity(self) -> None:
+        runner = load_runner()
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+        responses = [
+            self.response({"outcome": "unavailable", "reason": "concealed"}),
+            self.response(
+                {
+                    "outcome": "expanded",
+                    "evidence": {
+                        "signal_id": "stack-signal.fixture",
+                        "watermark_id": "stack-watermark.fixture",
+                        "kind": "dependency_ready",
+                        "native_source": {
+                            "source": "preflight",
+                            "preview": {"preview_id": "preview.fixture"},
+                        },
+                    },
+                }
+            ),
+        ]
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def call_tool(self, name, arguments, deadline_ms):
+                self.calls.append((name, arguments, deadline_ms))
+                return responses.pop(0), 3
+
+        client = Client()
+        fixture = {}
+
+        runner.prime_github_stack_signal(client, fixture, 1_000)
+
+        expected = {
+            "signal_id": "stack-signal.fixture",
+            "expected_watermark_id": "stack-watermark.fixture",
+            "format": "json",
+        }
+        self.assertEqual(fixture["github_stack_signal_arguments"], expected)
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(
+            runner.materialize_tool_arguments(
+                {
+                    "name": "tracedecay_github_stack_signal_expand",
+                    "inputSchema": {"type": "object", "properties": {}},
+                },
+                fixture,
+            ),
+            expected,
+        )
+
+
 class WorkflowLifecycleTests(unittest.TestCase):
     SHA_A = "sha256:" + "a" * 64
     SHA_B = "sha256:" + "b" * 64
