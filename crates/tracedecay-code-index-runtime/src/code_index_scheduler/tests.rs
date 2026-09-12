@@ -10,7 +10,9 @@ use crate::code_index_scheduler::feedback_document_identity_from_generation;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_contracts::retrieval::{
-    CodeFacetDimension, CodeFacetRequest, CodeNavigationRequest, CodeTimelineRequest,
+    CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
+    CodeImplementationsRequest, CodeNavigationRequest, CodeTimelineRequest, ImplementationSelector,
+    ModuleApiRequest,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantSnapshot,
@@ -2833,6 +2835,51 @@ fn query_meta() -> RetrievalRequestMeta {
         ResultProjection::Evidence,
         RetrievalOrder::Relevance,
     )
+}
+
+fn install_verified_graph_store(latest: &super::LatestCompleteCodeIndexV1) {
+    let generation = latest.generation.manifest().generation_id.clone();
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active("cancel.callable-graph-projection")
+            .expect("graph cancellation");
+    let publisher =
+        tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore::memory(
+            &cancellation,
+        )
+        .expect("graph publisher");
+    publisher
+        .publish_indexed_with_cancellation(
+            &generation,
+            latest.generation.edges(),
+            latest.generation.chunks().chunks(),
+            &latest.generation.snapshot().files,
+            latest.generation.symbols(),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("publish indexed graph");
+    let graph_store = Arc::new(
+        publisher
+            .verified_store(&generation)
+            .expect("verified graph"),
+    );
+    graph_store
+        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .expect("warm graph catalog");
+    let graph_reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation,
+            Some(latest.generation.snapshot().repository.clone()),
+            latest.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph reader");
+    latest
+        .install_graph_serving(
+            graph_reader,
+            Some(graph_store),
+            super::CodeGraphServingAuthorityV1::Memory,
+        )
+        .expect("install interactive graph serving");
 }
 
 fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
@@ -13044,6 +13091,26 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .occurrence
         .as_str()
         .to_owned();
+    let processor = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("Processor"))
+        .expect("processor trait")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let doubler = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("Doubler"))
+        .expect("doubler type")
+        .occurrence
+        .as_str()
+        .to_owned();
     let references_operation =
         callable_code_operation(CallableCodeOperationKind::References).expect("operation");
     let references_context = application_context(
@@ -13063,7 +13130,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
                 operation: &references_operation,
             },
             &CodeNavigationRequest {
-                node_id: callee,
+                node_id: callee.clone(),
                 scope: graph_request.scope.clone(),
                 meta: query_meta(),
             },
@@ -13079,6 +13146,183 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             .is_empty()
     );
 
+    let cold_repository = latest.generation.snapshot().repository.clone();
+    let cold_worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let cold_privacy_domain = latest.generation.manifest().privacy_domain.clone();
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .expect("mounted worktree");
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        assert!(
+            worktree
+                .text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some(),
+            "the verified graph remains seated on its lightweight generation owner"
+        );
+        Arc::clone(&worktree.scheduler)
+    };
+    drop(latest);
+    let decodes_before = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sealed_decode_count();
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+    macro_rules! assert_graph_only_query {
+        ($kind:expr, $method:ident, $request:expr) => {{
+            let operation = callable_code_operation($kind).expect("operation");
+            let context =
+                application_context(&operation, cold_repository.clone(), cold_worktree.clone());
+            mount_query_authority(
+                &registry,
+                fixture.path(),
+                &context,
+                cold_privacy_domain.clone(),
+            )
+            .await;
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(2),
+                registry.$method(
+                    RetrievalPortContext {
+                        request: &context,
+                        operation: &operation,
+                    },
+                    &$request,
+                ),
+            )
+            .await
+            .expect("graph-only query must not wait on the lexical decode");
+            assert!(
+                matches!(outcome, RetrievalPortOutcome::Completed(_)),
+                "{} must serve from the retained verified graph: {outcome:?}",
+                $kind.as_str(),
+            );
+            assert_eq!(
+                scheduler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .sealed_decode_count(),
+                decodes_before,
+                "{} must not decode the sealed lexical generation",
+                $kind.as_str(),
+            );
+        }};
+    }
+    assert_graph_only_query!(
+        CallableCodeOperationKind::Implementations,
+        implementations,
+        CodeImplementationsRequest {
+            selector: ImplementationSelector::Trait {
+                name: "Processor".to_owned(),
+            },
+            scope: graph_request.scope.clone(),
+            meta: query_meta(),
+        }
+    );
+    assert_graph_only_query!(
+        CallableCodeOperationKind::TypeHierarchy,
+        type_hierarchy,
+        CodeHierarchyRequest {
+            node_id: doubler.clone(),
+            maximum_depth: 2,
+            scope: graph_request.scope.clone(),
+            meta: query_meta(),
+        }
+    );
+    assert_graph_only_query!(
+        CallableCodeOperationKind::Callers,
+        callers,
+        CodeRelationRequest {
+            node_id: callee.clone(),
+            maximum_depth: 2,
+            resolve_trait_dispatch: false,
+            scope: graph_request.scope.clone(),
+            meta: query_meta(),
+        }
+    );
+    assert_graph_only_query!(
+        CallableCodeOperationKind::Impact,
+        impact,
+        CodeImpactRequest {
+            node_id: callee.clone(),
+            maximum_depth: 2,
+            scope: graph_request.scope.clone(),
+            meta: query_meta(),
+        }
+    );
+    assert_graph_only_query!(
+        CallableCodeOperationKind::Declaration,
+        declaration,
+        CodeNavigationRequest {
+            node_id: processor,
+            scope: graph_request.scope.clone(),
+            meta: query_meta(),
+        }
+    );
+    assert_graph_only_query!(
+        CallableCodeOperationKind::TypeDefinition,
+        type_definition,
+        CodeNavigationRequest {
+            node_id: doubler,
+            scope: graph_request.scope.clone(),
+            meta: query_meta(),
+        }
+    );
+    assert_graph_only_query!(
+        CallableCodeOperationKind::References,
+        references,
+        CodeNavigationRequest {
+            node_id: callee.clone(),
+            scope: graph_request.scope.clone(),
+            meta: query_meta(),
+        }
+    );
+    assert_graph_only_query!(
+        CallableCodeOperationKind::ModuleApi,
+        module_api,
+        ModuleApiRequest {
+            path: "src/lib.rs".to_owned(),
+            scope: graph_request.scope.clone(),
+            meta: query_meta(),
+        }
+    );
+    let graph = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &graph_request,
+        )
+        .await;
+    assert!(
+        matches!(graph, RetrievalPortOutcome::Completed(_)),
+        "a generation-pinned graph query must use the retained verified graph: {graph:?}"
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        decodes_before,
+        "graph-only query admission must not decode the sealed lexical generation"
+    );
+
+    drop(held_decode);
     registry.shutdown().await;
 }
 
@@ -13112,7 +13356,7 @@ fn callers_page_meta(page_size: u32, cursor: Option<OpaqueCursor>) -> RetrievalR
 }
 
 #[tokio::test]
-async fn callers_page_hydrates_only_the_requested_slice() {
+async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slice() {
     let sources = caller_star_sources();
     let files = sources
         .iter()
@@ -13131,6 +13375,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         .await
         .expect("mount daemon-owned scheduler");
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    install_verified_graph_store(&latest);
     let generation = latest.generation.manifest().generation_id.clone();
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
@@ -13147,23 +13392,6 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         .iter()
         .find(|record| record.qualified_name.ends_with("hub"))
         .expect("hub symbol");
-    let expected_keys = super::queries::relation_keys(
-        &latest,
-        &hub.occurrence,
-        &[RelationEdgeKindV1::Calls],
-        true,
-        1,
-        &scope,
-    );
-    let expected = super::queries::hydrate_relation_records(
-        &latest,
-        &expected_keys,
-        &registry.relation_symbol_hydrations,
-    )
-    .expect("hydrate all keys");
-    assert_eq!(expected.len(), CALLER_STAR);
-    let _ = registry.take_relation_symbol_hydrations();
-
     let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
     let context = application_context(&operation, repository, worktree);
     mount_query_authority(
@@ -13190,16 +13418,16 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         )
         .await;
     let first_page = match first {
-        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("first callers page"),
-        other => panic!("expected completed callers page, got {other:?}"),
+        RetrievalPortOutcome::Partial(evidence) => {
+            assert_eq!(evidence.coverage.eligible, Some(33));
+            assert_eq!(evidence.omissions.len(), 1);
+            assert_eq!(evidence.omissions[0].reason, OmissionReason::Budget);
+            evidence.payload.expect("first callers page")
+        }
+        other => panic!("expected capped callers page, got {other:?}"),
     };
     assert_eq!(first_page.items.len(), CALLER_PAGE as usize);
-    assert_eq!(first_page.total, Some(CALLER_STAR as u64));
-    assert_eq!(
-        first_page.items,
-        expected[..CALLER_PAGE as usize],
-        "page 1 must match the pre-change (depth, node_id) order"
-    );
+    assert_eq!(first_page.total, Some(32));
     let page1_hydrations = registry.take_relation_symbol_hydrations();
     assert_eq!(
         page1_hydrations,
@@ -13225,14 +13453,10 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         )
         .await;
     let second_page = match second {
-        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("second callers page"),
-        other => panic!("expected completed callers continuation, got {other:?}"),
+        RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("second callers page"),
+        other => panic!("expected capped callers continuation, got {other:?}"),
     };
     assert_eq!(second_page.items.len(), CALLER_PAGE as usize);
-    assert_eq!(
-        second_page.items,
-        expected[CALLER_PAGE as usize..CALLER_PAGE as usize * 2]
-    );
     assert!(
         second_page
             .items
@@ -13268,17 +13492,23 @@ async fn callers_page_hydrates_only_the_requested_slice() {
             )
             .await
         {
-            RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("callers page"),
-            other => panic!("expected completed callers page, got {other:?}"),
+            RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("callers page"),
+            other => panic!("expected capped callers page, got {other:?}"),
         };
         collected.extend(page.items);
         cursor = page.next_cursor;
     }
     let _ = registry.take_relation_symbol_hydrations();
     assert_eq!(
-        collected, expected,
-        "concatenated pages must equal the full (depth, occurrence) neighborhood"
+        collected.len(),
+        32,
+        "the declared candidate cap is enforced"
     );
+    let identities = collected
+        .iter()
+        .map(|record| record.symbol.node_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(identities.len(), collected.len(), "capped rows stay unique");
     registry.shutdown().await;
 }
 
@@ -13305,6 +13535,7 @@ async fn callers_candidate_cursor_continues_on_its_immutable_generation() {
         .await
         .expect("mount daemon-owned scheduler");
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    install_verified_graph_store(&latest);
     let generation_a = latest.generation.manifest().generation_id.clone();
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
