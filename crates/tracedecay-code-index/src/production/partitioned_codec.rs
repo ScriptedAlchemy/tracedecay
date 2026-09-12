@@ -3091,8 +3091,8 @@ mod tests {
                 "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
                 "snapshot": {
                     "files": [
-                        { "file_occurrence_id": FIXTURE_FILE },
-                        { "file_occurrence_id": "file.partitioned.missing" }
+                        { "file_occurrence_id": FIXTURE_FILE, "disposition": "present" },
+                        { "file_occurrence_id": "file.partitioned.missing", "disposition": "present" }
                     ]
                 },
                 "file_segments": [{
