@@ -1228,7 +1228,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_lcm_load_session": cls.response(
                 '{"messages":[{"store_id":41,"content":"catalog sweep captured LCM message"}]}'
             ),
-            "tracedecay_admin_cli": cls.response(
+            "tracedecay_active_project": cls.response(
                 '{"project_id":"project.fixture"}'
             ),
             "tracedecay_configuration_set": cls.response(
@@ -1274,7 +1274,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_git_hunks",
             "tracedecay_automation_run_list",
             "tracedecay_lcm_load_session",
-            "tracedecay_admin_cli",
+            "tracedecay_active_project",
             "tracedecay_configuration_set",
             "tracedecay_configuration_unset",
             "tracedecay_configuration_list",
@@ -1321,6 +1321,10 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
         self.assertEqual(fixture["lcm_store_id"], 41)
         self.assertEqual(fixture["project_id"], "project.fixture")
+        self.assertIn(
+            ("tracedecay_active_project", {"format": "json"}),
+            client.calls,
+        )
         self.assertEqual(fixture["configuration_scalar_value"], {"kind": "boolean", "value": False})
         self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
         self.assertEqual(
