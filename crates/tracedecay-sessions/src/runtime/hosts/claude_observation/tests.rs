@@ -113,7 +113,7 @@ async fn capture_frame_routes_through_observation_capture_port() {
     let identity = identify_claude_source(&fixture.transcript).unwrap();
     let mut scan = scan_claude_source_frames(identity.clone(), StoredCursor::default(), None)
         .expect("scan complete spy frame");
-    let source = ClaudeSourceIdentityV1::for_source(
+    let source = ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id).unwrap(),
         SessionId::new(identity.source_id).unwrap(),
     )
@@ -126,7 +126,7 @@ async fn capture_frame_routes_through_observation_capture_port() {
         &FrameCaptureContext {
             source,
             scope: ObservationScopeV1::Profile,
-            generation: ClaudeFileGenerationV1::new(scan.file_generation).unwrap(),
+            generation: ObservationSourceGenerationV1::new(scan.file_generation).unwrap(),
             file_identity: scan.file_identity,
             retention_class: RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS).unwrap(),
             cancellation: ObservationCancellation::default(),
@@ -294,9 +294,9 @@ impl Fixture {
     }
 }
 
-fn observation_source(path: &Path) -> ClaudeSourceIdentityV1 {
+fn observation_source(path: &Path) -> ObservationSourceIdentityV1 {
     let identity = identify_claude_source(path).expect("Claude source identity");
-    ClaudeSourceIdentityV1::for_source(
+    ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id).unwrap(),
         SessionId::new(identity.source_id).unwrap(),
     )
@@ -306,11 +306,12 @@ fn observation_source(path: &Path) -> ClaudeSourceIdentityV1 {
 #[test]
 fn observation_cursor_is_the_only_scan_authority() {
     assert_eq!(scanner_cursor(None), StoredCursor::default());
-    let source = ClaudeSourceIdentityV1::new(SessionId::new("cursor-authority").unwrap()).unwrap();
-    let observation = ClaudeSourceCursorV1::new(
+    let source =
+        ObservationSourceIdentityV1::new(SessionId::new("cursor-authority").unwrap()).unwrap();
+    let observation = ObservationSourceCursorV1::new(
         source,
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(73).unwrap(),
+        ObservationSourceGenerationV1::new(73).unwrap(),
         1_200,
     )
     .unwrap();
@@ -813,7 +814,7 @@ async fn commit_before_ack_retry_projects_without_rescan_or_duplicate() {
     source_adapter
         .retain_scoped_frames(&mut scan, &fixture.profile)
         .expect("retain profile-scoped retry frame");
-    let source = ClaudeSourceIdentityV1::for_source(
+    let source = ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id).unwrap(),
         SessionId::new(identity.source_id).unwrap(),
     )
@@ -825,7 +826,7 @@ async fn commit_before_ack_retry_projects_without_rescan_or_duplicate() {
         &FrameCaptureContext {
             source,
             scope: ObservationScopeV1::Profile,
-            generation: ClaudeFileGenerationV1::new(scan.file_generation).unwrap(),
+            generation: ObservationSourceGenerationV1::new(scan.file_generation).unwrap(),
             file_identity: scan.file_identity,
             retention_class: RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS).unwrap(),
             cancellation: ObservationCancellation::default(),

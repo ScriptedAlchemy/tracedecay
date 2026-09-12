@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde_json::Value;
 use tracedecay_domain::{
-    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceIdentityV1,
-    ObservationScopeV1, RetentionClass, SessionId,
+    ObservationIdentityMaterialV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, RetentionClass, SessionId,
 };
 
 use crate::runtime::claude_observation::CLAUDE_TRANSCRIPT_RETENTION_CLASS;
@@ -259,18 +259,18 @@ pub(super) fn try_parse_claude_transcript(
     // sanitizer-issued payload as observation-first ingestion, never the
     // parser's raw `Value` relabelled as sanitized.
     let sanitizer = ClaudeRecordSanitizerV1::claude_v1()?;
-    let source = ClaudeSourceIdentityV1::for_source(
+    let source = ObservationSourceIdentityV1::for_source(
         SessionId::new(scan.identity.session_id.clone())?,
         SessionId::new(scan.identity.source_id.clone())?,
     )?;
-    let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
+    let generation = ObservationSourceGenerationV1::new(scan.file_generation)?;
     let retention_class = RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS)?;
     for frame in &mut scan.frames {
         let parsed = frame
             .take_parsed_record()
             .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
         let range = *parsed.source_range();
-        let identity = ClaudeObservationIdentityMaterialV1::new(
+        let identity = ObservationIdentityMaterialV1::new(
             source.clone(),
             ObservationScopeV1::Profile,
             generation,

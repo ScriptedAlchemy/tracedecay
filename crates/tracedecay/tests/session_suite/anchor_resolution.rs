@@ -9,11 +9,11 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorResolutionStateV2, ClaudeByteRangeV1, ClaudeFileGenerationV1,
-    ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ComponentVersion, DurableClaudeObservationV1, FactLineageEventV1, FactOwnerV1,
-    ObservationScopeV1, PayloadAccessState, PayloadReferenceV1, ProjectionGenerationId,
-    RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
+    AnchorResolutionStateV2, ComponentVersion, DurableClaudeObservationV1, FactLineageEventV1,
+    FactOwnerV1, ObservationIdentityMaterialV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadAccessState, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
+    RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
     RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, UtcMicros,
     VectorWatermark, WatermarkDriftV1,
@@ -37,8 +37,8 @@ use tracedecay_store::{
 const GENERATION: u64 = 7;
 const PROJECTION_SHARD: &str = "observation.projection";
 
-fn source() -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new("session.anchor-resolution").unwrap()).unwrap()
+fn source() -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(SessionId::new("session.anchor-resolution").unwrap()).unwrap()
 }
 
 fn scope() -> ObservationScopeV1 {
@@ -62,11 +62,11 @@ fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableCla
         Some(payload_reference),
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::new(
         source(),
         scope(),
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
-        ClaudeByteRangeV1::new(start, end).unwrap(),
+        ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+        ObservationSourceRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
     DurableClaudeObservationV1::new(
@@ -80,9 +80,9 @@ fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableCla
 
 fn write(
     observation: DurableClaudeObservationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> ObservationWrite {
-    let next_cursor = ClaudeSourceCursorV1::new(
+    let next_cursor = ObservationSourceCursorV1::new(
         observation.source().clone(),
         observation.scope().clone(),
         observation.identity().generation(),
