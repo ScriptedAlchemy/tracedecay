@@ -1,3 +1,5 @@
+//! Shared mechanics for the closed Work and Workflow CLI surfaces.
+
 use std::io::Read;
 use std::path::Path;
 
