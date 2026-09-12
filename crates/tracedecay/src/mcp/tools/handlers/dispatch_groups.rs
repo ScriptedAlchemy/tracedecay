@@ -1444,7 +1444,6 @@ fn dispatch_session_workflow_tools_inner<'a>(
                     admitted_graph_query(cg, &options, "file_dependents"),
                     args,
                     options.application_cancellation.clone(),
-                    options.code_index_publication_identity.as_deref(),
                 )
                 .await
             }
