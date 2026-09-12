@@ -478,7 +478,10 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     })
     .await
     .unwrap();
-    assert_eq!(again.commits_attributed, 0, "re-sweeping an attributed commit is a no-op");
+    assert_eq!(
+        again.commits_attributed, 0,
+        "re-sweeping an attributed commit is a no-op"
+    );
     assert_eq!(again.unavailable_references, 0);
 }
 
@@ -503,7 +506,10 @@ async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() 
     })
     .await
     .expect("the empty start is not an error");
-    assert_eq!(attribution, git_correlation::CommitAttributionSweepOutcome::default());
+    assert_eq!(
+        attribution,
+        git_correlation::CommitAttributionSweepOutcome::default()
+    );
 }
 
 #[tokio::test]
