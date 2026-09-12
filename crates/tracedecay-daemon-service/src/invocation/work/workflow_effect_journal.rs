@@ -393,7 +393,20 @@ pub(super) fn workflow_coordination_effect_problem(
         Some(ApplicationProblem::InvalidRequest { diagnostic, .. }) => {
             WorkflowEffectProblemV1::InvalidRequestDiagnostic(diagnostic)
         }
-        _ => workflow_effect_problem(workflow_coordination_problem(error)),
+        Some(
+            ApplicationProblem::NotFoundOrNotAuthorized { .. }
+            | ApplicationProblem::Conflict { .. }
+            | ApplicationProblem::PartialEffect { .. }
+            | ApplicationProblem::Stale { .. }
+            | ApplicationProblem::Unsupported { .. }
+            | ApplicationProblem::Unavailable { .. }
+            | ApplicationProblem::ExecutionFailed { .. }
+            | ApplicationProblem::ResetRequired { .. }
+            | ApplicationProblem::Saturated { .. }
+            | ApplicationProblem::Cancelled { .. }
+            | ApplicationProblem::TimedOut { .. },
+        )
+        | None => workflow_effect_problem(workflow_coordination_problem(error)),
     }
 }
 
