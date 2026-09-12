@@ -19,7 +19,7 @@ use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
 use crate::mcp::tools::handlers::{
     ToolCallRegistryOptions, handle_tool_call_with_registry_options,
 };
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_mcp::ToolResult;
 
 fn available_authority() -> CurrentRemoteAuthorityStateV1 {

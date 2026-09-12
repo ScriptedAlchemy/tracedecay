@@ -24,7 +24,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn call_mcp_tool_for_test(
         &self,
-        cg: &crate::tracedecay::TraceDecay,
+        cg: &crate::project::TraceDecay,
         tool_name: &str,
         arguments: serde_json::Value,
         server_stats: Option<serde_json::Value>,

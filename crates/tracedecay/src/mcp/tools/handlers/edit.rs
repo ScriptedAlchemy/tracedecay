@@ -13,7 +13,7 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::support::{generic_tool_result, rendered_tool_result};
@@ -676,7 +676,7 @@ mod tests {
     use tracedecay_store::ProjectId;
 
     use super::*;
-    use crate::tracedecay::TraceDecayOpenOptions;
+    use crate::project::TraceDecayOpenOptions;
     use tracedecay_contracts::source_edit::EditResult;
     use tracedecay_contracts::source_edit::{
         SourceEditSurfaceOutcomeV1, SourceEditSurfaceResultV1,

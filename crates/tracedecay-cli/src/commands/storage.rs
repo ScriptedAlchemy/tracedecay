@@ -805,7 +805,7 @@ fn append_orphan_manifest_rows(
         .collect();
     let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
         profile_root,
-        tracedecay::tracedecay::current_timestamp(),
+        tracedecay::project::current_timestamp(),
     );
     for plan in report.plans {
         if plan.status

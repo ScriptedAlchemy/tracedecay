@@ -170,7 +170,7 @@ use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
     tool_dispatches_registered_project_reader,
 };
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,

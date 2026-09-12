@@ -32,8 +32,8 @@ use tokio::sync::Mutex;
 #[cfg(unix)]
 use tracedecay::mcp::handle_tool_call;
 #[cfg(unix)]
-use tracedecay::tracedecay::TraceDecay;
-use tracedecay::tracedecay::TraceDecayOpenOptions;
+use tracedecay::project::TraceDecay;
+use tracedecay::project::TraceDecayOpenOptions;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     create_managed_skill,

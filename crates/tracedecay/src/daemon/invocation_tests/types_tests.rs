@@ -920,7 +920,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let graph = host
         .initialize_project_graph_for_test(
             project.path(),
-            crate::tracedecay::TraceDecayOpenOptions::default(),
+            crate::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("initialized project graph");

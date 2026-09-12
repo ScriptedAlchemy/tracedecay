@@ -5,7 +5,7 @@ use tracedecay_contracts::{
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_domain::errors::{Result, TraceDecayError};

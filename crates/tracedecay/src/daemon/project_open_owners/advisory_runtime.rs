@@ -528,7 +528,7 @@ async fn install_project_open_context_scout_configuration(
 /// exact current-generation authority that maps saved-edit hooks back to
 /// indexed documents.
 struct ProjectOpenScoutProducerV1 {
-    graph: Arc<crate::tracedecay::TraceDecay>,
+    graph: Arc<crate::project::TraceDecay>,
     scout_owner: Arc<ProjectContextScoutOwnerV1>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
     feedback_cycle: tokio::sync::RwLock<ProjectOpenFeedbackCyclePinV1>,

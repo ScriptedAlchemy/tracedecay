@@ -736,7 +736,7 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 
 pub async fn get_config_path_with_identity(project_root: &Path) -> PathBuf {
     if let Ok(layout) =
-        crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root).await
+        crate::project::TraceDecay::resolve_store_layout_for_identity(project_root).await
     {
         return layout.config_path;
     }
@@ -755,7 +755,7 @@ pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf
     }
     let candidate = tracedecay_runtime_core::worktree::git_worktree_root(start)
         .unwrap_or_else(|| start.to_path_buf());
-    if crate::tracedecay::TraceDecay::has_initialized_store(&candidate).await {
+    if crate::project::TraceDecay::has_initialized_store(&candidate).await {
         Some(candidate)
     } else {
         None

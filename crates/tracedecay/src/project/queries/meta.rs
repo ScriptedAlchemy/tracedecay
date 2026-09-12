@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_application::tracedecay::{
     add_local_counter, get_local_counter, get_tokens_saved, reset_local_counter, set_tokens_saved,
 };
