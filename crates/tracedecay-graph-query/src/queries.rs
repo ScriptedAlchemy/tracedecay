@@ -728,6 +728,11 @@ fn fold_health_aggregates(
         .iter()
         .filter(|(_, (_, record))| is_test_marker(record))
         .map(|(occurrence, _)| occurrence.clone())
+        .chain(edges.iter().filter_map(|edge| {
+            (edge.neighbor.occurrence == edge.edge.from_occurrence
+                && edge.neighbor.metadata.as_ref().is_some_and(is_test_marker))
+            .then(|| edge.edge.from_occurrence.clone())
+        }))
         .collect::<HashSet<_>>();
     let test_annotated = edges
         .iter()
@@ -802,17 +807,51 @@ fn path_is_within(path: &str, directory: &str) -> bool {
 
 #[cfg(test)]
 mod path_scope_tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+    use std::fmt::Debug;
 
     use tracedecay_code_index::graph_projection::{
         CodeGraphSemanticEdgeV1, CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
     };
+    use tracedecay_code_index::lineage::LineageSymbolRecordV1;
     use tracedecay_domain::{
-        CanonicalRelationEdgeV1, EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision,
-        RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
+        CanonicalRelationEdgeV1, ComplexityAnalysisV1, EdgeAuthorityV1, FileOccurrenceId,
+        LanguageDescriptorRevision, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
     };
 
-    use super::{file_adjacency, path_is_within};
+    use super::{file_adjacency, fold_health_aggregates, path_is_within};
+
+    fn digest<T>(byte: char) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: Debug,
+    {
+        T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+    }
+
+    fn metadata(occurrence: &str, name: &str, kind: &str) -> LineageSymbolRecordV1 {
+        LineageSymbolRecordV1 {
+            occurrence: SymbolOccurrenceId::new(occurrence).expect("occurrence"),
+            identity: digest('1'),
+            qualified_name: name.to_owned(),
+            simple_name: name.to_owned(),
+            kind: kind.to_owned(),
+            visibility: "private".to_owned(),
+            branches: 0,
+            loops: 0,
+            max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            line_span: 1,
+            start_line: 1,
+            signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
+            skip_test_coverage: false,
+            file_identity: digest('2'),
+            content_digest: digest('3'),
+        }
+    }
 
     fn symbol(occurrence: &str, file: &str) -> CodeGraphSymbolSummaryV1 {
         CodeGraphSymbolSummaryV1 {
@@ -905,5 +944,29 @@ mod path_scope_tests {
                 })
                 .collect()
         );
+    }
+
+    #[test]
+    fn scoped_health_recognizes_an_external_test_marker_from_the_incoming_edge() {
+        let inside_record = metadata("symbol.inside_test", "inside_test", "function");
+        let marker_record = metadata("symbol.test_marker", "test", "annotation_usage");
+        let mut inside = symbol("symbol.inside_test", "src/scoped/inside.rs");
+        inside.metadata = Some(inside_record.clone());
+        let mut marker = symbol("symbol.test_marker", "src/outside.rs");
+        marker.metadata = Some(marker_record);
+        let mut annotation = edge(&marker, &inside);
+        annotation.edge.kind = RelationEdgeKindV1::Annotates;
+        let aggregates = fold_health_aggregates(
+            HashMap::from([(
+                inside.occurrence.clone(),
+                ("src/scoped/inside.rs".to_owned(), &inside_record),
+            )]),
+            &[annotation],
+            Some("src/scoped"),
+        );
+
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].function_methods, 1);
+        assert_eq!(aggregates[0].dead_function_methods, 0);
     }
 }
