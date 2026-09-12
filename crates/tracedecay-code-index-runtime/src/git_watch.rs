@@ -158,7 +158,7 @@ pub struct GitWatcherInner {
     pub config: SyncConfig,
     maintenance: MaintenanceCoordinator,
     code_index_schedulers: Option<super::code_index_scheduler::CodeIndexSchedulerRegistryV1>,
-    cancellation: tracedecay_session_memory::context::CancellationToken,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     /// Whether watching is enabled at all (`auto_watch`). When false every
     /// method is a no-op so the daemon runs exactly as before this feature.
     enabled: bool,
@@ -218,7 +218,7 @@ impl GitWatcher {
                 config: _config,
                 maintenance,
                 code_index_schedulers,
-                cancellation: tracedecay_session_memory::context::CancellationToken::new(),
+                cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
                 enabled,
                 admission: hotpath::mutex!(
                     std::sync::Mutex::new(()),
@@ -888,7 +888,7 @@ fn operation_state_blocking(
 
 #[cfg(test)]
 fn operation_state(state: &WatchState, max_worktrees: usize) -> OperationState {
-    let daemon_cancellation = tracedecay_session_memory::context::CancellationToken::new();
+    let daemon_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
     let cancellation = state.cancellation(&daemon_cancellation);
     let Some(deadline) = StdInstant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
         return OperationState::Incomplete;
