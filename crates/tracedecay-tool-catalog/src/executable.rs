@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
+use tracedecay_domain::canonical_sha256;
 
 use crate::binding::SurfaceOperationName;
 use crate::id::{BindingId, CapabilityId, CatalogDigest, CodecBindingKey, OperationId, ServiceId};
@@ -60,16 +61,20 @@ impl SchemaBodyAuthorityV1 {
             }
         })?;
         let body = canonicalize_json(body);
-        let bytes =
-            serde_json::to_vec(&body).map_err(|_| CatalogValidationError::InvalidValue {
-                field: "schema body",
-                reason: "canonical schema body could not be encoded",
-            })?;
+        let digest = canonical_sha256(&body).map_err(|_| CatalogValidationError::InvalidValue {
+            field: "schema body",
+            reason: "canonical schema body could not be hashed",
+        })?;
         Ok(Self {
             schema_ref,
             body,
             rust_type_path: RustTypePathV1::new(rust_type_path)?,
-            digest: CatalogDigest::sha256(bytes),
+            digest: CatalogDigest::from_manifest_digest(digest).map_err(|_| {
+                CatalogValidationError::InvalidValue {
+                    field: "schema body digest",
+                    reason: "domain digest was not canonical SHA-256",
+                }
+            })?,
         })
     }
 
@@ -86,8 +91,8 @@ impl SchemaBodyAuthorityV1 {
         self.rust_type_path.as_str()
     }
 
-    pub const fn digest(&self) -> CatalogDigest {
-        self.digest
+    pub fn digest(&self) -> CatalogDigest {
+        self.digest.clone()
     }
 }
 
