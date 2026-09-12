@@ -88,12 +88,14 @@ def _object_field(response: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
-_WORKFLOW_LIFECYCLE_EFFECTS = frozenset(
+WORKFLOW_LIFECYCLE_EFFECTS = frozenset(
     {
         "tracedecay_workflow_register_definition",
         "tracedecay_workflow_activate_definition",
         "tracedecay_workflow_retire_definition",
         "tracedecay_workflow_reject_definition",
+        "tracedecay_workflow_handoff_issue",
+        "tracedecay_workflow_handoff_redeem",
         "tracedecay_workflow_start_run",
         "tracedecay_workflow_pause_run",
         "tracedecay_workflow_resume_run",
@@ -225,6 +227,48 @@ def _workflow_run(
     raise JourneyError(f"Workflow run omitted {run_id} in status {expected}")
 
 
+def _workflow_effect_authority(response: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    for value in objects(response):
+        actor = value.get("actor")
+        scope = value.get("scope")
+        if (
+            isinstance(actor, str)
+            and isinstance(scope, dict)
+            and all(
+                isinstance(scope.get(field), str)
+                for field in ("project_id", "repository_id", "worktree_id")
+            )
+        ):
+            return actor, scope
+    raise JourneyError("Workflow effect omitted its admitted actor and scope")
+
+
+def _handoff_grant(response: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("scope") == scope
+            and isinstance(value.get("token_digest"), str)
+            and isinstance(value.get("frontier_digest"), str)
+            and isinstance(value.get("frontier"), dict)
+        ):
+            return value
+    raise JourneyError("handoff issue omitted the exact grant")
+
+
+def _handoff_redeemed(
+    response: dict[str, Any], scope: dict[str, Any], frontier_digest: str,
+) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("scope") == scope
+            and value.get("frontier_digest") == frontier_digest
+            and isinstance(value.get("frontier"), dict)
+            and isinstance(value.get("redeemed_at"), int)
+        ):
+            return value
+    raise JourneyError("handoff redeem omitted the issued grant frontier")
+
+
 def _prepare_workflow_effect_journey(
     name: str,
     fixture: dict[str, Any],
@@ -236,6 +280,91 @@ def _prepare_workflow_effect_journey(
 ) -> PreparedJourney:
     retained = fixture["workflow_effect_arguments"]
     definition_id = fixture["workflow_definition_id"]
+    if name in {
+        "tracedecay_workflow_handoff_issue",
+        "tracedecay_workflow_handoff_redeem",
+    }:
+        suffix = str(time.monotonic_ns())
+        actor = fixture["workflow_actor"]
+        admitted_scope = fixture["workflow_scope"]
+        scope = {
+            "project_id": admitted_scope["project_id"],
+            "repository_id": admitted_scope["repository_id"],
+            "worktree_id": admitted_scope["worktree_id"],
+            "definition_id": definition_id,
+            "definition_version": 1,
+            "step_id": fixture["workflow_definition_v1"]["steps"][0]["step_id"],
+            "task_id": fixture["work_task_id"],
+            "thread_id": f"thread.tool-sweep.{suffix}",
+            "run_id": fixture["workflow_run_id"],
+            "from_actor_id": actor,
+            "to_actor_id": actor,
+        }
+        frontier = {
+            "task_id": fixture["work_task_id"],
+            "work_version": fixture["work_admitted_version"]["graph_version"],
+            "attempts": [fixture["work_attempt_frontier"]],
+            "unknowns": [],
+            "blockers": [],
+            "legal_actions": ["Inspect the redeemed disposable frontier."],
+            "lineage": {
+                "issued_by": actor,
+                "issued_at": int(time.time() * 1_000_000),
+                "prior_frontier_digest": None,
+            },
+        }
+        secret = f"tool-sweep-handoff-{suffix}-" + "s" * 32
+        issue_arguments = {
+            "scope": scope,
+            "secret": secret,
+            "frontier": frontier,
+            "format": "json",
+        }
+        redeem_arguments = {
+            "secret": secret,
+            "expected_scope": scope,
+            "format": "json",
+        }
+        issued: dict[str, Any] | None = None
+        if name == "tracedecay_workflow_handoff_redeem":
+            issued = _handoff_grant(
+                call(
+                    "tracedecay_workflow_handoff_issue",
+                    issue_arguments,
+                    deadline("tracedecay_workflow_handoff_issue"),
+                ),
+                scope,
+            )
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if name == "tracedecay_workflow_handoff_issue":
+                grant = _handoff_grant(response, scope)
+                replayed = _handoff_grant(
+                    call(
+                        "tracedecay_workflow_handoff_issue",
+                        issue_arguments,
+                        deadline("tracedecay_workflow_handoff_issue"),
+                    ),
+                    scope,
+                )
+                if replayed["token_digest"] != grant["token_digest"]:
+                    raise JourneyError("handoff issue replay changed the grant identity")
+                redeemed = call(
+                    "tracedecay_workflow_handoff_redeem",
+                    redeem_arguments,
+                    deadline("tracedecay_workflow_handoff_redeem"),
+                )
+                _handoff_redeemed(redeemed, scope, grant["frontier_digest"])
+                return "issued grant replayed exactly, then consumed with its scope and frontier"
+            assert issued is not None
+            _handoff_redeemed(response, scope, issued["frontier_digest"])
+            return "issued grant redeemed once in the disposable store"
+
+        return PreparedJourney(
+            issue_arguments if name == "tracedecay_workflow_handoff_issue" else redeem_arguments,
+            cleanup,
+            "contained",
+        )
     if name in {
         "tracedecay_workflow_register_definition",
         "tracedecay_workflow_activate_definition",
@@ -535,6 +664,7 @@ def prime_workflow_lifecycle(
         deadline("tracedecay_workflow_activate_definition"),
     )
     active = _workflow_disposition(activated, definition_id, "active")
+    workflow_actor, workflow_scope = _workflow_effect_authority(activated)
 
     execution_snapshot = fixture["work_execution_snapshot"]
     route = execution_snapshot.get("route")
@@ -634,6 +764,8 @@ def prime_workflow_lifecycle(
             "workflow_definition_id": definition_id,
             "workflow_definition_v1": definition_v1,
             "workflow_run_id": run_id,
+            "workflow_actor": workflow_actor,
+            "workflow_scope": workflow_scope,
             "workflow_effect_arguments": {
                 "tracedecay_workflow_register_definition": {
                     "definition": definition_v1,
@@ -678,7 +810,7 @@ def prime_workflow_lifecycle(
             },
         }
     )
-    if effect_target in _WORKFLOW_LIFECYCLE_EFFECTS:
+    if effect_target in WORKFLOW_LIFECYCLE_EFFECTS:
         fixture["workflow_effect_journey"] = _prepare_workflow_effect_journey(
             effect_target,
             fixture,
@@ -899,6 +1031,15 @@ def prime_work_lifecycle(
     )
     if _object_field(cancelled, "identity").get("attempt_id") != attempt_id:
         raise JourneyError("Work cancellation did not retain the attempt identity")
+    cancelled_attempt = next(
+        (
+            value
+            for value in objects(cancelled)
+            if value.get("identity") == started_identity
+            and isinstance(value.get("state"), str)
+        ),
+        None,
+    )
 
     duplicate_attempt_id = f"attempt.duplicate-probe.tool-sweep.{suffix}"
     duplicate_start = {
@@ -962,6 +1103,11 @@ def prime_work_lifecycle(
             "work_status_arguments": status_arguments,
             "work_duplicate_arguments": duplicate_arguments,
             "work_duplicate_identity": duplicate_identity,
+            "work_attempt_frontier": {
+                "identity": started_identity,
+                "state": cancelled_attempt["state"] if cancelled_attempt else "cancelled",
+                "evidence_digest": None,
+            },
             "work_effect_arguments": {
                 "tracedecay_work_create": create_request,
                 "tracedecay_work_accept_proposal": accept_request,

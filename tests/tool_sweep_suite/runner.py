@@ -25,6 +25,7 @@ if str(SUITE_DIR) not in sys.path:
 from dispatch_policy import READ_EFFECTS, ToolPolicy, decode_tool_policy
 from journeys import (
     JourneyError,
+    WORKFLOW_LIFECYCLE_EFFECTS,
     api_migration_plan_arguments,
     prepare as prepare_journey,
     prime_work_lifecycle,

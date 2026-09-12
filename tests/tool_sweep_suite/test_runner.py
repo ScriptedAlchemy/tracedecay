@@ -1807,7 +1807,16 @@ class WorkflowLifecycleTests(unittest.TestCase):
             self.definitions = {}
             self.dispositions = {}
             self.runs = {}
+            self.handoffs = {}
             self.calls = []
+            self.actor = "actor.tool-sweep"
+            self.scope = {
+                "project_id": "project.fixture",
+                "repository_id": "repository.fixture",
+                "worktree_id": "worktree.fixture",
+                "reference": None,
+                "scope_digest": self.owner.SHA_A,
+            }
 
         def response(self, payload):
             return {"payload": payload}
@@ -1855,9 +1864,31 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 }[name]
                 key = (arguments["definition_id"], arguments["definition_version"])
                 self.dispositions[key] = {"state": state, "revision": revision}
+                return {
+                    "payload": {
+                        "definition_id": key[0], "definition_version": key[1],
+                        "state": state, "revision": revision,
+                    },
+                    "receipt": {"actor": self.actor, "scope": self.scope},
+                }
+            if name == "tracedecay_workflow_handoff_issue":
+                grant = {
+                    "scope": arguments["scope"],
+                    "token_digest": self.owner.SHA_B,
+                    "issued_at": 10,
+                    "expires_at": 60_000_010,
+                    "frontier": arguments["frontier"],
+                    "frontier_digest": self.owner.SHA_C,
+                }
+                self.handoffs[arguments["secret"]] = grant
+                return self.response(grant)
+            if name == "tracedecay_workflow_handoff_redeem":
+                grant = self.handoffs.pop(arguments["secret"])
                 return self.response({
-                    "definition_id": key[0], "definition_version": key[1],
-                    "state": state, "revision": revision,
+                    "scope": arguments["expected_scope"],
+                    "frontier": grant["frontier"],
+                    "frontier_digest": grant["frontier_digest"],
+                    "redeemed_at": 20,
                 })
             if name == "tracedecay_workflow_start_run":
                 run = {"run_id": arguments["run_id"], "status": "running", "sequence": 1}
@@ -1909,6 +1940,17 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 "backend": "codex_cli",
                 "model": "fixture-model",
             },
+            "work_task_id": "task.fixture",
+            "work_admitted_version": {"graph_version": 4},
+            "work_attempt_frontier": {
+                "identity": {
+                    "task_id": "task.fixture",
+                    "run_id": "run.fixture",
+                    "attempt_id": "attempt.fixture",
+                },
+                "state": "cancelled",
+                "evidence_digest": None,
+            },
         }
 
     def test_shared_lifecycle_consumes_public_pins_and_reaches_terminal_states(self) -> None:
@@ -1931,6 +1973,17 @@ class WorkflowLifecycleTests(unittest.TestCase):
         self.assertEqual(
             fixture["workflow_definition_v1"]["pinned_catalog_digest"], self.SHA_C
         )
+        self.assertEqual(
+            set(fixture["workflow_read_arguments"]),
+            {
+                "tracedecay_workflow_validate_definition",
+                "tracedecay_workflow_get_definition",
+                "tracedecay_workflow_list_definitions",
+                "tracedecay_workflow_definition_history",
+                "tracedecay_workflow_diff_definition",
+                "tracedecay_workflow_get_run",
+            },
+        )
 
     def test_pause_effect_is_contained_through_resume_cancel_and_retire(self) -> None:
         runner = load_runner()
@@ -1949,6 +2002,23 @@ class WorkflowLifecycleTests(unittest.TestCase):
         self.assertEqual(prepared.settlement, "contained")
         self.assertEqual(effect_run["status"], "cancelled")
         self.assertIn("retired", note)
+
+    def test_every_workflow_effect_has_a_contained_real_journey(self) -> None:
+        runner = load_runner()
+        for name in sorted(runner.WORKFLOW_LIFECYCLE_EFFECTS):
+            with self.subTest(name=name):
+                runtime = self.Runtime(self)
+                fixture = self.fixture()
+                runner.prime_workflow_lifecycle(
+                    fixture, runtime.call, runtime.probe, lambda _name: 1_000, name
+                )
+                prepared = fixture["workflow_effect_journey"]
+
+                response = runtime.call(name, prepared.arguments, 1_000)
+                note = prepared.cleanup(response)
+
+                self.assertEqual(prepared.settlement, "contained")
+                self.assertTrue(note)
 
 
 class MountRetryTests(unittest.TestCase):
