@@ -461,6 +461,14 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
+        "observation_repository_captures",
+        [
+            column("capture_id", "TEXT", false, None, 1),
+            column("capture_json", "TEXT", true, None, 0),
+        ],
+        []
+    ),
+    table!(
         "retrieval_anchor_aliases",
         [
             column("owner_json", "TEXT", true, None, 1),

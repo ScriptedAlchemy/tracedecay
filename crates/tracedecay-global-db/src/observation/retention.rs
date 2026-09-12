@@ -100,7 +100,7 @@ const ANCHOR_RELEASED_MARKER: &str = "{\"__retention_released\":\"anchor\"}";
 /// Compact tombstone written over a released `observations.observation_json`.
 const OBSERVATION_RELEASED_MARKER: &str = "{\"__retention_released\":\"observation\"}";
 /// Compact tombstone written over released provenance JSON columns.
-const PROVENANCE_RELEASED_MARKER: &str = "{\"__retention_released\":\"provenance\"}";
+pub(super) const PROVENANCE_RELEASED_MARKER: &str = "{\"__retention_released\":\"provenance\"}";
 
 /// SQL fragment (over an anchor aliased `a`, cutoff bound as `?2`) that is true
 /// when the anchor's *current* disposition (highest `sequence`) is `superseded`

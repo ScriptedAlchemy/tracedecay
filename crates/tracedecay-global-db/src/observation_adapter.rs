@@ -46,6 +46,9 @@ use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
     COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL,
     RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
 };
+use tracedecay_rusqlite_runtime::repository::{
+    REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,
+};
 
 /// Observation-store adapter over the already-registered authoritative
 /// runtime. The struct is concrete: the collision tests prove the
@@ -1162,27 +1165,31 @@ async fn read_retrieval_aliases_from_snapshot(
     Ok(aliases)
 }
 
-const OBSERVATION_BATCH_ROW_PROJECTION: &str =
-    "SELECT observation.observation_id, observation.sequence,
-            observation.observation_json, observation.committed_cursor_json,
-            anchor.anchor_json, anchor.projection_generation,
-            repository.availability_json, repository.capture_json,
-            repository_anchor.anchor_json, repository.owner_json,
-            EXISTS(
-                SELECT 1 FROM projection_queue
-                WHERE projection_queue.observation_id = observation.observation_id
-            )
-     FROM observations AS observation
-     LEFT JOIN observation_retrieval_anchors AS binding
-       ON binding.observation_id = observation.observation_id
-     LEFT JOIN retrieval_anchors AS anchor
-       ON anchor.anchor_id = binding.anchor_id
-     LEFT JOIN observation_repository_provenance AS repository
-       ON repository.observation_id = observation.observation_id
-     LEFT JOIN retrieval_anchors AS repository_anchor
-       ON repository_anchor.anchor_id = repository.retrieval_anchor_id
-     JOIN json_each(?1) AS requested
-       ON requested.value = observation.observation_id";
+fn observation_batch_row_projection() -> String {
+    format!(
+        "SELECT observation.observation_id, observation.sequence,
+                observation.observation_json, observation.committed_cursor_json,
+                anchor.anchor_json, anchor.projection_generation,
+                {REPOSITORY_PROVENANCE_HYDRATED_COLUMNS},
+                repository_anchor.anchor_json, repository.owner_json,
+                EXISTS(
+                    SELECT 1 FROM projection_queue
+                    WHERE projection_queue.observation_id = observation.observation_id
+                )
+         FROM observations AS observation
+         LEFT JOIN observation_retrieval_anchors AS binding
+           ON binding.observation_id = observation.observation_id
+         LEFT JOIN retrieval_anchors AS anchor
+           ON anchor.anchor_id = binding.anchor_id
+         LEFT JOIN observation_repository_provenance AS repository
+           ON repository.observation_id = observation.observation_id
+         {REPOSITORY_PROVENANCE_CAPTURE_JOIN}
+         LEFT JOIN retrieval_anchors AS repository_anchor
+           ON repository_anchor.anchor_id = repository.retrieval_anchor_id
+         JOIN json_each(?1) AS requested
+           ON requested.value = observation.observation_id"
+    )
+}
 
 async fn read_stored_observations_from_snapshot(
     snapshot: &DatabaseEngineReadSnapshot,
@@ -1201,7 +1208,7 @@ async fn read_stored_observations_from_snapshot(
     .map_err(|error| runtime_storage_error(operation, error))?;
     record_observation_snapshot_probe();
     let mut rows = snapshot
-        .query(OBSERVATION_BATCH_ROW_PROJECTION, [requested])
+        .query(&observation_batch_row_projection(), [requested])
         .await
         .map_err(|error| runtime_storage_error(operation, error))?;
     let mut observations = HashMap::new();
