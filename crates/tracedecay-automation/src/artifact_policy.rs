@@ -22,12 +22,12 @@ impl TaskArtifactPolicy {
         }
     }
 
-    pub fn handoff_tests(self) -> Vec<&'static str> {
-        vec![self.handoff_test]
+    pub fn handoff_test(self) -> &'static str {
+        self.handoff_test
     }
 
-    pub fn eval_replay_commands(self) -> Vec<&'static str> {
-        vec![self.eval_replay_command]
+    pub fn eval_replay_command(self) -> &'static str {
+        self.eval_replay_command
     }
 }
 

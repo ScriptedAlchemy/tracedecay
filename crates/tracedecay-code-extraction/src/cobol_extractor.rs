@@ -4,7 +4,7 @@
 /// COBOL programs have a fixed structure: IDENTIFICATION, ENVIRONMENT, DATA,
 /// and PROCEDURE divisions. Paragraphs in the PROCEDURE DIVISION act as
 /// subroutines, and PERFORM statements are the primary call mechanism.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
@@ -33,10 +33,7 @@ struct ExtractionState<'s> {
 
 impl<'s> ExtractionState<'s> {
     fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -91,27 +88,6 @@ impl<'s> ExtractionState<'s> {
 }
 
 impl CobolExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_cobol(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -162,21 +138,6 @@ impl CobolExtractor {
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    ///
-    /// The `cobol` grammar is the copy of yutaro-sakamoto/tree-sitter-cobol
-    /// vendored in `tokensave-large-treesitters`, pinned to a fork of 0.5.0
-    /// that carries the upstream scanner fix (#1104). Without it the external
-    /// scanner's sequence-number skip `while (get_column() <= 5) advance()`
-    /// never tests for end of input, so any token starting at 0-based column
-    /// 0–5 with no six-column line before EOF spins forever — and no boundary
-    /// in this crate can interrupt it, because tree-sitter polls the progress
-    /// callback only between parse actions, never inside a scanner call. The
-    /// pin can drop once the bundle ships a release with the fix.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("cobol", "COBOL", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -678,17 +639,16 @@ impl crate::LanguageExtractor for CobolExtractor {
         "COBOL"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_cobol(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

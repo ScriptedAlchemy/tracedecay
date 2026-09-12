@@ -22,8 +22,7 @@ use tracedecay_graph_db::GraphCancellation;
 
 use super::queries::{GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1};
 use super::source_authority::{
-    AdmittedSourceAuthority, CodeGraphSourceAuthorityPort, CodeGraphSourceBindRequest,
-    graph_source_scope_mismatch, graph_source_unbound,
+    AdmittedSourceAuthority, graph_source_scope_mismatch, graph_source_unbound,
 };
 use super::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
@@ -85,7 +84,7 @@ where
 pub struct AdmittedVerifiedGraphQueryPort {
     admission: Arc<dyn CodeGraphReadAdmissionPort>,
     projection: Arc<dyn CodeGraphProjectionReadPort>,
-    source_authority: Option<Arc<dyn CodeGraphSourceAuthorityPort>>,
+    source: Option<SourceReadContext>,
 }
 
 impl AdmittedVerifiedGraphQueryPort {
@@ -97,8 +96,7 @@ impl AdmittedVerifiedGraphQueryPort {
         Self {
             admission,
             projection,
-            source_authority: source
-                .map(|source| Arc::new(source) as Arc<dyn CodeGraphSourceAuthorityPort>),
+            source,
         }
     }
 }
@@ -109,7 +107,7 @@ impl VerifiedGraphQueryPort for AdmittedVerifiedGraphQueryPort {
             &*self.admission,
             &*self.projection,
             request,
-            self.source_authority.as_deref(),
+            self.source.as_ref(),
         ))
     }
 }
@@ -724,20 +722,20 @@ impl VerifiedGraphQuery {
 }
 
 /// Admits the request and opens a verified query through the lower graph
-/// ports. Every port wait — admission, source bind, and projection open — is
-/// raced against the canonical deadline/cancellation pair, and fresh time is
-/// rechecked after each acquisition.
+/// ports. Every port wait — admission and projection open — is raced against
+/// the canonical deadline/cancellation pair, and fresh time is rechecked after
+/// each acquisition.
 ///
 /// The composition-root adapter closes over those ports; this function never
-/// names a root type, and the source authority is frozen from the bind
-/// result before the query exists — no later surface accepts a runtime,
+/// names a root type, and the source authority is frozen from the supplied
+/// context before the query exists — no later surface accepts a runtime,
 /// root, or database.
 #[hotpath::measure(label = "usecases.graph.open_verified", future = true)]
 pub async fn open_verified_graph_query(
     admission: &dyn CodeGraphReadAdmissionPort,
     projection: &dyn CodeGraphProjectionReadPort,
     request: VerifiedGraphQueryRequest<'_>,
-    source: Option<&dyn CodeGraphSourceAuthorityPort>,
+    source: Option<&SourceReadContext>,
 ) -> Result<VerifiedGraphQuery> {
     let observed_at = tracedecay_contracts::now_micros();
     let context = await_graph_port_wait(
@@ -754,24 +752,9 @@ pub async fn open_verified_graph_query(
     .await?
     .map_err(map_code_graph_read_runtime_error)?;
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
-    let source = match source {
-        None => None,
-        Some(port) => {
-            let observed_at = tracedecay_contracts::now_micros();
-            let source = await_graph_port_wait(
-                &request.deadline,
-                request.cancellation,
-                port.bind(CodeGraphSourceBindRequest {
-                    context: &context,
-                    observed_at,
-                }),
-            )
-            .await?
-            .map_err(map_code_graph_read_runtime_error)?;
-            refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
-            Some(AdmittedSourceAuthority::capture(&context, source)?)
-        }
-    };
+    let source = source
+        .map(|source| AdmittedSourceAuthority::capture(&context, source.clone()))
+        .transpose()?;
     let graph_cancellation = application_graph_cancellation(request.cancellation);
     let observed_at = tracedecay_contracts::now_micros();
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;

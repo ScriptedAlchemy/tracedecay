@@ -1,8 +1,8 @@
-use tracedecay_code_extraction::DartExtractor;
+use tracedecay_code_extraction::{DartExtractor, LanguageExtractor};
 use tracedecay_domain::*;
 
 fn extract(source: &str) -> ExtractionResult {
-    DartExtractor::extract_dart("test.dart", source)
+    DartExtractor.extract("test.dart", source)
 }
 
 #[test]

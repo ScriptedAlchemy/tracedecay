@@ -404,7 +404,7 @@ impl DaemonInvocationState {
         &self,
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
-        cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+        cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
@@ -422,7 +422,7 @@ impl DaemonInvocationState {
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
         expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
-        cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+        cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::
@@ -448,7 +448,7 @@ impl DaemonInvocationState {
         profile_id: tracedecay_domain::configuration::UserProfileId,
         scope: tracedecay_contracts::ResolvedScope,
         state: crate::config::retrieval::RetrievalProfileStateV1,
-        cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
+        cursor_keys: Arc<tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider>,
     ) -> std::result::Result<
         tracedecay_daemon_service::QueryAuthorityProviderStatusV1,
         tracedecay_daemon_service::QueryAuthorityUpdateErrorV1,
@@ -957,9 +957,10 @@ impl DaemonInvocationState {
             page: request.page,
             continuation: request.continuation,
         };
-        let page = match self
-            .service
-            .execute_multi_root_query(PrecomputedMultiRootQueryPort { outcomes }, query)
+        let page = match tracedecay_contracts::AuthorizedMultiRootQueryService::new(
+            PrecomputedMultiRootQueryPort { outcomes },
+        )
+        .execute(query)
         {
             Ok(page) => page,
             Err(_) => {

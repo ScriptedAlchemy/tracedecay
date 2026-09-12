@@ -1,15 +1,16 @@
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, FeatureId,
-    IdempotencyContract, LifecycleClass, PaginationContract, PrivacyClass, ProtocolRevisionRange,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
-    TerminalStateContract, UseCaseId,
+    AvailabilityContract, BindingId, BindingStatus, BindingSurface, CancellationContract,
+    CancellationPoint, CapabilityId, CatalogContributionInputV1, CatalogContributionV1,
+    ContributionId, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    FeatureId, LifecycleClass, PaginationContract, PrivacyClass, ProtocolRevisionRange,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -68,70 +69,69 @@ pub fn lsp_context_catalog_contribution() -> Result<CatalogContributionV1, Appli
             status: BindingStatus::Current,
             alias_of: None,
         })?);
-        capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
-            capability_id,
-            use_case_id: use_case_id(spec)?,
-            routing: RoutingContractV1::new(
-                1,
-                spec.summary,
-                spec.description,
-                vec![spec.summary.to_owned()],
-            )?,
-            request_schema: schema(spec, "request")?,
-            result_schema: schema(spec, "result")?,
-            effect: EffectClass::Read,
-            scope: ScopeRequirement::new(vec![
-                ScopeDimension::Project,
-                ScopeDimension::Repository,
-                ScopeDimension::Worktree,
-                ScopeDimension::Resource,
-            ])?,
-            authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
-            denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
-            privacy: PrivacyClass::ScopedMetadata,
-            lifecycle: LifecycleClass::SessionStateful,
-            streaming: StreamingContract::Unsupported,
-            cancellation: CancellationContract::cooperative(vec![
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::BeforeRead,
-                CancellationPoint::DuringRead,
-            ])?,
-            deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
-            pagination: spec
-                .paginated
-                .then(|| PaginationContract::new(10, 100, 60_000))
-                .transpose()?,
-            idempotency: IdempotencyContract::NotRequired,
-            inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
-            authority_revalidation: RevalidationContract::required(vec![
-                RevalidationPoint::Authority,
-                RevalidationPoint::Scope,
-                RevalidationPoint::Policy,
-                RevalidationPoint::Configuration,
-                RevalidationPoint::ExpectedState,
-            ])?,
-            reconciliation: ReconciliationContract::NotRequired,
-            receipt: ReceiptContract::Operation,
-            terminal_states: TerminalStateContract::new(vec![
-                TerminalState::Completed,
-                TerminalState::Cancelled,
-                TerminalState::TimedOut,
-                TerminalState::Failed,
-                TerminalState::Partial,
-            ])?,
-            availability: AvailabilityContract::Available,
-            binding_ids: vec![binding_id],
-            profile_eligibility: application_profile_ids(spec.profiles)?,
-            required_features: vec![feature],
-        })?);
+        capabilities.push(application_capability_manifest(
+            ApplicationCapabilityManifestInput {
+                capability_id,
+                use_case_id: use_case_id(spec)?,
+                routing: RoutingContractV1::new(
+                    1,
+                    spec.summary,
+                    spec.description,
+                    vec![spec.summary.to_owned()],
+                )?,
+                request_schema: schema(spec, "request")?,
+                result_schema: schema(spec, "result")?,
+                effect: EffectClass::Read,
+                scope: ScopeRequirement::new(vec![
+                    ScopeDimension::Project,
+                    ScopeDimension::Repository,
+                    ScopeDimension::Worktree,
+                    ScopeDimension::Resource,
+                ])?,
+                denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+                privacy: PrivacyClass::ScopedMetadata,
+                lifecycle: LifecycleClass::SessionStateful,
+                streaming: StreamingContract::Unsupported,
+                cancellation: CancellationContract::cooperative(vec![
+                    CancellationPoint::BeforeAdmission,
+                    CancellationPoint::BeforeRead,
+                    CancellationPoint::DuringRead,
+                ])?,
+                deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
+                pagination: spec
+                    .paginated
+                    .then(|| PaginationContract::new(10, 100, 60_000))
+                    .transpose()?,
+                inverse: None,
+                authority_revalidation: RevalidationContract::required(vec![
+                    RevalidationPoint::Authority,
+                    RevalidationPoint::Scope,
+                    RevalidationPoint::Policy,
+                    RevalidationPoint::Configuration,
+                    RevalidationPoint::ExpectedState,
+                ])?,
+                terminal_states: TerminalStateContract::new(vec![
+                    TerminalState::Completed,
+                    TerminalState::Cancelled,
+                    TerminalState::TimedOut,
+                    TerminalState::Failed,
+                    TerminalState::Partial,
+                ])?,
+                availability: AvailabilityContract::Available,
+                binding_ids: vec![binding_id],
+                profile_eligibility: application_profile_ids(spec.profiles)?,
+                required_features: vec![feature],
+            },
+        )?);
     }
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.lsp-context")?,
-        depends_on: Vec::new(),
-        capabilities,
-        retrieval_primitives: Vec::new(),
-        bindings,
-    })?)
+    Ok(CatalogContributionV1::new(
+        CatalogContributionInputV1::new(
+            ContributionId::new("contribution.application.lsp-context")?,
+            Vec::new(),
+            capabilities,
+            bindings,
+        ),
+    )?)
 }
 
 pub fn lsp_context_handler_descriptors()

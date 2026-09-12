@@ -43,7 +43,7 @@ use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
 };
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
-use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
+use tracedecay_session_temporal_store::SessionTemporalStore;
 
 const DIGEST: &str = "sha256:6161616161616161616161616161616161616161616161616161616161616161";
 const BRANCH_ID: &str = "branch.project.test";
@@ -342,7 +342,7 @@ async fn reopen_and_settle(
         wake.wake_and_wait_until_idle(Duration::from_secs(2)).await,
         "restarted scheduler must settle persisted recovery"
     );
-    let receipt = GlobalDbSessionTemporalStore::new(database.as_ref())
+    let receipt = SessionTemporalStore::new(database.as_ref())
         .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
             SessionRefreshOperationIdV1::new(operation_id.to_owned())
                 .expect("persisted operation id"),
@@ -373,7 +373,7 @@ async fn retained_begin_and_join_report_partial_effect_and_restart_recovers_same
             .execute(&context, &signal, UtcMicros(2), &public_request)
             .await
             .expect_err("retired scheduler delivery must be a partial effect");
-        let recovery = GlobalDbSessionTemporalStore::new(fixture.database.as_ref())
+        let recovery = SessionTemporalStore::new(fixture.database.as_ref())
             .session_refresh_recovery(&session_id)
             .await
             .expect("read durable refresh recovery")
@@ -397,7 +397,7 @@ async fn retained_begin_and_join_report_partial_effect_and_restart_recovers_same
             )
             .await
             .expect_err("an identical committed begin must join and preserve failed delivery");
-        let joined_recovery = GlobalDbSessionTemporalStore::new(fixture.database.as_ref())
+        let joined_recovery = SessionTemporalStore::new(fixture.database.as_ref())
             .session_refresh_recovery(&session_id)
             .await
             .expect("read joined recovery")
@@ -482,7 +482,7 @@ async fn retained_cancel_reports_partial_effect_with_canonical_cancelled_receipt
         &operation_id,
     );
 
-    let receipt = GlobalDbSessionTemporalStore::new(fixture.database.as_ref())
+    let receipt = SessionTemporalStore::new(fixture.database.as_ref())
         .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
             SessionRefreshOperationIdV1::new(operation_id.clone()).expect("operation id"),
             session_id,

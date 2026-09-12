@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tracedecay_capture::claude::{normalize, stable_record_id};
-use tracedecay_domain::{ClaudeByteRangeV1, ObservationOrderingDomainV1};
+use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
@@ -216,7 +216,7 @@ pub fn try_scan_claude_source_frames_with_resume(
         .collect::<Vec<_>>();
 
     for frame in raw.frames.drain(..) {
-        let Ok(range) = ClaudeByteRangeV1::new(frame.offset, frame.end_offset) else {
+        let Ok(range) = ObservationSourceRangeV1::new(frame.offset, frame.end_offset) else {
             return Ok(None);
         };
         let mut raw_message_id = None;

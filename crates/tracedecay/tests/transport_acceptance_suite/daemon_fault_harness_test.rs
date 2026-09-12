@@ -14,11 +14,11 @@ use tracedecay::daemon::call_tool;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationScopeV1, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId, UtcMicros,
+    ComponentVersion, DurableClaudeObservationV1, ObservationIdentityMaterialV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1,
+    ProjectionGenerationId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_store::{
@@ -45,16 +45,18 @@ const OBSERVATION_PERSIST_BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_OBSERVATION_P
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 const DAEMON_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn source(stage: &str) -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new(format!("session.daemon-fault.{stage}")).unwrap())
-        .unwrap()
+fn source(stage: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(
+        SessionId::new(format!("session.daemon-fault.{stage}")).unwrap(),
+    )
+    .unwrap()
 }
 
-fn cursor(stage: &str, byte_offset: u64) -> ClaudeSourceCursorV1 {
-    ClaudeSourceCursorV1::new(
+fn cursor(stage: &str, byte_offset: u64) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::new(
         source(stage),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+        ObservationSourceGenerationV1::new(GENERATION).unwrap(),
         byte_offset,
     )
     .unwrap()
@@ -76,11 +78,11 @@ fn observation(stage: &str) -> DurableClaudeObservationV1 {
         Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::new(
         source(stage),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
-        ClaudeByteRangeV1::new(0, 100).unwrap(),
+        ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+        ObservationSourceRangeV1::new(0, 100).unwrap(),
     )
     .unwrap();
 

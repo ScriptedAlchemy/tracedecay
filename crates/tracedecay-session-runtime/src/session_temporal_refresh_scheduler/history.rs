@@ -9,6 +9,7 @@ use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_sessions::host_ports::session_review::SessionReviewPort;
 
 pub type SessionHistoricalIngestPass<'a> =
     Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + 'a>>;
@@ -187,6 +188,7 @@ pub struct ProfileSessionHistoricalIngestor {
     cancellation: ObservationCancellation,
     codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
+    session_review: SessionReviewPort,
     codex_consumer: String,
     codex_registered: AtomicBool,
     progress: Mutex<SessionHistoricalIngestProgress>,
@@ -200,6 +202,7 @@ impl ProfileSessionHistoricalIngestor {
         transcript_source_home: Option<PathBuf>,
         codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
         background_cpu: Arc<ProcessBackgroundCpuV1>,
+        session_review: SessionReviewPort,
     ) -> Self {
         let source_home = transcript_source_home
             .as_deref()
@@ -220,6 +223,7 @@ impl ProfileSessionHistoricalIngestor {
             cancellation: ObservationCancellation::default(),
             codex_discovery,
             background_cpu,
+            session_review,
             codex_consumer,
             codex_registered: AtomicBool::new(true),
             progress: Mutex::new(SessionHistoricalIngestProgress::default()),
@@ -256,7 +260,8 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
         Box::pin(async move {
             let authority =
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone())
-                    .with_background_cpu(Arc::clone(&self.background_cpu));
+                    .with_background_cpu(Arc::clone(&self.background_cpu))
+                    .with_session_review(self.session_review);
             let registry_authority =
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone())
                     .with_background_cpu(Arc::clone(&self.background_cpu));

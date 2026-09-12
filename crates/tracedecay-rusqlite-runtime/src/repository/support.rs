@@ -1,14 +1,16 @@
 use std::fmt::Display;
 
+use crate::exact_sql::{decode_json, encode_json};
 use rusqlite::types::{ToSqlOutput, Type, Value, ValueRef};
 use rusqlite::{OptionalExtension, ToSql};
 use serde::{Serialize, de::DeserializeOwned};
+
 pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
-    serde_json::to_string(value).map_err(|error| conversion(error.to_string()))
+    encode_json(value, |error| conversion(error.to_string()))
 }
 
 pub(super) fn decode<T: DeserializeOwned>(value: String) -> rusqlite::Result<T> {
-    serde_json::from_str(&value).map_err(|error| conversion(error.to_string()))
+    decode_json(&value, |error| conversion(error.to_string()))
 }
 
 /// Two persisted encodings agree when they denote the same JSON document. A

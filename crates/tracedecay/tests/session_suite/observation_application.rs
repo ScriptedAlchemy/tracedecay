@@ -9,12 +9,10 @@ use tracedecay_application::observation::{
 };
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ClaudeByteRangeV1,
-    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
-    ClaudeSourceIdentityV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProviderId, RetentionClass, SessionId,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_privacy::{
     ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
@@ -42,29 +40,29 @@ const OBSERVATION_TABLES: &[&str] = &[
     "session_messages_fts",
 ];
 
-fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
+fn source(session_id: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
 }
 
 fn request(
     session_id: &str,
     record: Value,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> CaptureClaudeObservationRequest {
     let encoded_frame = serde_json::to_vec(&record).unwrap();
     let frame_end = u64::try_from(encoded_frame.len()).unwrap();
     let parsed_record = parse_claude_record_v1(
         &encoded_frame,
-        ClaudeByteRangeV1::new(0, frame_end).unwrap(),
+        ObservationSourceRangeV1::new(0, frame_end).unwrap(),
     )
     .unwrap();
     CaptureClaudeObservationRequest::new(
         parsed_record,
-        ClaudeObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::new(
             source(session_id),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(GENERATION).unwrap(),
-            ClaudeByteRangeV1::new(0, frame_end).unwrap(),
+            ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+            ObservationSourceRangeV1::new(0, frame_end).unwrap(),
         )
         .unwrap(),
         expected_cursor,

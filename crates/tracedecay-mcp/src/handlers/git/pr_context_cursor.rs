@@ -5,7 +5,7 @@ use tracedecay_domain::{
     canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_session_temporal_store::GlobalDbCursorKeyProvider;
+use tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::ports::SessionCursorAuthenticator;
 use tracedecay_temporal_query::ports::{
@@ -234,7 +234,7 @@ pub(super) struct PrContextCursorPosition {
 pub(super) async fn pr_context_cursor_authority(
     ctx: &McpToolContext<'_>,
     binding: &PrContextCursorBinding<'_>,
-) -> Result<(TemporalExecutionSnapshot, GlobalDbCursorKeyProvider)> {
+) -> Result<(TemporalExecutionSnapshot, SessionTemporalCursorKeyProvider)> {
     let Some((session_db, authorization)) = ctx.authorized_project_session_db() else {
         // Attached means admitted; absent is the typed denied state.
         return Err(TraceDecayError::project_route(

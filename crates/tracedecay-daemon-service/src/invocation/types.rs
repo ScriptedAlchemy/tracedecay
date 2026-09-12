@@ -1,7 +1,10 @@
 //! Shared retained-state shapes and small daemon-private types used across the invocation split.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
+
 use super::*;
-use futures_util::FutureExt;
 use tracedecay_contracts::RegisteredRootLocatorV1;
 
 pub use tracedecay_contracts::HookOrchestrationAdmissionV1;
@@ -116,13 +119,16 @@ impl Default for HookOrchestrationTaskOwnerV1 {
 impl HookOrchestrationTaskOwnerV1 {
     fn reap_finished(&mut self) {
         let tasks = std::mem::take(&mut self.tasks);
-        for task in tasks {
-            if task.is_finished() {
-                if !matches!(task.now_or_never(), Some(Ok(()))) {
-                    self.failed = true;
-                }
-            } else {
+        for mut task in tasks {
+            if !task.is_finished() {
                 self.tasks.push(task);
+                continue;
+            }
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            match Pin::new(&mut task).poll(&mut cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(_)) | Poll::Pending => self.failed = true,
             }
         }
     }

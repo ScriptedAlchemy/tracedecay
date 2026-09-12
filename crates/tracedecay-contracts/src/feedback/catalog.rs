@@ -5,17 +5,18 @@
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
-    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
-    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
-    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
-    LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
-    UseCaseId,
+    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    LifecycleClass, PaginationContract, PrivacyClass, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
+    TerminalState, TerminalStateContract, UseCaseId,
 };
 
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -245,13 +246,12 @@ fn feedback_surface_catalog_contribution_from_specs()
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
 
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.feedback-surface")?,
-        depends_on: Vec::new(),
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
+        ContributionId::new("contribution.application.feedback-surface")?,
+        Vec::new(),
         capabilities,
-        retrieval_primitives: Vec::new(),
         bindings,
-    })?;
+    ))?;
     let schemas = feedback_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
 }
@@ -377,69 +377,67 @@ fn capability(
     capability_id: CapabilityId,
     binding_ids: Vec<BindingId>,
 ) -> Result<CapabilityManifestV1, ApplicationContractError> {
-    Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
-        capability_id,
-        use_case_id: UseCaseId::new(spec.use_case)?,
-        routing: RoutingContractV1::new(
-            1,
-            spec.summary,
-            spec.description,
-            vec![spec.example.to_owned()],
-        )?,
-        request_schema: schema(spec.request_schema)?,
-        result_schema: schema(spec.result_schema)?,
-        effect: EffectClass::Read,
-        scope: ScopeRequirement::new(vec![ScopeDimension::Project, ScopeDimension::Branch])?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
-        denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
-        privacy: PrivacyClass::ScopedMetadata,
-        lifecycle: LifecycleClass::Resumable,
-        streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(vec![
-            CancellationPoint::BeforeAdmission,
-            CancellationPoint::BeforeRead,
-            CancellationPoint::DuringRead,
-        ])?,
-        deadline: DeadlineContract::new(15_000, DeadlineBehavior::ReturnOperationReceipt)?,
-        pagination: if spec.paginated {
-            Some(PaginationContract::new(10, 100, 60_000)?)
-        } else {
-            None
-        },
-        idempotency: IdempotencyContract::NotRequired,
-        inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
-        authority_revalidation: RevalidationContract::required(vec![
-            RevalidationPoint::Authority,
-            RevalidationPoint::Scope,
-            RevalidationPoint::Policy,
-            RevalidationPoint::Configuration,
-        ])?,
-        reconciliation: ReconciliationContract::NotRequired,
-        receipt: ReceiptContract::Operation,
-        terminal_states: TerminalStateContract::new(vec![
-            TerminalState::Completed,
-            TerminalState::Cancelled,
-            TerminalState::TimedOut,
-            TerminalState::Failed,
-            TerminalState::Unavailable,
-            TerminalState::Partial,
-        ])?,
-        availability: AvailabilityContract::Available,
-        binding_ids,
-        profile_eligibility: if !spec.surfaces.is_empty() {
-            application_profile_ids(if spec.operation == "test_results" {
-                &[
-                    APPLICATION_DEFAULT_PROFILE_ID,
-                    APPLICATION_COMPACT_PROFILE_ID,
-                ]
+    Ok(application_capability_manifest(
+        ApplicationCapabilityManifestInput {
+            capability_id,
+            use_case_id: UseCaseId::new(spec.use_case)?,
+            routing: RoutingContractV1::new(
+                1,
+                spec.summary,
+                spec.description,
+                vec![spec.example.to_owned()],
+            )?,
+            request_schema: schema(spec.request_schema)?,
+            result_schema: schema(spec.result_schema)?,
+            effect: EffectClass::Read,
+            scope: ScopeRequirement::new(vec![ScopeDimension::Project, ScopeDimension::Branch])?,
+            denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+            privacy: PrivacyClass::ScopedMetadata,
+            lifecycle: LifecycleClass::Resumable,
+            streaming: StreamingContract::Unsupported,
+            cancellation: CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeRead,
+                CancellationPoint::DuringRead,
+            ])?,
+            deadline: DeadlineContract::new(15_000, DeadlineBehavior::ReturnOperationReceipt)?,
+            pagination: if spec.paginated {
+                Some(PaginationContract::new(10, 100, 60_000)?)
             } else {
-                &[APPLICATION_DEFAULT_PROFILE_ID]
-            })?
-        } else {
-            Vec::new()
+                None
+            },
+            inverse: None,
+            authority_revalidation: RevalidationContract::required(vec![
+                RevalidationPoint::Authority,
+                RevalidationPoint::Scope,
+                RevalidationPoint::Policy,
+                RevalidationPoint::Configuration,
+            ])?,
+            terminal_states: TerminalStateContract::new(vec![
+                TerminalState::Completed,
+                TerminalState::Cancelled,
+                TerminalState::TimedOut,
+                TerminalState::Failed,
+                TerminalState::Unavailable,
+                TerminalState::Partial,
+            ])?,
+            availability: AvailabilityContract::Available,
+            binding_ids,
+            profile_eligibility: if !spec.surfaces.is_empty() {
+                application_profile_ids(if spec.operation == "test_results" {
+                    &[
+                        APPLICATION_DEFAULT_PROFILE_ID,
+                        APPLICATION_COMPACT_PROFILE_ID,
+                    ]
+                } else {
+                    &[APPLICATION_DEFAULT_PROFILE_ID]
+                })?
+            } else {
+                Vec::new()
+            },
+            required_features: Vec::new(),
         },
-        required_features: Vec::new(),
-    })?)
+    )?)
 }
 
 fn handler_descriptor(

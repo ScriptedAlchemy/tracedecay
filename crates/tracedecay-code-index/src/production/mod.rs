@@ -26,8 +26,8 @@ use tracedecay_graph_db::{
 
 use super::{
     capabilities::{
-        BaseCapabilityEmitter, CapabilityEmissionErrorV1, CodeIndexCapabilityEmitter,
-        expected_seal_digest, generation_language_revisions_match,
+        BaseCapabilityEmitter, CapabilityEmissionErrorV1, expected_seal_digest,
+        generation_language_revisions_match,
     },
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionV1,

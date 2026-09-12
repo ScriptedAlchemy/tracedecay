@@ -103,9 +103,9 @@ impl Fixture {
     }
 }
 
-fn observation_source(path: &Path) -> ClaudeSourceIdentityV1 {
+fn observation_source(path: &Path) -> ObservationSourceIdentityV1 {
     let identity = identify_claude_source(path).expect("Claude source identity");
-    ClaudeSourceIdentityV1::for_source(
+    ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id).unwrap(),
         SessionId::new(identity.source_id).unwrap(),
     )
@@ -559,7 +559,7 @@ async fn commit_before_ack_retry_projects_without_rescan_or_duplicate() {
     source_adapter
         .retain_scoped_frames(&mut scan, &fixture.profile)
         .expect("retain profile-scoped retry frame");
-    let source = ClaudeSourceIdentityV1::for_source(
+    let source = ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id).unwrap(),
         SessionId::new(identity.source_id).unwrap(),
     )
@@ -571,7 +571,7 @@ async fn commit_before_ack_retry_projects_without_rescan_or_duplicate() {
         &FrameCaptureContext {
             source,
             scope: ObservationScopeV1::Profile,
-            generation: ClaudeFileGenerationV1::new(scan.file_generation).unwrap(),
+            generation: ObservationSourceGenerationV1::new(scan.file_generation).unwrap(),
             file_identity: scan.file_identity,
             retention_class: RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS).unwrap(),
             cancellation: ObservationCancellation::default(),

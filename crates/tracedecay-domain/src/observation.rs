@@ -216,8 +216,6 @@ fn is_default_observation_provider(provider: &ProviderId) -> bool {
     provider.as_str() == "claude"
 }
 
-pub type ClaudeSourceIdentityV1 = ObservationSourceIdentityV1;
-
 /// Authoritative ownership scope selected before persistence.
 #[derive(
     Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -519,8 +517,6 @@ impl<'de> Deserialize<'de> for ObservationSourceGenerationV1 {
     }
 }
 
-pub type ClaudeFileGenerationV1 = ObservationSourceGenerationV1;
-
 /// Exact byte span of one complete Claude JSONL record.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObservationSourceRangeV1 {
@@ -561,8 +557,6 @@ impl<'de> Deserialize<'de> for ObservationSourceRangeV1 {
         Self::new(wire.start, wire.end).map_err(serde::de::Error::custom)
     }
 }
-
-pub type ClaudeByteRangeV1 = ObservationSourceRangeV1;
 
 /// A collision-only identity refinement for a provider record that has no
 /// native record id.
@@ -720,8 +714,6 @@ impl ObservationIdentityMaterialV1 {
     }
 }
 
-pub type ClaudeObservationIdentityMaterialV1 = ObservationIdentityMaterialV1;
-
 crate::canonical_text::validated_string_newtype!(
     schema,
     ObservationContractError,
@@ -729,8 +721,6 @@ crate::canonical_text::validated_string_newtype!(
     CanonicalObservationIdV1 => "observation identity",
     PayloadDigestV1 => "payload digest",
 );
-
-pub type IdempotencyKeyV1 = CanonicalObservationIdV1;
 
 impl CanonicalObservationIdV1 {
     pub fn derive(
@@ -889,8 +879,6 @@ impl ObservationSourceCursorV1 {
         Ok(self.byte_offset.cmp(&other.byte_offset))
     }
 }
-
-pub type ClaudeSourceCursorV1 = ObservationSourceCursorV1;
 
 pub const CANONICAL_OBSERVATION_ENVELOPE_VERSION_V1: u16 = 1;
 
@@ -2381,7 +2369,7 @@ pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
 
 impl CanonicalClaudeSanitizationReceiptMaterialV1 {
     pub fn for_durable_payload(
-        identity: &ClaudeObservationIdentityMaterialV1,
+        identity: &ObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,
         disposition: SanitizerDispositionV1,
         raw_digest: &[u8; 32],
@@ -2405,7 +2393,7 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
     }
 
     pub fn for_durable_payload_with_sensitivity(
-        identity: &ClaudeObservationIdentityMaterialV1,
+        identity: &ObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,
         disposition: SanitizerDispositionV1,
         sensitivity: SensitivityV1,
@@ -2429,7 +2417,7 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
     }
 
     pub fn for_non_durable_with_sensitivity(
-        identity: &ClaudeObservationIdentityMaterialV1,
+        identity: &ObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,
         disposition: SanitizerDispositionV1,
         sensitivity: SensitivityV1,
@@ -2610,7 +2598,7 @@ impl DurableObservationV1 {
         &self.observation_id
     }
 
-    pub fn idempotency_key(&self) -> &IdempotencyKeyV1 {
+    pub fn idempotency_key(&self) -> &CanonicalObservationIdV1 {
         &self.observation_id
     }
 
@@ -2674,8 +2662,8 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
         #[serde(deny_unknown_fields)]
         struct Wire {
             observation_id: CanonicalObservationIdV1,
-            idempotency_key: IdempotencyKeyV1,
-            identity: ClaudeObservationIdentityMaterialV1,
+            idempotency_key: CanonicalObservationIdV1,
+            identity: ObservationIdentityMaterialV1,
             receipt: SanitizationReceiptV1,
             retention_class: RetentionClass,
             payload: Value,
@@ -3010,7 +2998,7 @@ fn domain_digest(
 /// `observations` table.
 fn accepted_identity_digests(
     current: &CanonicalObservationIdV1,
-    material: &ClaudeObservationIdentityMaterialV1,
+    material: &ObservationIdentityMaterialV1,
 ) -> Result<[CanonicalObservationIdV1; 3], ObservationContractError> {
     let provider_domain = if is_default_observation_provider(material.source().provider()) {
         CLAUDE_OBSERVATION_ID_DOMAIN

@@ -1,17 +1,27 @@
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_session_memory::provider_usage::{
     ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
+};
+
+use crate::{
+    commands::daemon_tool_json,
+    cost_summary::{CostSummaryPayload, TodayCostPayload},
 };
 
 #[hotpath::measure(label = "cli.cost.read", future = true)]
 pub(crate) async fn handle_cost(
     range: String,
     by_model: bool,
-    by_task: bool,
     export: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
-    let payload = call_cost_admin(&range).await?;
+    let cwd = std::env::current_dir()?;
+    let project_root = tracedecay::config::discover_project_root(&cwd);
+    let payload = daemon_tool_json(
+        project_root.as_deref(),
+        "tracedecay_admin_cli",
+        serde_json::json!({ "action": "cost_summary", "range": &range }),
+    )
+    .await?;
     if payload.get("summary").is_none_or(Value::is_null) {
         println!("Provider usage accounting is unavailable.");
         return Ok(());
@@ -28,7 +38,6 @@ pub(crate) async fn handle_cost(
             &today.provider_usage,
             &range,
             by_model,
-            by_task,
             export.as_deref(),
             &summary,
         )
@@ -40,16 +49,13 @@ fn print_cost_summary(
     today: &ProviderUsageCostSummaryV1,
     range: &str,
     by_model: bool,
-    by_task: bool,
     export: Option<&str>,
     summary: &CostSummaryPayload,
 ) -> tracedecay_domain::errors::Result<()> {
     if let Some(fmt) = export {
-        print_cost_export(fmt, range, by_model, by_task, summary)?;
+        print_cost_export(fmt, range, by_model, summary)?;
     } else if by_model {
         print_model_table(summary);
-    } else if by_task {
-        print_task_table(summary);
     } else {
         print_default_summary(today, range, summary);
     }
@@ -60,7 +66,6 @@ fn print_cost_export(
     fmt: &str,
     range: &str,
     by_model: bool,
-    by_task: bool,
     summary: &CostSummaryPayload,
 ) -> tracedecay_domain::errors::Result<()> {
     let usage = &summary.provider_usage;
@@ -79,13 +84,13 @@ fn print_cost_export(
             });
             println!("{}", serde_json::to_string_pretty(&obj)?);
         }
-        "csv" => print_cost_csv(summary, by_model, by_task),
+        "csv" => print_cost_csv(summary, by_model),
         _ => eprintln!("Unknown export format '{fmt}'. Use 'json' or 'csv'."),
     }
     Ok(())
 }
 
-fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool, by_task: bool) {
+fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool) {
     let usage = &summary.provider_usage;
     if by_model {
         println!("provider,model,cost_usd,tokens");
@@ -100,9 +105,6 @@ fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool, by_task: bool) {
                 .unwrap_or_else(|| "unavailable".to_owned());
             println!("{},{},{cost},{tokens}", model.provider, model.model);
         }
-    } else if by_task {
-        println!("status");
-        println!("task_attribution_unavailable");
     } else {
         println!("total_cost_usd,input_tokens,output_tokens,tokens_saved,efficiency");
         let total_cost = usage
@@ -156,10 +158,6 @@ fn print_model_table(summary: &CostSummaryPayload) {
     }
 }
 
-fn print_task_table(_summary: &CostSummaryPayload) {
-    println!("Task cost attribution is unavailable from canonical provider usage.");
-}
-
 fn print_default_summary(
     today: &ProviderUsageCostSummaryV1,
     range: &str,
@@ -198,33 +196,6 @@ fn print_default_summary(
             None => println!("  Savings  {saved} tokens (efficiency unavailable)"),
         }
     }
-}
-
-#[derive(Deserialize)]
-struct CostSummaryPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
-    tokens_saved: u64,
-    efficiency_ratio: Option<f64>,
-}
-
-#[derive(Deserialize)]
-struct TodayCostPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
-}
-
-#[hotpath::measure(label = "cli.cost.request", future = true)]
-async fn call_cost_admin(range: &str) -> tracedecay_domain::errors::Result<Value> {
-    let cwd = std::env::current_dir()?;
-    let project_root = tracedecay::config::discover_project_root(&cwd);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
-    let result = tracedecay::daemon::call_default_tool(
-        &handshake,
-        "tracedecay_admin_cli",
-        json!({ "action": "cost_summary", "range": range }),
-    )
-    .await?;
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
 fn print_cost_row(

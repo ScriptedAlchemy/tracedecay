@@ -11,7 +11,7 @@
 
 use serde_json::json;
 use tracedecay_capture::parse_claude_record_v1;
-use tracedecay_domain::ClaudeByteRangeV1;
+use tracedecay_domain::ObservationSourceRangeV1;
 
 /// Deterministic, daemon-free workload that reaches this crate's measured
 /// parse path (`capture.parse.record` and `capture.parse.record_digest`).
@@ -21,7 +21,8 @@ fn run_capture_parse_workload() -> usize {
         "message": { "content": "hotpath coverage fixture" },
     }))
     .expect("serialize claude record fixture");
-    let range = ClaudeByteRangeV1::new(0, record.len() as u64).expect("valid fixture byte range");
+    let range =
+        ObservationSourceRangeV1::new(0, record.len() as u64).expect("valid fixture byte range");
     let parsed = parse_claude_record_v1(&record, range).expect("parse claude record fixture");
     assert_eq!(parsed.encoded_len(), record.len());
     assert_eq!(

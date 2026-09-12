@@ -71,8 +71,6 @@ mod remote_protocol;
 pub mod request_cancellation;
 mod shutdown_coordination;
 
-mod multi_root;
-
 pub use callable_code_authorization::{
     DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission, GRANT_HORIZON,
     daemon_owned_project_source_access_at, project_open_source_access_authority,

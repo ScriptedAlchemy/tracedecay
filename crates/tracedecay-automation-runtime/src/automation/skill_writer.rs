@@ -16,9 +16,10 @@ use super::skill_usage::{
     SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
 };
-use super::text::truncate_chars_for_prompt;
 use crate::ports::session_evidence::LcmGrepHit;
 use tracedecay_automation::analytics::ToolFamilySignal;
+use tracedecay_automation::managed_skills::validate_managed_skill_update;
+use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::Result;
 
 use super::config_error;
@@ -832,8 +833,7 @@ fn skill_update_from_proposal(
             "update proposal does not change managed skill id '{id}'"
         ));
     }
-    super::managed_skill_validation::validate_managed_skill_update(&update)
-        .map_err(|error| error.to_string())?;
+    validate_managed_skill_update(&update).map_err(|error| error.to_string())?;
     Ok((id, base_checksum, update))
 }
 

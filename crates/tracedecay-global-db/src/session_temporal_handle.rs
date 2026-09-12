@@ -137,8 +137,8 @@ impl RegisteredGlobalDb {
     pub async fn load_session_cursor_key_provider_result(
         &self,
     ) -> Result<
-        tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
-        tracedecay_session_temporal_store::GlobalDbCursorKeyProviderError,
+        tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
+        tracedecay_session_temporal_store::SessionTemporalCursorKeyProviderError,
     > {
         SessionTemporalAccess::new(self)
             .load_session_cursor_key_provider_result()
@@ -152,8 +152,8 @@ impl RegisteredGlobalDb {
     pub async fn load_preprovisioned_session_cursor_key_provider_result(
         &self,
     ) -> Result<
-        tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
-        tracedecay_session_temporal_store::GlobalDbCursorKeyProviderError,
+        tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
+        tracedecay_session_temporal_store::SessionTemporalCursorKeyProviderError,
     > {
         SessionTemporalAccess::new(self)
             .load_preprovisioned_session_cursor_key_provider_result()

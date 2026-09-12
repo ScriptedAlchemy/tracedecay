@@ -471,7 +471,7 @@ impl<'de> Deserialize<'de> for CommandDigestV1 {
 
 /// Storage-owned projection used to distinguish replay from conflict.
 ///
-/// The key is not the observation-domain `IdempotencyKeyV1`, whose semantics
+/// The key is not the observation-domain `CanonicalObservationIdV1`, whose semantics
 /// and derivation are observation-specific. Application idempotency keys cross
 /// this dependency boundary through `StoreIdempotencyKeyV1`'s validated,
 /// lossless string conversion.

@@ -12,7 +12,7 @@ use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEven
 
 #[cfg(unix)]
 use tracedecay_daemon_identity::connection_for_socket_path;
-use tracedecay_daemon_identity::{DaemonConnection, current_daemon_connection};
+use tracedecay_daemon_identity::{ResolvedDaemonConnection, current_daemon_connection};
 #[cfg(unix)]
 use tracedecay_daemon_protocol::SOCKET_ENV;
 
@@ -56,7 +56,7 @@ pub async fn notify_hook_event(
 async fn notify_hook_event_to_connection(
     project_path: &Path,
     event: DaemonHookEvent,
-    connection: DaemonConnection,
+    connection: ResolvedDaemonConnection,
 ) -> HookEventNotifyOutcomeV1 {
     let Ok(handshake) = crate::daemon::handshake_for_current_client(
         Some(project_path.to_path_buf()),

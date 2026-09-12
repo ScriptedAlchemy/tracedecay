@@ -13,7 +13,10 @@ use tracedecay_domain::{
     ProviderUsageScopeV1, SessionId,
 };
 
-use crate::{ObservationRecordParseErrorV1, parse_rfc3339_timestamp};
+use crate::{
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
+    parse_rfc3339_timestamp,
+};
 
 const PROVIDER: &str = "codex";
 
@@ -856,7 +859,7 @@ pub fn codex_native_record_id(
     );
     ObservationId::new(format!(
         "codex.native.sha256:{}",
-        hex::encode(hasher.finalize())
+        sha256_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
@@ -909,14 +912,6 @@ fn canonical_native_observation_id(
     native_id
         .and_then(|native_id| ObservationId::new(native_id).ok())
         .unwrap_or_else(|| fallback.clone())
-}
-
-fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
 }
 
 fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<String> {

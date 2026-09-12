@@ -33,8 +33,6 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 
-chrono = { version = "0.4.45", default-features = false, features = ["std"] }
-dirs = "6"
 fs2 = "0.4"
 getrandom = "0.2"
 gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
@@ -70,9 +68,6 @@ windows-sys = { version = "0.61", features = [
 criterion = "0.5"
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
 
-hex = "0.4"
-sha2 = "0.11"
-tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [[bench]]

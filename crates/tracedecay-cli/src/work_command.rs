@@ -1,9 +1,6 @@
 //! CLI presentation for the closed Work application binding.
 
-use std::io::{Read, Write};
-
-use serde_json::Value;
-use tracedecay_contracts::ApplicationResult;
+use std::io::Write;
 
 use crate::cli::WorkInvocationArgs;
 
@@ -11,7 +8,10 @@ use crate::cli::WorkInvocationArgs;
 pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
-    let body = read_request(&invocation.request_file)?;
+    let body = crate::application_cli::read_request(
+        &invocation.request_file,
+        crate::application_cli::WORK,
+    )?;
     let project_root = tracedecay_configuration::resolve_path_with_discovery(invocation.project);
     let operation = invocation.operation;
     // The application round-trip timed apart from `cli.work.invoke` so daemon
@@ -22,21 +22,13 @@ pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::er
         label = "cli.work.request"
     )
     .await?;
-    let rendered = if invocation.json {
-        work_json_line(&response.outcome)?
-    } else {
-        let outcome = response.outcome.as_ref().map_err(|problem| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("{}: {}", problem.problem.code, problem.problem.message),
-            }
-        })?;
-        format!(
-            "Work {}\nProject: {}\n{}\n",
-            operation.route_segment().replace('-', " "),
-            project_root.display(),
-            serde_json::to_string_pretty(outcome)?
-        )
-    };
+    let rendered = crate::application_cli::render(
+        crate::application_cli::WORK,
+        operation.route_segment(),
+        &project_root,
+        &response.outcome,
+        invocation.json,
+    )?;
 
     let mut stdout = std::io::stdout().lock();
     let write_result = write_work_output(&mut stdout, rendered.as_bytes());
@@ -87,63 +79,18 @@ fn classify_work_output(result: &std::io::Result<()>) -> WorkOutputSettlement {
     }
 }
 
-fn work_json_line(outcome: &ApplicationResult<Value>) -> serde_json::Result<String> {
-    crate::cli::output::json::json_line(outcome)
-}
-
-fn read_request(path: &std::path::Path) -> tracedecay_domain::errors::Result<Value> {
-    let payload = if path == std::path::Path::new("-") {
-        let mut payload = String::new();
-        std::io::stdin().read_to_string(&mut payload)?;
-        payload
-    } else {
-        std::fs::read_to_string(path)?
-    };
-    serde_json::from_str(&payload).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "Work request file {} is not valid JSON: {error}",
-                path.display()
-            ),
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::work_json_line;
-    use super::{WorkOutputSettlement, classify_work_output, write_work_output};
     use std::io::{self, Write};
-    use tracedecay_contracts::{
-        ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
-        ResultContractRef, RetryDirective,
-    };
-    use tracedecay_tool_catalog::SchemaId;
+
+    use super::{WorkOutputSettlement, classify_work_output, write_work_output};
 
     #[test]
     fn work_json_line_preserves_the_canonical_typed_problem() {
-        let outcome: ApplicationResult<serde_json::Value> = Err(ApplicationProblemEnvelope::new(
-            ResultContractRef::new(
-                SchemaId::new("schema.work.start_attempt.result").unwrap(),
-                1,
-            )
-            .unwrap(),
-            RequestId::new("request.cli.work.7").unwrap(),
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        )
-        .expect("construct canonical work problem fixture"));
-
-        let rendered = work_json_line(&outcome).expect("work JSON line");
-        let problem: serde_json::Value =
-            serde_json::from_str(rendered.trim_end()).expect("typed work problem JSON");
-        assert_eq!(
-            problem["contract"]["schema_id"],
-            "schema.work.start_attempt.result"
+        crate::application_cli::tests::assert_json_problem(
+            "schema.work.start_attempt.result",
+            "request.cli.work.7",
         );
-        assert_eq!(problem["contract"]["schema_revision"], 1);
-        assert_eq!(problem["request_id"], "request.cli.work.7");
-        assert_eq!(problem["problem"]["kind"], "not_found_or_not_authorized");
-        assert_eq!(rendered.lines().count(), 1);
     }
 
     struct BrokenPipeWriter;

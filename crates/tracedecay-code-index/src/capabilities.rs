@@ -36,29 +36,6 @@ pub enum CapabilityEmissionErrorV1 {
     Contract(String),
 }
 
-/// The capability-manifest emitter contract.
-pub trait CodeIndexCapabilityEmitter {
-    /// Emit the base capability manifest for one sealed generation.
-    fn emit(
-        &self,
-        generation: &CodeGenerationManifestV1,
-    ) -> Result<CodeIndexCapabilityManifestV1, CapabilityEmissionErrorV1>;
-}
-
-/// The consumer-side validation contract for a base manifest: reject missing,
-/// incompatible, mixed-generation, or unauthorized manifests before candidate
-/// production.
-pub trait CodeIndexCapabilityValidator {
-    /// Validate that `manifest` authorizes candidate production under
-    /// `projection` for `generation`.
-    fn validate_for_candidates(
-        &self,
-        generation: &CodeGenerationId,
-        projection: &ProjectionKeyV1,
-        manifest: &CodeIndexCapabilityManifestV1,
-    ) -> Result<(), CapabilityEmissionErrorV1>;
-}
-
 /// Domain separator for the generation seal's expected digest. The seal is
 /// computed over every generation field except the seal itself.
 pub const GENERATION_SEAL_SEPARATOR: &str = "tracedecay.code-generation-seal.v1";
@@ -231,8 +208,9 @@ pub fn generation_language_revisions_match<R: LanguageRegistry>(
         )
 }
 
-impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R> {
-    fn emit(
+impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
+    /// Emit the base capability manifest for one sealed generation.
+    pub fn emit(
         &self,
         generation: &CodeGenerationManifestV1,
     ) -> Result<CodeIndexCapabilityManifestV1, CapabilityEmissionErrorV1> {
@@ -354,8 +332,11 @@ impl Default for BaseCapabilityValidator {
     }
 }
 
-impl CodeIndexCapabilityValidator for BaseCapabilityValidator {
-    fn validate_for_candidates(
+impl BaseCapabilityValidator {
+    /// Validate that `manifest` authorizes candidate production under
+    /// `projection` for `generation`: reject missing, incompatible,
+    /// mixed-generation, or unauthorized manifests before candidate production.
+    pub fn validate_for_candidates(
         &self,
         generation: &CodeGenerationId,
         projection: &ProjectionKeyV1,

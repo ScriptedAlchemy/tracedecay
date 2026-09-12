@@ -18,10 +18,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
-#[cfg(windows)]
-use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-#[cfg(windows)]
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 use tracedecay_code_index::chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest};
 use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
@@ -79,10 +75,8 @@ use tracedecay_query::retrieval::lexical::{
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 use tracedecay_query::search_quality::semantic_native::{
-    SemanticChannelAblationV1, SemanticNativeHydrationMeasurementV1, SemanticNativeQueryInputV1,
-    SemanticNativeQueryOutputV1, SemanticNativeQueryStageMeasurementsV1,
-    SemanticNativeResourceEvidenceV1, SemanticNativeResourceSampleV1,
-    SemanticNativeStageMeasurementV1, SemanticNativeStageResultV1, evaluate_native_query,
+    SemanticNativeHydrationMeasurementV1, SemanticNativeQueryStageMeasurementsV1,
+    SemanticNativeResourceEvidenceV1, SemanticNativeStageMeasurementV1,
 };
 
 use tracedecay_query::search_quality::candidate_output::{
@@ -91,23 +85,27 @@ use tracedecay_query::search_quality::candidate_output::{
     evaluated_rerank_policy, fusion_profile, retrieval_budget, typed_id as id,
 };
 
-pub use tracedecay_query::search_quality::candidate_output::{
-    CandidateOutputError, CandidateWorkloadV1, DirectEvaluatedProfileMaterialV1,
-    EvaluationConcurrencyContractV1, EvaluationExecutionContractV1,
-    GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1, IncrementalFixtureV1,
-    OptionalStageMeasurementV1, OptionalStageMeasurementsV1, PRODUCTION_BOUNDARY,
-    ProductionCandidateNativeExecutionAuthorityV1, ProductionCandidateNativeGenerationResourcesV1,
-    ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
-    ProductionCandidateNativeResourceContextV1, ProductionCandidateOutputV1,
-    ProductionCandidateSemanticProjectionSourcesV1, ProfileSpecV1, QueryCandidateRowV1,
-    RankedCandidateRowV1, ResourceMeasurementStatusV1, ResourceSampleV1, WORKLOAD_RELATIVE,
-    WorkloadQueryV1, compute_corpus_digest, compute_corpus_digest_from_embedded_bytes,
-    compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
-    load_candidate_workload, load_direct_evaluated_profile_material, validate_workload_for_tuning,
+use tracedecay_query::search_quality::candidate_output::{
+    CandidateOutputError, CandidateWorkloadV1, GenerateCandidateOutputsResultV1,
+    HistoricalQueryExecutionV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
+    PRODUCTION_BOUNDARY, ProductionCandidateNativeExecutionAuthorityV1,
+    ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1, RankedCandidateRowV1,
+    ResourceSampleV1, WORKLOAD_RELATIVE, WorkloadQueryV1, compute_corpus_digest,
+    compute_profile_material_digest, compute_workload_digest, load_candidate_workload,
+    validate_workload_for_tuning,
 };
 
 mod control;
 use control::ActiveControl;
+
+mod native;
+use native::{
+    apply_native_resource_evidence, elapsed_micros, measure_native_partition,
+    native_optional_stage_measurements, retriever_outcome_candidate_count,
+};
+
+mod peak_rss;
+use peak_rss::{completed_resource_sample, peak_rss_bytes};
 
 mod cancellation;
 use cancellation::prove_cancellation;
@@ -673,451 +671,6 @@ pub fn generate_candidate_outputs_with_native(
     Ok(generated)
 }
 
-#[hotpath::measure(label = "search_eval.native.partition")]
-fn measure_native_partition(
-    published: &PublishedCorpus,
-    profile: &ProfileSpecV1,
-    queries: &[&WorkloadQueryV1],
-    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
-    workload_digest: &str,
-    corpus_digest: &str,
-    scale: &str,
-) -> Result<
-    (
-        Vec<QueryCandidateRowV1>,
-        SemanticNativeStageResultV1<SemanticNativeResourceSampleV1>,
-    ),
-    CandidateOutputError,
-> {
-    hotpath::gauge!("search_eval_queries_total").set(queries.len());
-    hotpath::gauge!("search_eval_queries_completed").set(0_usize);
-    let mut rows = None;
-    let generation = &published.generation;
-    let mut execute_queries = || {
-        let mut measured_rows = Vec::with_capacity(queries.len());
-        let mut latency_samples_us = Vec::with_capacity(queries.len());
-        for (index, query) in queries.iter().enumerate() {
-            let started = Instant::now();
-            measured_rows.push(retrieve_one_native_query(
-                published, profile, query, authority,
-            )?);
-            latency_samples_us.push(elapsed_micros(started));
-            hotpath::gauge!("search_eval_queries_completed").set(index.saturating_add(1));
-        }
-        rows = Some(measured_rows);
-        Ok(latency_samples_us)
-    };
-    let evidence = authority.measure_resources(
-        ProductionCandidateNativeResourceContextV1 {
-            profile,
-            queries,
-            code: generation,
-            incremental_code: &published.incremental_generation,
-            incremental_before_content_digest: &published.incremental_before_content_digest,
-            incremental_after_content_digest: &published.incremental_after_content_digest,
-            code_generation: &generation.manifest().generation_id,
-            workload_digest,
-            corpus_digest,
-            scale,
-            eligible_chunks: published.eligible_chunks,
-            semantic_projection_sources: ProductionCandidateSemanticProjectionSourcesV1 {
-                one_symbol: &published.incremental_generation,
-                deletion: &published.deletion_generation,
-                no_op: &published.no_op_generation,
-            },
-        },
-        &mut execute_queries,
-    )?;
-    let rows = rows.ok_or_else(|| {
-        CandidateOutputError::Contract(
-            "native resource authority did not execute the exact query workload".to_owned(),
-        )
-    })?;
-    if let SemanticNativeStageResultV1::Complete(sample) = &evidence {
-        let source_manifest_digest = &generation.projection().request().changes.manifest_digest;
-        if sample.provenance.workload_digest != workload_digest
-            || sample.provenance.corpus_digest != corpus_digest
-            || sample.provenance.scale != scale
-            || sample.provenance.code_generation_id != generation.manifest().generation_id.as_str()
-            || sample.provenance.code_source_manifest_digest != source_manifest_digest.as_str()
-            || sample.provenance.incremental_code_generation_id
-                != published
-                    .incremental_generation
-                    .manifest()
-                    .generation_id
-                    .as_str()
-            || sample.provenance.incremental_code_source_manifest_digest
-                != published
-                    .incremental_generation
-                    .projection()
-                    .request()
-                    .changes
-                    .manifest_digest
-                    .as_str()
-            || sample.provenance.incremental_before_content_digest
-                != published.incremental_before_content_digest
-            || sample.provenance.incremental_after_content_digest
-                != published.incremental_after_content_digest
-            || sample.provenance.threads == 0
-            || sample.provenance.max_concurrent_sessions == 0
-            || sample.provenance.batch_size == 0
-            || sample.provenance.sequence_length == 0
-            || sample.provenance.load_deadline_ms == 0
-            || sample.eligible_chunks != published.eligible_chunks
-            || sample.measured_queries != queries.len() as u64
-        {
-            return Err(CandidateOutputError::Contract(
-                "native resource evidence is not bound to the exact evaluator workload".to_owned(),
-            ));
-        }
-    }
-    Ok((rows, evidence))
-}
-
-fn elapsed_micros(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
-}
-
-fn retriever_outcome_candidate_count<E>(
-    outcome: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<E>>,
-) -> u64 {
-    match outcome {
-        RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
-            batch.candidates.len() as u64
-        }
-        RetrieverOutcome::Unavailable(_)
-        | RetrieverOutcome::Denied
-        | RetrieverOutcome::Stale(_)
-        | RetrieverOutcome::BudgetExceeded(_)
-        | RetrieverOutcome::TimedOut(_)
-        | RetrieverOutcome::Cancelled => 0,
-    }
-}
-
-#[hotpath::measure(label = "search_eval.native.retrieve")]
-fn retrieve_one_native_query(
-    published: &PublishedCorpus,
-    profile: &ProfileSpecV1,
-    query: &WorkloadQueryV1,
-    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
-) -> Result<QueryCandidateRowV1, CandidateOutputError> {
-    let prepared = prepare_production_query(published, profile, query)?;
-    let mut fusion = fusion_profile(profile, true)?;
-    let mut native = None;
-    let scope_key = canonical_scope_key(&query.allowed_scopes);
-    let semantic_allowed_chunks = published
-        .semantic_allowed_chunks
-        .get(&scope_key)
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(format!(
-                "query {} has no precomputed semantic scope",
-                query.query_id
-            ))
-        })?;
-    let mut evaluate = |inputs: ProductionCandidateNativeQueryInputsV1<'_>| {
-        if native.is_some() {
-            return Err(CandidateOutputError::Contract(format!(
-                "native authority evaluated query {} more than once",
-                query.query_id
-            )));
-        }
-        fusion.rerank_policy_id = inputs
-            .rerank
-            .as_ref()
-            .map(|rerank| rerank.policy.policy_id.clone());
-        native = Some(
-            evaluate_native_query(SemanticNativeQueryInputV1 {
-                profile_spec: profile,
-                fusion_profile: &fusion,
-                diversity_policy: &prepared.diversity,
-                kernel: &prepared.kernel,
-                fallback_lanes: &prepared.fallback_lanes,
-                query_measurements: prepared.query_measurements,
-                semantic: inputs.semantic,
-                fallback: &prepared.fallback,
-                rerank: inputs.rerank,
-            })
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        );
-        Ok(())
-    };
-    authority.with_query_inputs(
-        ProductionCandidateNativeQueryContextV1 {
-            profile,
-            query,
-            request: &prepared.request,
-            query_view: &prepared.query_view,
-            code: &published.generation,
-            code_generation: &prepared.code_generation,
-            semantic_allowed_chunks,
-            rerank_policy: prepared.rerank_policy.as_ref(),
-        },
-        &mut evaluate,
-    )?;
-    let mut native = native.ok_or_else(|| {
-        CandidateOutputError::Contract(format!(
-            "native authority did not evaluate query {}",
-            query.query_id
-        ))
-    })?;
-    let ranked = match &native.rerank.on {
-        SemanticNativeStageResultV1::Complete(ranked) => ranked.clone(),
-        SemanticNativeStageResultV1::NotRequested | SemanticNativeStageResultV1::Pending { .. } => {
-            native.rerank.off.clone()
-        }
-    };
-    native.measurements.hydration = Some(measure_late_hydration(
-        published,
-        &prepared.request,
-        &ranked,
-        &retrieval_budget(),
-    )?);
-    validate_native_query_output(profile, &prepared.fallback, &native)?;
-    let ranked = map_ranked_candidate_list(published, &ranked)?;
-    let (historical, historical_ranked) = historical_candidates(published, query)?;
-    let ranked = merge_candidate_timelines(query, ranked, historical_ranked);
-    Ok(QueryCandidateRowV1 {
-        query_id: query.query_id.clone(),
-        abstained: ranked.is_empty(),
-        ranked,
-        historical,
-        native: Some(native),
-    })
-}
-
-fn validate_native_query_output(
-    profile: &ProfileSpecV1,
-    fallback: &QueryFallbackSubpayload,
-    native: &SemanticNativeQueryOutputV1,
-) -> Result<(), CandidateOutputError> {
-    if native.profile_id != profile.profile_id
-        || native.fallback_digest != fallback.digest.as_str()
-        || !native.fallback_bytes_unchanged
-    {
-        return Err(CandidateOutputError::Contract(format!(
-            "native query output does not preserve the exact query fallback for {}",
-            profile.profile_id
-        )));
-    }
-    let observed = native
-        .ablations
-        .iter()
-        .map(|result| result.ablation)
-        .collect::<BTreeSet<_>>();
-    if observed.len() != native.ablations.len()
-        || !observed.contains(&SemanticChannelAblationV1::ExactLexical)
-        || !observed.contains(&SemanticChannelAblationV1::QueryExactLexicalGraph)
-    {
-        return Err(CandidateOutputError::Contract(
-            "native query output is missing required query baseline ablations".to_owned(),
-        ));
-    }
-    for ablation in &native.ablations {
-        if ablation.measurement.output_candidates != ablation.ranked_candidates.len() as u64 {
-            return Err(CandidateOutputError::Contract(
-                "native fusion measurement does not match its ranked output".to_owned(),
-            ));
-        }
-    }
-    let hydration = native.measurements.hydration.ok_or_else(|| {
-        CandidateOutputError::Contract(
-            "native query output is missing genuine late-hydration measurements".to_owned(),
-        )
-    })?;
-    if hydration.source_fetches != hydration.receipts
-        || hydration.receipts > hydration.selected_candidates
-        || (hydration.receipts != 0 && hydration.bytes_hydrated == 0)
-    {
-        return Err(CandidateOutputError::Contract(
-            "native late-hydration measurements do not match source receipts".to_owned(),
-        ));
-    }
-    let semantic_ablations = [
-        SemanticChannelAblationV1::ExactLexicalSemantic,
-        SemanticChannelAblationV1::HybridExactLexicalGraphSemantic,
-    ];
-    match (&native.exact_flat_oracle, &native.measurements.semantic) {
-        (
-            SemanticNativeStageResultV1::Complete(oracle),
-            SemanticNativeStageResultV1::Complete(measurement),
-        ) => {
-            if measurement.output_candidates != oracle.hits.len() as u64 {
-                return Err(CandidateOutputError::Contract(
-                    "native semantic measurement does not match the exact-flat oracle".to_owned(),
-                ));
-            }
-            if semantic_ablations
-                .iter()
-                .any(|ablation| !observed.contains(ablation))
-            {
-                return Err(CandidateOutputError::Contract(
-                    "complete semantic output is missing required channel ablations".to_owned(),
-                ));
-            }
-        }
-        (SemanticNativeStageResultV1::NotRequested, SemanticNativeStageResultV1::NotRequested)
-        | (
-            SemanticNativeStageResultV1::Pending { .. },
-            SemanticNativeStageResultV1::Pending { .. },
-        ) => {
-            if semantic_ablations
-                .iter()
-                .any(|ablation| observed.contains(ablation))
-            {
-                return Err(CandidateOutputError::Contract(
-                    "semantic ablations cannot exist without a complete semantic run".to_owned(),
-                ));
-            }
-        }
-        _ => {
-            return Err(CandidateOutputError::Contract(
-                "native semantic result and measurement states disagree".to_owned(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn native_optional_stage_measurements(
-    profile: &ProfileSpecV1,
-    rows: &[QueryCandidateRowV1],
-) -> Result<OptionalStageMeasurementsV1, CandidateOutputError> {
-    let native = rows
-        .iter()
-        .map(|row| {
-            row.native.as_ref().ok_or_else(|| {
-                CandidateOutputError::Contract(format!(
-                    "native generation omitted query evidence {}",
-                    row.query_id
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(OptionalStageMeasurementsV1 {
-        semantic: aggregate_native_stage(
-            profile.semantic_weight_ppm != 0,
-            native.iter().map(|native| &native.exact_flat_oracle),
-        )?,
-        rerank: aggregate_native_rerank_stage(profile.rerank_weight_ppm != 0, &native)?,
-    })
-}
-
-fn aggregate_native_stage<'a, T: 'a>(
-    requested: bool,
-    results: impl Iterator<Item = &'a SemanticNativeStageResultV1<T>>,
-) -> Result<OptionalStageMeasurementV1, CandidateOutputError> {
-    let results = results.collect::<Vec<_>>();
-    if !requested {
-        if results
-            .iter()
-            .any(|result| !matches!(result, SemanticNativeStageResultV1::NotRequested))
-        {
-            return Err(CandidateOutputError::Contract(
-                "unrequested native stage reported execution".to_owned(),
-            ));
-        }
-        return Ok(OptionalStageMeasurementV1::NotRequested);
-    }
-    if results
-        .iter()
-        .any(|result| matches!(result, SemanticNativeStageResultV1::NotRequested))
-    {
-        return Err(CandidateOutputError::Contract(
-            "requested native stage reported not_requested".to_owned(),
-        ));
-    }
-    Ok(
-        if results
-            .iter()
-            .all(|result| matches!(result, SemanticNativeStageResultV1::Complete(_)))
-        {
-            OptionalStageMeasurementV1::Complete
-        } else {
-            OptionalStageMeasurementV1::Pending
-        },
-    )
-}
-
-fn aggregate_native_rerank_stage(
-    requested: bool,
-    native: &[&SemanticNativeQueryOutputV1],
-) -> Result<OptionalStageMeasurementV1, CandidateOutputError> {
-    for output in native {
-        let states_agree = match (&output.rerank.on, &output.rerank.execution) {
-            (
-                SemanticNativeStageResultV1::NotRequested,
-                SemanticNativeStageResultV1::NotRequested,
-            )
-            | (
-                SemanticNativeStageResultV1::Complete(_),
-                SemanticNativeStageResultV1::Complete(_),
-            ) => true,
-            (
-                SemanticNativeStageResultV1::Pending { reason: left },
-                SemanticNativeStageResultV1::Pending { reason: right },
-            ) => left == right,
-            _ => false,
-        };
-        if !states_agree {
-            return Err(CandidateOutputError::Contract(
-                "rerank output and resource execution states disagree".to_owned(),
-            ));
-        }
-    }
-    aggregate_native_stage(requested, native.iter().map(|native| &native.rerank.on))
-}
-
-fn apply_native_resource_evidence(
-    output: &mut ProductionCandidateOutputV1,
-    evidence: &SemanticNativeResourceEvidenceV1,
-) -> Result<(), CandidateOutputError> {
-    let expected_chunks = output
-        .resources
-        .iter()
-        .map(|(scale, sample)| (scale.clone(), sample.eligible_chunks))
-        .collect::<BTreeMap<_, _>>();
-    let mut projected = BTreeMap::new();
-    for (scale, stage) in &evidence.samples {
-        let eligible_chunks = expected_chunks.get(scale).copied().ok_or_else(|| {
-            CandidateOutputError::Contract(format!("unknown native resource scale {scale}"))
-        })?;
-        let sample = match stage {
-            SemanticNativeStageResultV1::Complete(sample) => {
-                let projected = sample.as_existing_evaluator_sample().ok_or_else(|| {
-                    CandidateOutputError::Contract(format!(
-                        "complete native resource sample {scale} is incomplete"
-                    ))
-                })?;
-                if projected.eligible_chunks != eligible_chunks {
-                    return Err(CandidateOutputError::Contract(format!(
-                        "native resource sample {scale} has the wrong eligible chunk count"
-                    )));
-                }
-                projected
-            }
-            SemanticNativeStageResultV1::Pending { reason } => ResourceSampleV1 {
-                status: ResourceMeasurementStatusV1::Pending,
-                eligible_chunks,
-                peak_rss_bytes: None,
-                latency_samples_us: Vec::new(),
-                measured_queries: 0,
-                pending_reason: Some(format!(
-                    "native semantic resource measurement pending: {reason:?}"
-                )),
-            },
-            SemanticNativeStageResultV1::NotRequested => {
-                return Err(CandidateOutputError::Contract(format!(
-                    "native resource sample {scale} cannot be not_requested"
-                )));
-            }
-        };
-        projected.insert(scale.clone(), sample);
-    }
-    output.resources = projected;
-    output.native_resources = Some(evidence.clone());
-    Ok(())
-}
-
 /// Direct production call for one query/profile — used by tests to prove the
 /// generator emits identical candidate bytes.
 pub fn retrieve_partition_query_bytes(
@@ -1278,111 +831,6 @@ fn measure_partition_resources(
         latencies_us,
         queries.len() as u64,
     ))
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum PeakRssObservation {
-    Measured(u64),
-    Pending(PeakRssPendingReason),
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum PeakRssPendingReason {
-    #[cfg(any(target_os = "linux", test))]
-    LinuxStatusReadFailure(String),
-    #[cfg(any(target_os = "linux", test))]
-    LinuxMissingNonzeroVmHwm,
-    #[cfg(any(target_os = "macos", test))]
-    MacOsGetrusageFailure(String),
-    #[cfg(any(target_os = "macos", test))]
-    MacOsNonPositiveMaxRss,
-    #[cfg(any(windows, test))]
-    WindowsK32GetProcessMemoryInfoFailure(String),
-    #[cfg(any(windows, test))]
-    WindowsZeroPeakWorkingSetSize,
-    #[cfg(any(not(any(target_os = "linux", target_os = "macos", windows)), test))]
-    UnsupportedPlatform(&'static str),
-}
-
-impl std::fmt::Display for PeakRssPendingReason {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            #[cfg(any(target_os = "linux", test))]
-            Self::LinuxStatusReadFailure(error) => write!(
-                formatter,
-                "Linux peak_rss_bytes is unavailable because /proc/self/status could not be read: {error}"
-            ),
-            #[cfg(any(target_os = "linux", test))]
-            Self::LinuxMissingNonzeroVmHwm => formatter.write_str(
-                "Linux peak_rss_bytes is unavailable because /proc/self/status has no nonzero VmHWM value",
-            ),
-            #[cfg(any(target_os = "macos", test))]
-            Self::MacOsGetrusageFailure(error) => write!(
-                formatter,
-                "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) failed: {error}"
-            ),
-            #[cfg(any(target_os = "macos", test))]
-            Self::MacOsNonPositiveMaxRss => formatter.write_str(
-                "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) returned a non-positive ru_maxrss",
-            ),
-            #[cfg(any(windows, test))]
-            Self::WindowsK32GetProcessMemoryInfoFailure(error) => write!(
-                formatter,
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo failed before PeakWorkingSetSize could be read: {error}"
-            ),
-            #[cfg(any(windows, test))]
-            Self::WindowsZeroPeakWorkingSetSize => formatter.write_str(
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned zero PeakWorkingSetSize",
-            ),
-            #[cfg(any(not(any(target_os = "linux", target_os = "macos", windows)), test))]
-            Self::UnsupportedPlatform(platform) => write!(
-                formatter,
-                "{platform} peak_rss_bytes is unavailable because the platform is unsupported"
-            ),
-        }
-    }
-}
-
-impl PeakRssObservation {
-    fn max(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Measured(left), Self::Measured(right)) => Self::Measured(left.max(right)),
-            (Self::Pending(reason), _) | (Self::Measured(_), Self::Pending(reason)) => {
-                Self::Pending(reason)
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn is_measured(&self) -> bool {
-        matches!(self, Self::Measured(_))
-    }
-}
-
-fn completed_resource_sample(
-    eligible_chunks: u64,
-    peak_rss: PeakRssObservation,
-    latency_samples_us: Vec<u64>,
-    measured_queries: u64,
-) -> ResourceSampleV1 {
-    let (status, peak_rss_bytes, pending_reason) = match peak_rss {
-        PeakRssObservation::Measured(bytes) => {
-            (ResourceMeasurementStatusV1::Measured, Some(bytes), None)
-        }
-        PeakRssObservation::Pending(reason) => (
-            ResourceMeasurementStatusV1::Pending,
-            None,
-            Some(reason.to_string()),
-        ),
-    };
-    ResourceSampleV1 {
-        status,
-        eligible_chunks,
-        peak_rss_bytes,
-        latency_samples_us,
-        measured_queries,
-        pending_reason,
-    }
 }
 
 fn retrieve_one_query(
@@ -2660,107 +2108,24 @@ fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<(), Candidat
     })
 }
 
-#[cfg(target_os = "linux")]
-fn peak_rss_bytes() -> PeakRssObservation {
-    let status = match fs::read_to_string("/proc/self/status") {
-        Ok(status) => status,
-        Err(error) => {
-            return PeakRssObservation::Pending(PeakRssPendingReason::LinuxStatusReadFailure(
-                error.to_string(),
-            ));
-        }
-    };
-    match peak_rss_bytes_from_status(&status) {
-        Some(bytes) => PeakRssObservation::Measured(bytes),
-        None => PeakRssObservation::Pending(PeakRssPendingReason::LinuxMissingNonzeroVmHwm),
-    }
-}
-
-/// macOS reports the peak resident set in bytes through `getrusage`; Linux
-/// keeps `/proc` because `ru_maxrss` there is kilobytes and `VmHWM` is exact.
-#[cfg(target_os = "macos")]
-fn peak_rss_bytes() -> PeakRssObservation {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    // SAFETY: `getrusage` fully initialises the out-parameter when it returns 0.
-    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if rc != 0 {
-        return PeakRssObservation::Pending(PeakRssPendingReason::MacOsGetrusageFailure(
-            std::io::Error::last_os_error().to_string(),
-        ));
-    }
-    // SAFETY: checked above that the call succeeded and wrote the struct.
-    let usage = unsafe { usage.assume_init() };
-    match u64::try_from(usage.ru_maxrss)
-        .ok()
-        .filter(|bytes| *bytes > 0)
-    {
-        Some(bytes) => PeakRssObservation::Measured(bytes),
-        None => PeakRssObservation::Pending(PeakRssPendingReason::MacOsNonPositiveMaxRss),
-    }
-}
-
-#[cfg(windows)]
-fn peak_rss_bytes() -> PeakRssObservation {
-    let counter_size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    let mut counters = PROCESS_MEMORY_COUNTERS {
-        cb: counter_size,
-        ..PROCESS_MEMORY_COUNTERS::default()
-    };
-    // SAFETY: `GetCurrentProcess` returns a valid pseudo-handle, and `counters`
-    // points to a writable value whose exact size is supplied to the API.
-    let succeeded =
-        unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counter_size) };
-    let api_error = (succeeded == 0).then(|| std::io::Error::last_os_error().to_string());
-    windows_peak_rss_observation(counters.PeakWorkingSetSize, api_error)
-}
-
-#[cfg(any(windows, test))]
-fn windows_peak_rss_observation(
-    peak_working_set_size: usize,
-    api_error: Option<String>,
-) -> PeakRssObservation {
-    if let Some(error) = api_error {
-        return PeakRssObservation::Pending(
-            PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(error),
-        );
-    }
-    match u64::try_from(peak_working_set_size)
-        .ok()
-        .filter(|bytes| *bytes > 0)
-    {
-        Some(bytes) => PeakRssObservation::Measured(bytes),
-        None => PeakRssObservation::Pending(PeakRssPendingReason::WindowsZeroPeakWorkingSetSize),
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn peak_rss_bytes() -> PeakRssObservation {
-    PeakRssObservation::Pending(PeakRssPendingReason::UnsupportedPlatform(
-        std::env::consts::OS,
-    ))
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn peak_rss_bytes_from_status(status: &str) -> Option<u64> {
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
-            let kb: u64 = rest
-                .split_whitespace()
-                .next()
-                .and_then(|value| value.parse().ok())?;
-            return kb.checked_mul(1024).filter(|bytes| *bytes > 0);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod fallback_baseline_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::native::aggregate_native_stage;
+    use super::peak_rss::{
+        PeakRssObservation, PeakRssPendingReason, peak_rss_bytes_from_status,
+        windows_peak_rss_observation,
+    };
     use super::*;
-    use crate::semantic_native::SemanticNativePendingReasonV1;
+    use tracedecay_query::search_quality::candidate_output::{
+        ResourceMeasurementStatusV1, load_direct_evaluated_profile_material,
+    };
+    use tracedecay_query::search_quality::semantic_native::{
+        SemanticNativePendingReasonV1, SemanticNativeQueryInputV1, SemanticNativeStageResultV1,
+        evaluate_native_query,
+    };
 
     pub(crate) struct TestRepositoryFixture {
         _temp: tempfile::TempDir,

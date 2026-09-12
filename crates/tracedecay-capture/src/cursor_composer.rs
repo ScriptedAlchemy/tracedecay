@@ -3,14 +3,15 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    CanonicalWorkflowSemanticKindV1, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceIdentityV1, ProviderId, ProviderUsageCounterSemanticsV1,
-    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, SessionId,
+    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowSemanticKindV1,
+    ObservationId, ObservationOrderingDomainV1, ObservationSourceIdentityV1, ProviderId,
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1, SessionId,
 };
 use tracedecay_store::cursor_dispatch::cursor_model_string;
 
-use crate::ObservationRecordParseErrorV1;
+use crate::git_facts::append_diff_and_pull_request_facts;
+use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse::sha256_hex};
 
 const PROVIDER: &str = "cursor";
 
@@ -191,9 +192,9 @@ fn normalize_composer_bubble_record(
     }
 
     if let Some(token_count) = native.get("tokenCount") {
-        let input_tokens = composer_canonical_u64(token_count.get("inputTokens"));
-        let output_tokens = composer_canonical_u64(token_count.get("outputTokens"));
-        let total_tokens = composer_canonical_u64(
+        let input_tokens = canonical_u64_i64(token_count.get("inputTokens"));
+        let output_tokens = canonical_u64_i64(token_count.get("outputTokens"));
+        let total_tokens = canonical_u64_i64(
             token_count
                 .get("totalTokens")
                 .or_else(|| token_count.get("total_tokens")),
@@ -281,35 +282,22 @@ fn append_composer_git_facts(native: &Value, facts: &mut Vec<CanonicalObservatio
             });
         }
     }
-    if native
+    let has_diffs = native
         .get("gitDiffs")
         .and_then(Value::as_array)
-        .is_some_and(|diffs| !diffs.is_empty())
-    {
-        facts.push(CanonicalObservationFactV1::Git {
-            evidence_kind: CanonicalGitEvidenceKindV1::Diff,
-            reference: None,
-            content: None,
-        });
-    }
-    if let Some(pull_requests) = native.get("pullRequests").and_then(Value::as_array) {
-        for pull_request in pull_requests {
-            let reference = ["url", "htmlUrl", "html_url", "id"]
+        .is_some_and(|diffs| !diffs.is_empty());
+    let pull_request_references = native
+        .get("pullRequests")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|pull_request| {
+            ["url", "htmlUrl", "html_url", "id"]
                 .into_iter()
                 .find_map(|key| pull_request.get(key).and_then(Value::as_str))
-                .map(str::to_string);
-            facts.push(CanonicalObservationFactV1::Git {
-                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
-                reference: reference.clone(),
-                content: None,
-            });
-            facts.push(CanonicalObservationFactV1::Workflow {
-                evidence_kind: CanonicalWorkflowEvidenceKindV1::PullRequest,
-                reference,
-                content: None,
-            });
-        }
-    }
+                .map(str::to_string)
+        });
+    append_diff_and_pull_request_facts(facts, has_diffs, pull_request_references);
 }
 
 /// Map native Composer `todos[{id,content,status}]` into `WorkflowLifecycle`
@@ -488,14 +476,6 @@ fn composer_observation_id(native_id: Option<&str>, fallback: &ObservationId) ->
         .unwrap_or_else(|| fallback.clone())
 }
 
-fn composer_canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
-}
-
 /// Exact allowlist for `toolFormerData.status` → `ToolResult.success`.
 /// Unknown statuses stay `None` (not a concrete failure/`Some(false)`).
 fn composer_tool_result_success(status: &str) -> Option<bool> {
@@ -548,7 +528,7 @@ pub fn cursor_composer_native_record_id(
     hasher.update(bubble_id.as_bytes());
     ObservationId::new(format!(
         "cursor.composer.sha256:{}",
-        hex::encode(hasher.finalize())
+        sha256_hex(&hasher.finalize())
     ))
     .map_err(|error| format!("invalid Cursor composer native identity: {error}"))
 }
@@ -626,7 +606,7 @@ pub fn cursor_composer_envelope_native_record_id(
     hasher.update(checkpoint.to_le_bytes());
     ObservationId::new(format!(
         "cursor.composer.envelope.sha256:{}",
-        hex::encode(hasher.finalize())
+        sha256_hex(&hasher.finalize())
     ))
     .map_err(|error| format!("invalid Cursor composer envelope native identity: {error}"))
 }

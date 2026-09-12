@@ -4,8 +4,9 @@ use std::sync::Arc;
 use thiserror::Error;
 pub use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, ClaudeByteRangeV1, MAX_OBSERVATION_STRUCTURE_DEPTH,
-    MAX_OBSERVATION_STRUCTURE_VALUES, ObservationOrderingDomainV1, ProviderId,
+    CanonicalObservationEnvelopeV1, MAX_OBSERVATION_STRUCTURE_DEPTH,
+    MAX_OBSERVATION_STRUCTURE_VALUES, ObservationOrderingDomainV1, ObservationSourceRangeV1,
+    ProviderId,
 };
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -63,7 +64,7 @@ impl ParseLimits {
 /// into the sanitizer without serializing or parsing it again.
 pub struct ParsedClaudeRecordV1 {
     value: Value,
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
     encoded_len: usize,
     observed_depth: usize,
@@ -77,7 +78,7 @@ impl ParsedClaudeRecordV1 {
         &self.value
     }
 
-    pub fn source_range(&self) -> &ClaudeByteRangeV1 {
+    pub fn source_range(&self) -> &ObservationSourceRangeV1 {
         &self.source_range
     }
 
@@ -125,7 +126,7 @@ pub type ObservationRecordParseErrorV1 = ClaudeRecordParseErrorV1;
 #[derive(Clone)]
 pub struct PreparedObservationRecordV1 {
     native: Arc<Value>,
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
     encoded_len: usize,
     raw_digest: [u8; 32],
@@ -175,14 +176,14 @@ fn decoded_value_retained_bytes(value: &Value) -> u64 {
 
 pub fn parse_claude_record_v1(
     record: &[u8],
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
 ) -> Result<ParsedClaudeRecordV1, ClaudeRecordParseErrorV1> {
     parse_observation_record_v1(record, source_range, ObservationOrderingDomainV1::FileBytes)
 }
 
 pub fn parse_observation_record_v1(
     record: &[u8],
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
     let parsed = parse_observation_record(
@@ -203,7 +204,7 @@ pub fn parse_observation_record_v1(
 #[hotpath::measure(label = "capture.parse.normalized_record")]
 pub fn parse_normalized_observation_record_v1(
     record: &[u8],
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
     normalize: impl FnOnce(
         Value,
@@ -231,7 +232,7 @@ pub fn parse_normalized_observation_record_v1(
 
 pub fn prepare_observation_record_v1(
     record: &[u8],
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<PreparedObservationRecordV1, ObservationRecordParseErrorV1> {
     let prepared = prepare_observation_record(record, source_range, ordering_domain);
@@ -242,7 +243,7 @@ pub fn prepare_observation_record_v1(
 #[hotpath::measure(label = "capture.parse.prepare_record")]
 fn prepare_observation_record(
     record: &[u8],
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<PreparedObservationRecordV1, ObservationRecordParseErrorV1> {
     let limits = ParseLimits::default_policy();
@@ -293,7 +294,7 @@ pub fn normalize_prepared_observation_record_v1(
 /// per-policy limits are verified against later.
 fn finish_canonical_envelope(
     envelope: CanonicalObservationEnvelopeV1,
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
     encoded_len: usize,
     raw_digest: [u8; 32],
@@ -325,7 +326,7 @@ fn finish_canonical_envelope(
 #[hotpath::measure(label = "capture.parse.record")]
 fn parse_observation_record(
     record: &[u8],
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
     limits: ParseLimits,
 ) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
@@ -366,9 +367,29 @@ fn record_digest(record: &[u8]) -> [u8; 32] {
     hotpath::measure_block!("capture.parse.record_digest", Sha256::digest(record).into())
 }
 
+pub(crate) fn canonical_u64_i64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+    })
+}
+
+pub(crate) fn canonical_u64_string(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+    })
+}
+
+pub(crate) fn sha256_hex(digest: &[u8]) -> String {
+    tracedecay_domain::canonical_text::encode_lowercase_hex(digest)
+}
+
 fn validate_record_frame(
     record: &[u8],
-    source_range: ClaudeByteRangeV1,
+    source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
     limits: ParseLimits,
 ) -> Result<(), ClaudeRecordParseErrorV1> {
@@ -442,7 +463,7 @@ mod canonical_envelope_tests {
 
     fn message_envelope(
         content: Value,
-        range: ClaudeByteRangeV1,
+        range: ObservationSourceRangeV1,
     ) -> Result<CanonicalObservationEnvelopeV1, ClaudeRecordParseErrorV1> {
         CanonicalObservationEnvelopeV1::new(
             ProviderId::new("codex").unwrap(),
@@ -462,9 +483,9 @@ mod canonical_envelope_tests {
         .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
     }
 
-    fn native_record(content: &Value) -> (Vec<u8>, ClaudeByteRangeV1) {
+    fn native_record(content: &Value) -> (Vec<u8>, ObservationSourceRangeV1) {
         let record = serde_json::to_vec(&json!({ "content": content })).unwrap();
-        let range = ClaudeByteRangeV1::new(0, record.len() as u64).unwrap();
+        let range = ObservationSourceRangeV1::new(0, record.len() as u64).unwrap();
         (record, range)
     }
 
@@ -635,7 +656,7 @@ mod canonical_envelope_tests {
     /// validation, so the finishing boundary is what has to refuse it.
     fn unvalidated_message_envelope(
         content: Value,
-        range: ClaudeByteRangeV1,
+        range: ObservationSourceRangeV1,
     ) -> CanonicalObservationEnvelopeV1 {
         let mut envelope =
             serde_json::to_value(message_envelope(Value::Null, range).unwrap()).unwrap();
@@ -694,7 +715,8 @@ mod canonical_envelope_tests {
     fn evidence_mismatch_is_refused_before_conversion() {
         let content = json!({ "text": "mismatch" });
         let (record, range) = native_record(&content);
-        let other = ClaudeByteRangeV1::new(range.end(), range.end() + record.len() as u64).unwrap();
+        let other =
+            ObservationSourceRangeV1::new(range.end(), range.end() + record.len() as u64).unwrap();
         assert_eq!(
             parse_normalized_observation_record_v1(
                 &record,

@@ -15,7 +15,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
-    ExactSqlValue, optional_text_at, text_column,
+    ExactSqlValue, decode_json, encode_json, optional_text_at, text_column,
 };
 use crate::repository::RetainedExactSqlCapability;
 
@@ -117,20 +117,12 @@ fn execute_tx(
     transaction.execute(statement(sql, params)?).map(|_| ())
 }
 
-fn encode<T: serde::Serialize>(value: &T) -> Result<String, HandoffOpenAuthorityError> {
-    serde_json::to_string(value).map_err(|_| codec_unavailable())
-}
-
-fn decode<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, HandoffOpenAuthorityError> {
-    serde_json::from_str(payload).map_err(|_| codec_unavailable())
-}
-
 impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
     fn issue(
         &self,
         grant: &HandoffOpenGrantV1,
     ) -> Result<HandoffOpenGrantV1, HandoffOpenAuthorityError> {
-        let payload = encode(grant)?;
+        let payload = encode_json(grant, |_| codec_unavailable())?;
         let transaction = self.handle().begin_immediate().map_err(unavailable)?;
         let existing = query_tx(
             &transaction,
@@ -144,7 +136,8 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         .map_err(unavailable)?;
         if let Some(row) = existing.rows.first() {
             let persisted_payload = text_column(&row.values, 0).ok_or_else(codec_unavailable)?;
-            let persisted: HandoffOpenGrantV1 = decode(persisted_payload)?;
+            let persisted: HandoffOpenGrantV1 =
+                decode_json(persisted_payload, |_| codec_unavailable())?;
             let _ = transaction.rollback();
             if persisted.same_issue_identity(grant) {
                 return Ok(persisted);
@@ -201,14 +194,15 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         let mut listings = Vec::new();
         for row in &rows.rows {
             let payload = text_column(&row.values, 0).ok_or_else(codec_unavailable)?;
-            let grant: HandoffOpenGrantV1 = decode(payload)?;
+            let grant: HandoffOpenGrantV1 = decode_json(payload, |_| codec_unavailable())?;
             if !filter.matches(grant.context()) {
                 continue;
             }
             let consumed_at =
                 match optional_text_at(&row.values, 1).map_err(|_| codec_unavailable())? {
                     Some(payload) => {
-                        let consumption: HandoffOpenConsumptionV1 = decode(payload)?;
+                        let consumption: HandoffOpenConsumptionV1 =
+                            decode_json(payload, |_| codec_unavailable())?;
                         Some(*consumption.consumed_at())
                     }
                     None => None,
@@ -237,7 +231,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
             return Ok(None);
         };
         let payload = text_column(&row.values, 0).ok_or_else(codec_unavailable)?;
-        let grant: HandoffOpenGrantV1 = decode(payload)?;
+        let grant: HandoffOpenGrantV1 = decode_json(payload, |_| codec_unavailable())?;
         if !expected.matches(grant.context()) || observed_at >= *grant.expires_at() {
             return Ok(None);
         }
@@ -267,7 +261,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
             return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
         };
         let grant_payload = text_column(&row.values, 0).ok_or_else(codec_unavailable)?;
-        let grant: HandoffOpenGrantV1 = decode(grant_payload)?;
+        let grant: HandoffOpenGrantV1 = decode_json(grant_payload, |_| codec_unavailable())?;
         if !expected.matches(grant.context()) || consumed_at >= *grant.expires_at() {
             let _ = transaction.rollback();
             return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
@@ -285,7 +279,8 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
             consumption_payload,
         ) {
             (Some(stored_request_id), Some(stored_input_digest), Some(payload)) => {
-                let consumption: HandoffOpenConsumptionV1 = decode(payload)?;
+                let consumption: HandoffOpenConsumptionV1 =
+                    decode_json(payload, |_| codec_unavailable())?;
                 let _ = transaction.rollback();
                 if stored_request_id != request_id.as_str() {
                     return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
@@ -307,7 +302,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         let consumption = grant
             .consume(request_id.clone(), input_digest.clone(), consumed_at)
             .map_err(|_| codec_unavailable())?;
-        let payload = encode(&consumption)?;
+        let payload = encode_json(&consumption, |_| codec_unavailable())?;
         execute_tx(
             &transaction,
             "UPDATE handoff_open_grants_v1

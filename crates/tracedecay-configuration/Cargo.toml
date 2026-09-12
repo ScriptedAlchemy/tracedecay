@@ -12,7 +12,6 @@ glob = "0.3"
 hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
@@ -26,6 +25,5 @@ tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 
 [dev-dependencies]
-hex = "0.4"
 tempfile = "3"
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
