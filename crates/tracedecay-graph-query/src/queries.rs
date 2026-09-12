@@ -728,11 +728,15 @@ fn fold_health_aggregates(
         .iter()
         .filter(|(_, (_, record))| is_test_marker(record))
         .map(|(occurrence, _)| occurrence.clone())
-        .chain(edges.iter().filter_map(|edge| {
-            (edge.neighbor.occurrence == edge.edge.from_occurrence
-                && edge.neighbor.metadata.as_ref().is_some_and(is_test_marker))
-            .then(|| edge.edge.from_occurrence.clone())
-        }))
+        .chain(
+            edges
+                .iter()
+                .filter(|edge| {
+                    edge.neighbor.occurrence == edge.edge.from_occurrence
+                        && edge.neighbor.metadata.as_ref().is_some_and(is_test_marker)
+                })
+                .map(|edge| edge.edge.from_occurrence.clone()),
+        )
         .collect::<HashSet<_>>();
     let test_annotated = edges
         .iter()
