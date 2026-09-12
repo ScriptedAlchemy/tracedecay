@@ -4,7 +4,12 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use crate::db::engine::QueryExecutor;
+use tracedecay_domain::canonical_text::canonical_framed_sha256;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+
+/// Domain tag for [`fingerprint_schema_objects`]. Changing it would rename
+/// every cache keyed on the digest; keep it stable.
+const SCHEMA_SHAPE_FINGERPRINT_DOMAIN: &[u8] = b"tracedecay.final-schema-shape.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SchemaObject {
@@ -123,6 +128,36 @@ fn read_rusqlite_inventory(
         }
     }
     Ok(inventory)
+}
+
+/// Deterministic fingerprint of a schema-object set (`name` + `sql`, sorted).
+///
+/// Two inventories that differ in any object's name or DDL produce different
+/// keys; permutation of the same pairs does not. This is the cache identity
+/// for fixtures that must not reuse a store template after the final shape
+/// changes without a `SCHEMA_VERSION` bump.
+pub fn fingerprint_schema_objects<'a, I>(objects: I) -> String
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let mut rows: Vec<(&str, &str)> = objects.into_iter().collect();
+    rows.sort_unstable_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(right.1)));
+    let mut parts = Vec::with_capacity(rows.len().saturating_mul(2));
+    for (name, sql) in &rows {
+        parts.push(name.as_bytes());
+        parts.push(sql.as_bytes());
+    }
+    canonical_framed_sha256(SCHEMA_SHAPE_FINGERPRINT_DOMAIN, &parts)
+}
+
+/// Fingerprint of the exact final shape this binary creates and admits.
+pub fn expected_final_schema_fingerprint() -> Result<String> {
+    let inventory = EXPECTED_FINAL_SHAPE
+        .as_ref()
+        .map_err(|error| database_error(error.clone()))?;
+    Ok(fingerprint_schema_objects(inventory.iter().map(
+        |(name, object)| (name.as_str(), object.sql.as_str()),
+    )))
 }
 
 pub(super) fn require_admissible_final_shape_rusqlite(
@@ -311,4 +346,39 @@ fn require_final_shape_inventory(
         )));
     }
     Ok(shipped_trigger_found)
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::fingerprint_schema_objects;
+
+    #[test]
+    fn schema_object_fingerprint_differs_for_different_ddl_and_matches_for_the_same_set() {
+        let baseline = [
+            ("alpha", "CREATE TABLE alpha(id INTEGER PRIMARY KEY)"),
+            ("beta", "CREATE INDEX beta ON alpha(id)"),
+        ];
+        let same_set_permuted = [
+            ("beta", "CREATE INDEX beta ON alpha(id)"),
+            ("alpha", "CREATE TABLE alpha(id INTEGER PRIMARY KEY)"),
+        ];
+        let different_ddl = [
+            (
+                "alpha",
+                "CREATE TABLE alpha(id INTEGER PRIMARY KEY, extra TEXT)",
+            ),
+            ("beta", "CREATE INDEX beta ON alpha(id)"),
+        ];
+        let same_key = fingerprint_schema_objects(baseline);
+        assert_eq!(
+            same_key,
+            fingerprint_schema_objects(same_set_permuted),
+            "identical name+sql pairs must produce the same cache key regardless of input order"
+        );
+        assert_ne!(
+            same_key,
+            fingerprint_schema_objects(different_ddl),
+            "a DDL change must produce a different cache key"
+        );
+    }
 }
