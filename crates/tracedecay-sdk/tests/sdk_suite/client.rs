@@ -10,7 +10,7 @@ use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, McpToolTransport,
     OperationRequestOptions, StreamOptions, StreamResume,
 };
-use tracedecay_sdk::operation::DeadlineBehavior;
+use tracedecay_tool_catalog::DeadlineBehavior;
 use tracedecay_sdk::operations::{
     ApplicationFactStoreCurate, ApplicationGitStatus, CodeExactOccurrence, MultiRootExecute,
     MultiRootScopeSetCompareAndSwap, MultiRootScopeSetRead, OperationTransport, TypedOperation,
@@ -470,7 +470,7 @@ fn curate_requires_and_sends_the_stable_replay_handle() {
     ))
     .build()
     .unwrap();
-    let request = tracedecay_sdk::contracts::retained_surfaces::FactStoreCurateRequestV1::default();
+    let request = tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1::default();
 
     assert!(matches!(
         client.execute::<ApplicationFactStoreCurate>(&request),
@@ -487,7 +487,7 @@ fn curate_requires_and_sends_the_stable_replay_handle() {
             &request,
             OperationRequestOptions {
                 request_id: Some(
-                    tracedecay_sdk::contracts::RequestId::new("request.sdk.curate")
+                    tracedecay_contracts::RequestId::new("request.sdk.curate")
                         .expect("request id"),
                 ),
                 ..OperationRequestOptions::default()
@@ -525,13 +525,13 @@ fn curate_rejects_a_problem_bound_to_a_foreign_replay_handle() {
     let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
         .build()
         .unwrap();
-    let request = tracedecay_sdk::contracts::retained_surfaces::FactStoreCurateRequestV1::default();
+    let request = tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1::default();
     let error = client
         .execute_with_options::<ApplicationFactStoreCurate>(
             &request,
             OperationRequestOptions {
                 request_id: Some(
-                    tracedecay_sdk::contracts::RequestId::new("request.sdk.curate")
+                    tracedecay_contracts::RequestId::new("request.sdk.curate")
                         .expect("request id"),
                 ),
                 ..OperationRequestOptions::default()
@@ -544,9 +544,9 @@ fn curate_rejects_a_problem_bound_to_a_foreign_replay_handle() {
 
 #[test]
 fn curate_accepts_a_terminal_bound_to_the_public_replay_handle() {
-    let request = tracedecay_sdk::contracts::retained_surfaces::FactStoreCurateRequestV1::default();
+    let request = tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1::default();
     let request_id =
-        tracedecay_sdk::contracts::RequestId::new("request.sdk.curate").expect("request id");
+        tracedecay_contracts::RequestId::new("request.sdk.curate").expect("request id");
     let admission = request
         .automation_request(&request_id)
         .expect("automation admission");
