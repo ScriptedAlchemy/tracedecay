@@ -141,6 +141,18 @@ impl TraceDecay {
         match selected {
             Some(layout) => Ok(layout),
             None if allow_default_identity => {
+                // The registry refuses to mint a durable authority for a root
+                // under the OS temp directory, but by the time it is asked the
+                // shard directory, hook configs, and databases have already
+                // been materialized from the default layout — which is how a
+                // fixture reaching a daemon under another profile left 111
+                // /tmp-rooted stores in that profile. Refuse here, before any
+                // layout exists to write into.
+                if let Some(message) =
+                    tracedecay_global_db::ephemeral_root_rejection(project_root, &profile_root)
+                {
+                    return Err(TraceDecayError::Config { message });
+                }
                 if let Some(registry_database) = registry_database
                     && let Some(layout) =
                         tracedecay_application::project_adoption::adopt_moved_nongit_project(
@@ -311,4 +323,70 @@ impl TraceDecay {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A durable profile root: one that is not under the OS temp directory.
+    /// Cargo's target directory qualifies, and the test binary already lives
+    /// there, so derive it from `current_exe` rather than hard-coding a path.
+    fn durable_profile_root(name: &str) -> std::path::PathBuf {
+        let exe = std::env::current_exe().expect("test binary path");
+        let base = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("test binary sits under a cargo target profile directory")
+            .join("first-touch-layout-fixtures")
+            .join(name);
+        std::fs::create_dir_all(&base).expect("create durable profile fixture");
+        base
+    }
+
+    /// First touch of a root under the OS temp directory against a durable
+    /// profile is refused before any layout — and therefore any shard
+    /// directory — exists. A hermetic (temp) profile still admits temp roots.
+    #[tokio::test]
+    async fn first_touch_refuses_an_ephemeral_root_before_minting_a_layout() {
+        let ephemeral_project = tempfile::TempDir::new().expect("ephemeral project");
+        let durable_profile = durable_profile_root("refuses-ephemeral-root");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(durable_profile.clone()),
+            global_db_path: Some(durable_profile.join("registry.db")),
+        };
+        let error = TraceDecay::resolve_store_layout_for_authority(
+            ephemeral_project.path(),
+            &options,
+            None,
+            true,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+        .expect_err("an ephemeral root must not receive a default layout in a durable profile");
+        assert!(
+            matches!(error, TraceDecayError::Config { .. }),
+            "the refusal is a typed configuration failure: {error:?}"
+        );
+        assert!(
+            !durable_profile.join("projects").exists(),
+            "refusal must leave no shard directory behind"
+        );
+
+        let hermetic = tempfile::TempDir::new().expect("hermetic profile");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(hermetic.path().join("profile")),
+            global_db_path: Some(hermetic.path().join("profile/registry.db")),
+        };
+        let layout = TraceDecay::resolve_store_layout_for_authority(
+            ephemeral_project.path(),
+            &options,
+            None,
+            true,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+        .expect("a throwaway profile still admits throwaway roots");
+        assert!(layout.data_root.starts_with(hermetic.path()));
+    }
 }

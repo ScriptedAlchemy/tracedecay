@@ -1096,7 +1096,10 @@ fn build_or_open_sealed_store(
             return Err(sealed_store_io_failure("artifact install failed", error));
         }
     }
-    match open_sealed_store(&directory, identity, expected) {
+    match hotpath::measure_block!(
+        "code_index.seal.verify",
+        open_sealed_store(&directory, identity, expected)
+    ) {
         // When this call enumerated the staging database's rows into the
         // copy and the reopen digest matched the authority's expectation,
         // together that is the staging container's own proof, sized by the
@@ -1135,18 +1138,27 @@ fn build_sealed_container(
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(usize, usize), GraphDbError> {
+    hotpath::gauge!("code_index.seal.encode.effective_workers").set(1);
     let physical_namespace = identity.physical_namespace()?;
     let mut sealed = SealedCompactRows::new();
-    let (entity_count, relation_count, dependency_namespaces_written) = match rows {
-        SealedRowSource::Staging(source) => {
-            push_staged_rows(source, identity, &physical_namespace, &mut sealed, check)?
-        }
-        SealedRowSource::Manifest(manifest) => {
-            let counts =
-                push_manifest_rows(manifest, identity, &physical_namespace, &mut sealed, check)?;
-            (counts.0, counts.1, BTreeMap::new())
-        }
-    };
+    let (entity_count, relation_count, dependency_namespaces_written) =
+        hotpath::measure_block!("code_index.seal.encode", {
+            match rows {
+                SealedRowSource::Staging(source) => {
+                    push_staged_rows(source, identity, &physical_namespace, &mut sealed, check)
+                }
+                SealedRowSource::Manifest(manifest) => {
+                    let counts = push_manifest_rows(
+                        manifest,
+                        identity,
+                        &physical_namespace,
+                        &mut sealed,
+                        check,
+                    )?;
+                    Ok((counts.0, counts.1, BTreeMap::new()))
+                }
+            }
+        })?;
 
     // Finalization: one projection commit per written namespace, in
     // namespace order, then the format marker at the final sequence. The
@@ -1177,7 +1189,10 @@ fn build_sealed_container(
     )?;
     sealed.push_format_marker(sequence)?;
     check()?;
-    sealed.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))?;
+    hotpath::measure_block!(
+        "code_index.seal.write",
+        sealed.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))
+    )?;
     Ok((entity_count, relation_count))
 }
 

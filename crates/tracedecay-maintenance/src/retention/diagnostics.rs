@@ -383,6 +383,7 @@ mod tests {
             expected_payload_mtime_secs: 0,
             expected_data_root_fence: StoreDirectoryFence::Unverifiable,
             expected_content_fence: StoreContentFence::Unverifiable,
+            abandoned_root: false,
         };
         let typed = unregistered_store_doctor_finding(&finding)
             .expect("unregistered directory produces a typed finding");

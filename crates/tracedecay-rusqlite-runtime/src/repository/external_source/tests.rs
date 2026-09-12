@@ -142,7 +142,7 @@ thread_local! {
 
 fn count_full_state_reads(event: TraceEvent<'_>) {
     if let TraceEvent::Stmt(_, sql) = event
-        && sql.contains("SELECT mutation_json FROM external_source_objects_v1 WHERE binding_id")
+        && sql.contains("FROM external_source_objects_v2 AS current")
     {
         OBSERVED_CURRENT_OBJECT_SELECTS
             .set(OBSERVED_CURRENT_OBJECT_SELECTS.get().saturating_add(1));
@@ -920,7 +920,7 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
         .query_row(
             "SELECT source_frontier_json || mutation_json
                  FROM external_source_states_v1
-                 JOIN external_source_objects_v1 USING (binding_id)
+                 JOIN external_source_mutations_v1 USING (binding_id)
                  WHERE binding_id = ?1",
             [binding.binding_id.as_str()],
             |row| row.get(0),
@@ -1154,8 +1154,8 @@ fn narrow_pending_read_skips_unrelated_corrupt_current_object_but_writer_does_no
     }
     connection
         .execute(
-            "UPDATE external_source_objects_v1
-             SET mutation_json = '{'
+            "UPDATE external_source_objects_v2
+             SET mutation_digest = 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
              WHERE binding_id = ?1",
             [binding.binding_id.as_str()],
         )
@@ -1373,8 +1373,8 @@ fn failed_source_cas_discards_verified_cache() {
     }
     connection
         .execute(
-            "UPDATE external_source_objects_v1
-             SET mutation_json = '{'
+            "UPDATE external_source_objects_v2
+             SET mutation_digest = 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
              WHERE binding_id = ?1",
             [binding.binding_id.as_str()],
         )
@@ -1411,8 +1411,8 @@ fn external_commit_invalidates_verified_cache() {
     let external = rusqlite::Connection::open(&path).unwrap();
     external
         .execute(
-            "UPDATE external_source_objects_v1
-             SET mutation_json = '{'
+            "UPDATE external_source_objects_v2
+             SET mutation_digest = 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
              WHERE binding_id = ?1",
             [binding.binding_id.as_str()],
         )
@@ -1448,8 +1448,8 @@ fn reopened_executor_fully_validates_historical_current_rows() {
         let successor = empty_successor(&state, 2, '7');
         connection
             .execute(
-                "UPDATE external_source_objects_v1
-                 SET mutation_json = '{'
+                "UPDATE external_source_objects_v2
+                 SET mutation_digest = 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
                  WHERE binding_id = ?1",
                 [binding.binding_id.as_str()],
             )

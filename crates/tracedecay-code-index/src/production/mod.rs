@@ -1193,12 +1193,18 @@ impl CodeIndexPublishedGenerationV1 {
     /// Use this wherever bytes were genuinely re-read (sealed-generation
     /// restore) so the memoized fast path can never mask a real re-read.
     pub(crate) fn validate_fresh(&self) -> Result<(), CodeIndexProductionErrorV1> {
-        self.validate_uncached()?;
+        self.validate_uncached(true)?;
         let _ = self.validated.set(());
         Ok(())
     }
 
-    fn validate_uncached(&self) -> Result<(), CodeIndexProductionErrorV1> {
+    fn validate_assembled(&self) -> Result<(), CodeIndexProductionErrorV1> {
+        self.validate_uncached(false)?;
+        let _ = self.validated.set(());
+        Ok(())
+    }
+
+    fn validate_uncached(&self, rederive_edges: bool) -> Result<(), CodeIndexProductionErrorV1> {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1342,16 +1348,11 @@ impl CodeIndexPublishedGenerationV1 {
                     "published generation does not match file artifacts".to_owned(),
                 ));
             }
-            // Re-derive the generation's edge evidence (per-file edges plus
-            // the seal-time cross-file resolution) with the same authority
-            // that sealed it, so a published generation whose derivation and
-            // stored evidence disagree is refused.
-            let (edges, _) = collect_edge_evidence(&files);
-            let edges_match = edges.len() == self.edges.len()
-                && edges
-                    .iter()
-                    .zip(&self.edges)
-                    .all(|(left, right)| left == right);
+            // Restored bytes must re-prove their derived graph. A fresh
+            // candidate owns the exact edge vector just derived from these
+            // same immutable files in `build_and_publish`, so repeating the
+            // 1.7M-reference resolution here proves no additional boundary.
+            let edges_match = !rederive_edges || collect_edge_evidence(&files).0 == self.edges;
             let mut edge_abstentions = files
                 .iter()
                 .flat_map(|file| file.artifacts.edge_abstentions.iter())
@@ -1803,7 +1804,10 @@ where
                 chunk_policy: OnceLock::new(),
                 graph_manifest: OnceLock::new(),
             };
-            hotpath::measure_block!("code_index.build.assemble.validate", candidate.validate())?;
+            hotpath::measure_block!(
+                "code_index.build.assemble.validate",
+                candidate.validate_assembled()
+            )?;
             Ok::<_, CodeIndexProductionErrorV1>(candidate)
         })?;
         #[cfg(feature = "hotpath")]

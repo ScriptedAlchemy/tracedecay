@@ -334,6 +334,7 @@ pub struct TraceDecayStorageEnvGuard {
     _data_dir_guard: EnvVarGuard,
     _global_db_guard: GlobalDbEnvGuard,
     _holder_scan_guard: EnvVarGuard,
+    _daemon_socket_guard: EnvVarGuard,
 }
 
 impl TraceDecayStorageEnvGuard {
@@ -401,6 +402,19 @@ impl TraceDecayStorageEnvGuard {
             _holder_scan_guard: EnvVarGuard::set(
                 "TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN",
                 "1",
+            ),
+            // Storage isolation is only as good as the daemon the client
+            // reaches. An ambient `TRACEDECAY_DAEMON_SOCKET` (an operator's
+            // shell, another lane's private daemon) would route this fixture's
+            // requests to a daemon running under a *different* profile, which
+            // then materializes the fixture's project — hook configs, session
+            // and graph databases, a manifest naming /tmp roots — under its own
+            // home. One operator profile accumulated 111 such stores. Pin the
+            // socket inside the isolated profile so a fixture can only ever
+            // talk to a daemon it started itself.
+            _daemon_socket_guard: EnvVarGuard::set(
+                tracedecay_daemon_protocol::SOCKET_ENV,
+                &profile_root.join("daemon.sock"),
             ),
         }
     }
@@ -800,7 +814,13 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
-        .env(GLOBAL_DB_ENV, home.join(".tracedecay/global.db"));
+        .env(GLOBAL_DB_ENV, home.join(".tracedecay/global.db"))
+        // Same hermeticity as the in-process guard: a child must never inherit
+        // a socket that reaches a daemon running under another profile.
+        .env(
+            tracedecay_daemon_protocol::SOCKET_ENV,
+            home.join(".tracedecay/daemon.sock"),
+        );
     detach_from_test_process_group(command);
 }
 

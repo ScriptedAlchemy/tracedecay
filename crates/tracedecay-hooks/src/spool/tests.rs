@@ -359,6 +359,19 @@ fn append_ack_compact_and_reopen_are_exact() {
 }
 
 #[test]
+fn replay_probe_is_false_until_a_record_is_durable() {
+    let root = TestDir::new("replay-probe");
+    assert!(!HookSpoolV1::has_durable_records(&root.0).unwrap());
+
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+
+    assert!(HookSpoolV1::has_durable_records(&root.0).unwrap());
+}
+
+#[test]
 fn identical_event_id_and_envelope_reuses_pending_record_after_reopen() {
     let root = TestDir::new("dedupe");
     let mut config = config();

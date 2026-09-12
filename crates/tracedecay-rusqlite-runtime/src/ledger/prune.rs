@@ -53,15 +53,15 @@ pub(super) const MAX_PRUNED_ROWS_PER_COMMIT: i64 = 256;
 /// stop. A neighbour's superseded records are retired by that incarnation's own
 /// commits, under its own validated checkpoint.
 ///
-/// The candidate scan matches the table's primary-key prefix and is therefore
+/// The candidate scan matches the table's unique key prefix and is therefore
 /// already in key order, which makes each bounded pass deterministic and lets
 /// repeated commits converge on the remaining backlog.
 const DELETE_SUPERSEDED: &str = r#"
-DELETE FROM td_runtime_writer_idempotency_v1
+DELETE FROM td_runtime_writer_idempotency_v2
 WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
     SELECT candidate.shard_json, candidate.incarnation,
            candidate.authority_epoch, candidate.idempotency_key
-    FROM td_runtime_writer_idempotency_v1 AS candidate
+    FROM td_runtime_writer_idempotency_v2 AS candidate
     WHERE candidate.shard_json = ?1
       AND candidate.incarnation = ?2
       AND candidate.authority_epoch < ?3
