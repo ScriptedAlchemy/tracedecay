@@ -8,8 +8,9 @@ use tracedecay_contracts::retained_surfaces::{
 };
 use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1,
-    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
+    AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, AuthorizedScopeSet,
+    CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkTaskRequestV1,
+    DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
     ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
     GeneratedWorkProposal, ListTaskHandoffsRequestV1, ListTaskHandoffsResultV1,
     MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
@@ -133,6 +134,7 @@ struct DashboardContractCatalogV1 {
     work_create_task_request: CreateWorkTaskRequestV1,
     work_decide_proposal_request: DecideWorkProposalRequestV1,
     work_admit_execution_request: AdmitWorkExecutionRequestV1,
+    work_admitted_execution: AdmittedWorkExecutionV1,
     work_start_attempt_command: StartWorkAttemptCommand,
     work_admit_synthesis_command: AdmitWorkSynthesisCommand,
     work_synthesis_attempt: WorkSynthesisAttemptV1,
@@ -358,6 +360,7 @@ mod tests {
                 "work_admit_execution_request",
                 "AdmitWorkExecutionRequestV1",
             ),
+            ("work_admitted_execution", "AdmittedWorkExecutionV1"),
             ("work_start_attempt_command", "StartWorkAttemptCommand"),
             ("work_admit_synthesis_command", "AdmitWorkSynthesisCommand"),
             ("work_synthesis_attempt", "WorkSynthesisAttemptV1"),
