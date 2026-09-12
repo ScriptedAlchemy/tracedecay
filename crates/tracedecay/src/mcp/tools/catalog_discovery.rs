@@ -362,6 +362,47 @@ mod tests {
         assert_eq!(source_edit_dispatch["availability"]["state"], "available");
         assert_eq!(source_edit_dispatch["idempotency"], "key_required");
 
+        for (tool_name, required_identity) in [
+            (
+                "tracedecay_approve_native_integration",
+                &["preview_id", "preview_digest"][..],
+            ),
+            (
+                "tracedecay_apply_native_integration",
+                &[
+                    "preview_id",
+                    "preview_digest",
+                    "approval_id",
+                    "approval_digest",
+                    "transaction_id",
+                ][..],
+            ),
+            (
+                "tracedecay_cancel_native_integration",
+                &["transaction_id"][..],
+            ),
+        ] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == tool_name)
+                .expect("native-integration effect is advertised");
+            let dispatch = &definition.meta.as_ref().unwrap()["tracedecay/dispatch"];
+            assert_eq!(dispatch["idempotency"], "idempotent", "{tool_name}");
+
+            let properties = definition.input_schema["properties"]
+                .as_object()
+                .expect("native-integration input properties");
+            assert!(
+                !properties.contains_key("idempotency_key"),
+                "{tool_name} must not advertise an unused caller idempotency key"
+            );
+            assert_eq!(
+                definition.input_schema["required"],
+                serde_json::json!(required_identity),
+                "{tool_name} must expose its durable replay identity"
+            );
+        }
+
         let fingerprints = definitions
             .iter()
             .map(|definition| {
