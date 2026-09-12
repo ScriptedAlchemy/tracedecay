@@ -240,7 +240,7 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
     def test_mutation_denial_probe_passes_exactly_and_needs_no_rollback(self) -> None:
         """A control mutation denied before admission proves its typed deny path."""
         runner = load_runner()
-        name = "tracedecay_context_scout_pause"
+        name = "tracedecay_multi_root_scope_set_compare_and_swap"
         self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
         kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
         policy = runner.ToolPolicy(
