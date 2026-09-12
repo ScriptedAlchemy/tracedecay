@@ -2460,22 +2460,52 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
             "term_postings_by_term",
         ]
     );
-    let incorrect_field_stats: i64 = connection
+    // `field_stats` is sealed from running totals the append phase carried,
+    // and the fuzzy flag is derived from `term_stats`; both must agree
+    // exactly (no extra, missing, or differing rows) with a fresh scan of
+    // the postings they summarize.
+    let field_stats_rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM field_stats", [], |row| row.get(0))
+        .expect("count field statistics");
+    assert!(
+        field_stats_rows > 0,
+        "the fixture must index at least one field"
+    );
+    let field_stats_divergence: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM field_stats AS actual LEFT JOIN (SELECT field, SUM(frequency) AS total_length FROM term_postings GROUP BY field) AS expected USING(field) WHERE actual.total_length != expected.total_length",
+            "SELECT (SELECT COUNT(*) FROM (SELECT field, total_length FROM field_stats EXCEPT SELECT field, SUM(frequency) FROM term_postings GROUP BY field)) \
+                  + (SELECT COUNT(*) FROM (SELECT field, SUM(frequency) FROM term_postings GROUP BY field EXCEPT SELECT field, total_length FROM field_stats))",
             [],
             |row| row.get(0),
         )
         .expect("compare field statistics");
-    let incorrect_term_stats: i64 = connection
+    let term_stats_divergence: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM term_stats AS actual LEFT JOIN (SELECT term_id, field, COUNT(*) AS document_frequency FROM term_postings GROUP BY term_id, field) AS expected USING(term_id, field) WHERE actual.document_frequency != expected.document_frequency",
+            "SELECT (SELECT COUNT(*) FROM (SELECT term_id, field, document_frequency FROM term_stats EXCEPT SELECT term_id, field, COUNT(*) FROM term_postings GROUP BY term_id, field)) \
+                  + (SELECT COUNT(*) FROM (SELECT term_id, field, COUNT(*) FROM term_postings GROUP BY term_id, field EXCEPT SELECT term_id, field, document_frequency FROM term_stats))",
             [],
             |row| row.get(0),
         )
         .expect("compare term statistics");
-    assert_eq!(incorrect_field_stats, 0);
-    assert_eq!(incorrect_term_stats, 0);
+    // Field code 7 is the subtoken field of every shipped layout.
+    let fuzzy_flag_divergence: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM vocabulary WHERE in_fuzzy != EXISTS(SELECT 1 FROM term_postings WHERE term_postings.term_id = vocabulary.term_id AND term_postings.field != 7)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("compare fuzzy vocabulary flags");
+    let staging_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('field_stats_staging', 'row_dictionary_pages')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count leftover staging tables");
+    assert_eq!(field_stats_divergence, 0);
+    assert_eq!(term_stats_divergence, 0);
+    assert_eq!(fuzzy_flag_divergence, 0);
+    assert_eq!(staging_tables, 0, "finalization drops every staging table");
 }
 
 #[test]
