@@ -18,7 +18,7 @@ pub(crate) async fn join_standalone_session_registry(
     tracedecay_store_runtime::join_standalone_session_registry(identity).await
 }
 
-impl crate::tracedecay::TraceDecay {
+impl crate::project::TraceDecay {
     pub(crate) fn store_runtime_registry(&self) -> &Arc<DaemonSessionRuntimeRegistryV1> {
         &self.store_runtime_registry
     }

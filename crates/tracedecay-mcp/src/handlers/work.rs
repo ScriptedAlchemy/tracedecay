@@ -18,6 +18,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::OperationId;
 
 use crate::ToolResult;
+use crate::handlers::support::unknown_tool_error;
 use crate::text_tool_result;
 
 fn json_result(value: &Value) -> ToolResult {
@@ -39,9 +40,7 @@ where
 {
     let (operation, request_id, controls) = hotpath::measure_block!("mcp.work.request_build", {
         let operation =
-            work_operation_for_tool(tool_name).ok_or_else(|| TraceDecayError::Config {
-                message: format!("unknown tool: {tool_name}"),
-            })?;
+            work_operation_for_tool(tool_name).ok_or_else(|| unknown_tool_error(tool_name))?;
         let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
         let controls = work_controls(
             operation,

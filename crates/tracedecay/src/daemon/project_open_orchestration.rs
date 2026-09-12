@@ -261,7 +261,7 @@ fn remote_deleted_project_route_error(identity: &str) -> TraceDecayError {
 /// manufacturing a new identity.
 ///
 /// The profile registry is a *derived* index: the authoritative identity chain
-/// in [`crate::tracedecay::TraceDecay::resolve_registered_configuration_layout`]
+/// in [`crate::project::TraceDecay::resolve_registered_configuration_layout`]
 /// consults the project's own enrollment marker (and the repository-identity
 /// marker) BEFORE it ever asks the registry, and a successful open republishes
 /// the registry rows via `register_project_store_in_global_registry`. A guard

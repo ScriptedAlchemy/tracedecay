@@ -6,8 +6,8 @@ use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use crate::config::PinnedUserDataDir;
 use crate::mcp::server::McpServerConstructionContext;
+use crate::project::TraceDecay;
 use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use crate::tracedecay::TraceDecay;
 
 pub(super) fn git(root: &Path, args: &[&str]) {
     let output = std::process::Command::new(
@@ -35,7 +35,7 @@ impl WriterTestFixtureAuthority {
         self.runtime
             .open_project_graph_for_test(
                 project_root,
-                crate::tracedecay::TraceDecayOpenOptions {
+                crate::project::TraceDecayOpenOptions {
                     profile_root: Some(self.runtime.profile_root_for_test().to_path_buf()),
                     global_db_path: None,
                 },

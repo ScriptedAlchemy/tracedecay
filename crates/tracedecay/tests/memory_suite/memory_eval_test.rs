@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_contracts::retained_surfaces::{
     FactCategoryV1, FactProjectionV1, FactSearchHitV1, FactStoreAddCommitV1, FactStoreAddResultV1,
     FactStoreGetResultV1, FactStoreListResultV1, FactStoreSearchResultV1, FactV1,

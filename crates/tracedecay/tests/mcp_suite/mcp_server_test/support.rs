@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
+use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 

@@ -8,7 +8,7 @@ use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
     RetainedAutomationSettlementProjection, pinned_automation_configuration_digest,
@@ -403,7 +403,7 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-        cg: Arc<crate::tracedecay::TraceDecay>,
+        cg: Arc<crate::project::TraceDecay>,
     ) {
         if !self.lifecycle.accepting() {
             return;
@@ -1508,7 +1508,7 @@ async fn maybe_run_global_retention(
     let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
         return;
     };
-    let now_secs = crate::tracedecay::current_timestamp();
+    let now_secs = crate::project::current_timestamp();
     let global_config = global_table_retention_config(config);
     let Some(retention) = administration
         .try_with_writer(|| async {
@@ -1916,7 +1916,7 @@ struct PinnedAutomationConfiguration {
 
 #[hotpath::measure(label = "daemon.scheduler.read_automation_config", future = true)]
 async fn effective_automation_config_for_project(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
 ) -> Result<PinnedAutomationConfiguration> {
     let configuration = cg
         .configuration_runtime()
@@ -1979,7 +1979,7 @@ pub(super) fn automation_scheduler_configured(
 /// scheduled fixed task or a schedulable user-defined job.
 #[hotpath::measure(label = "daemon.scheduler.probe_scheduler_work", future = true)]
 async fn automation_scheduler_has_work(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<bool> {
     use tracedecay_automation_runtime::automation::config::{
@@ -2018,7 +2018,7 @@ async fn run_user_jobs_scheduler_pass(
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     profile_root: &Path,
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     configuration_digest: tracedecay_domain::ManifestDigest,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     backend: &tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,

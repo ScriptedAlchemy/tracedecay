@@ -59,7 +59,7 @@ fn lsp_test_invocation(
         client_instance_id: client_instance_id.to_owned(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
     };
     tracedecay_daemon_protocol::DaemonInvocationClient::new(
         tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
@@ -570,7 +570,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         client_instance_id: "client.reconnect-test".to_owned(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
     };
     let invocation = tracedecay_daemon_protocol::DaemonInvocationClient::new(
         tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),

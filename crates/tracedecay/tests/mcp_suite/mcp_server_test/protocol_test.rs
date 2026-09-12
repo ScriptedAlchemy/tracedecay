@@ -2,7 +2,7 @@ use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
 use tempfile::TempDir;
-use tracedecay::tracedecay::current_timestamp;
+use tracedecay::project::current_timestamp;
 use tracedecay_mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };

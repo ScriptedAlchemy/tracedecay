@@ -10,7 +10,7 @@ use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,

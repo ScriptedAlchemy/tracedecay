@@ -13,7 +13,7 @@ use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::mcp::handle_tool_call;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::canonical_existing_path;
 use crate::support::extract_text;

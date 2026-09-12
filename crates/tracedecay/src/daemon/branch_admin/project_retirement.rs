@@ -511,7 +511,7 @@ mod tests {
         project_root: &std::path::Path,
         project_id: &str,
     ) -> (
-        crate::tracedecay::TraceDecay,
+        crate::project::TraceDecay,
         crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(profile_root).expect("isolated profile root");
@@ -528,7 +528,7 @@ mod tests {
         let graph = runtime
             .initialize_project_graph_for_test(
                 project_root,
-                crate::tracedecay::TraceDecayOpenOptions {
+                crate::project::TraceDecayOpenOptions {
                     profile_root: Some(profile_root.to_path_buf()),
                     global_db_path: None,
                 },
@@ -544,7 +544,7 @@ mod tests {
         project_root: &std::path::Path,
         project_id: &str,
     ) -> (
-        crate::tracedecay::TraceDecay,
+        crate::project::TraceDecay,
         crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(project_root).expect("isolated sibling project root");
@@ -557,7 +557,7 @@ mod tests {
         let graph = sibling
             .initialize_project_graph_for_test(
                 project_root,
-                crate::tracedecay::TraceDecayOpenOptions {
+                crate::project::TraceDecayOpenOptions {
                     profile_root: Some(profile_root.to_path_buf()),
                     global_db_path: None,
                 },

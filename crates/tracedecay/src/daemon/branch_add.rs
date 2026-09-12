@@ -144,7 +144,7 @@ pub(super) async fn branch_add_response(
 async fn activate_and_track_manual_branch(
     administration: &StoreAdministration,
     project_root: &Path,
-    graph: &Arc<crate::tracedecay::TraceDecay>,
+    graph: &Arc<crate::project::TraceDecay>,
     schedulers: &CodeIndexSchedulerRegistryV1,
     branch: &str,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
@@ -241,7 +241,7 @@ async fn activate_and_track_manual_branch(
 #[hotpath::measure(label = "daemon.branch_add.owner", future = true)]
 pub(super) async fn activate_and_track_manual_branch_owned(
     project_root: std::path::PathBuf,
-    graph: Arc<crate::tracedecay::TraceDecay>,
+    graph: Arc<crate::project::TraceDecay>,
     schedulers: CodeIndexSchedulerRegistryV1,
     branch: String,
     data_root: std::path::PathBuf,
@@ -325,7 +325,7 @@ pub(super) async fn activate_and_track_manual_branch_owned(
 }
 
 pub(crate) fn branch_publication_context(
-    graph: &crate::tracedecay::TraceDecay,
+    graph: &crate::project::TraceDecay,
 ) -> Result<BranchPublicationContextV1, TraceDecayError> {
     BranchPublicationContextV1::new(
         graph.store_layout().identity.project_id.as_deref(),
@@ -335,7 +335,7 @@ pub(crate) fn branch_publication_context(
 }
 
 fn graph_matches_project(
-    graph: &crate::tracedecay::TraceDecay,
+    graph: &crate::project::TraceDecay,
     canonical_root: &std::path::Path,
 ) -> bool {
     graph.project_root() == canonical_root

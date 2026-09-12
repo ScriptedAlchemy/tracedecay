@@ -22,7 +22,7 @@ use tracedecay_sessions::admission::{
 };
 use tracedecay_sessions::runtime::codex::CodexDiscoveryHub;
 
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use crate::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};

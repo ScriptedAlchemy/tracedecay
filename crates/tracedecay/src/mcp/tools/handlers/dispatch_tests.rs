@@ -642,10 +642,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
     let cg = runtime
-        .open_project_graph_for_test(
-            &project,
-            crate::tracedecay::TraceDecayOpenOptions::default(),
-        )
+        .open_project_graph_for_test(&project, crate::project::TraceDecayOpenOptions::default())
         .await
         .unwrap();
     assert_eq!(

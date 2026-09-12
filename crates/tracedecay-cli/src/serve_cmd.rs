@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::project::TraceDecay;
 use tracedecay_domain::errors::Result;
 
 /// Returns the first plausible unexpanded `${...}` template variable in a

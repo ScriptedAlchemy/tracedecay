@@ -35,7 +35,7 @@ use tracedecay_dashboard_api::{
 use tracedecay_domain::configuration::UserProfileId;
 
 use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectServerResolver};
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod retained_curator;

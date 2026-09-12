@@ -8,7 +8,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_contracts::catalog_composition::{
     ApplicationCatalogComposition, compose_application_catalog,
 };
