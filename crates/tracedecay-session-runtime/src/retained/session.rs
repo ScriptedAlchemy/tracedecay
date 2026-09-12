@@ -112,22 +112,15 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         configuration_digest: &ManifestDigest,
         refresh: Option<&dyn RetainedSessionRefreshPortV1>,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        let selector = &request.request;
-        let SessionRefreshScopeV1::Profile { profile_id } = &selector.scope else {
+        let SessionRefreshScopeV1::Profile {} = &request.request.scope else {
             return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
         };
-        if profile_id != identity.profile_id().as_str()
-            || selector.session.store_id != identity.store_id().as_str()
-            || selector.session.root_id != identity.root_id().as_str()
-        {
-            return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
-        }
         let refresh = refresh.ok_or_else(|| {
             RetainedSurfaceExecutionErrorV1::unavailable(
                 "the profile session refresh authority is not mounted for this connection",
             )
         })?;
-        let profile_id = UserProfileId::new(profile_id.as_str())
+        let profile_id = UserProfileId::new(identity.profile_id().as_str())
             .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
         execute_admitted_session_refresh(
             context,
@@ -824,27 +817,12 @@ fn ensure_session_refresh_identity(
     authorities: &ProjectRetainedSessionAuthoritiesV1,
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
     ensure_mounted_project_context(context, authorities)?;
-    let selector = &request.request;
     // A profile-owned refresh is served by the profile session authority; the
     // project owner never redirects it through its own store.
-    let SessionRefreshScopeV1::Project { project } = &selector.scope else {
+    let SessionRefreshScopeV1::Project {} = &request.request.scope else {
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     };
-    let scope = context.request_context.scope();
-    let branch_matches = scope
-        .reference
-        .as_ref()
-        .and_then(|reference| reference.as_str().strip_prefix("refs/heads/"))
-        .is_some_and(|branch| branch == project.branch_id);
-    (project.id == authorities.project_id.as_str()
-        && project.profile_id == authorities.profile_id.as_str()
-        && project.repository_id == scope.repository_id.as_str()
-        && project.worktree_id == scope.worktree_id.as_str()
-        && branch_matches
-        && selector.session.store_id == authorities.session_store_id.as_str()
-        && selector.session.root_id == authorities.session_root_id.as_str())
-    .then_some(())
-    .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+    Ok(())
 }
 
 fn ensure_mounted_project_context(

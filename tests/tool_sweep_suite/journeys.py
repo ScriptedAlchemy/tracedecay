@@ -746,28 +746,11 @@ def _api_migration(
     return PreparedJourney(apply, cleanup)
 
 
-def _profile_refresh_selectors(fixture: dict[str, str], call: Call, deadline: Deadline) -> dict[str, Any]:
-    """Bind a refresh to a sweep-scoped session in the disposable profile's own store.
-
-    The profile id is the daemon's durable identity, read back through the
-    registry context rather than fabricated by the harness.
-    """
-    context = call(
-        "tracedecay_admin_cli",
-        {"action": "registry_context", "project_arg": fixture["root"]},
-        deadline("tracedecay_admin_cli"),
-    )
-    profile_id = first_value(context, {"profile_id"})
-    if not isinstance(profile_id, str) or not profile_id.startswith("profile."):
-        raise JourneyError("registry context omitted the daemon's durable profile id")
-    suffix = profile_id[len("profile."):]
+def _profile_refresh_selectors(fixture: dict[str, str]) -> dict[str, Any]:
+    """Select the mounted disposable profile without copying its internal identity."""
     return {
-        "scope": {"kind": "profile", "profile_id": profile_id},
-        "session": {
-            "id": fixture["session_id"],
-            "store_id": f"store.profile.{suffix}",
-            "root_id": f"root.profile.{suffix}",
-        },
+        "scope": {"kind": "profile"},
+        "session": {"id": fixture["session_id"]},
         "source": {"scope": "codex"},
         "target": {
             "temporal_mode": {"kind": "current"},
@@ -1084,7 +1067,7 @@ def prepare(
             cleanup,
         )
     if name == "tracedecay_session_refresh_begin":
-        selectors = _profile_refresh_selectors(fixture, call, deadline)
+        selectors = _profile_refresh_selectors(fixture)
 
         def cleanup(response: dict[str, Any]) -> str:
             handle, operation_id = _begun_refresh(response)
@@ -1099,7 +1082,7 @@ def prepare(
 
         return PreparedJourney(dict(selectors), cleanup)
     if name == "tracedecay_session_refresh_cancel":
-        selectors = _profile_refresh_selectors(fixture, call, deadline)
+        selectors = _profile_refresh_selectors(fixture)
         handle, operation_id = _begun_refresh(
             call("tracedecay_session_refresh_begin", dict(selectors), deadline("tracedecay_session_refresh_begin"))
         )

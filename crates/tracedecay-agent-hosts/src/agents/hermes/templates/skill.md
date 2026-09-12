@@ -80,12 +80,13 @@ user intent. It returns the opaque handle used by
 The CLI equivalents are `tracedecay sessions refresh begin`, `status`, and
 `cancel`, using the same selectors and returned handle. Preserve the scope the
 read returned in the request's `scope` selector: a project-root read refreshes
-with `scope.kind=project` and the exact registered project route, an
-authorized profile-root read (`storage_scope=user`) refreshes with
-`scope.kind=profile` and its `profile_id`, served by the profile session
-authority. Never redirect a profile refresh through whichever project happens
-to be active, and pass the same `scope`, `session`, `source`, and `target`
-selectors to `status` and `cancel` as to `begin`.
+with `scope.kind=project`, while an authorized profile-root read
+(`storage_scope=user`) refreshes with `scope.kind=profile`, served by the
+authenticated profile session authority. Profile, project, Git-route, store,
+and root identity stay inside the mounted daemon authority. Never redirect a
+profile refresh through whichever project happens to be active, and pass the
+same `scope`, `session`, `source`, and `target` selectors to `status` and
+`cancel` as to `begin`.
 Leave host context-window
 preflight, compression, and boundaries to the Hermes context engine rather
 than triggering them during recall.

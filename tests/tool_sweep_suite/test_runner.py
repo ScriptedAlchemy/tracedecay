@@ -888,19 +888,14 @@ class MutationJourneyTests(unittest.TestCase):
 
     def test_session_refresh_journey_requires_a_durable_terminal_receipt(self) -> None:
         """The refresh rollback is a receipt-backed durable cancel, verified terminal,
-        bound to the daemon's own profile id rather than a fabricated one."""
+        bound to the daemon's mounted profile without exposing internal ids."""
         runner = load_runner()
         state = {"terminal": False}
         fixture = {"root": "/fixture/root", "session_id": "session.sweep"}
 
         def call(tool, arguments, _deadline_ms):
-            if tool == "tracedecay_admin_cli":
-                self.assertEqual(arguments["action"], "registry_context")
-                self.assertEqual(arguments["project_arg"], "/fixture/root")
-                return self.response('{"status":"ok","profile_id":"profile.sweep"}')
-            self.assertEqual(arguments["scope"], {"kind": "profile", "profile_id": "profile.sweep"})
-            self.assertEqual(arguments["session"]["store_id"], "store.profile.sweep")
-            self.assertEqual(arguments["session"]["root_id"], "root.profile.sweep")
+            self.assertEqual(arguments["scope"], {"kind": "profile"})
+            self.assertEqual(arguments["session"], {"id": "session.sweep"})
             self.assertEqual(arguments["handle"], "srh_fixture")
             if tool == "tracedecay_session_refresh_cancel":
                 state["terminal"] = True
@@ -917,7 +912,7 @@ class MutationJourneyTests(unittest.TestCase):
         prepared = runner.prepare_journey(
             "tracedecay_session_refresh_begin", object(), fixture, lambda _tool: 1_000, call
         )
-        self.assertEqual(prepared.arguments["scope"], {"kind": "profile", "profile_id": "profile.sweep"})
+        self.assertEqual(prepared.arguments["scope"], {"kind": "profile"})
         self.assertEqual(prepared.arguments["session"]["id"], "session.sweep")
         self.assertNotIn("action", prepared.arguments)
         self.assertNotIn("handle", prepared.arguments)
@@ -938,8 +933,6 @@ class MutationJourneyTests(unittest.TestCase):
         fixture = {"root": "/fixture/root", "session_id": "session.sweep"}
 
         def call(tool, arguments, _deadline_ms):
-            if tool == "tracedecay_admin_cli":
-                return self.response('{"status":"ok","profile_id":"profile.sweep"}')
             if tool == "tracedecay_session_refresh_begin":
                 self.assertNotIn("handle", arguments)
                 return self.response(
