@@ -391,7 +391,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
             actor,
             grant,
             policy_digest,
-            configuration_digest,
+            configuration_digest.clone(),
             tracedecay_domain::configuration::safe_work_topology_policy_v1(),
             proposal_routing,
             evidence_retrieval,
