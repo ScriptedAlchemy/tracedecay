@@ -291,3 +291,40 @@ measurements, not inferred table sizes.
 - No lossy deletion of live, referenced evidence: retention acts on
   superseded, orphaned, or projected-and-durable data only.
 - No background compaction that competes with foreground writes.
+
+## Dated amendment (2026-09-12, measured): session-store residue after the receipt cutover
+
+**Landed 2026-09-12** (PR #707 lane): retire-on-head-install for sealed
+graph generations, staging sweep on open, retention due on publish,
+immediate collection of vanished worktree scopes and `/tmp`-rooted or
+root-less unregistered stores, enrolled-only writers for response handles
+and the run ledger, the activity index without `metadata_json`, a rowid
+idempotency ledger, one `mutation_json` per mutation, slim receipts with
+frontiers stored once, and a Doctor census of dead sealed artifacts. On the
+measured 16 GB `sessions.db` those remove roughly 7 GB.
+
+Two residues remain, each blocked on a design decision outside retention:
+
+1. **`retrieval_anchors` (0.9 GB; 437k `exact_observation` anchors at
+   ~1.5 KB).** Each `anchor_json` is mostly constant structure: an empty
+   `CoverageReportV1`, a `ResolutionAuthorizationV1` whose four identity
+   fields never vary, `projection_watermark` with no components. The table
+   cannot be shadowed by a hydrating view because
+   `retrieval_anchor_aliases`, `retrieval_anchor_dispositions`, and the
+   derived-evidence tables hold foreign keys into
+   `retrieval_anchors(anchor_id, owner_json)`, and the record is read by SQL
+   in the temporal store, not through one loader. The fix is a
+   `RetrievalAnchorRecordV2`/`V3` persisted shape that omits default
+   coverage and interns the authorization block, with the dependent foreign
+   keys moving with it. `anchor_id` derives from owner and target only, so
+   the identity is unaffected.
+2. **`observations.observation_json` (1.3 GB) after projection.** Plan 38
+   §4 asks for one content copy; the observation payload is the third beside
+   `session_messages.text` and `lcm_raw_messages.content`. It cannot be
+   released on projection durability today because temporal retrieval reads
+   `observation.observation_json` as the content authority when matching
+   evidence (`tracedecay-session-temporal-store/src/retrieval.rs`), and the
+   retention module correctly never releases active evidence. Release becomes
+   possible once temporal hydration reads message content from the LCM raw
+   store (content-addressed, offloadable) and the observation row keeps only
+   its identity, receipt, and cursor.
