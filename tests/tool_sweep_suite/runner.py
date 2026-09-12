@@ -660,15 +660,15 @@ def prime_fixture_values(
             "configuration_scalar_revision": scalar_setting["revision_id"],
         }
     )
-    registry = _producer_call(
+    active_project = _producer_call(
         client,
-        "tracedecay_admin_cli",
-        {"action": "registry_context", "project_arg": fixture["root"]},
-        deadline("tracedecay_admin_cli"),
+        "tracedecay_active_project",
+        {"format": "json"},
+        deadline("tracedecay_active_project"),
     )
-    project_id = first_value(registry, {"project_id"})
+    project_id = first_value(active_project, {"project_id"})
     if not isinstance(project_id, str) or not project_id:
-        raise SweepError("registry context omitted the fixture project id")
+        raise SweepError("active project producer omitted the fixture project id")
     fixture["project_id"] = project_id
     toggled = {
         "kind": "boolean",
