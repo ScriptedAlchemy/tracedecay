@@ -27,6 +27,10 @@ use tracedecay_global_db::configuration::contracts::{
 };
 use tracedecay_query::search_quality::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
+    NativeQualificationExecutionResourceKeyV1, NativeQualificationExpectationsV1,
+    NativeQualificationModelKeyV1, NativeQualificationPlatformV1, NativeQualificationRuntimeKeyV1,
+    PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1,
+    qualified_default_activation_candidate,
 };
 use tracedecay_semantic_contracts::SemanticProfileSelection;
 
@@ -143,18 +147,31 @@ pub struct SemanticEvaluatedProfilePublicationV1 {
     pub snapshot: SemanticEvaluationPublicationSnapshotV1,
 }
 
-/// Closed genuine evaluation retained until the authority commits. The
-/// non-serializable evaluator capability stays opaque from callers.
+/// Closed evidence retained until the authority commits. Ordinary activation
+/// can consume only a package that search-eval has already validated; genuine
+/// qualification keeps its non-serializable evaluator capability opaque.
 #[derive(Clone)]
-struct SemanticActivationPublicationEvidenceV1(DirectActivationEvaluationV1);
+enum SemanticActivationPublicationEvidenceV1 {
+    Genuine(DirectActivationEvaluationV1),
+    Packaged(PackagedNativeActivationCandidateV1),
+}
 
 impl SemanticActivationPublicationEvidenceV1 {
     fn report_and_material(&self) -> (DirectEvaluationReportV1, DirectEvaluatedProfileMaterialV1) {
-        self.0.clone().into_parts()
+        match self {
+            Self::Genuine(evaluation) => evaluation.clone().into_parts(),
+            Self::Packaged(candidate) => {
+                let (portable_evidence, material) = candidate.clone().into_parts();
+                (portable_evidence.report, material)
+            }
+        }
     }
 
     fn into_report(self) -> DirectEvaluationReportV1 {
-        self.0.into_parts().0
+        match self {
+            Self::Genuine(evaluation) => evaluation.into_parts().0,
+            Self::Packaged(candidate) => candidate.into_parts().0.report,
+        }
     }
 }
 
@@ -378,7 +395,7 @@ impl ProductionSemanticConfigurationOperationV1 {
         prepare_semantic_activation_publication(
             &before,
             &candidate,
-            &SemanticActivationPublicationEvidenceV1(evaluation.clone()),
+            &SemanticActivationPublicationEvidenceV1::Genuine(evaluation.clone()),
         )
         .map_err(|error| {
             rejected_with_context("semantic qualification preparation failed", error)
@@ -398,12 +415,8 @@ impl ProductionSemanticConfigurationOperationV1 {
         })
     }
 
-    /// Evaluate the selected profile natively and publish that exact evidence.
-    ///
-    /// The qualification step owns the expensive evaluator and proves the
-    /// snapshot stayed current. Publication then rechecks the same snapshot
-    /// before committing, so an operator activation never substitutes stale
-    /// packaged evidence for the runtime and artifact it actually evaluated.
+    /// Publish only evidence from the reviewed native-qualification package.
+    /// Genuine evaluation remains available through [`Self::qualify_profile`].
     #[hotpath::measure(label = "usecases.semantic_config.evaluate_publish", future = true)]
     pub async fn evaluate_and_publish_profile(
         &self,
@@ -411,14 +424,18 @@ impl ProductionSemanticConfigurationOperationV1 {
         repo_root: &Path,
         candidate: SemanticEvaluationProfileCandidateV1,
     ) -> Result<SemanticEvaluatedProfilePublicationV1, SemanticActivationCoordinationErrorV1> {
-        let qualification = Self::qualify_profile(snapshot_authority, repo_root, candidate)
+        let before = snapshot_authority
+            .current()
             .await
-            .map_err(|error| {
-                rejected_with_context("semantic profile qualification failed", error)
-            })?;
-        let before = qualification.snapshot().clone();
-        let candidate = qualification.candidate().clone();
-        let evidence = SemanticActivationPublicationEvidenceV1(qualification.into_evaluation());
+            .map_err(|error| rejected_with_context("semantic snapshot preflight failed", error))?;
+        validate_evaluation_snapshot(repo_root, &before, &candidate)
+            .map_err(|error| rejected_with_context("semantic snapshot validation failed", error))?;
+        let candidate = validate_candidate_snapshot_runtime(candidate, &before)?;
+        let expectations = native_qualification_expectations(&before, &candidate)?;
+        let evidence = SemanticActivationPublicationEvidenceV1::Packaged(
+            qualified_default_activation_candidate(&expectations)
+                .map_err(map_packaged_qualification_error)?,
+        );
         let prepared = prepare_semantic_activation_publication(&before, &candidate, &evidence)
             .map_err(|error| {
                 rejected_with_context("semantic publication preparation failed", error)
@@ -707,6 +724,76 @@ fn log_semantic_activation_failure(
         "semantic profile activation did not advance"
     );
     error
+}
+
+fn validate_candidate_snapshot_runtime(
+    candidate: SemanticEvaluationProfileCandidateV1,
+    snapshot: &SemanticEvaluationPublicationSnapshotV1,
+) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
+    match (
+        candidate.compatibility.semantic.as_ref(),
+        snapshot.runtime.semantic.as_ref(),
+    ) {
+        (Some(candidate_semantic), Some(snapshot_semantic))
+            if candidate_semantic == snapshot_semantic =>
+        {
+            // The portable report remains redacted. This exact equality keeps
+            // its independently validated runtime identity separate from the
+            // project-local vector identity bound by publication.
+            Ok(candidate)
+        }
+        _ => Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation candidate runtime does not match the verified snapshot".to_owned(),
+        )),
+    }
+}
+
+fn native_qualification_expectations(
+    snapshot: &SemanticEvaluationPublicationSnapshotV1,
+    candidate: &SemanticEvaluationProfileCandidateV1,
+) -> Result<NativeQualificationExpectationsV1, SemanticActivationCoordinationErrorV1> {
+    let semantic = snapshot.runtime.semantic.as_ref().ok_or_else(|| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "semantic evaluation profile {} requires semantic runtime pins, but the verified \
+             snapshot carries none",
+            candidate.evaluated_profile_id
+        ))
+    })?;
+    let runtime = NativeQualificationRuntimeKeyV1 {
+        implementation_revision: semantic.implementation_revision.clone(),
+        fusion_revision: semantic.fusion_revision.clone(),
+        runtime_compatibility_digest: semantic.runtime_compatibility_digest.clone(),
+        model: NativeQualificationModelKeyV1::from_admitted_projection(&semantic.projection),
+        search_index_key: semantic.search_index_key.clone(),
+        execution_resources: NativeQualificationExecutionResourceKeyV1 {
+            model_bytes: semantic.resources.model_bytes,
+            tokenizer_bytes: semantic.resources.tokenizer_bytes,
+            threads: semantic.resources.threads,
+            max_concurrent_sessions: semantic.resources.max_concurrent_sessions,
+            batch_size: semantic.resources.batch_size,
+            sequence_length: semantic.resources.sequence_length,
+            load_deadline_ms: semantic.resources.load_deadline_ms,
+        },
+    };
+    NativeQualificationExpectationsV1::packaged_default(
+        candidate.evaluated_profile_id.clone(),
+        runtime,
+        NativeQualificationPlatformV1::current(),
+    )
+    .map_err(map_packaged_qualification_error)
+}
+
+fn map_packaged_qualification_error(
+    error: PackagedNativeQualificationErrorV1,
+) -> SemanticActivationCoordinationErrorV1 {
+    match error {
+        PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable => {
+            SemanticActivationCoordinationErrorV1::Unavailable
+        }
+        rejected => SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "packaged native qualification rejected: {rejected}"
+        )),
+    }
 }
 
 #[hotpath::measure(label = "usecases.semantic_config.prepare_activation")]
@@ -1628,6 +1715,26 @@ mod tests {
             calibration_mismatch.starts_with("calibration observed "),
             "calibration drift must be attributed to the live calibration: {calibration_mismatch}"
         );
+    }
+
+    #[test]
+    fn packaged_publication_rejects_a_foreign_project_vector_generation() {
+        let mut candidate = query_candidate();
+        candidate.compatibility.semantic = Some(semantic_compatibility(semantic_resources(10)));
+        let mut snapshot = query_snapshot(&candidate);
+        snapshot.runtime.semantic = candidate.compatibility.semantic.clone();
+        candidate
+            .compatibility
+            .semantic
+            .as_mut()
+            .expect("semantic candidate")
+            .vector_generation_id = VectorGenerationIdV1::new(digest('9'));
+
+        assert!(matches!(
+            validate_candidate_snapshot_runtime(candidate, &snapshot),
+            Err(SemanticActivationCoordinationErrorV1::RejectedDetail(detail))
+                if detail == "semantic evaluation candidate runtime does not match the verified snapshot"
+        ));
     }
 
     #[test]
