@@ -18,7 +18,7 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 use super::{AllowAuthorizer, BenchResult, CONFIG_VERSION, PROJECTOR_VERSION};
-use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
+use tracedecay_session_temporal_store::SessionTemporalStore;
 
 pub(super) const ROOT_RELATION_PARTICIPANT_COUNT: usize = 64;
 
@@ -56,7 +56,7 @@ pub(super) async fn refresh_sessions(
     }
     let refresh = SessionRefreshService::new(
         AllowAuthorizer,
-        GlobalDbSessionTemporalStore::new(db),
+        SessionTemporalStore::new(db),
         || Ok(()),
         SessionRefreshConfiguration::new(PROJECTOR_VERSION, CONFIG_VERSION)
             .map_err(|error| format!("root refresh configuration: {error}"))?,
@@ -106,7 +106,7 @@ pub(super) async fn refresh_sessions(
                         u64::try_from(batch.item_count())
                             .map_err(|error| format!("root batch item count: {error}"))?,
                     );
-                    GlobalDbSessionTemporalStore::new(db)
+                    SessionTemporalStore::new(db)
                         .persist_session_refresh_projection_batch(progress, batch)
                         .await
                         .map_err(|error| format!("persist root projection batch: {error:?}"))?;

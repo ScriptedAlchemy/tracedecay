@@ -10,7 +10,7 @@ use tracedecay_domain::{
     UtcMicros,
 };
 use tracedecay_session_temporal_store::{
-    GlobalDbSessionTemporalStore, SessionRefreshRestartStateV1,
+    SessionTemporalStore, SessionRefreshRestartStateV1,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
@@ -60,14 +60,14 @@ async fn registered_temporal_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV
 
 fn temporal_store(
     runtime: &HostAdmissionTestRuntimeV1,
-) -> GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb> {
+) -> SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb> {
     runtime
         .session_temporal_store_for_test(HostAdmissionScope::Profile)
         .expect("registered profile session-temporal store")
 }
 
 async fn begin(
-    store: &GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     session_id: &SessionId,
     target: SessionRefreshFrontierV1,
 ) -> tracedecay_store::SessionRefreshBeginOrJoinReceiptV1 {

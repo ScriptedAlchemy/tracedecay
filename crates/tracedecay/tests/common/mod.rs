@@ -1414,7 +1414,7 @@ impl LcmTestRuntime {
     pub fn session_temporal_store(
         &self,
     ) -> Result<
-        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
+        tracedecay_session_temporal_store::SessionTemporalStore<
             '_,
             tracedecay_global_db::RegisteredGlobalDb,
         >,

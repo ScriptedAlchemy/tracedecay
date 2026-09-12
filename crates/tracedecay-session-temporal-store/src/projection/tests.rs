@@ -28,7 +28,7 @@ use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
 use super::persist::persist_occurrences;
 use super::record_canonical_observation_effect;
-use crate::GlobalDbSessionTemporalStore;
+use crate::SessionTemporalStore;
 use crate::handle::SessionTemporalRegisteredDb;
 use crate::test_support::QueryCountingConnection;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -45,8 +45,8 @@ fn fixture_session(value: &str) -> SessionId {
 
 fn temporal_store(
     runtime: &HostAdmissionTestRuntimeV1,
-) -> GlobalDbSessionTemporalStore<'_, RegisteredGlobalDb> {
-    GlobalDbSessionTemporalStore::new(
+) -> SessionTemporalStore<'_, RegisteredGlobalDb> {
+    SessionTemporalStore::new(
         runtime
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile session-temporal store"),

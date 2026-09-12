@@ -88,13 +88,15 @@ use tracedecay_temporal_query::ports::{
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 use tracedecay_temporal_query::{execute_temporal_candidate_export, execute_temporal_kernel};
 
-pub use self::cursor_keys::{GlobalDbCursorKeyProvider, GlobalDbCursorKeyProviderError};
+pub use self::cursor_keys::{
+    SessionTemporalCursorKeyProvider, SessionTemporalCursorKeyProviderError,
+};
 pub use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::participant_freeze::{
     freeze_participants, freeze_prepared_candidate_participants, root_readiness,
 };
-use self::retrieval::GlobalDbTemporalReadPort;
+use self::retrieval::SessionTemporalReadPort;
 use self::sql::TemporalSqlRead;
 use tracedecay_lcm::payload::read_verified_payload_content_with_checkpoint;
 
@@ -103,7 +105,7 @@ pub use doctor_health::{
 };
 pub use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
-pub use store::GlobalDbSessionTemporalStore;
+pub use store::SessionTemporalStore;
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// Resolves a Git filter through the verified Git-evidence graph.
@@ -185,29 +187,32 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::skip]
     pub async fn load_session_cursor_key_provider_result(
         &self,
-    ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
+    ) -> Result<SessionTemporalCursorKeyProvider, cursor_keys::SessionTemporalCursorKeyProviderError>
+    {
         let read = self.cursor_key_read_snapshot().await?;
-        match GlobalDbCursorKeyProvider::from_registered_active(&read).await {
-            Err(cursor_keys::GlobalDbCursorKeyProviderError::ActiveKeyMissing) => {}
+        match SessionTemporalCursorKeyProvider::from_registered_active(&read).await {
+            Err(cursor_keys::SessionTemporalCursorKeyProviderError::ActiveKeyMissing) => {}
             loaded => return loaded,
         }
         drop(read);
         let key = self
             .ensure_active_session_cursor_key_result()
             .await
-            .map_err(|source| cursor_keys::GlobalDbCursorKeyProviderError::Provision { source })?;
+            .map_err(
+                |source| cursor_keys::SessionTemporalCursorKeyProviderError::Provision { source },
+            )?;
         let read = self.cursor_key_read_snapshot().await?;
-        GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
+        SessionTemporalCursorKeyProvider::from_registered_key_ref(&read, key).await
     }
 
     async fn cursor_key_read_snapshot(
         &self,
     ) -> Result<
         tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
-        cursor_keys::GlobalDbCursorKeyProviderError,
+        cursor_keys::SessionTemporalCursorKeyProviderError,
     > {
         self.read_snapshot().await.map_err(|source| {
-            cursor_keys::GlobalDbCursorKeyProviderError::Storage {
+            cursor_keys::SessionTemporalCursorKeyProviderError::Storage {
                 operation: "load registered session cursor authentication key",
                 source: EngineError::invalid_operation(source.to_string()),
             }
@@ -217,14 +222,15 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::skip]
     pub async fn load_preprovisioned_session_cursor_key_provider_result(
         &self,
-    ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
+    ) -> Result<SessionTemporalCursorKeyProvider, cursor_keys::SessionTemporalCursorKeyProviderError>
+    {
         let read = self.read_snapshot().await.map_err(|source| {
-            cursor_keys::GlobalDbCursorKeyProviderError::Storage {
+            cursor_keys::SessionTemporalCursorKeyProviderError::Storage {
                 operation: "load pre-provisioned session cursor authentication key",
                 source: EngineError::invalid_operation(source.to_string()),
             }
         })?;
-        GlobalDbCursorKeyProvider::from_registered_active(&read).await
+        SessionTemporalCursorKeyProvider::from_registered_active(&read).await
     }
 }
 
@@ -818,9 +824,10 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let authenticator = GlobalDbCursorKeyProvider::from_registered_snapshot(&read, snapshot)
-            .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let authenticator =
+            SessionTemporalCursorKeyProvider::from_registered_snapshot(&read, snapshot)
+                .await
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         encode_cursor(
             snapshot,
             &lcm_source_cursor_sort_key(binding, next_source_offset),
@@ -841,9 +848,10 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let authenticator = GlobalDbCursorKeyProvider::from_registered_snapshot(&read, snapshot)
-            .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let authenticator =
+            SessionTemporalCursorKeyProvider::from_registered_snapshot(&read, snapshot)
+                .await
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         let sort_key =
             verify_cursor(encoded, snapshot, &authenticator).map_err(map_lcm_cursor_error)?;
         parse_lcm_source_cursor_offset(binding, &sort_key)
@@ -880,13 +888,13 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
                     let relation_authority = self.db.session_relation_store().ok();
                     let candidate_read = match &relation_authority {
                         Some((relation_scope, relation_store)) => {
-                            GlobalDbTemporalReadPort::new_registered_with_relations(
+                            SessionTemporalReadPort::new_registered_with_relations(
                                 &read,
                                 relation_scope,
                                 relation_store.clone(),
                             )
                         }
-                        None => GlobalDbTemporalReadPort::new_registered(&read),
+                        None => SessionTemporalReadPort::new_registered(&read),
                     };
                     let plan = tracedecay_temporal_query::plan_temporal_candidates(
                         request.query(),
@@ -953,7 +961,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         hotpath::gauge!("session_temporal.execution").inc(1u32);
         let (read_snapshot, snapshot, root_readiness) = self.freeze(&request).await?;
         let authenticator =
-            GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
+            SessionTemporalCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
                 .await
                 .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         let storage_root = self
@@ -966,7 +974,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .session_relation_store()
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         let kernel_request = request.into_kernel_request(snapshot);
-        let read = GlobalDbTemporalReadPort::new_registered_with_relations(
+        let read = SessionTemporalReadPort::new_registered_with_relations(
             &read_snapshot,
             &relation_scope,
             relation_store.clone(),
@@ -1031,10 +1039,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
         Box::pin(async move {
             hotpath::gauge!("session_temporal.execution").inc(1u32);
             let (read_snapshot, snapshot, _) = self.freeze(request.temporal()).await?;
-            let authenticator =
-                GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
-                    .await
-                    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let authenticator = SessionTemporalCursorKeyProvider::from_registered_snapshot(
+                &read_snapshot,
+                &snapshot,
+            )
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
             let storage_root = self
                 .db
                 .db_path()
@@ -1043,12 +1053,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
             let relation_authority = self.db.session_relation_store().ok();
             let kernel_request = request.temporal().clone().into_kernel_request(snapshot);
             let read = match &relation_authority {
-                Some((scope, store)) => GlobalDbTemporalReadPort::new_registered_with_relations(
+                Some((scope, store)) => SessionTemporalReadPort::new_registered_with_relations(
                     &read_snapshot,
                     scope,
                     store.clone(),
                 ),
-                None => GlobalDbTemporalReadPort::new_registered(&read_snapshot),
+                None => SessionTemporalReadPort::new_registered(&read_snapshot),
             };
             let hydration = match &relation_authority {
                 Some((scope, store)) => {

@@ -17,7 +17,7 @@ use tracedecay_temporal_query::ports::{
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
-use super::GlobalDbTemporalReadPort;
+use super::SessionTemporalReadPort;
 use crate::relations::{
     SessionRelationProjection, SessionRelationScope, SummaryRelationNode, SummarySourceRef,
     WorkflowAgentMembership,
@@ -230,7 +230,7 @@ async fn session_context_filters_read_parent_and_workflow_only_from_grafeo() {
         .replace(&graph_projection)
         .expect("relation projection");
     let scope = SessionRelationScope::project_sessions(project());
-    let adapter = GlobalDbTemporalReadPort::new_with_relations(&connection, &scope, relations);
+    let adapter = SessionTemporalReadPort::new_with_relations(&connection, &scope, relations);
     let snapshot = snapshot(ExecutionControl::default());
     let filter = TemporalCandidateFilterV1 {
         parent_session_id: Some("graph-parent".to_string()),
@@ -257,7 +257,7 @@ async fn summary_semantic_filter_hydrates_only_grafeo_source_anchors() {
         .replace(&projection())
         .expect("relation projection");
     let scope = SessionRelationScope::project_sessions(project());
-    let adapter = GlobalDbTemporalReadPort::new_with_relations(&connection, &scope, relations);
+    let adapter = SessionTemporalReadPort::new_with_relations(&connection, &scope, relations);
     let filter = TemporalCandidateFilterV1 {
         source: Some("claude".to_string()),
         ..TemporalCandidateFilterV1::default()
@@ -281,7 +281,7 @@ async fn missing_summary_relation_projection_is_a_typed_read_failure() {
     let connection = canonical_source_connection(&directory.path().join("unavailable.db")).await;
     let relations = crate::relations::memory_relation_store();
     let scope = SessionRelationScope::project_sessions(project());
-    let adapter = GlobalDbTemporalReadPort::new_with_relations(&connection, &scope, relations);
+    let adapter = SessionTemporalReadPort::new_with_relations(&connection, &scope, relations);
 
     let error = adapter
         .candidate_observations_match(
@@ -309,7 +309,7 @@ async fn cancelled_summary_relation_read_preserves_temporal_cancellation() {
         .replace(&projection())
         .expect("relation projection");
     let scope = SessionRelationScope::project_sessions(project());
-    let adapter = GlobalDbTemporalReadPort::new_with_relations(&connection, &scope, relations);
+    let adapter = SessionTemporalReadPort::new_with_relations(&connection, &scope, relations);
     let control = ExecutionControl::default();
     control.cancel();
 
