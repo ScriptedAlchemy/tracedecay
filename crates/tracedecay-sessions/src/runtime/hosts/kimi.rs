@@ -154,7 +154,7 @@ impl KimiSource {
                         continue;
                     };
                     if state.session_id(&session_dir).is_none()
-                        || !matcher.accepts(Some(&state.cwd))
+                        || !matcher.accepts(state.working_directory())
                     {
                         continue;
                     }
@@ -379,9 +379,9 @@ fn read_session_state(
     else {
         return Ok(None);
     };
-    match serde_json::from_str(&text) {
-        Ok(state) => Ok(Some(state)),
-        Err(_) => {
+    match serde_json::from_str::<KimiSessionState>(&text) {
+        Ok(state) if state.working_directory().is_some() => Ok(Some(state)),
+        Ok(_) | Err(_) => {
             discovery.record_failure(
                 KimiDiscoveryFailureKind::InvalidSessionMetadata,
                 &path,
@@ -954,6 +954,7 @@ mod tests {
         std::fs::write(
             session.join("state.json"),
             serde_json::json!({
+                "cwd": project,
                 "workDir": project,
                 "agents": {
                     "main": {

@@ -649,12 +649,7 @@ impl VerifiedGraphQuery {
                 graph_corrupt("verified graph symbol is missing lineage metadata")
             })?;
             paths.insert(symbol.occurrence.clone(), path.clone());
-            if metadata.kind == "annotation_usage"
-                && matches!(
-                    metadata.simple_name.as_str(),
-                    "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-                )
-            {
+            if tracedecay_code_index::is_test_marker(metadata) {
                 test_markers.insert(symbol.occurrence.clone());
             }
         }

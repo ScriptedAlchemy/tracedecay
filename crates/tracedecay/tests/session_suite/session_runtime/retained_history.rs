@@ -21,13 +21,20 @@ use tracedecay_domain::{
     SessionId, UtcMicros,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_session_runtime::session_sync::test_harness::configure_scheduler;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::history::{
     SessionHistoricalIngestOutcome, SessionHistoricalIngestPass, SessionHistoricalIngestor,
 };
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::projector::{
+    SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy,
+    SessionTemporalRefreshProjectionFuture, SessionTemporalRefreshProjector,
+};
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionTemporalStore};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
-    ObservationStore, ObservationWrite, build_observation_resolution_authorization_v1,
+    ObservationStore, ObservationWrite, SessionRefreshBeginOrJoinRequestV1,
+    SessionRefreshFrontierV1, SessionRefreshStore, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
 
@@ -83,6 +90,21 @@ struct BlockThirdHistoricalIngestor {
     passes: AtomicUsize,
     third_entered: AtomicBool,
     release_third: tokio::sync::Notify,
+}
+
+struct CountingDeferredProjector {
+    calls: AtomicUsize,
+}
+
+impl SessionTemporalRefreshProjector for CountingDeferredProjector {
+    fn project<'a>(
+        &'a self,
+        _database: &'a RegisteredGlobalDbLeaseV1,
+        _recovery: SessionRefreshRecoveryV1,
+    ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        Box::pin(async { Ok(SessionTemporalRefreshEffect::Deferred) })
+    }
 }
 
 struct PanicOnceHistoricalIngestor {
@@ -438,7 +460,22 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
     let temp = TempDir::new().unwrap();
     let authority = profile_authority(&temp, "history-only-retry").await;
     let ingestor = Arc::new(BlockThirdHistoricalIngestor::new());
-    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let projector = Arc::new(CountingDeferredProjector {
+        calls: AtomicUsize::new(0),
+    });
+    let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
+    configure_scheduler(
+        &mut registry,
+        projector.clone(),
+        SessionTemporalRefreshPolicy::default(),
+    );
+    SessionTemporalStore::new(authority.database())
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            SessionId::new("session.history-only-retry").unwrap(),
+            SessionRefreshFrontierV1::new(1, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
 
     registry
         .ensure_profile_with_history(
@@ -452,12 +489,8 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
             .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
             .await
     );
-    let baseline_admissions = authority
-        .database()
-        .read_connection()
-        .reader_pool_occupancy()
-        .expect("registered reader pool")
-        .snapshot_admissions;
+    let baseline_projection_calls = projector.calls.load(Ordering::Acquire);
+    assert!(baseline_projection_calls > 0);
 
     registry
         .ensure_profile_with_history(
@@ -473,40 +506,22 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
         )
         .await
     );
-    let after_explicit_wake = authority
-        .database()
-        .read_connection()
-        .reader_pool_occupancy()
-        .expect("registered reader pool")
-        .snapshot_admissions;
+    let after_explicit_wake = projector.calls.load(Ordering::Acquire);
     assert!(
-        after_explicit_wake > baseline_admissions,
-        "the explicit ensure wake must retain its projection discovery",
+        after_explicit_wake > baseline_projection_calls,
+        "the explicit ensure wake must retain projection discovery",
     );
-    // An explicit wake runs the projection refresh *and* the retained-summary
-    // convergence page that `4480b0208` put in every scheduler pass. A
-    // history-only retry runs only the convergence page, so its read cost must
-    // stay strictly below a wake's; equality would mean the retry rediscovered
-    // temporal projections.
-    let explicit_wake_reads = after_explicit_wake.saturating_sub(baseline_admissions);
+
     ingestor.release_third.notify_waiters();
     assert!(
         registry
             .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
             .await
     );
-    let history_retry_reads = authority
-        .database()
-        .read_connection()
-        .reader_pool_occupancy()
-        .expect("registered reader pool")
-        .snapshot_admissions
-        .saturating_sub(after_explicit_wake);
-    assert!(
-        history_retry_reads < explicit_wake_reads,
-        "history-only no-progress retries must not rediscover temporal \
-         projections: retry read {history_retry_reads} snapshots, an explicit \
-         wake reads {explicit_wake_reads}",
+    assert_eq!(
+        projector.calls.load(Ordering::Acquire),
+        after_explicit_wake,
+        "a history-only no-progress retry must not rediscover temporal projections",
     );
 
     registry.shutdown().await;

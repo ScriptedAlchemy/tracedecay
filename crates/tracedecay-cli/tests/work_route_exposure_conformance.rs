@@ -992,7 +992,11 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
                     .unwrap_or_else(|| panic!("{label} must name the product generation: {body}"));
                 assert!(!generation.is_empty(), "{label}: {body}");
                 assert_eq!(payload["topology"]["task_count"], 1, "{label}: {body}");
-                assert_eq!(payload["attempts"], serde_json::json!([]), "{label}: {body}");
+                assert_eq!(
+                    payload["attempts"],
+                    serde_json::json!([]),
+                    "{label}: {body}"
+                );
                 assert_eq!(
                     payload["coverage"],
                     serde_json::json!({ "coverage": "complete", "returned": 0 }),
@@ -1010,7 +1014,10 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
                     serde_json::json!({ "coverage": "complete", "returned": 0 }),
                     "{label}: {body}"
                 );
-                assert_eq!(payload["timing_coverage"]["coverage"], "complete", "{label}: {body}");
+                assert_eq!(
+                    payload["timing_coverage"]["coverage"], "complete",
+                    "{label}: {body}"
+                );
             }
         }
     }

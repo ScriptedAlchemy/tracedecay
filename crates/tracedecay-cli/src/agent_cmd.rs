@@ -3938,10 +3938,12 @@ mod tests {
             tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
             &code_home,
         );
+        let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
+            .unwrap_or_else(|| "tracedecay".to_string());
         let integration = tracedecay_agent_hosts::agents::get_integration("kimi").unwrap();
         let ctx = tracedecay_agent_hosts::agents::InstallContext {
             home: home.path().to_path_buf(),
-            tracedecay_bin: "new-tracedecay".to_string(),
+            tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay_agent_hosts::agents::expected_tool_perms()
                 .expect("tool catalog"),
             project_root: None,
@@ -3956,6 +3958,8 @@ mod tests {
             .join(".tracedecay/host-bundle-stage/kimi/tracedecay")
             .canonicalize()
             .unwrap();
+        let managed = code_home.join("plugins/managed/tracedecay");
+        copy_test_bundle(&staged, &managed);
         let installed_path = code_home.join("plugins/installed.json");
         std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -3966,7 +3970,8 @@ mod tests {
                     "id": "tracedecay",
                     "enabled": true,
                     "source": "local-path",
-                    "root": staged,
+                    "root": managed,
+                    "originalSource": staged,
                 }],
             })
             .to_string(),
@@ -3976,7 +3981,7 @@ mod tests {
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
             &["kimi".to_string()],
             home.path(),
-            "new-tracedecay",
+            &tracedecay_bin,
         )
         .await;
         assert!(matches!(
