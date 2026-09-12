@@ -10234,6 +10234,15 @@ async fn diagnostics_change_generation_advances_for_out_of_band_git_drift() {
     );
 
     drop(admission);
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
+    let reconciled = registry
+        .diagnostics_change_generation(fixture.path())
+        .await
+        .expect("reconciled diagnostics generation");
+    assert_eq!(
+        reconciled, changed,
+        "settling the observed drift must not mint another generation"
+    );
     registry.shutdown().await;
 }
 

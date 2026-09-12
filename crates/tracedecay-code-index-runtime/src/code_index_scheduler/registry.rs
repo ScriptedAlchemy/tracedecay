@@ -5969,17 +5969,47 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return None;
         };
-        let (scheduler, wake, pending_wake, reconcile_in_progress, epoch) = {
+        let (scheduler, source_freshness, hints, wake, pending_wake, reconcile_in_progress, epoch) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.scheduler),
+                worktree.source_freshness.clone(),
+                Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
                 Arc::clone(&worktree.reconcile_in_progress),
                 Arc::clone(&worktree.epoch),
             )
         };
+        // A neutral verification or publication pass must not hide a real Git
+        // move from diagnostics caches. Sample the fixed-cost Git authority
+        // before the busy shortcut and record the movement through the same
+        // hint/epoch authority the scheduler uses. `source_change_pending`
+        // keeps repeated reads from superseding the same in-flight remedy.
+        if source_freshness.verified_git_metadata_moved(&project_root) {
+            let mut hints = hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Re-prove both predicates while holding the hint authority. This
+            // serializes concurrent diagnostics and closes the window where a
+            // reconciler could finish after the first sample but before this
+            // read recorded what would then be a phantom second transition.
+            if source_freshness.verified_git_metadata_moved(&project_root)
+                && !source_freshness.source_change_pending()
+            {
+                super::CodeIndexWorktreeSchedulerV1::record_background_reconcile_hint(
+                    &mut hints, &epoch, true,
+                );
+            }
+            drop(hints);
+            Self::note_wake_if_idle(
+                &pending_wake,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+            return Some(epoch.load(Ordering::Acquire));
+        }
         if pending_wake.has_pending_arrival() || reconcile_in_progress.load(Ordering::Acquire) != 0
         {
             return Some(epoch.load(Ordering::Acquire));

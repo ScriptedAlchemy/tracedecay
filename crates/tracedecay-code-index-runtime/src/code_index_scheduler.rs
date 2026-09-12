@@ -5567,6 +5567,16 @@ impl SourceFreshnessFenceV1 {
         self.source_epoch.load(Ordering::Acquire) != state.reconciled_source_epoch
     }
 
+    /// Whether Git metadata proves that the checkout moved past the last
+    /// completed source verification. An unverified mount has no baseline and
+    /// therefore cannot turn its first verification into an observed change.
+    fn verified_git_metadata_moved(&self, project_root: &Path) -> bool {
+        let state = self.snapshot();
+        state.verified_against_source
+            && identity::GitMetadataFingerprintV1::capture(project_root)
+                .differs_from(&state.git_metadata)
+    }
+
     fn ready_without_stat(&self, project_root: &Path, shutting_down: &AtomicBool) -> bool {
         let state = self.snapshot();
         self.snapshot_is_recently_verified(&state, project_root, shutting_down)
@@ -6337,20 +6347,32 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .hints
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let newly_observed_change = source_changed && !hints.observed_source_change;
-            hints.observed_source_change |= source_changed;
-            if newly_observed_change {
-                // Advance while holding the hint authority: a reconciler that
-                // drains the observed-change marker must also observe the
-                // cancellation epoch that marker minted.
-                DaemonCodeIndexControlV1::advance(&self.epoch);
-            }
-            hints.overflow();
+            Self::record_background_reconcile_hint(&mut hints, &self.epoch, source_changed);
         }
         // `Notify` already coalesces stored permits. Always refresh the permit:
         // a prior worker may have consumed its wake and then failed before
         // draining this overflow marker.
         self.wake.notify_one();
+    }
+
+    /// Record one source-neutral or source-moving reconcile hint through the
+    /// canonical hint and cancellation authorities. Registry reads use this
+    /// while the scheduler mutex is owned by a blocking reconcile so Git drift
+    /// cannot disappear behind unrelated in-flight work.
+    fn record_background_reconcile_hint(
+        hints: &mut PendingHintsV1,
+        epoch: &AtomicU64,
+        source_changed: bool,
+    ) {
+        let newly_observed_change = source_changed && !hints.observed_source_change;
+        hints.observed_source_change |= source_changed;
+        if newly_observed_change {
+            // Advance while holding the hint authority: a reconciler that
+            // drains the observed-change marker must also observe the
+            // cancellation epoch that marker minted.
+            DaemonCodeIndexControlV1::advance(epoch);
+        }
+        hints.overflow();
     }
 
     #[hotpath::measure(label = "code_index.generation.compatibility_observe")]
