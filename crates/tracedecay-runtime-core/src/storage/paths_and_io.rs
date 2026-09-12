@@ -14,9 +14,9 @@ use super::DURABLE_REMOVAL_TOMBSTONE_PREFIX;
 use super::{
     ActiveProjectContext, BRANCH_META_FILENAME, DurableAtomicWritePhase, EnrollmentMarker,
     GraphScopeId, PrivateStoreIo, ProjectIdentity, ProjectPath, QueryTarget,
-    RESPONSE_HANDLES_DIRECTORY, SESSIONS_DB_FILENAME,
-    STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind, StoreLayout,
-    StoreManifest, inject_durable_atomic_write_fault, inject_durable_namespace_sync_fault,
+    RESPONSE_HANDLES_DIRECTORY, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreArtifactPath, StoreKind, StoreLayout, StoreManifest, inject_durable_atomic_write_fault,
+    inject_durable_namespace_sync_fault,
 };
 
 impl StoreManifest {

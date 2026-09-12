@@ -273,10 +273,12 @@ pub fn resolve_project_session_db_path(project_root: &Path) -> Result<PathBuf> {
 /// 286 of them on one profile, outnumbering the real stores.
 pub fn resolve_response_handle_root(project_root: &Path) -> Result<PathBuf> {
     let profile_root = default_profile_root()?;
-    Ok(match resolve_enrolled_layout(project_root, &profile_root)? {
-        Some(layout) => layout.response_handle_root,
-        None => profile_root.join(RESPONSE_HANDLES_DIRECTORY),
-    })
+    Ok(
+        match resolve_enrolled_layout(project_root, &profile_root)? {
+            Some(layout) => layout.response_handle_root,
+            None => profile_root.join(RESPONSE_HANDLES_DIRECTORY),
+        },
+    )
 }
 
 pub fn resolve_lcm_payload_root(project_root: &Path) -> Result<PathBuf> {

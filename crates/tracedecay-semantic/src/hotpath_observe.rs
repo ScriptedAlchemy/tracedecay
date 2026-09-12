@@ -166,6 +166,7 @@ pub(crate) fn record_model_state(name: &'static str) {
     let _ = name;
 }
 
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 #[inline(always)]
 pub(crate) fn record_embed_execution_provider(name: &'static str) {
     #[cfg(feature = "hotpath")]

@@ -2197,19 +2197,28 @@ fn scope_plan_skips_the_stranding_age_when_the_recorded_root_is_gone() {
 
     // The same record for a root that exists keeps the age gate.
     let present = tempfile::TempDir::new().expect("present root");
-    let present_root = present.path().canonicalize().expect("canonical present root");
+    let present_root = present
+        .path()
+        .canonicalize()
+        .expect("canonical present root");
     let present_hash = code_index_scope_hash(&present_root);
     let present_scope = store.path().join(&present_hash);
     std::fs::create_dir_all(present_scope.join(GENERATIONS_DIRECTORY)).expect("scope");
     std::fs::write(
-        present_scope.join(GENERATIONS_DIRECTORY).join("generation-fixture"),
+        present_scope
+            .join(GENERATIONS_DIRECTORY)
+            .join("generation-fixture"),
         b"present",
     )
     .expect("payload");
     record_scope_root(&present_scope, &present_root).expect("record");
     let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
         .expect("plan");
-    assert_eq!(plan.collectable_scopes.len(), 1, "only the scope whose root is gone");
+    assert_eq!(
+        plan.collectable_scopes.len(),
+        1,
+        "only the scope whose root is gone"
+    );
     assert_eq!(plan.retained_immature_scopes.len(), 1);
     assert_eq!(plan.retained_immature_scopes[0].scope_hash, present_hash);
     assert!(!plan.retained_immature_scopes[0].root_missing);

@@ -139,12 +139,19 @@ impl MaintenanceCadence {
     /// alone (its `finish` sets the next deadline); a deadline already
     /// nearer than that stays where it is.
     #[must_use]
-    pub fn pull_forward(&mut self, now: CadenceInstant, deadline: CadenceInstant) -> CadenceInstant {
+    pub fn pull_forward(
+        &mut self,
+        now: CadenceInstant,
+        deadline: CadenceInstant,
+    ) -> CadenceInstant {
         if self.in_flight {
             return deadline;
         }
         let pulled = deadline.min(now + self.retry_delay);
-        if self.not_before.is_some_and(|not_before| not_before > pulled) {
+        if self
+            .not_before
+            .is_some_and(|not_before| not_before > pulled)
+        {
             self.not_before = Some(pulled);
         }
         pulled
