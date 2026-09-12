@@ -1429,23 +1429,82 @@ mod tests {
     }
 
     #[test]
-    fn generation_stripes_cold_load_at_most_the_session_width() {
-        const SESSION_WIDTH: usize = 4;
-        const STRIPES: usize = 12;
-        let pool = fake_pool(SESSION_WIDTH, Duration::from_mins(1), 1 << 20);
+    fn acquire_release_reuses_warmed_session() {
+        let pool = fake_pool(2, Duration::from_mins(1), 1 << 20);
         let authority = authority();
+        {
+            let _guard = pool.acquire(&authority).expect("first acquire");
+            assert_eq!(pool.stats().active, 1);
+        }
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.sessions_opened, 1);
+        {
+            let _guard = pool.acquire(&authority).expect("second acquire");
+            let stats = pool.stats();
+            assert_eq!(stats.active, 1);
+            assert_eq!(stats.idle, 0);
+            assert_eq!(
+                stats.sessions_opened, 1,
+                "release/acquire reuses the warmed session"
+            );
+        }
+    }
 
+    const STRIPE_WIDTH: usize = 4;
+    const STRIPES: usize = 12;
+    const STRIPE_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+
+    /// Run `STRIPES` generation stripes of `STRIPE_WIDTH` concurrent sessions,
+    /// waiting `idle_gap` between them.
+    fn run_generation_stripes(idle_gap: Duration) -> SessionPoolStats {
+        let pool = fake_pool(STRIPE_WIDTH, STRIPE_IDLE_TIMEOUT, 1 << 20);
+        let authority = authority();
         for _ in 0..STRIPES {
-            let stripe = (0..SESSION_WIDTH)
+            let stripe = (0..STRIPE_WIDTH)
                 .map(|_| pool.acquire(&authority).expect("generation stripe session"))
                 .collect::<Vec<_>>();
             drop(stripe);
+            pool.inner.clock.advance(idle_gap);
         }
+        pool.stats()
+    }
 
-        let stats = pool.stats();
-        assert_eq!(stats.sessions_opened, SESSION_WIDTH);
-        assert_eq!(stats.idle, SESSION_WIDTH);
-        assert_eq!(stats.sessions_closed, 0);
+    /// Back-to-back stripes cold-load the width exactly once. This is the
+    /// property the projector depends on: stripe count does not multiply
+    /// model loads.
+    #[test]
+    fn back_to_back_generation_stripes_cold_load_the_width_once() {
+        let stats = run_generation_stripes(Duration::ZERO);
+
+        assert_eq!(stats.sessions_opened, STRIPE_WIDTH);
+        assert_eq!(stats.sessions_reaped, 0);
+        assert_eq!(stats.idle, STRIPE_WIDTH);
+    }
+
+    /// With a whole idle timeout between stripes, reuse-first saves exactly
+    /// the one session that serves the acquisition: reaping runs inside that
+    /// same acquisition, so the rest of the expired stripe is closed before
+    /// the stripe's remaining acquisitions ask for it.
+    ///
+    /// Advancing the clock is what makes both of these falsifiable. Without
+    /// it `idle_for` is always zero, nothing can expire, and the numbers below
+    /// would hold under any idle policy whatsoever — which is precisely why
+    /// the previous version of this guard proved nothing.
+    #[test]
+    fn an_expired_generation_stripe_reuses_one_session_and_reopens_the_rest() {
+        let stats = run_generation_stripes(STRIPE_IDLE_TIMEOUT + Duration::from_secs(1));
+
+        let reopened_per_stripe = STRIPE_WIDTH - 1;
+        assert_eq!(
+            stats.sessions_opened,
+            STRIPE_WIDTH + (STRIPES - 1) * reopened_per_stripe,
+            "one session per stripe survives the reaper; the rest cold-load again"
+        );
+        assert_eq!(stats.sessions_reaped, (STRIPES - 1) * reopened_per_stripe);
+        assert_eq!(stats.sessions_closed, stats.sessions_reaped);
+        assert_eq!(stats.idle, STRIPE_WIDTH);
     }
 
     #[test]
