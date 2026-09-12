@@ -11,14 +11,7 @@ include = ["/src/**", "/assets/**"]
 [dependencies]
 flate2 = "1"
 fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
-gix = { version = "=0.86.0", default-features = false, features = [
-    "revision",
-    "blob-diff",
-    "parallel",
-    "sha1",
-    "sha256",
-    "status",
-] }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "parallel", "sha1", "sha256"] }
 hex = "0.4"
 hmac = "0.13.0"
 hotpath.workspace = true
