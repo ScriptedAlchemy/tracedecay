@@ -1284,6 +1284,7 @@ fn symbol_page<T: Serialize>(
 fn symbol_temporal_state<T>(page: &SymbolGraphPage<T>, finished_at: UtcMicros) -> TemporalState {
     let mut temporal = TemporalState::current(finished_at);
     temporal.source_generation = Some(page.generation.clone());
+    temporal.code_graph_freshness = Some(page.freshness);
     temporal.freshness = if page.freshness.is_stale() {
         FreshnessState::Stale
     } else {
@@ -2007,6 +2008,7 @@ mod tests {
 
         assert_eq!(page.items, vec!["symbol"]);
         assert_eq!(page.generation, generation.clone());
+        assert_eq!(temporal.code_graph_freshness, Some(page.freshness));
         assert_eq!(temporal.source_generation, Some(generation));
         assert_eq!(temporal.freshness, FreshnessState::Stale);
     }

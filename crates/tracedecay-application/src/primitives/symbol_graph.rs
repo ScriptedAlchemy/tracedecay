@@ -216,6 +216,7 @@ where
                     &request.meta.page,
                     "search",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -286,6 +287,7 @@ where
                     &request.meta.page,
                     "exact",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -348,6 +350,7 @@ where
                     &request.meta.page,
                     "signature",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -436,6 +439,7 @@ where
                     &request.meta.page,
                     "implementations",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -478,6 +482,7 @@ where
                             &request.meta.page,
                             "hierarchy",
                             &claim,
+                            graph.freshness,
                             Vec::new(),
                             Vec::new(),
                             None,
@@ -542,6 +547,7 @@ where
                     &request.meta.page,
                     "hierarchy",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -586,6 +592,7 @@ where
                     &request.meta.page,
                     "callers",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -683,6 +690,7 @@ where
                     &request.meta.page,
                     "callees",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -741,6 +749,7 @@ where
                     &request.meta.page,
                     "impact",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     Some(edge_count),
@@ -755,6 +764,7 @@ where
 struct OpenSymbolGraph {
     reader: CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
 #[hotpath::measure(label = "usecases.primitives.open_graph", future = true)]
@@ -771,6 +781,7 @@ async fn open_graph(
         ))
         .await
         .map_err(|_| ())?;
+    let freshness = verified.freshness();
     let reader = verified
         .reader_with_cancellation(
             context.request,
@@ -781,6 +792,7 @@ async fn open_graph(
     Ok(OpenSymbolGraph {
         reader,
         cancellation,
+        freshness,
     })
 }
 
@@ -1126,11 +1138,12 @@ async fn complete_or_failed<T: Send>(
     request: &PageRequest,
     lane: &str,
     claim: &SymbolGraphPageClaim,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     items: Vec<T>,
     gaps: Vec<PrimitiveSupportGap>,
     related_edge_count: Option<u64>,
 ) -> SymbolGraphPortOutcome<T> {
-    let mut page = match paginate(cursors, context, request, lane, claim, items).await {
+    let mut page = match paginate(cursors, context, request, lane, claim, freshness, items).await {
         Ok(page) => page,
         Err(failure) => {
             return SymbolGraphPortOutcome::Failed {
@@ -1163,6 +1176,7 @@ async fn paginate<T: Send>(
     request: &PageRequest,
     lane: &str,
     claim: &SymbolGraphPageClaim,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     items: Vec<T>,
 ) -> Result<SymbolGraphPage<T>, PrimitiveFailure> {
     let offset = claim.offset();
@@ -1194,7 +1208,7 @@ async fn paginate<T: Send>(
         .await?;
     Ok(SymbolGraphPage::complete(
         claim.snapshot.code_generation_id().clone(),
-        claim.snapshot.freshness(),
+        freshness,
         page_items,
         Some(total as u64),
         next_cursor,

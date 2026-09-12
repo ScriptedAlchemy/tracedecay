@@ -1033,6 +1033,7 @@ pub fn context_scout_candidates_from_publication(
                         requested_at: publication.input.observed_at,
                         resolved_at: observed_at,
                         source_generation: Some(code_generation_id.clone()),
+                        code_graph_freshness: None,
                         watermark_digest: Some(
                             publication.runtime.authoritative.runtime_watermark.clone(),
                         ),

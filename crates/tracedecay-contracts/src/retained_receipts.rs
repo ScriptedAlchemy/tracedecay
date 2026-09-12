@@ -563,6 +563,7 @@ fn evidence_temporal_state(
             requested_at,
             resolved_at,
             source_generation: None,
+            code_graph_freshness: None,
             watermark_digest: None,
             freshness: facts.freshness,
         });
@@ -578,6 +579,7 @@ fn evidence_temporal_state(
         requested_at,
         resolved_at,
         source_generation: None,
+        code_graph_freshness: None,
         watermark_digest: Some(watermark_digest),
         freshness: facts.freshness,
     })

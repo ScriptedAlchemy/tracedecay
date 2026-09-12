@@ -410,13 +410,6 @@ async fn retained_partitioned_generation_reaches_semantics_after_source_proof_ex
         unverified_identity.code_generation_id, retained_generation,
         "source verification must keep serving the retained generation"
     );
-    assert!(
-        matches!(
-            unverified_identity.freshness,
-            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale { .. }
-        ),
-        "an expired source proof must be reported as stale"
-    );
     let (candidate, code) = registry
         .semantic_evaluation_generation_for_scope(fixture.path(), &scope)
         .await
@@ -469,16 +462,6 @@ async fn retained_partitioned_generation_reaches_semantics_after_source_proof_ex
     assert_eq!(
         projection_identity.code_generation_id, retained_generation,
         "read-only query identity must keep serving the retained generation"
-    );
-    assert!(
-        matches!(
-            projection_identity.freshness,
-            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
-                rebuild_in_flight: true,
-                ..
-            }
-        ),
-        "read-only query identity must report the pending source refresh"
     );
     drop(reconcile_admission);
     registry.shutdown().await;

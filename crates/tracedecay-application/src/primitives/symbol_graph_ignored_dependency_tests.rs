@@ -55,10 +55,30 @@ mod edge_cases;
 
 const NOW: UtcMicros = UtcMicros(1_000);
 
+#[tokio::test]
+async fn page_uses_the_verified_projection_freshness() {
+    let freshness = tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+        sealed_at: UtcMicros(900),
+        rebuild_in_flight: true,
+    };
+    let fixture = fixture_with_freshness(freshness);
+    let outcome = adapter(&fixture, None)
+        .symbol_search(
+            port_context(&fixture),
+            &search_request("Widget", false, None),
+        )
+        .await;
+    let SymbolGraphPortOutcome::Completed { page, .. } = outcome else {
+        panic!("fixture projection must return a complete symbol page");
+    };
+    assert_eq!(page.freshness, freshness);
+}
+
 #[derive(Clone)]
 struct FixtureCodeGraphProjection {
     scope: ResolvedScope,
     store: Arc<CodeGraphProjectionStore>,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
 impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
@@ -75,11 +95,7 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
                 RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
             }
-            VerifiedCodeGraphRead::new(
-                self.scope.clone(),
-                Arc::clone(&self.store),
-                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
-            )
+            VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store), self.freshness)
         })
     }
 }
@@ -266,12 +282,17 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_freshness(tracedecay_graph_query::CodeGraphReadFreshnessV1::Current)
+}
+
+fn fixture_with_freshness(freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1) -> Fixture {
     let (scope, context, operation) = application_context();
     let generation = current_generation();
     let (store, expected_import) = projection_fixture(&generation);
     let graph: Arc<dyn CodeGraphProjectionReadPort> = Arc::new(FixtureCodeGraphProjection {
         scope: scope.clone(),
         store,
+        freshness,
     });
     let cursor = FixtureCursor {
         snapshot: cursor_snapshot(&scope, &context),

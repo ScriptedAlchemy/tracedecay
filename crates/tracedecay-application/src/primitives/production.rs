@@ -2280,11 +2280,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                     "could not authorize temporal snapshot",
                 )
             })?;
-            Ok(SymbolGraphCursorSnapshot::new(
-                temporal,
-                code_generation_id,
-                graph_identity.freshness,
-            ))
+            Ok(SymbolGraphCursorSnapshot::new(temporal, code_generation_id))
         })
     }
 }
@@ -2665,6 +2661,7 @@ fn affected_tests_evidence(
             requested_at: finished_at,
             resolved_at: finished_at,
             source_generation: Some(request.generation.clone()),
+            code_graph_freshness: None,
             watermark_digest,
             freshness,
         },
@@ -3301,7 +3298,6 @@ mod affected_tests_tests {
                 repository: self.scope.repository_id.clone(),
                 worktree: Some(self.scope.worktree_id.clone()),
                 reference: self.scope.reference.clone(),
-                freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
                 head_commit_id: self.source_revision.clone(),
                 source_revision: self.source_revision.clone(),
                 code_generation_id,

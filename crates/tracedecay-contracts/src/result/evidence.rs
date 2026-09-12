@@ -70,6 +70,8 @@ pub struct TemporalState {
     pub requested_at: UtcMicros,
     pub resolved_at: UtcMicros,
     pub source_generation: Option<CodeGenerationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_graph_freshness: Option<crate::retrieval::CodeGraphReadFreshnessV1>,
     pub watermark_digest: Option<ManifestDigest>,
     pub freshness: FreshnessState,
 }
@@ -81,6 +83,7 @@ impl TemporalState {
             requested_at: resolved_at,
             resolved_at,
             source_generation: None,
+            code_graph_freshness: None,
             watermark_digest: None,
             freshness: FreshnessState::Current,
         }

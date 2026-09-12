@@ -18,7 +18,6 @@ pub struct LspCodeIndexProjectionIdentity {
     pub repository: RepositoryId,
     pub worktree: Option<WorktreeId>,
     pub reference: Option<RefId>,
-    pub freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     /// The checkout's live HEAD when this current identity was resolved.
     /// Distinct from `source_revision`: dirty sealed content belongs to no
     /// commit, while a managed test run still executes under the live HEAD.
@@ -42,7 +41,6 @@ pub struct LspCodeIndexProjectionIdentity {
 /// commit go through [`LspCodeIndexProjectionIdentity::admit_commit_scope`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspCodeIndexWorktreeGraphScope {
-    pub freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     pub source_revision: Option<CommitId>,
     pub code_generation_id: CodeGenerationId,
     pub snapshot_digest: ManifestDigest,
@@ -79,7 +77,6 @@ impl LspCodeIndexProjectionIdentity {
         let generation = generation_sequence(&self.code_generation_id)
             .ok_or_else(|| LspRuntimeFailure::new("current-generation-invalid"))?;
         Ok(LspCodeIndexWorktreeGraphScope {
-            freshness: self.freshness,
             source_revision: self.source_revision,
             code_generation_id: self.code_generation_id,
             snapshot_digest: self.snapshot_digest,
