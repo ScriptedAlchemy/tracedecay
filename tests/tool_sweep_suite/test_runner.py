@@ -605,7 +605,7 @@ class MutationJourneyTests(unittest.TestCase):
 
         def setting():
             return self.response(json.dumps({"payload": {
-                "key": "mcp.tool_timings",
+                "key": "diagnostics.prewarm.v1",
                 "revision_id": state["revision"],
                 "effective_value": state["value"],
             }}))
@@ -626,7 +626,7 @@ class MutationJourneyTests(unittest.TestCase):
             "tracedecay_configuration_set",
             object(),
             {
-                "configuration_scalar_key": "mcp.tool_timings",
+                "configuration_scalar_key": "diagnostics.prewarm.v1",
                 "configuration_scalar_value": baseline,
                 "project_id": "project.fixture",
             },
@@ -1151,7 +1151,8 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 '[{"digest":"sha256:fixture","hunk":{}}]}'
             ),
             "tracedecay_configuration_list": cls.response(
-                '{"payload":[{"key":"work.topology_policy.v1"},{"key":"mcp.tool_timings"}]}'
+                '{"payload":[{"key":"work.topology_policy.v1"},'
+                '{"key":"diagnostics.prewarm.v1"}]}'
             ),
             "tracedecay_configuration_get": cls.response(
                 '{"payload":{"key":"work.topology_policy.v1",'
@@ -1188,9 +1189,12 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 self.calls.append((name, arguments))
                 if name == "tracedecay_by_qualified_name":
                     return self.qualified_name_responses.pop(0), 3
-                if name == "tracedecay_configuration_get" and arguments["key"] == "mcp.tool_timings":
+                if (
+                    name == "tracedecay_configuration_get"
+                    and arguments["key"] == "diagnostics.prewarm.v1"
+                ):
                     return cls.response(
-                        '{"payload":{"key":"mcp.tool_timings",'
+                        '{"payload":{"key":"diagnostics.prewarm.v1",'
                         '"revision_id":"configuration.fixture.v1",'
                         '"effective_value":{"kind":"boolean","value":false}}}'
                     ), 3
