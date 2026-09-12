@@ -240,7 +240,7 @@ pub(super) fn verify_encoded_row<K: rusqlite::ToSql + ?Sized>(
     collision: &'static str,
 ) -> rusqlite::Result<()> {
     let stored: String = connection.query_row(sql, params![binding_id, key], |row| row.get(0))?;
-    if super::slim::same_json(&stored, expected) {
+    if same_json(&stored, expected) {
         Ok(())
     } else {
         Err(invalid(collision))

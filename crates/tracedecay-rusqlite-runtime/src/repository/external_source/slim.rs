@@ -49,8 +49,7 @@ pub(super) fn slim_commit_receipt(
 pub(super) fn slim_projection_receipt(
     projection: &SourceProjectionCommitV1,
 ) -> rusqlite::Result<SlimReceiptV1> {
-    let mut value =
-        serde_json::to_value(projection).map_err(|error| invalid(error.to_string()))?;
+    let mut value = serde_json::to_value(projection).map_err(|error| invalid(error.to_string()))?;
     let frontiers = detach_frontiers(&mut value, &PROJECTION_FRONTIERS)?;
     detach_mutations(&mut value)?;
     // Effects live in `external_source_projection_effects_v2`, ordered by
@@ -67,7 +66,8 @@ pub(super) fn hydrate_commit_receipt(
     binding_id: &str,
     slim: &str,
 ) -> rusqlite::Result<SourceCommitReceiptV1> {
-    let mut value: Value = serde_json::from_str(slim).map_err(|error| invalid(error.to_string()))?;
+    let mut value: Value =
+        serde_json::from_str(slim).map_err(|error| invalid(error.to_string()))?;
     attach_frontiers(connection, binding_id, &mut value, &COMMIT_FRONTIERS)?;
     attach_mutations(connection, binding_id, &mut value)?;
     serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
@@ -78,7 +78,8 @@ pub(super) fn hydrate_projection_receipt(
     binding_id: &str,
     slim: &str,
 ) -> rusqlite::Result<SourceProjectionCommitV1> {
-    let mut value: Value = serde_json::from_str(slim).map_err(|error| invalid(error.to_string()))?;
+    let mut value: Value =
+        serde_json::from_str(slim).map_err(|error| invalid(error.to_string()))?;
     attach_frontiers(connection, binding_id, &mut value, &PROJECTION_FRONTIERS)?;
     attach_mutations(connection, binding_id, &mut value)?;
     let projection_digest = object(&mut value)?
@@ -101,33 +102,13 @@ pub(super) fn hydrate_projection_receipt(
     serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
 }
 
-/// Two persisted encodings agree when they denote the same JSON document. A
-/// row migrated in SQL is minified differently from one serde wrote, so a
-/// byte comparison would report a collision on an idempotent replay of a
-/// pre-migration commit.
-pub(super) fn same_json(stored: &str, expected: &str) -> bool {
-    if stored == expected {
-        return true;
-    }
-    match (
-        serde_json::from_str::<Value>(stored),
-        serde_json::from_str::<Value>(expected),
-    ) {
-        (Ok(stored), Ok(expected)) => stored == expected,
-        _ => false,
-    }
-}
-
 fn object(value: &mut Value) -> rusqlite::Result<&mut serde_json::Map<String, Value>> {
     value
         .as_object_mut()
         .ok_or_else(|| invalid("external source receipt encoding is not a JSON object"))
 }
 
-fn detach_frontiers(
-    value: &mut Value,
-    fields: &[&str],
-) -> rusqlite::Result<Vec<(String, String)>> {
+fn detach_frontiers(value: &mut Value, fields: &[&str]) -> rusqlite::Result<Vec<(String, String)>> {
     let mut frontiers = Vec::with_capacity(fields.len());
     let object = object(value)?;
     for field in fields {
@@ -213,7 +194,9 @@ fn attach_mutations(
     let mut mutations = Vec::with_capacity(digests.len());
     for digest in digests {
         let Value::String(digest) = digest else {
-            return Err(invalid("external source receipt mutation reference is not a digest"));
+            return Err(invalid(
+                "external source receipt mutation reference is not a digest",
+            ));
         };
         let encoded: Option<String> = statement
             .query_row(params![binding_id, digest], |row| row.get(0))

@@ -97,6 +97,7 @@ const OBSERVATION_AUTHORITY_TABLES: &[&str] = &[
     "remote_observation_events",
     "observation_retrieval_anchors",
     "observation_repository_provenance",
+    "observation_repository_captures",
 ];
 
 /// Pure derivations of the observation stream owned by
