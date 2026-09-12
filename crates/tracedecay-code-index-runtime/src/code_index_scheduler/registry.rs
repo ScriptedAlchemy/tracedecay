@@ -2611,6 +2611,15 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
+    /// Queue worker-owned continuation work through the same pending-arrival
+    /// authority as external wakes. This keeps readiness truthful while the
+    /// continuation waits for shared admission; a bare `Notify` permit is not
+    /// observable by freshness readers.
+    fn note_worker_continuation(pending_wake: &PendingWakeV1, wake: &tokio::sync::Notify) {
+        let _ =
+            Self::note_wake_if_idle(pending_wake, wake, CodeIndexCadenceTriggerV1::BusyFollowUp);
+    }
+
     /// Claim the pending wake as one reconcile's arrival, at the instant the
     /// scheduler dequeues it.
     ///
@@ -3960,7 +3969,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(retained_text);
-                            worker_wake.notify_one();
+                            Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                             continue;
                         }
                         Ok(Ok(Some(RetainedTextGenerationRestoreV1::Refused(metadata)))) => {
@@ -4154,7 +4163,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     arrival.wake_micros().is_some(),
                     matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_)))),
                 ) {
-                    worker_wake.notify_one();
+                    Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                 }
                 if let Ok(Ok(outcome)) = &source_result {
                     Self::record_source_reconcile_observation(
@@ -4243,7 +4252,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .as_ref()
                         .is_none_or(LatestCodeTextGenerationV1::text_serving_needs_work)
                     {
-                        worker_wake.notify_one();
+                        Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                     }
                 }
                 // Graph seating must not wait for the checkout to hold still.
@@ -4472,7 +4481,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     // `retained_graph_head_recovery_attempted` guard above is
                     // now false for every later pass, so this cannot spin
                     // another retained-recovery Noop.
-                    worker_wake.notify_one();
+                    Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                 }
                 // A recovered revision-7 verified head already serves its
                 // native graph from the retained text owner, and that owner
@@ -4481,17 +4490,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 // partition replay the verified-head recovery exists to
                 // avoid: the decoder reloads the active generation, and the
                 // seat that follows is a second copy of what already serves.
-                // Restarts of a partitioned manifest therefore serve complete
-                // demands through the text projection and leave the sealed
-                // slot unseated, exactly as `sealed_decode_count() == 0`
-                // requires. A publication seats its own product as usual, and
-                // a legacy (non-partitioned) owner still takes the seat.
+                // Restarts of a partitioned manifest therefore leave the
+                // sealed slot unseated until an explicit complete-generation
+                // consumer asks for it, exactly as graph-only
+                // `sealed_decode_count() == 0` requires. A publication seats
+                // its own product as usual, and a legacy (non-partitioned)
+                // owner still takes the seat.
                 if prepare_graph
                     && !published_pass
                     && graph_already_serves
                     && graph_text
                         .as_ref()
                         .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest)
+                    && !worker_complete_generation_requested.load(Ordering::Acquire)
                 {
                     prepare_graph = false;
                     tracing::debug!(
@@ -4598,7 +4609,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                     // One pass, claimed from the scheduler, so
                                     // a refusal that keeps reproducing cannot
                                     // spin this worker.
-                                    worker_wake.notify_one();
+                                    Self::note_worker_continuation(
+                                        &worker_pending_wake,
+                                        &worker_wake,
+                                    );
                                 }
                                 Ok((outcome, latest, replay_binding))
                             }
@@ -4833,7 +4847,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 "the publication's text owner did not finish its projection; \
                                  the sealed generation stays unseated until it does"
                             );
-                            worker_wake.notify_one();
+                            Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
                     }
                     // Keep the pass lifetime around the post-projection source
@@ -5030,7 +5044,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ServingSwapOutcomeV1::Offered => {}
                             }
                             if text_latest.text_serving_needs_work() {
-                                worker_wake.notify_one();
+                                Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                             }
                         }
                         Ok(Err(error)) => {
@@ -5337,7 +5351,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             // stopped short would sleep until an unrelated
                             // arrival, exactly as the inline slice's own
                             // follow-up notify prevented.
-                            worker_wake.notify_one();
+                            Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
                     }
                 }
