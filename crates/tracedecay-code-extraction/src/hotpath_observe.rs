@@ -99,117 +99,28 @@ pub(crate) fn file_byte_bucket(bytes: usize) -> &'static str {
     }
 }
 
+/// Count one file operation (`parse` or `traverse`) under the closed family
+/// and byte-bucket vocabularies. Both labels come from bounded tables, so the
+/// derived gauge names cannot grow with path, dialect, or exact file size.
 #[cfg(feature = "hotpath")]
-fn record_parse_dims(language: &str, source_bytes: usize) {
-    hotpath::gauge!("code_extraction.parse_calls").inc(1.0);
-    hotpath::gauge!("code_extraction.parse_bytes").inc(source_bytes as f64);
-    match language_family(language) {
-        "systems" => hotpath::gauge!("code_extraction.parse_calls.systems").inc(1.0),
-        "jvm" => hotpath::gauge!("code_extraction.parse_calls.jvm").inc(1.0),
-        "dotnet" => hotpath::gauge!("code_extraction.parse_calls.dotnet").inc(1.0),
-        "web" => hotpath::gauge!("code_extraction.parse_calls.web").inc(1.0),
-        "python" => hotpath::gauge!("code_extraction.parse_calls.python").inc(1.0),
-        "go" => hotpath::gauge!("code_extraction.parse_calls.go").inc(1.0),
-        "managed" => hotpath::gauge!("code_extraction.parse_calls.managed").inc(1.0),
-        "scripting" => hotpath::gauge!("code_extraction.parse_calls.scripting").inc(1.0),
-        "functional" => hotpath::gauge!("code_extraction.parse_calls.functional").inc(1.0),
-        "data" => hotpath::gauge!("code_extraction.parse_calls.data").inc(1.0),
-        "markup" => hotpath::gauge!("code_extraction.parse_calls.markup").inc(1.0),
-        "shader" => hotpath::gauge!("code_extraction.parse_calls.shader").inc(1.0),
-        "basic" => hotpath::gauge!("code_extraction.parse_calls.basic").inc(1.0),
-        "spec" => hotpath::gauge!("code_extraction.parse_calls.spec").inc(1.0),
-        _ => hotpath::gauge!("code_extraction.parse_calls.other").inc(1.0),
-    };
-    match file_byte_bucket(source_bytes) {
-        "le_1kib" => hotpath::gauge!("code_extraction.parse_calls.le_1kib").inc(1.0),
-        "le_4kib" => hotpath::gauge!("code_extraction.parse_calls.le_4kib").inc(1.0),
-        "le_16kib" => hotpath::gauge!("code_extraction.parse_calls.le_16kib").inc(1.0),
-        "le_64kib" => hotpath::gauge!("code_extraction.parse_calls.le_64kib").inc(1.0),
-        "le_256kib" => hotpath::gauge!("code_extraction.parse_calls.le_256kib").inc(1.0),
-        "le_1mib" => hotpath::gauge!("code_extraction.parse_calls.le_1mib").inc(1.0),
-        "le_2mib" => hotpath::gauge!("code_extraction.parse_calls.le_2mib").inc(1.0),
-        _ => hotpath::gauge!("code_extraction.parse_calls.gt_2mib").inc(1.0),
-    };
+fn record_file_dims(operation: &str, language: &str, source_bytes: usize) {
+    hotpath::gauge!(format!("code_extraction.{operation}_calls")).inc(1.0);
+    hotpath::gauge!(format!("code_extraction.{operation}_bytes")).inc(source_bytes as f64);
+    let family = language_family(language);
+    hotpath::gauge!(format!("code_extraction.{operation}_calls.{family}")).inc(1.0);
+    let bucket = file_byte_bucket(source_bytes);
+    hotpath::gauge!(format!("code_extraction.{operation}_calls.{bucket}")).inc(1.0);
 }
 
+/// Accumulate one file operation's inclusive time into the closed family
+/// vocabulary. Parallel workers overlap, so this is aggregate service demand,
+/// not wall time; the span totals remain the timing authority. On the batch
+/// traverse path this includes the nested parse, mirroring the inclusive
+/// `traverse_file` span; on the retained path it is pure walk.
 #[cfg(feature = "hotpath")]
-fn record_traverse_dims(language: &str, source_bytes: usize) {
-    hotpath::gauge!("code_extraction.traverse_calls").inc(1.0);
-    hotpath::gauge!("code_extraction.traverse_bytes").inc(source_bytes as f64);
-    match language_family(language) {
-        "systems" => hotpath::gauge!("code_extraction.traverse_calls.systems").inc(1.0),
-        "jvm" => hotpath::gauge!("code_extraction.traverse_calls.jvm").inc(1.0),
-        "dotnet" => hotpath::gauge!("code_extraction.traverse_calls.dotnet").inc(1.0),
-        "web" => hotpath::gauge!("code_extraction.traverse_calls.web").inc(1.0),
-        "python" => hotpath::gauge!("code_extraction.traverse_calls.python").inc(1.0),
-        "go" => hotpath::gauge!("code_extraction.traverse_calls.go").inc(1.0),
-        "managed" => hotpath::gauge!("code_extraction.traverse_calls.managed").inc(1.0),
-        "scripting" => hotpath::gauge!("code_extraction.traverse_calls.scripting").inc(1.0),
-        "functional" => hotpath::gauge!("code_extraction.traverse_calls.functional").inc(1.0),
-        "data" => hotpath::gauge!("code_extraction.traverse_calls.data").inc(1.0),
-        "markup" => hotpath::gauge!("code_extraction.traverse_calls.markup").inc(1.0),
-        "shader" => hotpath::gauge!("code_extraction.traverse_calls.shader").inc(1.0),
-        "basic" => hotpath::gauge!("code_extraction.traverse_calls.basic").inc(1.0),
-        "spec" => hotpath::gauge!("code_extraction.traverse_calls.spec").inc(1.0),
-        _ => hotpath::gauge!("code_extraction.traverse_calls.other").inc(1.0),
-    };
-    match file_byte_bucket(source_bytes) {
-        "le_1kib" => hotpath::gauge!("code_extraction.traverse_calls.le_1kib").inc(1.0),
-        "le_4kib" => hotpath::gauge!("code_extraction.traverse_calls.le_4kib").inc(1.0),
-        "le_16kib" => hotpath::gauge!("code_extraction.traverse_calls.le_16kib").inc(1.0),
-        "le_64kib" => hotpath::gauge!("code_extraction.traverse_calls.le_64kib").inc(1.0),
-        "le_256kib" => hotpath::gauge!("code_extraction.traverse_calls.le_256kib").inc(1.0),
-        "le_1mib" => hotpath::gauge!("code_extraction.traverse_calls.le_1mib").inc(1.0),
-        "le_2mib" => hotpath::gauge!("code_extraction.traverse_calls.le_2mib").inc(1.0),
-        _ => hotpath::gauge!("code_extraction.traverse_calls.gt_2mib").inc(1.0),
-    };
-}
-
-/// Accumulate one file's parse time into the closed family vocabulary.
-/// Values are inclusive aggregate service demand, not wall time.
-#[cfg(feature = "hotpath")]
-fn record_parse_family_nanos(language: &str, nanos: f64) {
-    match language_family(language) {
-        "systems" => hotpath::gauge!("code_extraction.parse_nanos.systems").inc(nanos),
-        "jvm" => hotpath::gauge!("code_extraction.parse_nanos.jvm").inc(nanos),
-        "dotnet" => hotpath::gauge!("code_extraction.parse_nanos.dotnet").inc(nanos),
-        "web" => hotpath::gauge!("code_extraction.parse_nanos.web").inc(nanos),
-        "python" => hotpath::gauge!("code_extraction.parse_nanos.python").inc(nanos),
-        "go" => hotpath::gauge!("code_extraction.parse_nanos.go").inc(nanos),
-        "managed" => hotpath::gauge!("code_extraction.parse_nanos.managed").inc(nanos),
-        "scripting" => hotpath::gauge!("code_extraction.parse_nanos.scripting").inc(nanos),
-        "functional" => hotpath::gauge!("code_extraction.parse_nanos.functional").inc(nanos),
-        "data" => hotpath::gauge!("code_extraction.parse_nanos.data").inc(nanos),
-        "markup" => hotpath::gauge!("code_extraction.parse_nanos.markup").inc(nanos),
-        "shader" => hotpath::gauge!("code_extraction.parse_nanos.shader").inc(nanos),
-        "basic" => hotpath::gauge!("code_extraction.parse_nanos.basic").inc(nanos),
-        "spec" => hotpath::gauge!("code_extraction.parse_nanos.spec").inc(nanos),
-        _ => hotpath::gauge!("code_extraction.parse_nanos.other").inc(nanos),
-    };
-}
-
-/// Accumulate one file's extract (symbol-walk) time into the closed family
-/// vocabulary. On the batch path this includes the nested parse, mirroring
-/// the inclusive `traverse_file` span; on the retained path it is pure walk.
-#[cfg(feature = "hotpath")]
-fn record_traverse_family_nanos(language: &str, nanos: f64) {
-    match language_family(language) {
-        "systems" => hotpath::gauge!("code_extraction.traverse_nanos.systems").inc(nanos),
-        "jvm" => hotpath::gauge!("code_extraction.traverse_nanos.jvm").inc(nanos),
-        "dotnet" => hotpath::gauge!("code_extraction.traverse_nanos.dotnet").inc(nanos),
-        "web" => hotpath::gauge!("code_extraction.traverse_nanos.web").inc(nanos),
-        "python" => hotpath::gauge!("code_extraction.traverse_nanos.python").inc(nanos),
-        "go" => hotpath::gauge!("code_extraction.traverse_nanos.go").inc(nanos),
-        "managed" => hotpath::gauge!("code_extraction.traverse_nanos.managed").inc(nanos),
-        "scripting" => hotpath::gauge!("code_extraction.traverse_nanos.scripting").inc(nanos),
-        "functional" => hotpath::gauge!("code_extraction.traverse_nanos.functional").inc(nanos),
-        "data" => hotpath::gauge!("code_extraction.traverse_nanos.data").inc(nanos),
-        "markup" => hotpath::gauge!("code_extraction.traverse_nanos.markup").inc(nanos),
-        "shader" => hotpath::gauge!("code_extraction.traverse_nanos.shader").inc(nanos),
-        "basic" => hotpath::gauge!("code_extraction.traverse_nanos.basic").inc(nanos),
-        "spec" => hotpath::gauge!("code_extraction.traverse_nanos.spec").inc(nanos),
-        _ => hotpath::gauge!("code_extraction.traverse_nanos.other").inc(nanos),
-    };
+fn record_family_nanos(operation: &str, language: &str, nanos: f64) {
+    let family = language_family(language);
+    hotpath::gauge!(format!("code_extraction.{operation}_nanos.{family}")).inc(nanos);
 }
 
 /// Closed per-file parse outcome recorded by [`measure_parse_file`].
@@ -253,10 +164,10 @@ pub(crate) fn measure_parse_file<T>(
 ) -> T {
     #[cfg(feature = "hotpath")]
     {
-        record_parse_dims(language, source_bytes);
+        record_file_dims("parse", language, source_bytes);
         let started = Instant::now();
         let result = hotpath::measure_block!("code_extraction.parse_file", f());
-        record_parse_family_nanos(language, started.elapsed().as_nanos() as f64);
+        record_family_nanos("parse", language, started.elapsed().as_nanos() as f64);
         match outcome(&result) {
             ParseFileOutcome::Parsed {
                 root_children,
@@ -295,10 +206,10 @@ pub(crate) fn measure_extract_file<T>(
 ) -> T {
     #[cfg(feature = "hotpath")]
     {
-        record_traverse_dims(language, source_bytes);
+        record_file_dims("traverse", language, source_bytes);
         let started = Instant::now();
         let result = hotpath::measure_block!("code_extraction.traverse_file", f());
-        record_traverse_family_nanos(language, started.elapsed().as_nanos() as f64);
+        record_family_nanos("traverse", language, started.elapsed().as_nanos() as f64);
         let counts = counts(&result);
         hotpath::gauge!("code_extraction.extract.nodes").inc(counts.nodes as f64);
         hotpath::gauge!("code_extraction.extract.edges").inc(counts.edges as f64);
