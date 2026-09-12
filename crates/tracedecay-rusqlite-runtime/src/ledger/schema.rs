@@ -1,6 +1,10 @@
 use super::{LedgerError, sqlite::LedgerTransaction};
 
-const LEDGER_SCHEMA: &str = r#"
+/// Runtime-writer ledger tables. They live in the canonical store the writer
+/// is bound to, so the store's exact final shape must include them: a store
+/// whose first lifetime created them lazily must still admit on every later
+/// open.
+pub const LEDGER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS td_runtime_writer_checkpoint_v1 (
     shard_json TEXT NOT NULL,
     incarnation INTEGER NOT NULL CHECK (incarnation > 0),
@@ -107,7 +111,7 @@ ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
 /// Moves the WITHOUT ROWID idempotency ledger a store may still carry into the
 /// rowid shape and drops the old table, in the caller's transaction. A store
 /// created at the current shape has no `_v1` table and skips this.
-const MIGRATE_IDEMPOTENCY_V1: &str = r#"
+pub const MIGRATE_IDEMPOTENCY_V1: &str = r#"
 INSERT OR IGNORE INTO td_runtime_writer_idempotency_v2 (
     shard_json, incarnation, authority_epoch, idempotency_key, request_digest,
     original_receipt_json, transaction_scope_json, operation_id, durability_json,
@@ -120,13 +124,15 @@ FROM td_runtime_writer_idempotency_v1;
 DROP TABLE td_runtime_writer_idempotency_v1;
 "#;
 
+/// Probe for the retired WITHOUT ROWID idempotency ledger that
+/// [`MIGRATE_IDEMPOTENCY_V1`] folds into the current shape.
+pub const RETIRED_IDEMPOTENCY_LEDGER_PRESENT: &str = "SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'";
+
 pub(crate) fn initialize_schema(transaction: &impl LedgerTransaction) -> Result<(), LedgerError> {
     transaction.execute_batch(LEDGER_SCHEMA)?;
     let retired_ledger_present = transaction
-        .prepare(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'",
-        )?
+        .prepare(RETIRED_IDEMPOTENCY_LEDGER_PRESENT)?
         .exists([])?;
     if retired_ledger_present {
         transaction.execute_batch(MIGRATE_IDEMPOTENCY_V1)?;

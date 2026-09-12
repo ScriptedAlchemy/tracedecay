@@ -16,6 +16,7 @@ pub mod exact_sql;
 pub mod handoff;
 mod hotpath_observe;
 mod ledger;
+pub use ledger::{LEDGER_SCHEMA, MIGRATE_IDEMPOTENCY_V1, RETIRED_IDEMPOTENCY_LEDGER_PRESENT};
 pub mod maintenance;
 mod operation;
 mod persistence;

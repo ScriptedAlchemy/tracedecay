@@ -25,6 +25,7 @@ pub(crate) use inbox::lookup as lookup_inbox;
 #[cfg(test)]
 pub(crate) use outbox::outbox_entry;
 pub(crate) use schema::initialize_schema;
+pub use schema::{LEDGER_SCHEMA, MIGRATE_IDEMPOTENCY_V1, RETIRED_IDEMPOTENCY_LEDGER_PRESENT};
 
 #[cfg(test)]
 mod tests;
