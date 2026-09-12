@@ -985,7 +985,6 @@ pub enum EmbeddingDeviceClassV1 {
 pub enum EmbeddingExecutionProviderV1 {
     #[default]
     Cpu,
-    CoreMl,
     Cuda,
     WebGpu,
 }
