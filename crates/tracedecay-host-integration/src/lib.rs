@@ -16,18 +16,18 @@ mod evidence;
 mod journal;
 mod manifest;
 
+#[cfg(test)]
+pub(crate) use evidence::HOST_REGISTRATIONS;
 pub use evidence::{
     ClineFamilyAdmissionV1, ClineFamilyEvidenceV1, ClineFamilyProviderV1,
-    EmbeddedHostIntegrationEvidenceV1, EmbeddedNativeHostFixtureV1, HostEditStopConformanceEvidenceV1,
-    HostFeedbackBoundaryEvidenceV1, HostFeedbackBoundaryV1, HostNativeFixtureEvidenceV1,
-    HostRegistrationEvidenceV1, HostRegistrationRouteV1,
+    EmbeddedHostIntegrationEvidenceV1, EmbeddedNativeHostFixtureV1,
+    HostEditStopConformanceEvidenceV1, HostFeedbackBoundaryEvidenceV1, HostFeedbackBoundaryV1,
+    HostNativeFixtureEvidenceV1, HostRegistrationEvidenceV1, HostRegistrationRouteV1,
     cline_family_evidence_from_embedded_assets,
     host_edit_stop_conformance_evidence_from_embedded_assets,
     native_host_edit_stop_conformance_evidence_from_embedded_assets,
     stock_host_native_fixture_evidence_from_embedded_assets, stock_host_registration_evidence,
 };
-#[cfg(test)]
-pub(crate) use evidence::HOST_REGISTRATIONS;
 pub use journal::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleBackupArtifactV1, HostBundleBackupReceiptV1,
     HostBundleInstallReceiptV1, HostBundleJournalEntryV1, HostBundleJournalStateV1,
@@ -36,10 +36,11 @@ pub use journal::{
     HostComponentSetJournalStateV1, HostComponentSetJournalV1, HostComponentSetReceiptV1,
 };
 pub use manifest::{
-    HOST_BUNDLE_SCHEMA_VERSION, MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS,
-    MAX_IDENTIFIER_BYTES, MAX_MANIFEST_ARTIFACTS, MAX_RELATIVE_PATH_BYTES, HostBundleArtifactContentV1,
-    HostBundleArtifactV1, HostBundleComponentV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
-    HostBundleVerificationAdapterV1, validate_identifier, validate_relative_install_path,
+    HOST_BUNDLE_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleArtifactV1,
+    HostBundleComponentV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
+    HostBundleVerificationAdapterV1, MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS,
+    MAX_IDENTIFIER_BYTES, MAX_MANIFEST_ARTIFACTS, MAX_RELATIVE_PATH_BYTES, validate_identifier,
+    validate_relative_install_path,
 };
 
 /// Builds a [`HostBundleError::StorageFailure`] tagged with the `file:line` of
@@ -168,7 +169,6 @@ pub enum HostBundleError {
     #[error("confirmed host lifecycle preview is stale or does not match apply (at {0})")]
     StalePreview(&'static str),
 }
-
 
 #[cfg(test)]
 mod tests {

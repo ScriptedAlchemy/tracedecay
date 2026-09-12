@@ -13,9 +13,7 @@ use tracedecay_daemon_control::default_socket_path;
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::current_daemon_connection;
 use tracedecay_daemon_identity::{ResolvedDaemonConnection, client_connection};
-use tracedecay_framing::{
-    BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error,
-};
+use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, tool_request_deadline};
