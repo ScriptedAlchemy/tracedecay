@@ -120,8 +120,9 @@ fn execute_collection_rejects_store_outside_profile() {
     );
 }
 
-/// Seed a profile with one live store and one identity-drift orphan store, then
-/// prove the async sweep collects only the orphan and retires its registry row.
+/// The collection plan is only an inspection receipt.  Replacing its directory
+/// with byte-identical contents in the same timestamp second must still abort
+/// the apply rather than retire a newly-created store identity.
 #[cfg(unix)]
 #[tokio::test]
 async fn registered_collection_refuses_same_second_directory_replacement() {
@@ -319,6 +320,10 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
     assert_eq!(restored_manifest.project_id.as_deref(), Some("proj_old"));
 }
 
+// === Durable-memory guard ===================================================
+/// A store whose graph database carries durable `memory_facts` rows must
+/// never be collected, even when every registry/manifest/payload revival
+/// check passes and the store is otherwise a textbook orphan.
 #[tokio::test]
 async fn durable_memory_rows_block_orphan_store_collection() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -464,8 +469,9 @@ async fn empty_memory_table_does_not_block_collection() {
     assert!(!data_root.exists());
 }
 
-// === Unregistered store directories =========================================
-
+/// An unregistered directory uses the same inspect→confirm→apply boundary as
+/// a registered orphan. A same-second replacement of an empty directory must
+/// not inherit the original collection decision.
 #[cfg(unix)]
 #[tokio::test]
 async fn unregistered_collection_refuses_same_second_directory_replacement() {
@@ -1126,54 +1132,6 @@ fn unregistered_uncommitted_recovery_retains_journal_when_both_names_are_absent(
             retirement_committed: false,
         }]
     );
-}
-
-async fn prepare_registered_quarantine(
-    db: &RegisteredGlobalDb,
-    profile_root: &Path,
-    project_id: &str,
-    store_id: &str,
-    payload: &[u8],
-) -> (PathBuf, PathBuf) {
-    let data_root = seed_store(
-        db,
-        profile_root,
-        project_id,
-        store_id,
-        &profile_root.join("missing-project-root"),
-        1_700_000_000,
-    )
-    .await;
-    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
-    let row = db
-        .try_list_store_instances_for_project(project_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|row| row.store_id == store_id)
-        .unwrap();
-    let expected = capture_store_content_fence(profile_root, &data_root).unwrap();
-    let quarantine = quarantine_store_for_verified_collection_controlled(
-        profile_root,
-        &data_root,
-        &expected,
-        QuarantineKindV1::Registered,
-        project_id,
-        store_id,
-        Some(QuarantineRegistryFenceV1 {
-            store_relpath: row.store_relpath,
-            created_at: row.created_at,
-            last_write_at: row.last_write_at,
-        }),
-        unbounded_collection_control(),
-    )
-    .unwrap();
-    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
-        panic!("fixture must reach a verified registered quarantine");
-    };
-    let quarantine_path = quarantine.quarantine_path().to_path_buf();
-    drop(quarantine);
-    (data_root, quarantine_path)
 }
 
 #[tokio::test]
@@ -1904,9 +1862,6 @@ fn pending_quarantine_reader_reports_restored_path_when_sync_is_unconfirmed() {
     assert_eq!(receipts[0].actual_path, data_root);
 }
 
-/// Cancellation is checked before any recursive SHA-256 read. A cancelled
-/// maintenance admission cannot turn a deep inventory into a partial plan or
-/// an implicit deletion permit.
 #[tokio::test]
 async fn registered_collection_payload_fence_cancellation_is_terminal() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2235,9 +2190,6 @@ fn unreadable_recovery_journal_is_a_retryable_typed_failure() {
     );
 }
 
-/// Unregistered projects are an on-disk-only class, but their retention work
-/// still advances through a bounded, resumable page rather than recursing the
-/// entire profile under a single writer admission.
 #[test]
 fn committed_unregistered_recovery_preserves_interrupted_control_and_resumes() {
     for expected_completion in [
@@ -2400,6 +2352,8 @@ async fn unregistered_recovery_removal_has_no_fabricated_bytes_or_receipt() {
     }
 }
 
+/// A durable-memory guard applies to unregistered directories exactly as it
+/// does to registered orphan stores.
 #[tokio::test]
 async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2441,7 +2395,6 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
 /// The durable-data check covers the manifest-selected project graph and every
 /// registered project graph scope, and refuses to answer when the manifest
 /// that names them cannot be read.
-
 mod durable_inventory {
     use super::*;
 

@@ -40,6 +40,8 @@ fn malformed_manifest_bytes_mark_the_census_entry_unverifiable() {
     );
 }
 
+/// Seed a profile with one live store and one identity-drift orphan store, then
+/// prove the async sweep collects only the orphan and retires its registry row.
 #[tokio::test]
 async fn sweep_collects_orphan_store_and_retires_row() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -118,9 +120,6 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     );
 }
 
-/// The collection plan is only an inspection receipt.  Replacing its directory
-/// with byte-identical contents in the same timestamp second must still abort
-/// the apply rather than retire a newly-created store identity.
 #[tokio::test]
 async fn sweep_preserves_immature_sibling_store_identity() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -381,11 +380,7 @@ async fn registered_store_census_resumes_across_bounded_project_pages() {
     assert!(second.next_cursor.is_none());
 }
 
-// === Durable-memory guard ===================================================
-
-/// A store whose graph database carries durable `memory_facts` rows must
-/// never be collected, even when every registry/manifest/payload revival
-/// check passes and the store is otherwise a textbook orphan.
+// === Unregistered store directories =========================================
 #[tokio::test]
 async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -544,9 +539,9 @@ async fn sweep_unregistered_stores_aborts_when_directory_gets_registered_first()
     );
 }
 
-/// An unregistered directory uses the same inspect→confirm→apply boundary as
-/// a registered orphan. A same-second replacement of an empty directory must
-/// not inherit the original collection decision.
+/// Cancellation is checked before any recursive SHA-256 read. A cancelled
+/// maintenance admission cannot turn a deep inventory into a partial plan or
+/// an implicit deletion permit.
 #[test]
 fn cancelled_content_census_stops_before_hashing_or_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -597,47 +592,9 @@ fn cancelled_mtime_and_size_walks_stop_before_descending() {
     assert!(data_root.join("a/b/c/payload.bin").is_file());
 }
 
-/// Build enough no-follow entries that a bounded apply can be interrupted in
-/// the payload-mtime fence itself, after the apply loop has admitted the
-/// finding. The production path must stop with a typed completion rather than
-/// recording `Cancelled` as an ordinary per-store error and claiming success.
-fn seed_payload_fence_work(data_root: &Path) {
-    std::fs::create_dir_all(data_root).unwrap();
-    for bucket_index in 0..32 {
-        std::fs::create_dir_all(data_root.join(format!("bucket-{bucket_index:03}"))).unwrap();
-    }
-    for index in 0..30_000usize {
-        let bucket = data_root.join(format!("bucket-{:03}", index % 32));
-        std::fs::write(bucket.join(format!("payload-{index:05}.bin")), b"x").unwrap();
-    }
-}
-
-fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> OrphanStoreFinding {
-    let profile_root = data_root
-        .parent()
-        .and_then(Path::parent)
-        .expect("fixture data root has a two-component profile path")
-        .to_path_buf();
-    OrphanStoreFinding {
-        project_id: "proj_payload_fence_interrupt".to_owned(),
-        store_id: "store_payload_fence_interrupt".to_owned(),
-        data_root: data_root.clone(),
-        disposition: StoreDisposition::Orphaned,
-        age_secs: 90 * DAY,
-        size_bytes: 30_000,
-        expected_store_relpath: expected_store_relpath.to_owned(),
-        expected_created_at: 1,
-        expected_last_write_at: None,
-        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs,
-        expected_data_root_fence: capture_store_directory_fence(&profile_root, &data_root).unwrap(),
-        // The mtime fence is the boundary under test; no later phase should be
-        // reached when this control is interrupted.
-        expected_content_fence: StoreContentFence::Missing,
-        expected_manifest_bytes: None,
-        graph_scope_relpaths: Vec::new(),
-    }
-}
-
+/// Unregistered projects are an on-disk-only class, but their retention work
+/// still advances through a bounded, resumable page rather than recursing the
+/// entire profile under a single writer admission.
 #[tokio::test]
 async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -761,6 +718,9 @@ async fn unregistered_store_sweep_elapsed_deadline_does_not_advance_page_state()
     );
 }
 
+/// Every platform uses an append-only durable inventory. A cancelled admission
+/// keeps its partial inventory, and
+/// the next page advances that exact log instead of deleting/rebuilding it.
 #[test]
 fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -844,6 +804,8 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
     );
 }
 
+/// Cancellation is a typed page result and must prevent both inspection and
+/// collection; it is not an empty successful census.
 #[tokio::test]
 async fn unregistered_store_sweep_returns_cancelled_without_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1078,6 +1040,3 @@ async fn unregistered_store_sweep_elapsed_deadline_reports_empty_legacy_restore_
         b"legacy quarantine bytes"
     );
 }
-
-/// A durable-memory guard applies to unregistered directories exactly as it
-/// does to registered orphan stores.

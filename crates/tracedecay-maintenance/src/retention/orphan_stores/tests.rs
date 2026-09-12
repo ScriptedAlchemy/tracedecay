@@ -2,27 +2,36 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-#[cfg(windows)]
-use super::quarantine::classify_recovery_journal_probe;
-use super::pages::walk_store_stats;
-use super::quarantine::{
-    DurableDatabaseInventoryV1, DurableMemoryCheck, PendingQuarantineReceiptV1,
-    QuarantineRecoveryOutcome, RegisteredQuarantineDecisionV1, RegisteredQuarantineInventoryV1,
-    RegisteredQuarantineRegistryStateV1, check_store_durable_memory, committed_journal_cleanup_names,
-    durable_check_scratch_root, durable_database_inventory, quarantine_candidate_namespace_available,
-    read_registered_quarantine_intents_controlled,
-    reconcile_registered_quarantine_inventory_with_classified_hook,
-    recover_existing_store_quarantine, recover_named_store_quarantine,
-    recover_named_store_quarantine_controlled, recover_registered_quarantine_intent_controlled,
-    reserve_quarantine_name_with_sequence,
-};
-use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
 };
+
+use super::fence::{capture_store_content_fence, capture_store_directory_fence};
+use super::pages::{census_unregistered_project_dirs, sweep_orphan_stores, walk_store_stats};
+#[cfg(windows)]
+use super::quarantine::classify_recovery_journal_probe;
+use super::quarantine::{
+    DurableDatabaseInventoryV1, DurableMemoryCheck, PendingQuarantineReceiptV1,
+    QuarantineFinalizeOutcome, QuarantineKindV1, QuarantineRecoveryOutcome,
+    QuarantineRegistryFenceV1, QuarantineStoreOutcome, RegisteredQuarantineDecisionV1,
+    RegisteredQuarantineInventoryV1, RegisteredQuarantineRegistryStateV1,
+    check_store_durable_memory, committed_journal_cleanup_names, durable_check_scratch_root,
+    durable_database_inventory, execute_registered_collection_controlled,
+    execute_unregistered_collection, quarantine_candidate_namespace_available,
+    quarantine_store_for_verified_collection, quarantine_store_for_verified_collection_controlled,
+    read_pending_quarantine_receipts, read_registered_quarantine_intents_controlled,
+    reconcile_existing_quarantine, reconcile_registered_quarantine_inventory_with_classified_hook,
+    recover_existing_store_quarantine, recover_named_store_quarantine,
+    recover_named_store_quarantine_controlled, recover_registered_quarantine_intent_controlled,
+    reserve_quarantine_name_with_sequence, unbounded_collection_control,
+};
+use super::*;
+
+mod pages;
+mod quarantine;
 
 const DAY: i64 = 24 * 60 * 60;
 #[cfg(unix)]
@@ -181,8 +190,94 @@ async fn seed_project(
     transaction.commit().await.unwrap();
 }
 
-mod pages;
-mod quarantine;
+/// Build enough no-follow entries that a bounded apply can be interrupted in
+/// the payload-mtime fence itself, after the apply loop has admitted the
+/// finding. The production path must stop with a typed completion rather than
+/// recording `Cancelled` as an ordinary per-store error and claiming success.
+fn seed_payload_fence_work(data_root: &Path) {
+    std::fs::create_dir_all(data_root).unwrap();
+    for bucket_index in 0..32 {
+        std::fs::create_dir_all(data_root.join(format!("bucket-{bucket_index:03}"))).unwrap();
+    }
+    for index in 0..30_000usize {
+        let bucket = data_root.join(format!("bucket-{:03}", index % 32));
+        std::fs::write(bucket.join(format!("payload-{index:05}.bin")), b"x").unwrap();
+    }
+}
+
+fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> OrphanStoreFinding {
+    let profile_root = data_root
+        .parent()
+        .and_then(Path::parent)
+        .expect("fixture data root has a two-component profile path")
+        .to_path_buf();
+    OrphanStoreFinding {
+        project_id: "proj_payload_fence_interrupt".to_owned(),
+        store_id: "store_payload_fence_interrupt".to_owned(),
+        data_root: data_root.clone(),
+        disposition: StoreDisposition::Orphaned,
+        age_secs: 90 * DAY,
+        size_bytes: 30_000,
+        expected_store_relpath: expected_store_relpath.to_owned(),
+        expected_created_at: 1,
+        expected_last_write_at: None,
+        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs,
+        expected_data_root_fence: capture_store_directory_fence(&profile_root, &data_root).unwrap(),
+        // The mtime fence is the boundary under test; no later phase should be
+        // reached when this control is interrupted.
+        expected_content_fence: StoreContentFence::Missing,
+        expected_manifest_bytes: None,
+        graph_scope_relpaths: Vec::new(),
+    }
+}
+
+async fn prepare_registered_quarantine(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    project_id: &str,
+    store_id: &str,
+    payload: &[u8],
+) -> (PathBuf, PathBuf) {
+    let data_root = seed_store(
+        db,
+        profile_root,
+        project_id,
+        store_id,
+        &profile_root.join("missing-project-root"),
+        1_700_000_000,
+    )
+    .await;
+    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
+    let row = db
+        .try_list_store_instances_for_project(project_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.store_id == store_id)
+        .unwrap();
+    let expected = capture_store_content_fence(profile_root, &data_root).unwrap();
+    let quarantine = quarantine_store_for_verified_collection_controlled(
+        profile_root,
+        &data_root,
+        &expected,
+        QuarantineKindV1::Registered,
+        project_id,
+        store_id,
+        Some(QuarantineRegistryFenceV1 {
+            store_relpath: row.store_relpath,
+            created_at: row.created_at,
+            last_write_at: row.last_write_at,
+        }),
+        unbounded_collection_control(),
+    )
+    .unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach a verified registered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    (data_root, quarantine_path)
+}
 
 #[test]
 fn live_root_is_never_collected() {
@@ -595,9 +690,6 @@ fn portable_inventory_other_profiles_progress_while_one_writer_is_paused() {
     ));
 }
 
-/// Every platform uses an append-only durable inventory. A cancelled admission
-/// keeps its partial inventory, and
-/// the next page advances that exact log instead of deleting/rebuilding it.
 #[test]
 fn unregistered_inventory_hydrates_another_writers_committed_suffix() {
     use std::io::Write;
@@ -1008,6 +1100,3 @@ fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
             .all(super::unregistered_page::portable_inventory_entry_is_valid)
     );
 }
-
-/// Cancellation is a typed page result and must prevent both inspection and
-/// collection; it is not an empty successful census.
