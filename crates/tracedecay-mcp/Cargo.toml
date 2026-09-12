@@ -57,6 +57,7 @@ tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-mcp-catalog = { path = "../tracedecay-mcp-catalog", version = "0.1.0" }
 tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }

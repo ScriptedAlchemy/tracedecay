@@ -4,11 +4,11 @@ use std::path::Path;
 
 use crate::ToolResult;
 use crate::rendered_tool_result;
-use crate::tools::definitions;
 use crate::tools::render::{self, Md};
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_mcp_catalog::ast_grep_diagnostics;
 use tracedecay_runtime_core::ast_grep::ast_grep_command;
 
 use super::{enrich_markdown_sections, render_section_md};
@@ -95,7 +95,7 @@ fn ast_grep_outline(abs_path: &Path) -> Result<Value> {
 }
 
 fn ensure_ast_grep_outline_available() -> Result<()> {
-    let diagnostics = definitions::ast_grep_diagnostics();
+    let diagnostics = ast_grep_diagnostics();
     if diagnostics.outline_available {
         Ok(())
     } else {
