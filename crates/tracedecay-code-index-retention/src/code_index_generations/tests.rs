@@ -1316,11 +1316,12 @@ fn pad_generation_file(
 fn next_retention_plan_limits_collection_to_one_generation() {
     let (store, _generations) = fixture_store(8);
 
-    let plan = plan_next_code_generation_retention_cancellable(
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan one retention unit");
 
@@ -1338,11 +1339,12 @@ fn next_retention_plan_limits_collection_to_one_generation() {
 fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
     let (store, generations) = fixture_store(5);
 
-    let plan = plan_next_code_generation_retention_cancellable(
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan one retention unit");
 
@@ -1574,11 +1576,12 @@ fn cancellable_maintenance_preparation_stops_during_generation_verification() {
 #[test]
 fn executing_a_prevalidated_unit_collects_only_that_generation() {
     let (store, _generations) = fixture_store(8);
-    let plan = plan_next_code_generation_retention_cancellable(
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan one retention unit");
 
