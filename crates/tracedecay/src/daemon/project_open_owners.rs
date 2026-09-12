@@ -719,6 +719,11 @@ pub(super) async fn register_project_open_production_owners(
     crate::daemon::hook_v2_replay_consumer::register_hook_v2_replay_consumer(
         Arc::clone(&graph),
         delivery_settlements,
+        session_db.clone(),
+        server.background_cpu_authority().ok_or_else(|| TraceDecayError::Config {
+            message: "project-open hook replay requires the daemon background CPU authority"
+                .to_owned(),
+        })?,
     );
 
     // At-rest privacy remediation is bounded background work after fail-closed
