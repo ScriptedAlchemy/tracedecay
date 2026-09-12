@@ -263,78 +263,64 @@ impl AutomationTaskLock {
     }
 }
 
-/// Runs a synchronous task-lock cleanup body without starving the tokio worker
-/// that happens to own the guard.
+/// Releases the lock file synchronously, without ever calling into the tokio
+/// runtime.
 ///
-/// Task-lock release is deliberately synchronous: callers (and tests such as
+/// Task-lock release must be synchronous: callers (and tests such as
 /// `retained_settlement_guard_owns_task_lock_until_drop`) rely on the lock file
 /// being gone the instant `drop` returns. The cleanup itself is genuinely
-/// blocking though — an fs2 coordination lock, `sync_all`/parent-directory
-/// fsyncs, and `std::thread::sleep` backoff between retries — and guards are
-/// routinely dropped when an async fn's future completes on a runtime worker
-/// (`_run_lock`, `_reflector_lock`, `_skill_lock`, `_task_lock`). Blocking
-/// inline there stalls every unrelated task queued on that worker.
+/// blocking — an fs2 coordination lock, `sync_all`/parent-directory fsyncs, and
+/// `std::thread::sleep` backoff between retries — so it is tempting to hand the
+/// owning worker's run queue away with `tokio::task::block_in_place`.
 ///
-/// `block_in_place` lets tokio hand this worker's run queue to another thread
-/// for the duration, but it panics outside a multi-thread runtime, so the
-/// flavor is checked first. Empirically verified against tokio 1.53.1:
-/// - multi-thread worker: `Handle` present, flavor `MultiThread`, offload works;
-/// - `spawn_blocking` thread on a multi-thread runtime (the settlement-owner
-///   pattern in `daemon::automation_effect`): `Handle` present, flavor
-///   `MultiThread`, `block_in_place` is a no-op passthrough and does *not*
-///   panic;
-/// - current-thread runtime: `Handle` present, flavor `CurrentThread`,
-///   `block_in_place` panics — hence the inline fallback;
-/// - no runtime at all: no `Handle`, inline fallback.
+/// That is not sound here, because this guard is reachable from inside tokio's
+/// own blocking-pool spawn path. When a runtime has begun shutting down,
+/// `blocking::pool::Spawner::spawn_task` (tokio 1.53.1) shuts a refused task
+/// down *while holding* the pool's non-reentrant `parking_lot` mutex, which
+/// drops the task's future — and with it any `AutomationTaskLock` the future
+/// owned, such as the `Arc<RetainedAutomationSettlementState>` captured by
+/// `start_retained_automation_settlement_inner`. `block_in_place` re-enters
+/// `spawn_task` on that same thread to hand off the worker core, so the release
+/// self-deadlocks on the mutex it is already under; the runtime's
+/// `BlockingPool::shutdown` then waits for that thread forever.
 ///
-/// The remaining `block_in_place` panic case is a `LocalSet` on a multi-thread
-/// runtime; this workspace has none, and introducing one would need this guard
-/// revisited.
-fn run_blocking_cleanup(cleanup: impl FnOnce()) {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(cleanup);
-        }
-        _ => cleanup(),
-    }
-}
-
+/// Blocking a worker for one unlink plus its fsyncs is the cost of being
+/// correct in a destructor. Callers that care about worker latency release the
+/// guard from `spawn_blocking` instead of dropping it on a worker.
 impl Drop for AutomationTaskLock {
     fn drop(&mut self) {
         let path = &self.path;
         let ownership_token = &self.ownership_token;
         let staging_slot = &mut self.staging_path;
-        run_blocking_cleanup(move || {
-            match retry_exact_task_lock_cleanup(|| {
-                remove_owned_task_lock_blocking(path, ownership_token)
-            }) {
-                Ok(()) => {
-                    if let Some(staging_path) = staging_slot.take()
-                        && let Err(error) = retry_exact_task_lock_cleanup(|| {
-                            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
-                                &staging_path,
-                            )
-                            .map(|_| ())
-                        })
-                    {
-                        tracing::warn!(
-                            path = %path.display(),
-                            staging_path = %staging_path.display(),
-                            error = %error,
-                            "failed to retire exact automation task-lock staging ownership"
-                        );
-                    }
-                }
-                Err(error) => {
+        match retry_exact_task_lock_cleanup(|| {
+            remove_owned_task_lock_blocking(path, ownership_token)
+        }) {
+            Ok(()) => {
+                if let Some(staging_path) = staging_slot.take()
+                    && let Err(error) = retry_exact_task_lock_cleanup(|| {
+                        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
+                            &staging_path,
+                        )
+                        .map(|_| ())
+                    })
+                {
                     tracing::warn!(
                         path = %path.display(),
-                        staging_path = ?staging_slot.as_deref(),
+                        staging_path = %staging_path.display(),
                         error = %error,
-                        "failed to release exact automation task-lock ownership; preserving retained staging evidence"
+                        "failed to retire exact automation task-lock staging ownership"
                     );
                 }
             }
-        });
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    staging_path = ?staging_slot.as_deref(),
+                    error = %error,
+                    "failed to release exact automation task-lock ownership; preserving retained staging evidence"
+                );
+            }
+        }
     }
 }
 
@@ -2421,7 +2407,7 @@ evidence about it",
     }
 
     /// A contender must be able to take the lock the instant the guard's drop
-    /// returns — the release stays synchronous even when it is offloaded.
+    /// returns.
     fn assert_lock_released(lock_path: &Path) {
         assert!(
             !lock_path.exists(),
@@ -2439,7 +2425,7 @@ evidence about it",
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_lock_release_offloads_from_a_multi_thread_worker() {
+    async fn task_lock_release_completes_on_a_multi_thread_worker() {
         let temp = tempdir().unwrap();
         let lock_path = temp
             .path()
@@ -2455,14 +2441,77 @@ evidence about it",
                 .unwrap();
         assert!(lock_path.exists());
 
-        // Drop directly on the async worker thread; block_in_place must let
-        // tokio migrate this worker's queue instead of stalling it.
+        drop(guard);
+        assert_lock_released(&lock_path);
+    }
+
+    /// The ordering that wedged `daemon::tests::rmcp_route` for a full drain
+    /// bound: a worker offers a blocking task to a pool that has already begun
+    /// shutting down, and tokio's `blocking::pool::Spawner::spawn_task` shuts
+    /// the refused task down *while holding* the pool's non-reentrant mutex.
+    /// The refused closure owns this guard, so its release runs under that
+    /// mutex — and a release that re-enters the runtime never returns, leaving
+    /// `BlockingPool::shutdown` waiting for the thread forever.
+    ///
+    /// Ordering is fixed by channels, not timing: the worker is parked until
+    /// after `shutdown_timeout` has returned, so the pool is provably closed
+    /// before `spawn_blocking` is offered and the refusal branch is the only
+    /// branch reachable. The `shutdown_timeout` budget only bounds tokio's
+    /// attempt to join the deliberately parked worker.
+    #[test]
+    fn task_lock_release_survives_a_drop_inside_a_refused_spawn_blocking() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp
+            .path()
+            .join("automation_locks")
+            .join("refused_spawn_blocking.lock");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let guard = acquire_lock_for_release_test(&lock_path);
+        assert!(lock_path.exists());
+
+        let (on_worker_tx, on_worker_rx) = std::sync::mpsc::channel();
+        let (pool_closed_tx, pool_closed_rx) = std::sync::mpsc::channel();
+        let (offered_tx, offered_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            // Reached only from a worker thread, which is the sole context
+            // where the release can re-enter the blocking spawner.
+            on_worker_tx.send(()).unwrap();
+            pool_closed_rx.recv().unwrap();
+            let _refused = tokio::task::spawn_blocking(move || drop(guard));
+            offered_tx.send(()).unwrap();
+        });
+        on_worker_rx.recv().unwrap();
+
+        runtime.shutdown_timeout(std::time::Duration::from_millis(50));
+        pool_closed_tx.send(()).unwrap();
+
+        offered_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("releasing the guard under the blocking pool's own mutex must not deadlock");
+        assert_lock_released(&lock_path);
+    }
+
+    #[test]
+    fn task_lock_release_works_with_no_tokio_runtime() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp.path().join("automation_locks").join("no_runtime.lock");
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "this test must run without a runtime handle so the inline path is exercised"
+        );
+
+        let guard = acquire_lock_for_release_test(&lock_path);
+        assert!(lock_path.exists());
         drop(guard);
         assert_lock_released(&lock_path);
     }
 
     #[tokio::test]
-    async fn task_lock_release_falls_back_inline_on_a_current_thread_runtime() {
+    async fn task_lock_release_completes_on_a_current_thread_runtime() {
         let temp = tempdir().unwrap();
         let lock_path = temp
             .path()
@@ -2474,11 +2523,33 @@ evidence about it",
             "#[tokio::test] must default to the current-thread flavor for this case"
         );
 
-        // block_in_place panics on a current-thread runtime, so the guard has to
-        // fall back to inline cleanup rather than aborting the process.
         let guard = acquire_lock_for_release_test(&lock_path);
         assert!(lock_path.exists());
         drop(guard);
+        assert_lock_released(&lock_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_lock_release_from_spawn_blocking_owner_does_not_panic() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp
+            .path()
+            .join("automation_locks")
+            .join("settlement_owner.lock");
+
+        // The settlement-owner pattern in daemon::automation_effect acquires and
+        // drops the guard entirely inside spawn_blocking, which is where callers
+        // that cannot afford to block a worker are expected to release it.
+        let owned_path = lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = acquire_lock_for_release_test(&owned_path);
+            assert!(owned_path.exists());
+            drop(guard);
+            assert!(!owned_path.exists());
+        })
+        .await
+        .expect("dropping the guard inside spawn_blocking must not panic");
+
         assert_lock_released(&lock_path);
     }
 
