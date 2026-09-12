@@ -1711,7 +1711,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
         )
         self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
 
-    def test_code_node_failure_does_not_block_git_work_or_workflow_groups(self) -> None:
+    def test_code_navigation_failure_does_not_block_git_work_or_workflow_groups(self) -> None:
         runner = load_runner()
         runner.CODE_INDEX_READY_TIMEOUT_S = 0
         client = self.client([self.response('{"node_id":"function:fixture"}')])
@@ -1746,7 +1746,10 @@ class FixturePrimingRetryTests(unittest.TestCase):
         finally:
             runner.prime_workflow_lifecycle = original_workflow
 
-        self.assertIn("complete generation identity", fixture["priming_errors"]["code_node"]["message"])
+        self.assertIn(
+            "navigation identities",
+            fixture["priming_errors"]["code_navigation"]["message"],
+        )
         self.assertEqual(fixture["preview_input_id"], "preview.fixture")
         self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
         self.assertTrue(fixture["workflow_group_reached"])
@@ -1777,7 +1780,17 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertIn("code-graph-unavailable", fixture["priming_errors"]["graph"]["message"])
         self.assertNotIn("node_id", fixture)
         self.assertEqual(fixture["handle"], "rh_fixture")
-        self.assertEqual(fixture["code_node_id"], "sym:code")
+        self.assertEqual(
+            fixture["code_navigation_node_ids"],
+            {
+                "tracedecay_code_callees": "sym:peer",
+                "tracedecay_code_callers": "sym:anchor",
+                "tracedecay_code_declaration": "sym:anchor",
+                "tracedecay_code_references": "sym:anchor",
+                "tracedecay_code_type_definition": "sym:typed",
+                "tracedecay_code_type_hierarchy": "sym:type",
+            },
+        )
         self.assertEqual(fixture["preview_input_id"], "preview.fixture")
         self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
 
