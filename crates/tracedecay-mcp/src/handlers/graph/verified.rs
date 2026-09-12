@@ -14,7 +14,7 @@ pub const GRAPH_RELATION_READ_LIMIT: usize = 50_000;
 /// Graph handlers consume canonical [`SymbolOccurrenceId`] values. This is the
 /// single place that unwraps the known search namespace so `search` → `callers`
 /// does not silently miss a seated entity.
-const CODE_SYMBOL_EVIDENCE_PREFIX: &str = "code-symbol:";
+pub(super) const CODE_SYMBOL_EVIDENCE_PREFIX: &str = "code-symbol:";
 
 /// Admits a caller-supplied node id as a graph occurrence id. Every graph
 /// handler that takes a node id funnels through this one guard, so a blank
