@@ -718,10 +718,7 @@ struct ProjectOpenFeedbackConfigurationRefreshV1 {
 }
 
 impl ConfigurationRuntimeRefreshPort for ProjectOpenFeedbackConfigurationRefreshV1 {
-    fn refresh(
-        &self,
-        current: ConfigurationCurrentStateV1,
-    ) -> ConfigurationRuntimeRefreshFuture {
+    fn refresh(&self, current: ConfigurationCurrentStateV1) -> ConfigurationRuntimeRefreshFuture {
         let cycle = self.cycle.upgrade();
         Box::pin(async move {
             let cycle = cycle.ok_or_else(|| {
