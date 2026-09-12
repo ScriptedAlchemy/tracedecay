@@ -201,6 +201,60 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
     }
 }
 
+fn primitive_read_description(operation: &str) -> &'static str {
+    match operation {
+        "code_signature_search" => {
+            "Find functions and methods by return type, parameter substrings, or async status. Use code_symbol_search for name or concept searches; this tool requires at least one signature filter."
+        }
+        "code_implementations" => {
+            "Find types implementing a named trait, or functions and methods with a selected method name. Use code_type_hierarchy to traverse extends and implements relationships from a known node ID."
+        }
+        "code_type_hierarchy" => {
+            "Traverse extends and implements relationships from a symbol node ID returned by code_symbol_search or another graph read. Use code_implementations when starting from a trait or method name."
+        }
+        "code_callers" => {
+            "Find symbols that call a known symbol node ID, up to the requested depth. Use call_chain when you need the shortest call path between two known node IDs."
+        }
+        "session_lookup" => {
+            "Return retrieval anchors for one exact session ID from the mounted session store. Use message_search when you need to find session content rather than look up a known session."
+        }
+        "qualified_name" => {
+            "Resolve an exact qualified symbol name to matching symbol records and node IDs, including ambiguous matches. Use code_symbol_search for partial names or concepts."
+        }
+        "call_chain" => {
+            "Find the shortest Calls path between two symbol node IDs, bounded by maximum depth. Obtain node IDs from code_symbol_search, qualified_name, or another graph read; use code_callers for an inbound neighborhood."
+        }
+        "file_dependents" => {
+            "Find files containing callers of symbols in one project-relative file. Use code_callers when you need the dependent symbols and call edges instead of file paths."
+        }
+        "source_lines" => {
+            "Read an exact byte span from the current indexed file and return a stable source anchor. Supply the file occurrence ID and span from code_exact_occurrence; use source_body when you already have a symbol node ID."
+        }
+        "source_body" => {
+            "Read the current source body and line range for a symbol node ID returned by code_symbol_search, qualified_name, or another graph read. Use source_lines for an exact occurrence span."
+        }
+        "source_outline" => {
+            "List indexed symbols in one project-relative file without reading their bodies. Use source_body with a returned node ID to inspect one symbol, or module_api for public symbols across a path."
+        }
+        "module_api" => {
+            "List public indexed symbols in a project-relative file or directory tree. Use source_outline when you need every indexed symbol from one file, including non-public symbols."
+        }
+        "health_read" => {
+            "Read the admitted project's serving status: ok, read_only, or degraded. Use storage_status for database size and page telemetry, or health_delta for generation-bound code-health changes."
+        }
+        "health_delta" => {
+            "Compare the current generation's code-health score and dimensions with a prior after_cursor, optionally within a path prefix. Save the returned after_cursor for a later comparison; omit before_cursor to establish a baseline."
+        }
+        "storage_status" => {
+            "Inspect the admitted project's graph-store status, read-only state, database size, page telemetry, and bounded size history. Use health_read when only serving availability matters."
+        }
+        "diagnostics_read" => {
+            "Read retained diagnostics for the current indexed generation, scoped to the workspace or one file. This does not run a compiler or refresh diagnostics; use the project's build or typecheck when fresh post-edit results are required."
+        }
+        _ => "Read bounded data from the admitted project's current retained state.",
+    }
+}
+
 const fn primitive_spec(operation: &'static str) -> PrimitiveReadSpec {
     primitive_spec_with_default_page_size(operation, 10)
 }
@@ -323,7 +377,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             routing: RoutingContractV1::new(
                 1,
                 format!("Read {}", spec.operation.replace('_', " ")),
-                "Invoke the daemon-retained typed primitive owner.",
+                primitive_read_description(spec.operation),
                 vec![format!("Read {}", spec.operation.replace('_', " "))],
             )?,
             request_schema: primitive_schema(spec.operation, "request")?,
