@@ -15055,9 +15055,15 @@
         "query_digest": {
           "$ref": "#/$defs/ManifestDigest"
         },
+        "root_cursors": {
+          "items": {
+            "$ref": "#/$defs/RootScopeOutcomeV1_for_Nullable_string"
+          },
+          "type": "array"
+        },
         "root_generations": {
           "items": {
-            "$ref": "#/$defs/RootScopeOutcomeV1_for_RootGenerationV1"
+            "$ref": "#/$defs/RootScopeOutcomeV1_for_Nullable_RootGenerationV1"
           },
           "type": "array"
         },
@@ -15068,6 +15074,7 @@
       "required": [
         "scope_set_digest",
         "root_generations",
+        "root_cursors",
         "query_digest",
         "order_digest",
         "next_page",
@@ -15200,7 +15207,14 @@
           "$ref": "#/$defs/ScopeOutcome_for_Array_of_AnyValue"
         },
         "continuation": {
-          "$ref": "#/$defs/MultiRootContinuationV1"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MultiRootContinuationV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "roots": {
           "items": {
@@ -17334,12 +17348,29 @@
       ],
       "type": "object"
     },
-    "RootScopeOutcomeV1_for_RootGenerationV1": {
+    "RootScopeOutcomeV1_for_Nullable_RootGenerationV1": {
       "additionalProperties": false,
       "description": "One typed outcome pinned to the digest of an exact resolved root.",
       "properties": {
         "outcome": {
-          "$ref": "#/$defs/ScopeOutcome_for_RootGenerationV1"
+          "$ref": "#/$defs/ScopeOutcome_for_Nullable_RootGenerationV1"
+        },
+        "scope_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "scope_digest",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "RootScopeOutcomeV1_for_Nullable_string": {
+      "additionalProperties": false,
+      "description": "One typed outcome pinned to the digest of an exact resolved root.",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/ScopeOutcome_for_Nullable_string"
         },
         "scope_digest": {
           "$ref": "#/$defs/ManifestDigest"
@@ -18046,7 +18077,7 @@
         }
       ]
     },
-    "ScopeOutcome_for_RootGenerationV1": {
+    "ScopeOutcome_for_Nullable_RootGenerationV1": {
       "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
       "oneOf": [
         {
@@ -18056,7 +18087,14 @@
               "type": "string"
             },
             "value": {
-              "$ref": "#/$defs/RootGenerationV1"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RootGenerationV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -18077,7 +18115,105 @@
                   "$ref": "#/$defs/ScopePartialReasonV1"
                 },
                 "value": {
-                  "$ref": "#/$defs/RootGenerationV1"
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/RootGenerationV1"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "unavailable",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ScopeUnavailableReasonV1"
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScopeOutcome_for_Nullable_string": {
+      "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "exact",
+              "type": "string"
+            },
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ScopePartialReasonV1"
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
