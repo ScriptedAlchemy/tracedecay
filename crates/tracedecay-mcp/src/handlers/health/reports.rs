@@ -180,7 +180,7 @@ fn verified_gini_fan_values(
     symbols: &[(
         tracedecay_domain::SymbolOccurrenceId,
         String,
-        tracedecay_graph_query::LineageSymbolRecordV1,
+        tracedecay_code_index::lineage::LineageSymbolRecordV1,
     )],
     fan_in: bool,
 ) -> Result<Vec<(String, f64)>> {
@@ -221,7 +221,7 @@ fn verified_gini_member_values(
     symbols: &[(
         tracedecay_domain::SymbolOccurrenceId,
         String,
-        tracedecay_graph_query::LineageSymbolRecordV1,
+        tracedecay_code_index::lineage::LineageSymbolRecordV1,
     )],
 ) -> Result<Vec<(String, f64)>> {
     let containers = symbols

@@ -3,10 +3,12 @@
 use std::collections::HashSet;
 
 use serde_json::{Value, json};
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
-use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, LineageSymbolRecordV1, VerifiedGraphQuery};
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 pub const GRAPH_RELATION_READ_LIMIT: usize = 50_000;
 

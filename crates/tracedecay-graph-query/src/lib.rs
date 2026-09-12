@@ -25,13 +25,6 @@ mod source_authority;
 pub mod test_risk;
 mod verified_query;
 
-pub use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
-pub use tracedecay_code_index::graph_projection::{
-    CodeGraphImpactBatchV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolSummaryV1,
-};
-pub use tracedecay_code_index::lineage::LineageSymbolRecordV1;
-
 pub use projection::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFreshnessV1,
