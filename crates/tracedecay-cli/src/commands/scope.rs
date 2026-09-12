@@ -126,21 +126,33 @@ fn scope_from_registry_payload(
     // The requested-root canonicalization, sibling-root authorization, and
     // scope-digest revalidation all live in the single canonical resolver; the
     // CLI keeps only the registry brokering and selector taxonomy above.
+    let project_path =
+        tracedecay_session_memory::context::RegisteredScopeResolver::canonical_scope_root(
+            &canonical,
+            requested,
+            &project_id,
+        )
+        .map_err(|error| {
+            config_error(format!(
+                "failed to resolve exact transport root for '{}': {error}",
+                requested.display()
+            ))
+        })?;
     tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
         &canonical,
-        requested,
+        &project_path,
         &project_id,
     )
     .map_err(|error| {
         config_error(format!(
             "failed to resolve exact application scope for '{}': {error}",
-            canonical.display()
+            project_path.display()
         ))
     })?;
     Ok(ResolvedCliScope {
         profile_id,
         project_id,
-        project_path: canonical,
+        project_path,
     })
 }
 
@@ -272,6 +284,60 @@ mod tests {
             resolved.project_path, root,
             "a path inside the registered root converges onto its canonical root"
         );
+    }
+
+    #[test]
+    fn linked_worktree_request_preserves_authorized_transport_root() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let registered = temp.path().join("registered");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&registered).unwrap();
+        git_init(&registered);
+        std::fs::write(registered.join("README.md"), "linked scope fixture\n").unwrap();
+        for args in [
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "Test User"][..],
+            &["add", "README.md"][..],
+            &["commit", "-q", "-m", "initial commit"][..],
+        ] {
+            let output = Command::new("git")
+                .current_dir(&registered)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let output = Command::new("git")
+            .current_dir(&registered)
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/linked-scope",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ])
+            .output()
+            .expect("git worktree add runs");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let registered = registered.canonicalize().unwrap();
+        let linked = linked.canonicalize().unwrap();
+        write_identity_marker(&registered, "project.cli-scope-test");
+
+        let resolved = scope_from_registry_payload(&linked, &ok_payload(&registered)).unwrap();
+
+        assert_eq!(resolved.project_path, linked);
+        assert_eq!(resolved.project_id.as_str(), "project.cli-scope-test");
+        assert_eq!(resolved.profile_id.as_str(), "profile.cli-scope-test");
     }
 
     #[test]

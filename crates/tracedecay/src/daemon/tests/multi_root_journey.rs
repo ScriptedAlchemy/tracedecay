@@ -58,6 +58,22 @@ fn repository() -> TempDir {
     repository
 }
 
+fn paginated_repository(prefix: &str) -> TempDir {
+    let repository = repository();
+    let source = (0..120)
+        .map(|index| {
+            format!("pub fn {prefix}_{index}() -> &'static str {{ \"multi-root-page-marker\" }}\n")
+        })
+        .collect::<String>();
+    std::fs::write(repository.path().join("lib.rs"), source).expect("paged source");
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "paged source"],
+    );
+    repository
+}
+
 fn now() -> UtcMicros {
     UtcMicros(
         i64::try_from(
@@ -352,8 +368,8 @@ async fn run_multi_root_quiescence() {
 async fn run_authenticated_multi_root_journey() {
     let home = TempDir::new().expect("home");
     let profile_root = home.path().join("profile");
-    let first = repository();
-    let second = repository();
+    let first = paginated_repository("alpha_page_item");
+    let second = paginated_repository("beta_page_item");
     let first_handshake = DaemonHandshake {
         project_path: Some(first.path().to_path_buf()),
         allow_init: true,
@@ -428,6 +444,28 @@ async fn run_authenticated_multi_root_journey() {
         .open_project_server(&second_handshake)
         .await
         .expect("second owner");
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if engine
+                .invocation
+                .code_index_schedulers
+                .latest_complete_ready(first.path())
+                .await
+                .is_some()
+                && engine
+                    .invocation
+                    .code_index_schedulers
+                    .latest_complete_ready(second.path())
+                    .await
+                    .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both roots must publish a query generation");
     let first_project = tracedecay_domain::ProjectId::new(
         first_key
             .owner
@@ -676,6 +714,177 @@ async fn run_authenticated_multi_root_journey() {
             problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
     ));
+
+    let operation = MultiRootOperationV1::Query {
+        request: json!({
+            "operation": "code_signature_search",
+            "request": {
+                "returns": "str",
+                "params": [],
+                "is_async": null,
+                "scope": {"path_prefix": null},
+                "meta": {"projection": "summary", "order": "source_position", "cursor": null}
+            }
+        }),
+    };
+    let observed_at = now();
+    let (deadline, cancellation) = controls("paged-query-0", observed_at);
+    let first_page_response = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.paged-query-0",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                operation.clone(),
+                0,
+                None,
+            )
+            .expect("first page request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome: tracedecay_contracts::ApplicationOutcome::Evidence(first_evidence),
+        ..
+    } = first_page_response.outcome
+    else {
+        panic!("first query page must return evidence")
+    };
+    let first_page = first_evidence.payload.expect("first page payload");
+    assert_eq!(first_page.roots.len(), 2);
+    assert_ne!(
+        first_page.roots[0].scope_digest,
+        first_page.roots[1].scope_digest
+    );
+    for root in &first_page.roots {
+        let tracedecay_domain::ScopeOutcome::Exact(values) = &root.outcome else {
+            panic!("each root must return an exact first page")
+        };
+        assert_eq!(
+            values[0]["items"].as_array().map(Vec::len),
+            Some(100),
+            "each child must fill the first 100-item page"
+        );
+    }
+    let continuation = first_page
+        .continuation
+        .clone()
+        .expect("120 matches per root must exceed the 100-item child page");
+
+    let observed_at = now();
+    let (deadline, cancellation) = controls("paged-query-1", observed_at);
+    let second_page_response = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.paged-query-1",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                operation,
+                1,
+                Some(continuation),
+            )
+            .expect("second page request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome: tracedecay_contracts::ApplicationOutcome::Evidence(second_evidence),
+        ..
+    } = second_page_response.outcome
+    else {
+        panic!("second query page must return evidence")
+    };
+    let second_page = second_evidence.payload.expect("second page payload");
+    assert_ne!(first_page.roots, second_page.roots);
+    for root in &second_page.roots {
+        let tracedecay_domain::ScopeOutcome::Exact(values) = &root.outcome else {
+            panic!("each root must return an exact second page")
+        };
+        assert_eq!(
+            values[0]["items"].as_array().map(Vec::len),
+            Some(20),
+            "each child must return only its remaining 20 items"
+        );
+    }
+    assert!(second_page.continuation.is_none());
+
+    let capped_phrase_operation = MultiRootOperationV1::Query {
+        request: json!({
+            "operation": "code_phrase_search",
+            "request": {
+                "query": "multi-root-page-marker",
+                "phrases": ["multi-root-page-marker"],
+                "field_filters": [],
+                "fuzzy_budget": 0,
+                "scope": {"generation": "code-generation:unpinned-latest.v1", "path_prefix": null},
+                "meta": {"projection": "summary", "order": "relevance", "cursor": null}
+            }
+        }),
+    };
+    let observed_at = now();
+    let (deadline, cancellation) = controls("capped-phrase-query", observed_at);
+    let capped_phrase_response = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.capped-phrase-query",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                capped_phrase_operation,
+                0,
+                None,
+            )
+            .expect("capped phrase request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome: tracedecay_contracts::ApplicationOutcome::Evidence(capped_phrase_evidence),
+        ..
+    } = capped_phrase_response.outcome
+    else {
+        panic!("capped phrase query must return evidence")
+    };
+    let capped_phrase_page = capped_phrase_evidence
+        .payload
+        .expect("capped phrase payload");
+    for root in &capped_phrase_page.roots {
+        let tracedecay_domain::ScopeOutcome::Partial { value, reason } = &root.outcome else {
+            panic!("each capped phrase root must remain partial")
+        };
+        assert_eq!(
+            *reason,
+            tracedecay_domain::ScopePartialReasonV1::BudgetExceeded
+        );
+        assert_eq!(value[0]["items"].as_array().map(Vec::len), Some(32));
+        assert_eq!(value[0]["total"].as_u64(), Some(32));
+        assert!(value[0]["next_cursor"].is_null());
+    }
+    assert!(matches!(
+        capped_phrase_page.aggregate,
+        tracedecay_domain::ScopeOutcome::Partial {
+            reason: tracedecay_domain::ScopePartialReasonV1::BudgetExceeded,
+            ..
+        }
+    ));
+    assert!(capped_phrase_page.continuation.is_none());
 
     // Every operation family fans out over the authorized scope set.
     for (index, operation) in [

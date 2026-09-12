@@ -124,6 +124,7 @@ pub fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
 pub async fn reconcile_graph_replay_releases(
     lease: &ProjectStoreMaintenanceLeaseV1,
     store_root: &Path,
+    repository_id: &tracedecay_domain::RepositoryId,
     observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> ReconcileOutcome {
@@ -161,6 +162,8 @@ pub async fn reconcile_graph_replay_releases(
         .store_runtime()
         .release_one_sealed_generation_staging_rows(
             project_id.clone(),
+            repository_id,
+            store_root.join("code-generations-v1"),
             lease.graph_db(),
             cancellation,
             staging_cursor,

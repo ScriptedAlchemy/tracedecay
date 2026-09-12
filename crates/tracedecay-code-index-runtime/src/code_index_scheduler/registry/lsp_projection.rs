@@ -32,8 +32,11 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
             // Bracket the current-generation fence with the cheap Git identity
             // read. A concurrent checkout, commit, or publication then refuses
             // instead of pairing one generation with another HEAD.
+            // Identity, not serving: every field this port reads comes from
+            // the retained generation's manifest and snapshot, so a text
+            // owner still building its lexical artifact answers it exactly.
             let retained = registry
-                .latest_text_serving_for_root(&root)
+                .retained_text_owner_for_root(&root)
                 .await
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
             let scope = tracedecay_contracts::ResolvedScope::new(
@@ -44,7 +47,7 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
             )
             .map_err(|_| LspRuntimeFailure::new("lsp-code-index-scope-unavailable"))?;
             let current = registry
-                .latest_text_serving_freshness_for_scope(&scope)
+                .retained_text_owner_freshness_for_scope(&scope)
                 .await
                 .map(|(current, _)| current)
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;

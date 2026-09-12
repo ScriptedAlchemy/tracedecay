@@ -397,7 +397,6 @@ pub enum DaemonInvocationOperation {
     CodeFacets,
     CodeTimeline,
     CodeDeclaration,
-    CodeDefinition,
     CodeTypeDefinition,
     CodeReferences,
     Configuration,
@@ -465,7 +464,6 @@ impl DaemonInvocationOperation {
             Self::CodeFacets => "code_facets",
             Self::CodeTimeline => "code_timeline",
             Self::CodeDeclaration => "code_declaration",
-            Self::CodeDefinition => "code_definition",
             Self::CodeTypeDefinition => "code_type_definition",
             Self::CodeReferences => "code_references",
             Self::Configuration => "configuration",
@@ -885,7 +883,6 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::CodeFacets
             | ApplicationSurfaceOperation::CodeTimeline
             | ApplicationSurfaceOperation::CodeDeclaration
-            | ApplicationSurfaceOperation::CodeDefinition
             | ApplicationSurfaceOperation::CodeTypeDefinition
             | ApplicationSurfaceOperation::CodeReferences => {
                 unreachable!("callable code operations use their typed constructor")
@@ -1402,9 +1399,6 @@ impl DaemonInvocationRequest {
                 tracedecay_contracts::CallableCodeSurfaceRequest::Declaration(_),
                 ApplicationSurfaceOperation::CodeDeclaration,
             ) | (
-                tracedecay_contracts::CallableCodeSurfaceRequest::Definition(_),
-                ApplicationSurfaceOperation::CodeDefinition,
-            ) | (
                 tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),
                 ApplicationSurfaceOperation::CodeTypeDefinition,
             ) | (
@@ -1729,10 +1723,6 @@ impl DaemonInvocationRequest {
                 ..
             } => DaemonInvocationOperation::CodeDeclaration,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_contracts::CallableCodeSurfaceRequest::Definition(_),
-                ..
-            } => DaemonInvocationOperation::CodeDefinition,
-            DaemonInvocationPayload::CallableCode {
                 request: tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),
                 ..
             } => DaemonInvocationOperation::CodeTypeDefinition,
@@ -1835,7 +1825,6 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::CodeFacets
                 | DaemonInvocationOperation::CodeTimeline
                 | DaemonInvocationOperation::CodeDeclaration
-                | DaemonInvocationOperation::CodeDefinition
                 | DaemonInvocationOperation::CodeTypeDefinition
                 | DaemonInvocationOperation::CodeReferences
                 | DaemonInvocationOperation::Configuration
@@ -2165,9 +2154,6 @@ impl DaemonInvocationRequest {
                     ) | (
                         ApplicationSurfaceOperation::CodeDeclaration,
                         tracedecay_contracts::CallableCodeSurfaceRequest::Declaration(_),
-                    ) | (
-                        ApplicationSurfaceOperation::CodeDefinition,
-                        tracedecay_contracts::CallableCodeSurfaceRequest::Definition(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeTypeDefinition,
                         tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),

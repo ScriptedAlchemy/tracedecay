@@ -155,26 +155,6 @@
       "request_schema": "schema.application.code-query.declaration.request",
       "result_schema": "schema.application.code-query.declaration.result"
     },
-    "code_definition": {
-      "bindings": {
-        "cli": "binding.cli.code_definition.v1",
-        "http": "binding.http.code_definition.v1",
-        "mcp": "binding.mcp.code_definition.v1"
-      },
-      "request": {
-        "meta": {
-          "order": "source_position",
-          "projection": "evidence"
-        },
-        "node_id": "symbol.application-parity",
-        "scope": {
-          "generation": "generation.application-parity",
-          "path_prefix": "src"
-        }
-      },
-      "request_schema": "schema.application.code-query.definition.request",
-      "result_schema": "schema.application.code-query.definition.result"
-    },
     "code_exact_occurrence": {
       "bindings": {
         "cli": "binding.cli.code_exact_occurrence.v1",

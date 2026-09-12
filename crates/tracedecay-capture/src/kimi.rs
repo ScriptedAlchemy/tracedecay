@@ -5,7 +5,7 @@ use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, ObservationId,
-    ObservationOrderingDomainV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
+    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId,
     ProviderUsageContractDimensionV1, SessionId,
 };
 
@@ -49,10 +49,9 @@ fn normalize_kimi_record(
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let role = native
-        .get("role")
-        .and_then(Value::as_str)
-        .ok_or(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+    let record = current_wire_record(native)?;
+    let native = record.value;
+    let role = record.role;
     let mut facts = Vec::new();
     let mut relations =
         CanonicalObservationRelationsV1::new(SessionId::new(session_id).map_err(|_| invalid())?);
@@ -61,11 +60,23 @@ fn normalize_kimi_record(
         "user" | "assistant" | "system" | "tool" | "_system_prompt" => {
             let content = native
                 .get("content")
+                .or_else(|| {
+                    matches!(
+                        native.get("type").and_then(Value::as_str),
+                        Some("text" | "think")
+                    )
+                    .then_some(native)
+                })
                 .filter(|value| !content_is_empty(value))
                 .cloned();
             if let Some(content) = &content {
-                append_reasoning(&mut facts, content);
-                if let Some(message_content) = message_content(content) {
+                let canonical_content = if native.get("content").is_some() {
+                    content.clone()
+                } else {
+                    Value::Array(vec![content.clone()])
+                };
+                append_reasoning(&mut facts, &canonical_content);
+                if let Some(message_content) = message_content(&canonical_content) {
                     facts.push(CanonicalObservationFactV1::Message {
                         role: canonical_role(role)?,
                         content: message_content.clone(),
@@ -73,7 +84,7 @@ fn normalize_kimi_record(
                             .get("model")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
-                        timestamp: native.get("timestamp").and_then(timestamp_secs),
+                        timestamp: record.timestamp.and_then(timestamp_secs),
                     });
                     if content_text(&message_content)
                         .is_some_and(|text| text.starts_with(COMPACTION_PREFIX))
@@ -89,13 +100,13 @@ fn normalize_kimi_record(
                     }
                 }
             }
-            append_tool_calls(&mut facts, native, &stable_record_id)?;
             append_tool_result(&mut facts, native)?;
             if facts.is_empty() {
                 return Err(ObservationRecordParseErrorV1::Empty);
             }
             relations = relations.with_message_id(stable_record_id.clone());
         }
+        "_tool_call" => append_current_tool_call(&mut facts, native)?,
         "_usage" => append_usage(&mut facts, native),
         "_checkpoint" => facts.push(CanonicalObservationFactV1::Unknown {
             native_kind: role.to_owned(),
@@ -107,7 +118,7 @@ fn normalize_kimi_record(
         }),
     }
 
-    let timestamp = native.get("timestamp").and_then(timestamp_secs);
+    let timestamp = record.timestamp.and_then(timestamp_secs);
     let mut evidence =
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range);
     if let Some(timestamp) = timestamp {
@@ -122,6 +133,92 @@ fn normalize_kimi_record(
         evidence,
     )
     .map_err(|_| invalid())
+}
+
+struct KimiRecord<'a> {
+    role: &'a str,
+    value: &'a Value,
+    timestamp: Option<&'a Value>,
+}
+
+fn current_wire_record(native: &Value) -> Result<KimiRecord<'_>, ObservationRecordParseErrorV1> {
+    match native.get("type").and_then(Value::as_str) {
+        Some("context.append_message") => {
+            let message = native
+                .get("message")
+                .filter(|message| message.is_object())
+                .ok_or_else(invalid)?;
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            Ok(KimiRecord {
+                role,
+                value: message,
+                timestamp: native.get("time"),
+            })
+        }
+        Some("context.append_loop_event") => {
+            let event = native
+                .get("event")
+                .filter(|event| event.is_object())
+                .ok_or_else(invalid)?;
+            match event.get("type").and_then(Value::as_str) {
+                Some("content.part") => {
+                    let part = event
+                        .get("part")
+                        .filter(|part| part.is_object())
+                        .ok_or_else(invalid)?;
+                    Ok(KimiRecord {
+                        role: "assistant",
+                        value: part,
+                        timestamp: native.get("time"),
+                    })
+                }
+                Some("tool.call") => Ok(KimiRecord {
+                    role: "_tool_call",
+                    value: event,
+                    timestamp: native.get("time"),
+                }),
+                Some("tool.result") => Ok(KimiRecord {
+                    role: "tool",
+                    value: event,
+                    timestamp: native.get("time"),
+                }),
+                Some("step.end") => Ok(KimiRecord {
+                    role: "_usage",
+                    value: event,
+                    timestamp: native.get("time"),
+                }),
+                _ => Err(ObservationRecordParseErrorV1::Empty),
+            }
+        }
+        Some(_) | None => Err(ObservationRecordParseErrorV1::Empty),
+    }
+}
+
+fn append_current_tool_call(
+    facts: &mut Vec<CanonicalObservationFactV1>,
+    event: &Value,
+) -> Result<(), ObservationRecordParseErrorV1> {
+    let name = event
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(invalid)?;
+    let invocation_id = event
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .map(ObservationId::new)
+        .transpose()
+        .map_err(|_| invalid())?
+        .ok_or_else(invalid)?;
+    facts.push(CanonicalObservationFactV1::ToolInvocation {
+        invocation_id,
+        name: name.to_owned(),
+        arguments: event.get("args").cloned().unwrap_or(Value::Null),
+    });
+    Ok(())
 }
 
 fn append_reasoning(facts: &mut Vec<CanonicalObservationFactV1>, content: &Value) {
@@ -161,14 +258,15 @@ fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
         .or_else(|| native.get("content"))
         .filter(|value| value.is_object())
         .unwrap_or(native);
-    let input_tokens = usage_u64(usage, &["input_tokens", "prompt_tokens"]);
-    let output_tokens = usage_u64(usage, &["output_tokens", "completion_tokens"]);
+    let input_tokens = usage_u64(usage, &["input_tokens", "prompt_tokens", "inputOther"]);
+    let output_tokens = usage_u64(usage, &["output_tokens", "completion_tokens", "output"]);
     let cache_read_tokens = usage_u64(
         usage,
         &[
             "cache_read_input_tokens",
             "cached_input_tokens",
             "cache_read_tokens",
+            "inputCacheRead",
         ],
     );
     let cache_write_tokens = usage_u64(
@@ -177,6 +275,7 @@ fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
             "cache_creation_input_tokens",
             "cache_write_input_tokens",
             "cache_write_tokens",
+            "inputCacheCreation",
         ],
     );
     let reasoning_tokens = usage_u64(usage, &["reasoning_tokens", "reasoning_output_tokens"]);
@@ -186,7 +285,6 @@ fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
         output_tokens,
         cache_read_tokens,
         cache_write_tokens,
-        reasoning_tokens,
         total_tokens,
     ]
     .iter()
@@ -229,64 +327,17 @@ fn usage_u64(usage: &Value, aliases: &[&str]) -> Option<u64> {
         .find_map(|key| canonical_u64_string(usage.get(*key)))
 }
 
-fn append_tool_calls(
-    facts: &mut Vec<CanonicalObservationFactV1>,
-    native: &Value,
-    message_id: &ObservationId,
-) -> Result<(), ObservationRecordParseErrorV1> {
-    let Some(calls) = native.get("tool_calls").and_then(Value::as_array) else {
-        return Ok(());
-    };
-    for call in calls {
-        let function = match call.get("function") {
-            Some(function @ Value::Object(_)) => function,
-            _ => call,
-        };
-        let Some(name) = function
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        let arguments = match function.get("arguments") {
-            Some(Value::String(raw)) => match serde_json::from_str(raw) {
-                Ok(value) => value,
-                Err(_) => Value::String(raw.clone()),
-            },
-            Some(value) => value.clone(),
-            None => Value::Null,
-        };
-        let invocation_id = if let Some(id) = call.get("id").and_then(Value::as_str) {
-            ObservationId::new(id).map_err(|_| invalid())?
-        } else {
-            let evidence = serde_json::json!({
-                "message_id": message_id.as_str(),
-                "name": name,
-                "arguments": arguments,
-            });
-            let digest = PayloadReferenceV1::for_payload(&evidence).map_err(|_| invalid())?;
-            ObservationId::new(format!("kimi.tool.{}", digest.digest().as_str()))
-                .map_err(|_| invalid())?
-        };
-        facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id,
-            name: name.to_owned(),
-            arguments,
-        });
-    }
-    Ok(())
-}
-
 fn append_tool_result(
     facts: &mut Vec<CanonicalObservationFactV1>,
     native: &Value,
 ) -> Result<(), ObservationRecordParseErrorV1> {
-    if native.get("role").and_then(Value::as_str) != Some("tool") {
+    let current_wire = native.get("type").and_then(Value::as_str) == Some("tool.result");
+    if !current_wire && native.get("role").and_then(Value::as_str) != Some("tool") {
         return Ok(());
     }
     let Some(content) = native
         .get("content")
+        .or_else(|| native.get("result"))
         .filter(|content| !content_is_empty(content))
         .cloned()
     else {
@@ -294,6 +345,7 @@ fn append_tool_result(
     };
     let invocation_id = native
         .get("tool_call_id")
+        .or_else(|| native.get("toolCallId"))
         .and_then(Value::as_str)
         .map(ObservationId::new)
         .transpose()
@@ -336,145 +388,164 @@ mod tests {
 
     use serde_json::json;
     use tracedecay_domain::{
-        CanonicalBoundaryKindV1, CanonicalObservationFactV1, ObservationSourceRangeV1,
-        ProviderUsageContractDimensionV1,
+        CanonicalBoundaryKindV1, CanonicalMessageRoleV1, CanonicalObservationFactV1,
+        ObservationSourceRangeV1, ProviderUsageContractDimensionV1,
     };
 
     use super::{native_record_id, normalize_observation};
 
-    #[test]
-    fn compaction_summary_remains_typed_and_message_backed() {
+    fn normalize(native: serde_json::Value) -> tracedecay_domain::CanonicalObservationEnvelopeV1 {
         let range = ObservationSourceRangeV1::new(10, 20).unwrap();
-        let id = native_record_id("session", range).unwrap();
-        let envelope = normalize_observation(
-            &json!({
-                "role": "assistant",
-                "content": "Previous context has been compacted. Here is the compaction output: summary"
-            }),
-            "session",
-            id,
+        normalize_observation(
+            &native,
+            "session-current",
+            native_record_id("session-current", range).unwrap(),
             range,
         )
-        .unwrap();
+        .unwrap()
+    }
 
+    #[test]
+    fn current_wire_visible_and_reasoning_parts_keep_distinct_semantics() {
+        let visible = normalize(json!({
+            "type": "context.append_loop_event",
+            "agentId": "main",
+            "event": {
+                "type": "content.part",
+                "part": {"type": "text", "text": "public answer"}
+            },
+            "time": 1_789_228_156_434_u64
+        }));
+        assert!(visible.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content,
+                timestamp: Some(1_789_228_156),
+                ..
+            } if content == &json!([{"type": "text", "text": "public answer"}])
+        )));
         assert!(
-            envelope
+            !visible
+                .facts()
+                .iter()
+                .any(|fact| matches!(fact, CanonicalObservationFactV1::Reasoning { .. }))
+        );
+
+        let reasoning = normalize(json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "content.part",
+                "part": {"type": "think", "think": "visible reasoning"}
+            },
+            "time": 1_789_228_156_433_u64
+        }));
+        assert!(reasoning.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Reasoning {
+                content: Some(content),
+                ..
+            } if content == "visible reasoning"
+        )));
+        assert!(
+            !reasoning
                 .facts()
                 .iter()
                 .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
         );
-        assert!(envelope.facts().iter().any(|fact| matches!(
+    }
+
+    #[test]
+    fn current_wire_compaction_and_tool_events_remain_typed() {
+        let compaction = normalize(json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "content.part",
+                "part": {
+                    "type": "text",
+                    "text": "Previous context has been compacted. Here is the compaction output: summary"
+                }
+            },
+            "time": 1_789_228_156_434_u64
+        }));
+        assert!(compaction.facts().iter().any(|fact| matches!(
             fact,
             CanonicalObservationFactV1::Compaction {
                 summary: Some(_),
                 ..
             }
         )));
-        assert!(envelope.facts().iter().any(|fact| matches!(
+        assert!(compaction.facts().iter().any(|fact| matches!(
             fact,
             CanonicalObservationFactV1::Boundary {
                 boundary_kind: CanonicalBoundaryKindV1::CompactionBoundary
             }
         )));
-    }
 
-    #[test]
-    fn tool_only_assistant_turn_remains_durable() {
-        let range = ObservationSourceRangeV1::new(20, 30).unwrap();
-        let id = native_record_id("session", range).unwrap();
-        let envelope = normalize_observation(
-            &json!({
-                "role": "assistant",
-                "content": null,
-                "tool_calls": [{
-                    "id": "call_1",
-                    "function": {"name": "read", "arguments": "{\"path\":\"x\"}"}
-                }]
-            }),
-            "session",
-            id,
-            range,
-        )
-        .unwrap();
-
-        assert!(
-            envelope
-                .facts()
-                .iter()
-                .any(|fact| matches!(fact, CanonicalObservationFactV1::ToolInvocation { .. }))
-        );
-    }
-
-    #[test]
-    fn reasoning_is_not_duplicated_into_message_content() {
-        let range = ObservationSourceRangeV1::new(30, 40).unwrap();
-        let envelope = normalize_observation(
-            &json!({
-                "role": "assistant",
-                "content": [
-                    {"type": "think", "think": "private chain"},
-                    {"type": "text", "text": "public answer"}
-                ]
-            }),
-            "session",
-            native_record_id("session", range).unwrap(),
-            range,
-        )
-        .unwrap();
-
-        let message = envelope.facts().iter().find_map(|fact| match fact {
-            CanonicalObservationFactV1::Message { content, .. } => Some(content),
-            _ => None,
-        });
-        assert_eq!(
-            message,
-            Some(&json!([{"type": "text", "text": "public answer"}]))
-        );
-        assert!(envelope.facts().iter().any(|fact| matches!(
+        let call = normalize(json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "tool.call",
+                "name": "read",
+                "args": {"path": "x"},
+                "toolCallId": "call_1"
+            },
+            "time": 1_789_228_124_540_u64
+        }));
+        assert!(call.facts().iter().any(|fact| matches!(
             fact,
-            CanonicalObservationFactV1::Reasoning {
-                content: Some(content),
-                ..
-            } if content == "private chain"
+            CanonicalObservationFactV1::ToolInvocation { name, arguments, .. }
+                if name == "read" && arguments == &json!({"path": "x"})
+        )));
+
+        let result = normalize(json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "tool.result",
+                "toolCallId": "call_1",
+                "result": {"output": "done"}
+            },
+            "time": 1_789_228_124_654_u64
+        }));
+        assert!(result.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::ToolResult { content, .. }
+                if content == &json!({"output": "done"})
         )));
     }
 
     #[test]
-    fn native_system_and_usage_records_keep_supported_semantics() {
-        let system_range = ObservationSourceRangeV1::new(40, 50).unwrap();
-        let system = normalize_observation(
-            &json!({"role": "system", "content": "instructions"}),
-            "session",
-            native_record_id("session", system_range).unwrap(),
-            system_range,
-        )
-        .unwrap();
-        assert!(system.facts().iter().any(|fact| matches!(
+    fn current_wire_message_and_usage_keep_supported_semantics() {
+        let user = normalize(json!({
+            "type": "context.append_message",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "request"}],
+                "toolCalls": []
+            },
+            "time": 1_789_228_081_157_u64
+        }));
+        assert!(user.facts().iter().any(|fact| matches!(
             fact,
             CanonicalObservationFactV1::Message {
-                role: tracedecay_domain::CanonicalMessageRoleV1::System,
+                role: CanonicalMessageRoleV1::User,
                 ..
             }
         )));
 
-        let usage_range = ObservationSourceRangeV1::new(50, 60).unwrap();
-        let usage = normalize_observation(
-            &json!({
-                "role": "_usage",
+        let usage = normalize(json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "step.end",
                 "usage": {
-                    "input_tokens": 11,
-                    "output_tokens": 7,
-                    "cache_read_input_tokens": 3,
-                    "cache_creation_input_tokens": 2,
-                    "reasoning_tokens": 5,
-                    "total_tokens": 18
+                    "inputOther": 11,
+                    "output": 7,
+                    "inputCacheRead": 3,
+                    "inputCacheCreation": 2
                 }
-            }),
-            "session",
-            native_record_id("session", usage_range).unwrap(),
-            usage_range,
-        )
-        .unwrap();
+            },
+            "time": 1_789_228_124_657_u64
+        }));
         assert!(usage.facts().iter().any(|fact| matches!(
             fact,
             CanonicalObservationFactV1::UncorrelatedUsage {
@@ -482,11 +553,10 @@ mod tests {
                 output_tokens: Some(7),
                 cache_read_tokens: Some(3),
                 cache_write_tokens: Some(2),
-                reasoning_tokens: Some(5),
-                total_tokens: Some(18),
                 native_kind,
                 native_field,
                 missing_dimensions,
+                ..
             } if native_kind == "_usage"
                 && native_field == "usage"
                 && missing_dimensions == &BTreeSet::from([

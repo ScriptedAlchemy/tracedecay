@@ -23,14 +23,13 @@ pub(super) async fn collect_verified_affected_test_files(
     files: &[String],
     max_depth: usize,
     custom_glob: Option<&glob::Pattern>,
-    files_with_inline_tests: &HashSet<String>,
 ) -> Result<AffectedTestTraversal> {
-    collect_affected_test_files(
+    collect_affected_test_files_with(
         &VerifiedAffectedTestDependents { query: graph },
         files,
         max_depth,
         custom_glob,
-        files_with_inline_tests,
+        |paths| graph.test_annotated_logical_files(Some(paths), 500_000, 2_000_000),
     )
     .await
 }
@@ -50,6 +49,7 @@ impl AffectedTestDependents for VerifiedAffectedTestDependents<'_> {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Sized>(
     dependents_source: &D,
     files: &[String],
@@ -57,12 +57,33 @@ pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Siz
     custom_glob: Option<&glob::Pattern>,
     files_with_inline_tests: &HashSet<String>,
 ) -> Result<AffectedTestTraversal> {
+    collect_affected_test_files_with(dependents_source, files, max_depth, custom_glob, |paths| {
+        Ok(paths
+            .intersection(files_with_inline_tests)
+            .cloned()
+            .collect())
+    })
+    .await
+}
+
+async fn collect_affected_test_files_with<D, F>(
+    dependents_source: &D,
+    files: &[String],
+    max_depth: usize,
+    custom_glob: Option<&glob::Pattern>,
+    inline_tests_in: F,
+) -> Result<AffectedTestTraversal>
+where
+    D: AffectedTestDependents + ?Sized,
+    F: Fn(&HashSet<String>) -> Result<HashSet<String>>,
+{
     let mut test_distances: HashMap<String, usize> = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut frontier = Vec::new();
+    let initial_inline_tests = inline_tests_in(&files.iter().cloned().collect())?;
 
     for file in files {
-        if matches_test_file(file, custom_glob, files_with_inline_tests) {
+        if matches_test_file(file, custom_glob, &initial_inline_tests) {
             test_distances.insert(file.clone(), 0);
         }
         if visited.insert(file.clone()) {
@@ -86,13 +107,14 @@ pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Siz
             .collect::<Vec<_>>();
         dependents.sort();
         dependents.dedup();
+        let inline_tests = inline_tests_in(&dependents.iter().cloned().collect())?;
 
         let mut next_frontier = Vec::new();
         for dep in dependents {
             if !visited.insert(dep.clone()) {
                 continue;
             }
-            if matches_test_file(&dep, custom_glob, files_with_inline_tests) {
+            if matches_test_file(&dep, custom_glob, &inline_tests) {
                 test_distances.insert(dep, depth + 1);
             } else {
                 next_frontier.push(dep);
@@ -117,19 +139,8 @@ pub async fn handle_affected(
     let custom_filter = args.get("filter").and_then(|v| v.as_str());
     let custom_glob = custom_filter.and_then(|p| glob::Pattern::new(p).ok());
 
-    let files_with_inline_tests = hotpath::measure_block!(
-        "mcp.git.affected.test_annotations",
-        graph.test_annotated_logical_files(None, 500_000, 2_000_000)?
-    );
-    let dependents = VerifiedAffectedTestDependents { query: graph };
     let traversal = hotpath::future!(
-        collect_affected_test_files(
-            &dependents,
-            &files,
-            max_depth,
-            custom_glob.as_ref(),
-            &files_with_inline_tests,
-        ),
+        collect_verified_affected_test_files(graph, &files, max_depth, custom_glob.as_ref()),
         label = "mcp.git.affected.traverse"
     )
     .await?;

@@ -8505,6 +8505,162 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
     registry.shutdown().await;
 }
 
+/// A publication can finish source capture long before its text artifact is
+/// ready. The serving swap must reverify after that projection, otherwise the
+/// exact active generation seats after its bounded proof expires and every
+/// graph readiness probe keeps an unchanged-source Noop loop alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_settles() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let (projection_started, release_projection) = registry
+        .pause_next_published_text_projection(canonical_root)
+        .await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    tokio::time::timeout(Duration::from_secs(10), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("publication projection gate stays armed");
+
+    let identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("mounted worktree identity");
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source fence");
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the pre-projection proof");
+    }
+    release_projection
+        .send(())
+        .expect("release publication projection");
+
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("post-projection source proof never admitted the exact active generation");
+    let generation = ready.generation().manifest().generation_id.clone();
+
+    // Exercise the ordinary expiry path too: one readiness request starts a
+    // real Noop, and a read during that owner pass records one BusyFollowUp.
+    // Both passes must settle because the existing seat keeps its exact
+    // witness while the source proof is renewed.
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the seated proof");
+    }
+    registry.clear_pending_wake_for_scope(&scope).await;
+    let receipts_before = registry.event_to_ready_receipts().len();
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "the expired proof declines before the worker renews it"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await
+        {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("readiness did not start a source-verification pass");
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "readiness stays fail-closed while the Noop owns verification"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let receipts = registry.event_to_ready_receipts();
+            let settled = !registry
+                .reconcile_in_progress_for_test(fixture.path())
+                .await
+                && registry.pending_wake_micros_for_scope(&scope).await == Some(0);
+            let new = &receipts[receipts_before.min(receipts.len())..];
+            if settled
+                && new.iter().any(|receipt| {
+                    receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp && receipt.is_noop()
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the real Noop and its single busy follow-up did not settle");
+    assert_eq!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .expect("renewed seat is ready")
+            .generation()
+            .manifest()
+            .generation_id,
+        generation
+    );
+
+    fixture.edit("src/lib.rs", "pub fn changed_after_seat() {}\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        "changed source reaches the mounted owner"
+    );
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "a real source change still refuses the old seat"
+    );
+
+    registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
@@ -12553,6 +12709,10 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
          impl Processor for Doubler {\n\
              fn process(&self, input: u32) -> u32 { input * 2 }\n\
          }\n\
+         pub struct Tripler;\n\
+         impl Processor for Tripler {\n\
+             fn process(&self, input: u32) -> u32 { input * 3 }\n\
+         }\n\
          pub fn via_trait(processor: &Doubler, input: u32) -> u32 {\n\
              Processor::process(processor, input)\n\
          }\n\
@@ -12572,6 +12732,47 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .expect("mount daemon-owned scheduler");
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let generation = latest.generation.manifest().generation_id.clone();
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active("cancel.callable-graph-projection")
+            .expect("graph cancellation");
+    let publisher =
+        tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore::memory(
+            &cancellation,
+        )
+        .expect("graph publisher");
+    publisher
+        .publish_indexed_with_cancellation(
+            &generation,
+            latest.generation.edges(),
+            latest.generation.chunks().chunks(),
+            &latest.generation.snapshot().files,
+            latest.generation.symbols(),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("publish indexed graph");
+    let graph_store = Arc::new(
+        publisher
+            .verified_store(&generation)
+            .expect("verified graph"),
+    );
+    graph_store
+        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .expect("warm graph catalog");
+    let graph_reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation,
+            Some(latest.generation.snapshot().repository.clone()),
+            latest.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph reader");
+    latest
+        .install_graph_serving(
+            graph_reader,
+            Some(graph_store),
+            super::CodeGraphServingAuthorityV1::Memory,
+        )
+        .expect("install interactive graph serving");
     assert_eq!(latest.generation.manifest().generation_id, generation);
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
@@ -12712,10 +12913,10 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             assert_eq!(callee.edge_kind, "calls");
             assert_eq!(callee.symbol.name, "callee");
             assert_eq!(callee.symbol.file, "src/lib.rs");
-            assert_eq!(callee.symbol.start_line_zero_based, 9);
-            assert_eq!(callee.symbol.end_line_zero_based, 9);
-            assert_eq!(callee.symbol.line, 10);
-            assert_eq!(callee.symbol.end_line, 10);
+            assert_eq!(callee.symbol.start_line_zero_based, 13);
+            assert_eq!(callee.symbol.end_line_zero_based, 13);
+            assert_eq!(callee.symbol.line, 14);
+            assert_eq!(callee.symbol.end_line, 14);
         }
         outcome => panic!("expected completed graph operation, got {outcome:?}"),
     }
@@ -12755,6 +12956,20 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
                 && record.kind == "method"
         })
         .expect("implementation method symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let second_implementation_method = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| {
+            record.simple_name == "process"
+                && record.qualified_name.contains("Tripler")
+                && record.kind == "method"
+        })
+        .expect("second implementation method symbol")
         .occurrence
         .as_str()
         .to_owned();
@@ -12813,7 +13028,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         panic!("expected completed resolved trait call");
     };
     let resolved_dispatch = resolved_dispatch.payload.expect("resolved trait call page");
-    assert_eq!(resolved_dispatch.total, Some(2));
+    assert_eq!(resolved_dispatch.total, Some(3));
     assert_eq!(resolved_dispatch.items.len(), 1);
     assert_eq!(resolved_dispatch.items[0].symbol.node_id, trait_method);
     assert!(!resolved_dispatch.items[0].dispatch_via_trait);
@@ -12845,15 +13060,60 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .payload
         .expect("resolved trait continuation page");
     assert_eq!(continuation.items.len(), 1);
-    let implementation = &continuation.items[0];
-    assert_eq!(implementation.symbol.node_id, implementation_method);
-    assert!(implementation.dispatch_via_trait);
+    let second_cursor = continuation
+        .next_cursor
+        .clone()
+        .expect("second resolved dispatch continuation");
+    let mut second_continuation_meta = query_meta();
+    second_continuation_meta.page =
+        PageRequest::new(1, Some(second_cursor)).expect("second dispatch continuation");
+    let second_continuation_request = CodeRelationRequest {
+        node_id: continuation_request.node_id.clone(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: true,
+        scope: scope.clone(),
+        meta: second_continuation_meta,
+    };
+    let second_continuation = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &second_continuation_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Completed(second_continuation) = second_continuation else {
+        panic!("expected second completed resolved trait continuation");
+    };
+    let second_continuation = second_continuation
+        .payload
+        .expect("second resolved trait continuation page");
+    assert_eq!(second_continuation.items.len(), 1);
     assert_eq!(
-        implementation.dispatch_from.as_deref(),
-        Some(trait_method.as_str())
+        continuation
+            .items
+            .iter()
+            .chain(&second_continuation.items)
+            .map(|item| item.symbol.node_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            implementation_method.as_str(),
+            second_implementation_method.as_str(),
+        ])
     );
-    assert_eq!(implementation.depth, Some(1));
-    assert!(continuation.next_cursor.is_none());
+    assert!(
+        continuation
+            .items
+            .iter()
+            .chain(&second_continuation.items)
+            .all(|implementation| {
+                implementation.dispatch_via_trait
+                    && implementation.dispatch_from.as_deref() == Some(trait_method.as_str())
+                    && implementation.depth == Some(1)
+            })
+    );
+    assert!(second_continuation.next_cursor.is_none());
 
     registry
         .mount_query_authority(
@@ -12861,7 +13121,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             graph_context.scope(),
             query_authority_with_candidate_cap(
                 latest.generation.manifest().privacy_domain.clone(),
-                1,
+                2,
             ),
         )
         .await
@@ -12890,6 +13150,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .expect("candidate-capped trait dispatch page");
     assert_eq!(capped_page.items.len(), 1);
     assert_eq!(capped_page.items[0].symbol.node_id, trait_method);
+    assert!(!capped_page.items[0].dispatch_via_trait);
     assert!(
         capped_dispatch
             .omissions
@@ -13077,6 +13338,51 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             .expect("references page")
             .items
             .is_empty()
+    );
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .expect("mounted worktree");
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        assert!(
+            worktree
+                .text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some(),
+            "the verified graph remains seated on its lightweight generation owner"
+        );
+        Arc::clone(&worktree.scheduler)
+    };
+    let decodes_before = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sealed_decode_count();
+    let graph = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &graph_request,
+        )
+        .await;
+    assert!(
+        matches!(graph, RetrievalPortOutcome::Completed(_)),
+        "a generation-pinned graph query must use the retained verified graph: {graph:?}"
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        decodes_before,
+        "graph-only query admission must not decode the sealed lexical generation"
     );
 
     registry.shutdown().await;
@@ -18510,13 +18816,24 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
         reason.contains("injected terminal graph activation failure"),
         "typed failure must retain its terminal cause: {reason}"
     );
-    assert!(
-        registry
+    // The owner's projection runs on its own task now, so the terminal graph
+    // failure above can be observed before it finishes. Withdrawal is still
+    // falsified: a withdrawn owner never becomes warm and this deadline fires.
+    let serving_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
             .latest_text_serving_for_scope(&scope)
             .await
-            .is_some_and(|text| text.query_owners_are_warm()),
-        "terminal native graph failure must not withdraw exact/lexical serving"
-    );
+            .is_some_and(|text| text.query_owners_are_warm())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= serving_deadline,
+            "terminal native graph failure must not withdraw exact/lexical serving"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
     registry.shutdown().await;
 }
 
@@ -19116,43 +19433,45 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
     use super::registry::GraphSeatGateV1;
 
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, true, true, false, true),
+        GraphSeatGateV1::decide(true, false, true, true, true),
         GraphSeatGateV1::Prepare,
         "a publication prepares once its own text owner has reopened, however busy the \
          checkout is; the owner's projection runs alongside and the seat joins it"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, true, true, false, false),
+        GraphSeatGateV1::decide(true, false, true, true, false),
         GraphSeatGateV1::PublishedTextOwnerUnavailable,
         "a publication whose replacement text owner did not reopen must not start graph work"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, true, false, true, false),
+        GraphSeatGateV1::decide(true, false, true, false, true),
         GraphSeatGateV1::Prepare,
-        "an unchanged pass seats the retained ready text owner's generation"
+        "an unchanged pass prepares as soon as a retained owner exists to recover a head \
+         from: the seat reads that owner's sealed manifest, never its lexical artifact, so a \
+         restart resuming an unfinished ngram index serves the graph while text still warms"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, true, false, false, false),
-        GraphSeatGateV1::RetainedTextOwnerWarming,
-        "an unchanged pass waits for exact and lexical serving to finish first"
+        GraphSeatGateV1::decide(true, false, true, false, false),
+        GraphSeatGateV1::RetainedGenerationUnavailable,
+        "an unchanged pass with no retained owner has no head to recover"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, true, true, true, true, true),
+        GraphSeatGateV1::decide(true, true, true, true, true),
         GraphSeatGateV1::ActivationDeferred,
         "a scheduled activation retry owns the next seat attempt"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, false, true, true, true),
+        GraphSeatGateV1::decide(true, false, false, true, true),
         GraphSeatGateV1::ReconcileUnfinished,
         "a pass with no terminal outcome has nothing to seat"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(false, false, true, true, true, true),
+        GraphSeatGateV1::decide(false, false, true, true, true),
         GraphSeatGateV1::Disabled,
         "graph activation off means no seat and no skip to report"
     );
     assert!(
-        GraphSeatGateV1::decide(false, false, true, true, true, true)
+        GraphSeatGateV1::decide(false, false, true, true, true)
             .skip_reason()
             .is_none(),
         "a worktree with graph activation off is not waiting for a seat"
@@ -19162,7 +19481,7 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
             GraphSeatGateV1::ReconcileUnfinished,
             GraphSeatGateV1::ActivationDeferred,
             GraphSeatGateV1::PublishedTextOwnerUnavailable,
-            GraphSeatGateV1::RetainedTextOwnerWarming,
+            GraphSeatGateV1::RetainedGenerationUnavailable,
         ]
         .into_iter()
         .all(|gate| gate.skip_reason().is_some()),
