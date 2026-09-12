@@ -7,8 +7,8 @@ use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
-    EnrollmentMarker, ProjectIdentity, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
-    StoreLayout, read_repository_identity_marker, validate_project_id,
+    EnrollmentMarker, ProjectIdentity, RESPONSE_HANDLES_DIRECTORY, STORE_MANIFEST_FILENAME,
+    StorageMode, StoreKind, StoreLayout, read_repository_identity_marker, validate_project_id,
 };
 
 /// Typed project identity recorded on a registered store layout.
@@ -263,8 +263,20 @@ pub fn resolve_project_session_db_path(project_root: &Path) -> Result<PathBuf> {
     Ok(resolve_layout_for_current_profile(project_root)?.sessions_db_path)
 }
 
+/// Where a checkout's truncated tool responses live.
+///
+/// An enrolled project keeps them in its own store shard. Any other directory
+/// an MCP server happens to run in gets the profile-wide root: a response
+/// handle is transient output, not evidence that the directory is a project,
+/// and resolving through the path-derived default layout used to mint a
+/// `projects/proj_<hash>/response-handles/` shard for every such directory —
+/// 286 of them on one profile, outnumbering the real stores.
 pub fn resolve_response_handle_root(project_root: &Path) -> Result<PathBuf> {
-    Ok(resolve_layout_for_current_profile(project_root)?.response_handle_root)
+    let profile_root = default_profile_root()?;
+    Ok(match resolve_enrolled_layout(project_root, &profile_root)? {
+        Some(layout) => layout.response_handle_root,
+        None => profile_root.join(RESPONSE_HANDLES_DIRECTORY),
+    })
 }
 
 pub fn resolve_lcm_payload_root(project_root: &Path) -> Result<PathBuf> {
