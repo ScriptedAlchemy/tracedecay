@@ -182,6 +182,35 @@ async fn setup_test_risk_non_src_fixture() -> (ProductionCompositionFixture, ())
     (fixture, ())
 }
 
+async fn setup_workspace_test_risk_fixture() -> (ProductionCompositionFixture, ()) {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("crates/demo/src")).unwrap();
+        fs::create_dir_all(project.join("crates/demo/tests")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/demo\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("crates/demo/src/lib.rs"),
+            "pub fn public_entry() -> usize { helper() }\nfn helper() -> usize { 1 }\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("crates/demo/tests/integration.rs"),
+            "use demo::public_entry;\n#[test]\nfn covers_public_entry() { assert_eq!(public_entry(), 1); }\n",
+        )
+        .unwrap();
+    })
+    .await;
+    (fixture, ())
+}
+
 async fn setup_ts_describe_it_project() -> (ProductionCompositionFixture, ()) {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
@@ -1506,6 +1535,36 @@ async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
             .is_some_and(|note| note.contains("closure")),
         "confidence note should explain the conservative closure signal, got: {}",
         text
+    );
+    close_test_graph(cg).await;
+}
+
+#[tokio::test]
+async fn test_test_risk_scopes_workspace_source_before_following_external_test_callers() {
+    let (cg, _dir) = setup_workspace_test_risk_fixture().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_test_risk",
+        json!({
+            "path": "crates/demo/src/lib.rs",
+            "limit": 10,
+            "include_tested": true
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(parsed["summary"]["total_functions"].as_u64(), Some(2));
+    assert_eq!(parsed["summary"]["tested"].as_u64(), Some(2));
+    assert!(
+        parsed["risks"]
+            .as_array()
+            .is_some_and(|risks| risks.iter().all(|risk| risk["has_test"] == true)),
+        "the out-of-scope integration test should attribute both scoped functions: {text}"
     );
     close_test_graph(cg).await;
 }
