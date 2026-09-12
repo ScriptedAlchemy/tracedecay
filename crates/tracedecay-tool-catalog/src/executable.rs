@@ -402,9 +402,9 @@ pub enum ExecutableUnavailableDispositionV1 {
 /// Truthful executable lookup state; unavailable records cannot carry a binding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
-pub enum ExecutableBindingAvailabilityV1 {
+pub enum BindingAvailabilityV1<T> {
     Available {
-        binding: Box<ExecutableBindingV1>,
+        binding: Box<T>,
     },
     Unavailable {
         operation_id: OperationId,
@@ -412,8 +412,18 @@ pub enum ExecutableBindingAvailabilityV1 {
     },
 }
 
-impl ExecutableBindingAvailabilityV1 {
-    pub fn available(binding: ExecutableBindingV1) -> Self {
+pub trait ExecutableBindingMetadataV1 {
+    fn operation_id(&self) -> &OperationId;
+}
+
+impl ExecutableBindingMetadataV1 for ExecutableBindingV1 {
+    fn operation_id(&self) -> &OperationId {
+        self.operation_id()
+    }
+}
+
+impl<T: ExecutableBindingMetadataV1> BindingAvailabilityV1<T> {
+    pub fn available(binding: T) -> Self {
         Self::Available {
             binding: Box::new(binding),
         }
@@ -426,7 +436,7 @@ impl ExecutableBindingAvailabilityV1 {
         }
     }
 
-    pub fn binding(&self) -> Option<&ExecutableBindingV1> {
+    pub fn binding(&self) -> Option<&T> {
         match self {
             Self::Available { binding } => Some(binding),
             Self::Unavailable { .. } => None,
@@ -436,14 +446,12 @@ impl ExecutableBindingAvailabilityV1 {
 
 /// Canonically ordered executable lookup assembled by the application root.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecutableBindingRegistryV1 {
-    bindings: BTreeMap<OperationId, ExecutableBindingAvailabilityV1>,
+pub struct BindingRegistryV1<T> {
+    bindings: BTreeMap<OperationId, BindingAvailabilityV1<T>>,
 }
 
-impl ExecutableBindingRegistryV1 {
-    pub fn new(
-        bindings: Vec<ExecutableBindingAvailabilityV1>,
-    ) -> Result<Self, CatalogValidationError> {
+impl<T: ExecutableBindingMetadataV1> BindingRegistryV1<T> {
+    pub fn new(bindings: Vec<BindingAvailabilityV1<T>>) -> Result<Self, CatalogValidationError> {
         let mut registry = BTreeMap::new();
         for binding in bindings {
             if registry
@@ -458,14 +466,17 @@ impl ExecutableBindingRegistryV1 {
         Ok(Self { bindings: registry })
     }
 
-    pub fn get(&self, operation_id: &OperationId) -> Option<&ExecutableBindingAvailabilityV1> {
+    pub fn get(&self, operation_id: &OperationId) -> Option<&BindingAvailabilityV1<T>> {
         self.bindings.get(operation_id)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &ExecutableBindingAvailabilityV1> {
+    pub fn iter(&self) -> impl Iterator<Item = &BindingAvailabilityV1<T>> {
         self.bindings.values()
     }
 }
+
+pub type ExecutableBindingAvailabilityV1 = BindingAvailabilityV1<ExecutableBindingV1>;
+pub type ExecutableBindingRegistryV1 = BindingRegistryV1<ExecutableBindingV1>;
 
 /// The concrete transport a generated, named SDK method invokes.
 ///
@@ -623,72 +634,12 @@ impl SdkExecutableBindingV1 {
     }
 }
 
-/// Truthful SDK lookup state. Unsupported product capabilities remain
-/// explicit, while every available entry has a concrete named transport.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "state")]
-pub enum SdkExecutableBindingAvailabilityV1 {
-    Available {
-        binding: Box<SdkExecutableBindingV1>,
-    },
-    Unavailable {
-        operation_id: OperationId,
-        disposition: ExecutableUnavailableDispositionV1,
-    },
-}
-
-impl SdkExecutableBindingAvailabilityV1 {
-    pub fn available(binding: SdkExecutableBindingV1) -> Self {
-        Self::Available {
-            binding: Box::new(binding),
-        }
-    }
-
-    pub fn operation_id(&self) -> &OperationId {
-        match self {
-            Self::Available { binding } => binding.operation_id(),
-            Self::Unavailable { operation_id, .. } => operation_id,
-        }
-    }
-
-    pub fn binding(&self) -> Option<&SdkExecutableBindingV1> {
-        match self {
-            Self::Available { binding } => Some(binding),
-            Self::Unavailable { .. } => None,
-        }
+impl ExecutableBindingMetadataV1 for SdkExecutableBindingV1 {
+    fn operation_id(&self) -> &OperationId {
+        self.operation_id()
     }
 }
 
-/// Canonically ordered SDK executable lookup assembled by application
-/// composition from actual mounted surface bindings.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SdkExecutableBindingRegistryV1 {
-    bindings: BTreeMap<OperationId, SdkExecutableBindingAvailabilityV1>,
-}
+pub type SdkExecutableBindingAvailabilityV1 = BindingAvailabilityV1<SdkExecutableBindingV1>;
 
-impl SdkExecutableBindingRegistryV1 {
-    pub fn new(
-        bindings: Vec<SdkExecutableBindingAvailabilityV1>,
-    ) -> Result<Self, CatalogValidationError> {
-        let mut registry = BTreeMap::new();
-        for binding in bindings {
-            if registry
-                .insert(binding.operation_id().clone(), binding)
-                .is_some()
-            {
-                return Err(CatalogValidationError::DuplicateValue {
-                    field: "SDK executable operation IDs",
-                });
-            }
-        }
-        Ok(Self { bindings: registry })
-    }
-
-    pub fn get(&self, operation_id: &OperationId) -> Option<&SdkExecutableBindingAvailabilityV1> {
-        self.bindings.get(operation_id)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &SdkExecutableBindingAvailabilityV1> {
-        self.bindings.values()
-    }
-}
+pub type SdkExecutableBindingRegistryV1 = BindingRegistryV1<SdkExecutableBindingV1>;

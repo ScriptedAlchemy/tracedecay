@@ -23,7 +23,8 @@ pub use binding::{
     SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
 };
 pub use executable::{
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    BindingAvailabilityV1, BindingRegistryV1, ExecutableBindingAvailabilityV1,
+    ExecutableBindingMetadataV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
     ExecutableCodecV1, ExecutableSchemaAuthority, ExecutableUnavailableDispositionV1,
     ExecutionOwnerV1, RouteExposureV1, SchemaBodyAuthorityV1, SdkExecutableBindingAvailabilityV1,
     SdkExecutableBindingRegistryV1, SdkExecutableBindingV1, SdkTransportBindingV1,
