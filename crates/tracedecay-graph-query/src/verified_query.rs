@@ -17,7 +17,9 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CodeGenerationId, RelationEdgeKindV1, SanitizedCodeFileV1, SymbolOccurrenceId,
+};
 use tracedecay_graph_db::GraphCancellation;
 
 use super::queries::{GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1};
@@ -393,6 +395,13 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .symbols_page(after, max_symbols, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub fn files(&self, max_files: usize) -> Result<Vec<SanitizedCodeFileV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .files(max_files, Arc::clone(&self.cancellation))
             .map_err(graph_projection_error)
     }
 
