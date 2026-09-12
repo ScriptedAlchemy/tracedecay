@@ -17,12 +17,14 @@ use tracedecay_daemon_protocol::{
 use super::super::work_attempt_exec::WorkAttemptProcessRegistryV1;
 use super::workflow_effect_journal::{
     complete_workflow_read, complete_workflow_run_effect, execute_journaled_workflow_effect,
-    task_handoff_problem, workflow_effect_problem, workflow_storage_problem,
+    task_handoff_problem, workflow_coordination_effect_problem, workflow_effect_problem,
+    workflow_storage_problem,
 };
 use super::workflow_fan_out::{reconcile_workflow_fan_out, synchronize_fan_out_run_controls};
 use super::workflow_run_control::{
     apply_workflow_run_command, cancel_workflow_run, start_workflow_run,
-    workflow_coordination_problem, workflow_run_storage_problem,
+    workflow_coordination_application_problem, workflow_coordination_problem,
+    workflow_run_storage_problem,
 };
 use super::{RegisteredWorkRuntime, work_request_context, workflow_census};
 
@@ -147,7 +149,7 @@ pub(crate) async fn execute_workflow_application(
                     ),
                     Err(error) => WorkflowEffectPreparedV1::problem(
                         input_digest.clone(),
-                        workflow_effect_problem(workflow_coordination_problem(error)),
+                        workflow_coordination_effect_problem(error),
                     ),
                 };
                 execute_journaled_workflow_effect(
@@ -221,6 +223,12 @@ pub(crate) async fn execute_workflow_application(
         }
         WorkflowApplicationInvocation::ValidateDefinition(request) => {
             hotpath::measure_block!("daemon.service.workflow.validate_definition", {
+                let validation = services.definitions().validate(request.definition);
+                if let Err(error) = &validation
+                    && let Some(problem) = workflow_coordination_application_problem(error)
+                {
+                    return DaemonInvocationResponse::application_problem(request_id, problem);
+                }
                 complete_workflow_read(
                     &registered,
                     request_id,
@@ -229,10 +237,7 @@ pub(crate) async fn execute_workflow_application(
                     operation_key,
                     use_case,
                     input_digest,
-                    services
-                        .definitions()
-                        .validate(request.definition)
-                        .map_err(workflow_coordination_problem),
+                    validation.map_err(workflow_coordination_problem),
                     observed_at,
                     deadline,
                     WorkflowApplicationOutcome::ValidateDefinition,

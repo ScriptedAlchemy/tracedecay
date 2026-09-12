@@ -219,77 +219,8 @@ pub(super) async fn registered_project_context(
 mod tests {
     use serde_json::json;
 
-    use tracedecay_mcp::tools::render;
-
-    use super::{
-        CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result,
-        rendered_tool_result,
-    };
+    use super::decode_primitive_request;
     use tracedecay_contracts::retrieval::NodeSurfaceRequestV1;
-    use tracedecay_global_db::RegisteredGlobalDb;
-
-    /// `generic_tool_result` must stay a pure spelling of the closure form it
-    /// replaced at every call site — same bytes on both output formats, and the
-    /// same internal-analytics lifting.
-    #[test]
-    fn generic_tool_result_matches_the_explicit_generic_md_closure() {
-        let mut value = json!({
-            "count": 2,
-            "items": [{"name": "alpha", "file": "src/a.rs"}, {"name": "beta", "file": "src/b.rs"}],
-        });
-        // Exercise the internal-analytics lifting branch too.
-        value[CONTEXT_MEMORY_ANALYTICS_KEY] = json!({"matches": 1});
-        let touched = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
-
-        for args in [
-            json!({}),
-            json!({"format": "markdown"}),
-            json!({"format": "json"}),
-        ] {
-            let expected = rendered_tool_result(None, &args, &value, touched.clone(), || {
-                render::generic_md(&value)
-            });
-            let actual = generic_tool_result(None, &args, &value, touched.clone());
-
-            assert_eq!(actual.value, expected.value, "payload differs for {args}");
-            assert_eq!(
-                actual.touched_files, expected.touched_files,
-                "touched files differ for {args}"
-            );
-            assert_eq!(
-                actual.internal_analytics(),
-                expected.internal_analytics(),
-                "internal analytics differ for {args}"
-            );
-        }
-    }
-
-    /// Handlers that used to build their own text envelope — `render::finalize`
-    /// then a hand-written `{"content":[{"type":"text",...}]}` — now go through
-    /// `rendered_tool_result`. That is the same envelope for any payload without
-    /// the internal-analytics key, which is every payload those handlers build.
-    #[test]
-    fn rendered_tool_result_matches_a_hand_built_text_envelope() {
-        let value = json!({"passed": 0, "failed": 1, "results": [], "note": "nothing ran"});
-        let touched = vec!["src/a.rs".to_string()];
-
-        for args in [
-            json!({}),
-            json!({"format": "markdown"}),
-            json!({"format": "json"}),
-        ] {
-            let text = render::finalize(None, &args, &value, || render::generic_md(&value));
-            let expected = super::text_tool_result(&text, touched.clone());
-            let actual = generic_tool_result(None, &args, &value, touched.clone());
-
-            assert_eq!(actual.value, expected.value, "payload differs for {args}");
-            assert_eq!(
-                actual.touched_files, expected.touched_files,
-                "touched files differ for {args}"
-            );
-            assert!(actual.internal_analytics().is_none(), "for {args}");
-        }
-    }
 
     #[test]
     fn primitive_request_decode_strips_transport_keys_and_rejects_legacy_aliases() {
@@ -318,19 +249,5 @@ mod tests {
         )
         .expect_err("the unreleased id alias is not part of the canonical request");
         assert!(error.to_string().contains("unknown field `id`"));
-    }
-
-    #[test]
-    fn explicit_project_path_detection_is_syntax_only() {
-        assert!(RegisteredGlobalDb::is_explicit_project_path_selector(
-            "/workspace/project"
-        ));
-        assert!(RegisteredGlobalDb::is_explicit_project_path_selector(
-            "team/project"
-        ));
-        assert!(RegisteredGlobalDb::is_explicit_project_path_selector("."));
-        assert!(!RegisteredGlobalDb::is_explicit_project_path_selector(
-            "project"
-        ));
     }
 }

@@ -8426,6 +8426,11 @@
           "const": "table_growth",
           "description": "Per-table SQLite payload growth observed between two retained\nwatermarks, including baseline and unavailable measurement states.",
           "type": "string"
+        },
+        {
+          "const": "pending_schema_migration",
+          "description": "A store whose historical schema convergence has not completed: the\nmigrations whose cost scales with store size are still pending, still\nrunning, or stopped on a failure. The daemon serves while they run, so\nthis is the surface that says which store is still migrating and why.",
+          "type": "string"
         }
       ]
     },
@@ -22746,6 +22751,13 @@
           "type": "array",
           "uniqueItems": true
         },
+        "attempt_receipts": {
+          "description": "Exact receipts for accepted successful attempts whose sealed provider\nevidence and declared artifacts establish reusable observed work. The\nidentity is also the canonical `work_retrieve_evidence` drill target.",
+          "items": {
+            "$ref": "#/$defs/WorkAttemptReceiptV1"
+          },
+          "type": "array"
+        },
         "evidence": {
           "description": "Exact anchored evidence establishing that this is observed experience.",
           "items": {
@@ -22760,6 +22772,7 @@
       "required": [
         "item",
         "evidence",
+        "attempt_receipts",
         "applicability"
       ],
       "type": "object"
@@ -28103,7 +28116,8 @@
           "type": "integer"
         },
         "pinned_catalog_digest": {
-          "$ref": "#/$defs/ManifestDigest"
+          "$ref": "#/$defs/ManifestDigest",
+          "description": "Must equal the live Work executable catalog digest. Validation and\nactivation report the current digest when this pin is stale."
         },
         "pinned_configuration_digest": {
           "$ref": "#/$defs/ManifestDigest"
@@ -28145,6 +28159,7 @@
           "type": "integer"
         },
         "expected_revision": {
+          "description": "Current candidate disposition revision. A newly registered candidate\nstarts at revision 1; activation reports expected and observed values\nwhen this compare-and-swap precondition is stale.",
           "format": "uint64",
           "minimum": 1,
           "type": "integer"

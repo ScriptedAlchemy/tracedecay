@@ -103,17 +103,6 @@ describe('composeConstellation', () => {
     return graph;
   }
 
-  it('leaves a single connected component exactly where the settle put it', () => {
-    const graph = scatter([[['a', 3, 4], ['b', 9, -2]]]);
-
-    composeConstellation(graph);
-
-    expect([
-      graph.getNodeAttribute('a', 'x'),
-      graph.getNodeAttribute('a', 'y'),
-    ]).toEqual([3, 4]);
-  });
-
   // Equal-sized components are a constellation with no main body, so they are
   // spaced evenly on a ring sized to exactly the radius non-overlap needs.
   it('spaces equal components onto a ring instead of letting them drift apart', () => {

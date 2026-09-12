@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN};
 use serde_json::Value;
 use tempfile::TempDir;
+use tracedecay_contracts::{APPLICATION_REQUEST_ID_HEADER, RequestId};
 use tracedecay_sdk::client::{
     Client, ClientError, ConnectionMode, OperationRequestOptions, TypedResponse,
 };
-use tracedecay_contracts::{APPLICATION_REQUEST_ID_HEADER, RequestId};
 use tracedecay_sdk::operations::ApplicationFactStoreCurate;
 
 const VALID_REQUEST_ID: &str = "request.sdk.semantic-replay";

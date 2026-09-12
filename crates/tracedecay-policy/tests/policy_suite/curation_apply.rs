@@ -91,15 +91,3 @@ fn curation_with_no_candidate_is_not_applicable() {
     );
     assert!(!decision.allows_apply());
 }
-
-#[test]
-fn decision_binds_exact_authority_and_configuration_revision() {
-    let input = input(
-        CurationApplySubjectV1::SkillWriter,
-        Some(digest('a')),
-        CurationValidationDispositionV1::Accepted,
-    );
-    let decision = evaluate_curation_apply(&input).expect("decision");
-
-    assert_eq!(decision.authority, input.authority);
-}

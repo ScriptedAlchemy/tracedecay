@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::{
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
+};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::SessionMessageRecord;
@@ -761,6 +764,138 @@ pub fn transcript_git_evidence(
         }
     }
     (records.into_values().collect(), spans)
+}
+
+/// Derives Git evidence from one privacy-approved canonical observation.
+///
+/// The envelope contributes only typed Git facts and native identity/time.
+/// Worktree identity comes exclusively from the daemon-admitted repository
+/// root. Commit facts become relations only when the referenced object resolves
+/// independently to a commit in that admitted repository.
+#[hotpath::measure(label = "sessions.git_correlation.canonical_observation_evidence")]
+pub fn canonical_observation_git_evidence(
+    sanitized_payload: &serde_json::Value,
+    admitted_project_root: &std::path::Path,
+) -> Result<(Vec<CommitSessionRecord>, Vec<SpanObservation>), GitCorrelationError> {
+    let envelope: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(sanitized_payload.clone()).map_err(|error| {
+            GitCorrelationError::Contract(format!(
+                "sanitized canonical observation is invalid: {error}"
+            ))
+        })?;
+    let mut branch = None;
+    let mut commit_references = BTreeSet::new();
+    for fact in envelope.facts() {
+        let CanonicalObservationFactV1::Git {
+            evidence_kind,
+            reference: Some(reference),
+            ..
+        } = fact
+        else {
+            continue;
+        };
+        match evidence_kind {
+            CanonicalGitEvidenceKindV1::Branch if !reference.trim().is_empty() => {
+                branch.get_or_insert_with(|| reference.clone());
+            }
+            CanonicalGitEvidenceKindV1::Commit if !reference.trim().is_empty() => {
+                commit_references.insert(reference.clone());
+            }
+            _ => {}
+        }
+    }
+    if branch.is_none() && commit_references.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let provider = envelope.provider().as_str().to_owned();
+    let session_id = envelope.relations().session_id().as_str().to_owned();
+    let timestamp = envelope.evidence().native_timestamp();
+    let worktree = normalize_worktree(&admitted_project_root.to_string_lossy());
+    let spans = timestamp
+        .map(|ts| {
+            vec![SpanObservation {
+                provider: provider.clone(),
+                session_id: session_id.clone(),
+                thread_id: envelope
+                    .relations()
+                    .thread_id()
+                    .map(|thread_id| thread_id.as_str().to_owned()),
+                branch: branch.clone(),
+                worktree: worktree.clone(),
+                ts,
+                source: SpanSource::Ingest,
+            }]
+        })
+        .unwrap_or_default();
+
+    let repo = gix::discover(admitted_project_root).map_err(|error| {
+        GitCorrelationError::Unavailable(format!(
+            "admitted repository could not be opened for canonical commit evidence: {error}"
+        ))
+    })?;
+    let mut commits = Vec::new();
+    for reference in commit_references {
+        let Ok(prefix) = gix::hash::Prefix::from_hex(reference.as_str()) else {
+            // A non-hex historical value is not independently verifiable
+            // commit evidence.
+            continue;
+        };
+        let object_id = match repo.objects.lookup_prefix(prefix, None) {
+            Ok(Some(Ok(object_id))) => object_id,
+            // Missing and ambiguous historical prefixes are unresolved, so
+            // neither is evidence for a particular commit.
+            Ok(None | Some(Err(()))) => continue,
+            Err(error) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit prefix `{reference}` could not be read: {error}"
+                )));
+            }
+        };
+        let object = match repo.try_find_object(object_id) {
+            Ok(Some(object)) => object,
+            Ok(None) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit `{reference}` disappeared after prefix resolution"
+                )));
+            }
+            Err(error) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit object `{reference}` could not be read: {error}"
+                )));
+            }
+        };
+        let commit = match object.try_into_commit() {
+            Ok(commit) => commit,
+            // A provider may retain another Git object identifier. It is not
+            // independently verified commit evidence.
+            Err(_) => continue,
+        };
+        let commit_time = commit.time().map_err(|error| {
+            GitCorrelationError::Corrupt(format!(
+                "canonical commit `{reference}` timestamp could not be decoded: {error}"
+            ))
+        })?;
+        let commit_sha = commit.id.to_string();
+        commits.push(CommitSessionRecord {
+            commit_sha,
+            provider: provider.clone(),
+            session_id: session_id.clone(),
+            branch: branch.clone(),
+            worktree: Some(worktree.clone()),
+            committed_at: commit_time.seconds,
+            span_overlap_kind: SpanOverlapKind::Direct,
+            span_id: None,
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::HeadObservation,
+            confidence: 60,
+            evidence_message_id: envelope
+                .relations()
+                .message_id()
+                .map(|message_id| message_id.as_str().to_owned()),
+        });
+    }
+    Ok((commits, spans))
 }
 
 fn parsed_message_metadata(message: &SessionMessageRecord) -> Option<serde_json::Value> {

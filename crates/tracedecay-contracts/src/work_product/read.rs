@@ -4,8 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    UtcMicros, WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductProjectionBundleV1,
-    WorkRuntimeProjectionV1, canonical_sha256,
+    ProjectionGenerationId, UtcMicros, WorkProductEventSequenceV1, WorkProductGraphV1,
+    WorkProductProjectionBundleV1, WorkRuntimeProjectionV1, canonical_sha256,
 };
 
 use crate::{
@@ -228,6 +228,34 @@ impl WorkGraphVersionEntryV1 {
     pub const fn projections(&self) -> &WorkProductProjectionBundleV1 {
         &self.projections
     }
+}
+
+pub fn work_product_projection_generation(
+    snapshot: &WorkGraphVersionEntryV1,
+) -> Result<ProjectionGenerationId, WorkProductApplicationErrorV1> {
+    let digest = canonical_sha256(&(
+        "tracedecay.work-product-projection-generation.v1",
+        snapshot.verified_version(),
+    ))
+    .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
+    ProjectionGenerationId::new(format!("work-product-projection.{}", digest.as_str()))
+        .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
+}
+
+pub fn work_product_attempt_topology_binding(
+    snapshot: &WorkGraphVersionEntryV1,
+) -> Result<WorkAttemptTopologyBindingV1, WorkProductApplicationErrorV1> {
+    let generation = canonical_sha256(&(
+        "tracedecay.work-attempt-topology-generation.v1",
+        snapshot.verified_version(),
+    ))
+    .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
+    let task_count = u32::try_from(snapshot.graph().items().len())
+        .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
+    Ok(WorkAttemptTopologyBindingV1 {
+        generation: generation.as_str().to_owned(),
+        task_count,
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -633,18 +661,8 @@ where
         let WorkGraphReadV1::Current { snapshot, .. } = read else {
             return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
         };
-        let generation = canonical_sha256(&(
-            "tracedecay.work-attempt-topology-generation.v1",
-            snapshot.verified_version(),
-        ))
-        .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
-        let task_count = u32::try_from(snapshot.graph().items().len())
-            .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
         Ok(WorkAttemptTopologyStateV1::Verified(
-            WorkAttemptTopologyBindingV1 {
-                generation: generation.as_str().to_owned(),
-                task_count,
-            },
+            work_product_attempt_topology_binding(&snapshot)?,
         ))
     }
 }

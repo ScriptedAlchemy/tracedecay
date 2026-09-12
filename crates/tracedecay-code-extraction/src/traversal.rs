@@ -75,10 +75,7 @@ fn visit_children_while<'tree>(node: TsNode<'tree>, mut visit: impl FnMut(TsNode
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{
-        find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind,
-        visit_children_while,
-    };
+    use super::{find_descendant_by_kind, find_direct_child_by_kind, visit_children_while};
     use crate::ts_provider;
     use tree_sitter::{Node as TsNode, Parser};
 
@@ -111,14 +108,6 @@ mod tests {
 
         assert!(find_direct_child_by_kind(function, "identifier").is_none());
         assert!(find_descendant_by_kind(function, "identifier").is_some());
-    }
-
-    #[test]
-    fn reports_presence_of_direct_children() {
-        let function = parse_c_function("int answer(void) { return 42; }");
-
-        assert!(has_direct_child_kind(function, "function_declarator"));
-        assert!(!has_direct_child_kind(function, "identifier"));
     }
 
     #[test]

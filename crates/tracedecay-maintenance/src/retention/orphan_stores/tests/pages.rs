@@ -1,47 +1,5 @@
 use super::*;
 
-#[test]
-fn malformed_manifest_bytes_mark_the_census_entry_unverifiable() {
-    let profile = tempfile::tempdir().unwrap();
-    let data_root = profile.path().join("stores/malformed");
-    std::fs::create_dir_all(&data_root).unwrap();
-    std::fs::write(
-        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
-        b"{ this is not valid manifest json",
-    )
-    .unwrap();
-
-    // Exercise the same parse the census performs, so the fixture proves the
-    // production decode path — not a hand-set flag — yields unverifiable.
-    let bytes =
-        std::fs::read(data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME))
-            .unwrap();
-    let parsed = serde_json::from_slice::<StoreManifest>(&bytes).ok();
-    assert!(parsed.is_none(), "fixture manifest must be unparseable");
-
-    let mut census_entry = entry(
-        "malformed",
-        PathBuf::from("/definitely/not/here/gone"),
-        None,
-        None,
-        data_root,
-        0,
-        4096,
-    );
-    census_entry.manifest_readable = parsed.is_some();
-
-    let findings = classify_stores(&[census_entry], 1_000 * DAY);
-    assert!(
-        matches!(
-            findings[0].disposition,
-            StoreDisposition::Unverifiable { .. }
-        ),
-        "unparseable manifest bytes must classify as unverifiable"
-    );
-}
-
-/// Seed a profile with one live store and one identity-drift orphan store, then
-/// prove the async sweep collects only the orphan and retires its registry row.
 #[tokio::test]
 async fn sweep_collects_orphan_store_and_retires_row() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -120,6 +78,9 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     );
 }
 
+/// The collection plan is only an inspection receipt.  Replacing its directory
+/// with byte-identical contents in the same timestamp second must still abort
+/// the apply rather than retire a newly-created store identity.
 #[tokio::test]
 async fn sweep_preserves_immature_sibling_store_identity() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -380,7 +341,11 @@ async fn registered_store_census_resumes_across_bounded_project_pages() {
     assert!(second.next_cursor.is_none());
 }
 
-// === Unregistered store directories =========================================
+// === Durable-memory guard ===================================================
+
+/// A store whose graph database carries durable `memory_facts` rows must
+/// never be collected, even when every registry/manifest/payload revival
+/// check passes and the store is otherwise a textbook orphan.
 #[tokio::test]
 async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -471,25 +436,79 @@ async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_you
     );
 }
 
+/// An unregistered store whose own manifest names a project root that no
+/// longer exists is debris the moment the census sees it: the retention
+/// window exists for stores whose root might still come back, and a missing
+/// or unreadable manifest, or a root that is still present, keeps that window.
 #[tokio::test]
-async fn sweep_unregistered_stores_collects_an_exactly_empty_old_directory() {
+async fn unregistered_store_with_a_vanished_manifest_root_is_collected_at_once() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let (_runtime, db) = open_registered_db(&profile_root).await;
-
     let base = 1_700_000_000i64;
-    let empty_dir = profile_root.join("projects").join("proj_empty_ghost");
-    std::fs::create_dir_all(&empty_dir).unwrap();
 
-    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
+    let manifest_for = |data_root: &Path, project_root: &Path| StoreManifest {
+        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+        project_id: Some(data_root.file_name().unwrap().to_str().unwrap().to_owned()),
+        store_kind: StoreKind::CodeProject,
+        storage_mode: StorageMode::ProfileSharded,
+        project_root: project_root.to_path_buf(),
+        data_root: data_root.to_path_buf(),
+        graph_db_relpath: PathBuf::from("tracedecay.db"),
+        sessions_db_relpath: PathBuf::from("sessions.db"),
+        branch_meta_relpath: PathBuf::from("branch-meta.json"),
+    };
+    let seed = |name: &str, project_root: Option<&Path>| {
+        let data_root = profile_root.join("projects").join(name);
+        std::fs::create_dir_all(&data_root).unwrap();
+        std::fs::write(data_root.join("sessions.db"), b"fresh payload").unwrap();
+        if let Some(project_root) = project_root {
+            tracedecay_runtime_core::storage::write_store_manifest_to_path(
+                &data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+                &manifest_for(&data_root, project_root),
+            )
+            .unwrap();
+        }
+        data_root
+    };
+
+    let vanished_root = tmp.path().join("checkouts").join("deleted-worktree");
+    let present_root = tmp.path().join("checkouts").join("still-here");
+    std::fs::create_dir_all(&present_root).unwrap();
+    let vanished = seed("proj_vanished_root", Some(&vanished_root));
+    let present = seed("proj_present_root", Some(&present_root));
+    let unmanifested = seed("proj_no_manifest", None);
+    // Every payload was written just now: none of them is past the window.
+    let findings = census_unregistered_project_dirs(&db, &profile_root, base + 60)
         .await
         .unwrap();
+    assert_eq!(findings.len(), 3);
+    let plan = plan_unregistered_collection(findings, 7 * DAY);
+    assert_eq!(
+        plan.collect
+            .iter()
+            .map(|finding| finding.project_dir_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["proj_vanished_root"],
+        "only the store whose root is gone skips the retention window"
+    );
+    assert!(plan.collect[0].abandoned_root);
+    assert_eq!(plan.retained_immature.len(), 2);
+    assert!(
+        plan.retained_immature
+            .iter()
+            .all(|finding| !finding.abandoned_root)
+    );
 
-    assert_eq!(report.plan.collect.len(), 1);
-    assert_eq!(report.outcome.collected.len(), 1);
-    assert!(report.outcome.errors.is_empty());
-    assert!(!empty_dir.exists());
+    let outcome = execute_unregistered_collection(&db, &plan, &profile_root)
+        .await
+        .unwrap();
+    assert_eq!(outcome.collected.len(), 1);
+    assert!(outcome.errors.is_empty());
+    assert!(!vanished.exists());
+    assert!(present.exists());
+    assert!(unmanifested.exists());
 }
 
 /// A registered project id must never be treated as an unregistered
@@ -539,9 +558,9 @@ async fn sweep_unregistered_stores_aborts_when_directory_gets_registered_first()
     );
 }
 
-/// Cancellation is checked before any recursive SHA-256 read. A cancelled
-/// maintenance admission cannot turn a deep inventory into a partial plan or
-/// an implicit deletion permit.
+/// An unregistered directory uses the same inspect→confirm→apply boundary as
+/// a registered orphan. A same-second replacement of an empty directory must
+/// not inherit the original collection decision.
 #[test]
 fn cancelled_content_census_stops_before_hashing_or_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -592,9 +611,6 @@ fn cancelled_mtime_and_size_walks_stop_before_descending() {
     assert!(data_root.join("a/b/c/payload.bin").is_file());
 }
 
-/// Unregistered projects are an on-disk-only class, but their retention work
-/// still advances through a bounded, resumable page rather than recursing the
-/// entire profile under a single writer admission.
 #[tokio::test]
 async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -718,9 +734,6 @@ async fn unregistered_store_sweep_elapsed_deadline_does_not_advance_page_state()
     );
 }
 
-/// Every platform uses an append-only durable inventory. A cancelled admission
-/// keeps its partial inventory, and
-/// the next page advances that exact log instead of deleting/rebuilding it.
 #[test]
 fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
     let tmp = tempfile::TempDir::new().unwrap();

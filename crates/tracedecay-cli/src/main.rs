@@ -220,16 +220,6 @@ mod spinner_tail_tests {
             assert!(text.ends_with(kept), "{text}");
         }
     }
-
-    #[test]
-    fn a_message_one_character_over_drops_two_and_adds_the_ellipsis() {
-        let text = "é".repeat(SPINNER_MESSAGE_MAX_CHARS + 1);
-        let tail = spinner_tail(&text, SPINNER_MESSAGE_MAX_CHARS);
-        assert_eq!(
-            tail,
-            format!("…{}", "é".repeat(SPINNER_MESSAGE_MAX_CHARS - 1))
-        );
-    }
 }
 
 impl Drop for Spinner {

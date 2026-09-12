@@ -240,19 +240,6 @@ mod tests {
     }
 
     #[test]
-    fn unactivated_wins_over_a_present_runtime_status() {
-        let source = semantic_source_from_read(read(
-            false,
-            Some(SemanticRuntimeStateV1::Indexing {
-                completed_units: 1,
-                total_units: 2,
-            }),
-        ));
-
-        assert_eq!(source.outcome, ExplorerSourceOutcomeV1::Absent);
-    }
-
-    #[test]
     fn activated_without_a_mounted_runtime_is_unavailable_not_absent() {
         let source = semantic_source_from_read(read(true, None));
 

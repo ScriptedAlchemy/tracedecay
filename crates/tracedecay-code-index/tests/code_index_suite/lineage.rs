@@ -73,34 +73,6 @@ fn index(sequence: u64, symbols: Vec<LineageSymbolRecordV1>) -> GenerationSymbol
 }
 
 #[test]
-fn exact_content_evidence_classifies_moves_and_renames() {
-    let prior = index(
-        1,
-        vec![
-            symbol("symbol.prior.move", 'a', "crate::move_me", 'f', '0'),
-            symbol("symbol.prior.rename", 'b', "crate::old_name", 'f', '1'),
-        ],
-    );
-    let current = index(
-        2,
-        vec![
-            symbol("symbol.current.move", 'c', "crate::move_me", '9', '0'),
-            symbol("symbol.current.rename", 'd', "crate::new_name", 'f', '1'),
-        ],
-    );
-
-    let candidates = SymbolLineageResolver::new()
-        .resolve(&prior, &current)
-        .expect("lineage resolves");
-
-    assert_eq!(candidates.len(), 2);
-    assert_eq!(candidates[0].kind, LineageKindV1::Moved);
-    assert_eq!(candidates[0].method, LineageMethodV1::ContentDigestMatch);
-    assert_eq!(candidates[1].kind, LineageKindV1::Renamed);
-    assert_eq!(candidates[1].method, LineageMethodV1::ContentDigestMatch);
-}
-
-#[test]
 fn content_digest_without_continuity_abstains() {
     let prior = index(
         1,

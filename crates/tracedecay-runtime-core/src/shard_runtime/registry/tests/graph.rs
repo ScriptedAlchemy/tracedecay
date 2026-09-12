@@ -112,32 +112,6 @@ async fn graph_db_map_owner_is_not_counted_as_an_ordinary_store_graph_client() {
 }
 
 #[tokio::test]
-async fn graph_map_owner_retains_no_ordinary_store_graph_lease() {
-    let (store_registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
-    let pin = profile_pin(&store_registry).await;
-    let key = project_request("project.graph-map-owner-identity", &pin)
-        .key()
-        .clone();
-
-    let (owner_attachment, retirement_target) = store_registry
-        .attach_graph_store_owner(key.clone())
-        .await
-        .unwrap();
-
-    {
-        let state = store_registry.lock_state();
-        let publication = state.graph_publications.get(&key).unwrap();
-        assert!(publication.owner_attachment.is_some());
-        assert!(publication.lease_tokens.is_empty());
-    }
-    assert_eq!(store_registry.retained_graph_publications_for_test(), 1);
-
-    drop(retirement_target);
-    drop(owner_attachment);
-    assert_eq!(store_registry.retained_graph_publications_for_test(), 0);
-}
-
-#[tokio::test]
 async fn graph_map_owner_issued_operation_lease_is_an_ordinary_token_and_releases_on_drop() {
     let (store_registry, resolver, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&store_registry).await;

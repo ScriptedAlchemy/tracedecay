@@ -227,8 +227,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         change: &'a tracedecay_domain::configuration::ProtectedChange,
-    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
-    {
+    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1> {
         let allowed = actor.actor_id == self.actor && change.validate().is_ok();
         let evidence = self.evidence.clone();
         Box::pin(async move {
@@ -242,8 +241,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         plan: &'a tracedecay_domain::configuration::ProtectedChangePlan,
-    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
-    {
+    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1> {
         let allowed = actor.actor_id == self.actor && plan.validate().is_ok();
         let evidence = self.evidence.clone();
         Box::pin(async move {
@@ -1486,24 +1484,17 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
     pub async fn ensure(
         &self,
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-        repository_root: PathBuf,
-        project_id: ProjectId,
-        repository_id: tracedecay_domain::RepositoryId,
-        policy_digest: ManifestDigest,
+        target: tracedecay_agent_hosts::native_integration::NativeIntegrationTargetV1,
         observed_at: UtcMicros,
+        analysis: Arc<
+            dyn tracedecay_application::native_integration::NativeIntegrationAnalysisPort,
+        >,
     ) -> Result<
         tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner,
         tracedecay_contracts::NativeIntegrationPortError,
     > {
         self.registry
-            .ensure(
-                database,
-                repository_root,
-                project_id,
-                repository_id,
-                policy_digest,
-                observed_at,
-            )
+            .ensure(database, target, observed_at, analysis)
             .await
     }
 

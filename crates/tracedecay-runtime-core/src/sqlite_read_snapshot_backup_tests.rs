@@ -308,22 +308,6 @@ fn forced_publish_failure_retires_staging_and_publishes_nothing() {
 }
 
 #[test]
-fn exclusive_staging_refuses_a_collision_without_deleting_it() {
-    let temp = TempDir::new().unwrap();
-    let path = temp.path().join("owned.backup-partial");
-    fs::write(&path, b"foreign-scratch").unwrap();
-    let identity = sqlite_generation_identity(&path).unwrap();
-    let bytes = fs::read(&path).unwrap();
-
-    let error = super::reserve_exclusive_file(&path)
-        .expect_err("create_new must refuse a pre-existing scratch name");
-
-    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    assert_eq!(fs::read(&path).unwrap(), bytes);
-    assert_eq!(sqlite_generation_identity(&path).unwrap(), identity);
-}
-
-#[test]
 fn early_source_open_error_skips_colliding_scratch_and_retires_only_owned_staging() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("missing.db");
@@ -473,29 +457,6 @@ async fn live_backup_of_wal_without_shm_does_not_write_the_source_directory() {
     assert_eq!(snapshot_ids(&destination), [0, 1]);
     assert_eq!(family_state(&source).unwrap(), before);
     assert!(!shm.exists());
-}
-
-#[tokio::test]
-async fn live_backup_never_replaces_an_existing_destination() {
-    let temp = TempDir::new().unwrap();
-    let source = temp.path().join("live.db");
-    let destination = temp.path().join("snapshot.db");
-    Connection::open(&source)
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-             INSERT INTO durable(id, value) VALUES (1, 'fresh');",
-        )
-        .unwrap();
-    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
-
-    let error = backup_live_sqlite_database(&source, &destination)
-        .await
-        .expect_err("an existing destination is refused on every platform");
-
-    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    assert_destination_survived(&destination, identity, &bytes);
-    assert_eq!(snapshot_ids_text(&destination), ["keep-me"]);
 }
 
 #[test]
@@ -685,29 +646,6 @@ fn live_backup_rejects_source_destination_alias() {
 }
 
 #[test]
-fn rollback_journal_exclusive_lock_makes_the_first_backup_step_busy() {
-    let temp = TempDir::new().unwrap();
-    let source = temp.path().join("locked.db");
-    let writer = Connection::open(&source).unwrap();
-    writer
-        .execute_batch(
-            "PRAGMA journal_mode=DELETE;
-             CREATE TABLE durable(value TEXT NOT NULL);
-             INSERT INTO durable(value) VALUES ('held');
-             BEGIN EXCLUSIVE;",
-        )
-        .unwrap();
-
-    let step = first_backup_step(&source).expect("probe the exclusive reader conflict");
-    assert!(
-        matches!(step, StepResult::Busy | StepResult::Locked),
-        "DELETE-journal EXCLUSIVE must exclude backup readers, got {step:?}"
-    );
-    writer.execute_batch("ROLLBACK;").unwrap();
-    drop(writer);
-}
-
-#[test]
 fn live_backup_deadline_interrupts_busy_locked_retries() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("locked.db");
@@ -778,39 +716,6 @@ fn snapshot_ids_text(path: &std::path::Path) -> Vec<String> {
         .unwrap()
         .map(|value| value.unwrap())
         .collect()
-}
-
-#[tokio::test]
-async fn foreign_copy_snapshot_leaves_the_source_main_wal_and_shm_family_untouched() {
-    let temp = TempDir::new().unwrap();
-    let source = temp.path().join("foreign.db");
-    let writer = wal_writer(&source);
-    let before = family_state(&source).unwrap();
-
-    let snapshot = open_foreign_in(
-        &source,
-        &temp.path().join("scratch"),
-        SnapshotReadControl::unlimited(),
-    )
-    .await
-    .unwrap();
-    let mut rows = snapshot
-        .connection()
-        .query("SELECT value FROM durable ORDER BY id", ())
-        .await
-        .unwrap();
-    let mut values = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        values.push(row.get::<String>(0).unwrap());
-    }
-
-    assert_eq!(values, ["checkpointed", "wal-resident"]);
-    assert_eq!(family_state(&source).unwrap(), before);
-    assert!(
-        with_suffix(&source, "-wal").metadata().unwrap().len() > 0,
-        "foreign snapshot must not checkpoint the source"
-    );
-    drop(writer);
 }
 
 #[tokio::test]

@@ -5,7 +5,11 @@ use std::path::Path;
 use tracedecay_domain::{UtcMicros, framed_log::checksum as frame_checksum};
 use tracedecay_private_fs::framed_log::{append_durable, truncate_file as shared_truncate_file};
 
-use crate::{HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, HookHostV1, MAX_HOOK_PAYLOAD_BYTES};
+use crate::{
+    HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, HookHostV1, MAX_HOOK_PAYLOAD_BYTES,
+    NativeContextScoutLifecycleV1,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::types::{HookSpoolRecordV1, PendingRecordV1, ScanResult};
@@ -14,6 +18,33 @@ use super::{
     HookSpoolConfigV1, HookSpoolError, SPOOL_FORMAT_VERSION, SPOOL_MAGIC, records_path,
     validate_regular_or_missing,
 };
+
+const SPOOL_PAYLOAD_VERSION: u16 = 1;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookSpoolPayloadV1 {
+    spool_payload_version: u16,
+    envelope: HookEventEnvelopeV2,
+    native_lifecycle: Option<NativeContextScoutLifecycleV1>,
+}
+
+pub(super) fn encode_spool_payload(
+    envelope: &HookEventEnvelopeV2,
+    native_lifecycle: Option<&NativeContextScoutLifecycleV1>,
+) -> Result<Vec<u8>, HookSpoolError> {
+    if native_lifecycle.is_some_and(|lifecycle| !lifecycle.matches_envelope(envelope)) {
+        return Err(HookSpoolError::EnvelopeRejected(
+            crate::HookContractError::BindingMismatch,
+        ));
+    }
+    tracedecay_domain::canonical_json_bytes(&HookSpoolPayloadV1 {
+        spool_payload_version: SPOOL_PAYLOAD_VERSION,
+        envelope: envelope.clone(),
+        native_lifecycle: native_lifecycle.cloned(),
+    })
+    .map_err(|_| HookSpoolError::RecordTooLarge)
+}
 
 pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
     hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame.len());
@@ -26,8 +57,7 @@ pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolErr
 
 pub(super) fn truncate_records(root: &Path, length: u64) -> Result<(), HookSpoolError> {
     hotpath::measure_block!("hooks.spool.fsync.truncate", {
-        shared_truncate_file(&records_path(root), length, DIRECTORY_POLICY)
-            .map_err(|_| HookSpoolError::Io)
+        shared_truncate_file(&records_path(root), length).map_err(|_| HookSpoolError::Io)
     })
 }
 
@@ -276,7 +306,7 @@ pub(super) fn decode_complete_frame(
         });
     }
     let payload = &frame[62..checksum_at];
-    let envelope = decode_exact_envelope(payload, file_offset)?;
+    let (envelope, native_lifecycle) = decode_spool_payload(payload, file_offset)?;
     if envelope.producer != host || envelope.protected_session_id != protected_session_id {
         return Err(HookSpoolError::Corrupted {
             at_offset: file_offset,
@@ -287,10 +317,38 @@ pub(super) fn decode_complete_frame(
         protected_session_id,
         queued_at,
         envelope,
+        native_lifecycle,
         encoded_len: u32::try_from(payload_len).map_err(|_| HookSpoolError::MetadataCorrupted)?,
         checksum,
         framed_len: u32::try_from(frame.len()).map_err(|_| HookSpoolError::MetadataCorrupted)?,
     })
+}
+
+fn decode_spool_payload(
+    payload: &[u8],
+    file_offset: u64,
+) -> Result<(HookEventEnvelopeV2, Option<NativeContextScoutLifecycleV1>), HookSpoolError> {
+    let value: Value = serde_json::from_slice(payload).map_err(|_| HookSpoolError::Corrupted {
+        at_offset: file_offset,
+    })?;
+    if value.get("spool_payload_version").is_none() {
+        return decode_exact_envelope(payload, file_offset).map(|envelope| (envelope, None));
+    }
+    let decoded: HookSpoolPayloadV1 =
+        serde_json::from_value(value).map_err(|_| HookSpoolError::Corrupted {
+            at_offset: file_offset,
+        })?;
+    if decoded.spool_payload_version != SPOOL_PAYLOAD_VERSION
+        || decoded
+            .native_lifecycle
+            .as_ref()
+            .is_some_and(|lifecycle| !lifecycle.matches_envelope(&decoded.envelope))
+    {
+        return Err(HookSpoolError::Corrupted {
+            at_offset: file_offset,
+        });
+    }
+    Ok((decoded.envelope, decoded.native_lifecycle))
 }
 
 fn decode_exact_envelope(

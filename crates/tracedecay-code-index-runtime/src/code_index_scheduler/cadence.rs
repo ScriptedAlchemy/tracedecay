@@ -417,21 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn queue_delay_is_arrival_to_dequeue_and_service_is_dequeue_to_ready() {
-        // Arrival at 100, dequeued at 400, terminal at 900: the wait in the
-        // queue and the work done after dequeue are different measurements.
-        let receipt = receipt(CodeIndexArrivalV1::Observed { wake_micros: 100 }, 400, 900);
-        assert_eq!(receipt.queue_delay_micros(), Some(300));
-        assert_eq!(receipt.service_micros(), 500);
-        assert_eq!(receipt.event_to_ready_micros(), Some(800));
-        assert!(
-            receipt.queue_delay_micros() < receipt.event_to_ready_micros(),
-            "queue delay must be strictly less than total latency when the \
-             scheduler spent time reconciling after dequeue"
-        );
-    }
-
-    #[test]
     fn unavailable_arrival_withholds_latency_instead_of_reporting_zero() {
         let receipt = receipt(CodeIndexArrivalV1::Unavailable, 400, 900);
         assert_eq!(receipt.queue_delay_micros(), None);

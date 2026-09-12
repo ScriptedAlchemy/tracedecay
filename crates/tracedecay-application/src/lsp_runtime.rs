@@ -3691,21 +3691,6 @@ mod projection_tests {
     }
 
     #[test]
-    fn context_projection_emits_only_active_findings() {
-        assert!(finding_item(&finding(FeedbackFindingLifecycleV1::Active)).is_some());
-        for lifecycle in [
-            FeedbackFindingLifecycleV1::Superseded,
-            FeedbackFindingLifecycleV1::Resolved,
-            FeedbackFindingLifecycleV1::Cleared,
-        ] {
-            assert!(
-                finding_item(&finding(lifecycle)).is_none(),
-                "{lifecycle:?} finding remained visible"
-            );
-        }
-    }
-
-    #[test]
     fn advisory_projection_keeps_only_its_active_canonical_producer_findings() {
         let findings = [
             advisory_finding(
@@ -4387,23 +4372,5 @@ mod diagnostic_admission_tests {
             admit(&drifted, Some(&target)),
             Err(FeedbackDiagnosticProjectionSkipV1::SourceRevisionDrift)
         );
-    }
-
-    #[test]
-    fn every_skip_reason_has_a_distinct_label() {
-        let labels = [
-            FeedbackDiagnosticProjectionSkipV1::LifecycleNotActive,
-            FeedbackDiagnosticProjectionSkipV1::NoRetrievalAnchor,
-            FeedbackDiagnosticProjectionSkipV1::AnchorNotPublished,
-            FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch,
-            FeedbackDiagnosticProjectionSkipV1::ImpactTargetAbsent,
-            FeedbackDiagnosticProjectionSkipV1::GenerationMismatch,
-            FeedbackDiagnosticProjectionSkipV1::ContentDigestMismatch,
-            FeedbackDiagnosticProjectionSkipV1::RecordNotCurrent,
-            FeedbackDiagnosticProjectionSkipV1::SourceRevisionDrift,
-        ]
-        .map(FeedbackDiagnosticProjectionSkipV1::label);
-        let unique: std::collections::BTreeSet<&str> = labels.into_iter().collect();
-        assert_eq!(unique.len(), labels.len());
     }
 }

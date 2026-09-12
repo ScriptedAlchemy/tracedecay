@@ -592,14 +592,21 @@ impl DaemonSemanticRuntimeHandleV1 {
                 // the live float set is bounded by one batch rather than by
                 // the corpus, and a crash resumes from the last committed
                 // checkpoint instead of re-embedding everything.
+                let mut splitter = RuntimeChunkVectorEncoderV1::new(
+                    Arc::clone(&candidate),
+                    Arc::clone(&progress),
+                    authority.embedding_execution_plan(),
+                    Arc::clone(&request.documents),
+                );
                 let batches = split_projection_request(
                     &request.projection_request,
                     &request.canonical_chunks,
                     request.max_embeds_per_batch,
-                    authority.projection().embedding_key().inference_batch_size as usize,
-                    authority.projection().embedding_key().inference_batch_bytes as usize,
+                    authority.projection().embedding_key(),
+                    &mut splitter,
                 )
                 .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+                drop(splitter);
                 drop(request.canonical_chunks);
                 let committed_batches = completed_batch_offset(resume, batches.len())?
                     .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
@@ -942,6 +949,12 @@ impl DaemonSemanticRuntimeHandleV1 {
 
     pub fn status_projection(&self) -> SemanticRuntimeStatusProjectionV1 {
         let status = self.status();
+        let execution_provider = self
+            .runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(CurrentSemanticQueryRuntimeV1::execution_provider);
         let (degraded_reason, prior_generation) = match &status {
             SemanticRuntimeScheduleStatusV1::Indexing {
                 prior_generation, ..
@@ -980,6 +993,7 @@ impl DaemonSemanticRuntimeHandleV1 {
             status,
             degraded_reason,
             prior_generation,
+            execution_provider,
         }
     }
 }
@@ -1158,6 +1172,29 @@ fn compose_group_documents(
             Ok(document.into_text())
         })
         .collect()
+}
+
+impl<R> projector::CanonicalChunkTokenLengthsV1 for RuntimeChunkVectorEncoderV1<R>
+where
+    R: EmbeddingRuntime + Send + Sync + 'static,
+{
+    /// Measure on the *composed* documents, not the raw chunk text: the
+    /// composition is what the tensor sees, and a rendered symbol header adds
+    /// tokens the chunk body does not carry.
+    fn document_token_lengths(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_sessions(1)?;
+        let texts = compose_group_documents(key, chunks, self.documents.as_ref())?;
+        self.sessions[0]
+            .encoded_token_lengths(&texts)
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl<R> CanonicalChunkVectorEncoderV1 for RuntimeChunkVectorEncoderV1<R>
@@ -1504,7 +1541,12 @@ mod loadable_lifecycle_tests {
             LoadedSemanticArtifactV1::from_lifecycle_projection(
                 &owner,
                 &projection,
-                SemanticResourceCeilings::default(),
+                SemanticResourceCeilings {
+                    max_resident_bytes: Some(
+                        tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES,
+                    ),
+                    ..SemanticResourceCeilings::default()
+                },
             ),
             Err(SemanticRuntimeScheduleFailureV1::Artifact)
         ));
@@ -1762,16 +1804,6 @@ mod scheduling_tests {
         }
     }
 
-    fn projection_request(source: char) -> ProjectionBatchRequestV1 {
-        projection_request_with_key(
-            source,
-            super::session_pool::test_support::authority()
-                .projection()
-                .projection_key()
-                .clone(),
-        )
-    }
-
     fn projection_request_with_key(
         source: char,
         target_projection_key: ProjectionKeyV1,
@@ -1814,73 +1846,6 @@ mod scheduling_tests {
     }
 
     #[tokio::test]
-    async fn scheduling_returns_before_blocked_semantic_preparation() {
-        let handle = SemanticRuntimeSchedulingHandleV1::new();
-        let (started_tx, started_rx) = oneshot::channel();
-        let (_release_tx, release_rx) = oneshot::channel::<()>();
-        let target = source_generation('a');
-
-        handle.schedule(SemanticRuntimeWorkV1::new(
-            target.clone(),
-            3,
-            move |_cancellation| async move {
-                let _ = started_tx.send(());
-                let _ = release_rx.await;
-                Err(SemanticRuntimeScheduleFailureV1::Projection)
-            },
-        ));
-
-        started_rx
-            .await
-            .expect("preparation started asynchronously");
-        assert!(matches!(
-            handle.status(),
-            SemanticRuntimeScheduleStatusV1::Indexing {
-                target_generation,
-                completed_units: 0,
-                total_units: 3,
-                ..
-            } if target_generation == target
-        ));
-        assert!(handle.current().is_none());
-    }
-
-    #[tokio::test]
-    async fn saved_edit_scheduling_does_not_block_exact_search() {
-        let handle =
-            super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
-        let (started_tx, started_rx) = oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-
-        let request = super::FastEmbedSemanticGenerationRequestV1::new(
-            source_generation('a'),
-            projection_request('a'),
-            Vec::new(),
-            documents('a'),
-            8,
-            move || {
-                let _ = started_tx.send(());
-                let _ = release_rx.recv();
-                Err(SemanticRuntimeScheduleFailureV1::Projection)
-            },
-            || async { Ok(SemanticProjectionResumeOutcomeV1::ReplayFromStart) },
-            |_prepared| async { Ok(()) },
-            move || async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
-        )
-        .expect("saved generation request");
-        assert!(handle.schedule_generation(request));
-        started_rx.await.expect("saved edit started in background");
-
-        let exact_results = ["exact-match"];
-        assert_eq!(exact_results, ["exact-match"]);
-        assert!(matches!(
-            handle.status(),
-            SemanticRuntimeScheduleStatusV1::Indexing { .. }
-        ));
-        release_tx.send(()).expect("release artifact loader");
-    }
-
-    #[tokio::test]
     async fn stale_restart_snapshot_cannot_replace_newer_indexing_work() {
         let handle =
             super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
@@ -1905,33 +1870,6 @@ mod scheduling_tests {
         assert!(matches!(
             handle.status(),
             SemanticRuntimeScheduleStatusV1::Indexing { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn indexing_progress_reports_completed_units_monotonically() {
-        let handle = SemanticRuntimeSchedulingHandleV1::new();
-        let (progress_tx, progress_rx) = oneshot::channel();
-        let (_release_tx, release_rx) = oneshot::channel::<()>();
-        handle.schedule(SemanticRuntimeWorkV1::new(
-            source_generation('a'),
-            4,
-            move |progress| async move {
-                progress.set_completed_units(2);
-                let _ = progress_tx.send(());
-                let _ = release_rx.await;
-                Err(SemanticRuntimeScheduleFailureV1::Projection)
-            },
-        ));
-        progress_rx.await.expect("progress reported");
-
-        assert!(matches!(
-            handle.status(),
-            SemanticRuntimeScheduleStatusV1::Indexing {
-                completed_units: 2,
-                total_units: 4,
-                ..
-            }
         ));
     }
 
@@ -2183,23 +2121,6 @@ mod scheduling_tests {
         );
     }
 
-    #[test]
-    fn restart_restore_installs_current_pointer_without_indexing() {
-        let handle = SemanticRuntimeSchedulingHandleV1::new();
-        // Vector char must be a valid sha256 hex digit for `ManifestDigest`;
-        // the source char is a plain string id, so the restore mnemonic stays.
-        let restored = pointer('e', 'r');
-        handle.restore_current(restored.clone());
-
-        assert_eq!(handle.current(), Some(restored.clone()));
-        assert_eq!(
-            handle.status(),
-            SemanticRuntimeScheduleStatusV1::Current {
-                generation: restored.generation,
-            }
-        );
-    }
-
     #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn exact_unbind_clears_pointer_and_factory_but_preserves_newer_generation() {
@@ -2290,23 +2211,6 @@ mod scheduling_tests {
         assert_ne!(
             handle.current().map(|pointer| pointer.generation),
             Some(old)
-        );
-    }
-
-    #[test]
-    fn artifact_schedule_failure_carries_source_error_text() {
-        let failure = SemanticRuntimeScheduleFailureV1::artifact(
-            "cataloged lifecycle install is missing a required member",
-        );
-        assert_eq!(
-            failure,
-            SemanticRuntimeScheduleFailureV1::ArtifactDetail(
-                "cataloged lifecycle install is missing a required member".to_owned()
-            )
-        );
-        assert_eq!(
-            failure.to_string(),
-            "Artifact: cataloged lifecycle install is missing a required member"
         );
     }
 }

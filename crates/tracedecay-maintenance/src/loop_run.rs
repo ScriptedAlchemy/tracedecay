@@ -1,7 +1,7 @@
 //! Cadence loop that drives admitted maintenance ticks.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -95,10 +95,47 @@ impl Drop for MaintenancePhaseInstrumentation {
     }
 }
 
+/// The maintenance loop's wake handle.
+///
+/// [`Self::wake`] parks the loop out of its timer so an already-due tick
+/// starts promptly; it never moves the due deadline, so a burst of git-watch
+/// events cannot turn the daily cadence into a busy loop.
+/// [`Self::request_due`] is for an event that just made retention work
+/// collectable — a sealed code generation superseding its predecessor — and
+/// pulls the next tick forward to at most one retry delay away. Requests
+/// inside that window coalesce into one tick. Before this, every publication
+/// left its predecessor's sealed artifact, read bundle, and segments on disk
+/// until the daily tick.
+#[derive(Default)]
+pub struct MaintenanceWake {
+    notify: Notify,
+    due_requested: AtomicBool,
+}
+
+impl MaintenanceWake {
+    pub fn wake(&self) {
+        self.notify.notify_one();
+    }
+
+    pub fn request_due(&self) {
+        self.due_requested.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    /// Release every parked waiter (shutdown).
+    pub fn notify_waiters(&self) {
+        self.notify.notify_waiters();
+    }
+
+    fn take_due_request(&self) -> bool {
+        self.due_requested.swap(false, Ordering::AcqRel)
+    }
+}
+
 /// Park on cancel / wake / cadence, then run the next admitted tick.
 pub async fn run_maintenance_loop<F, Fut>(
     cancellation: &tracedecay_session_memory::context::CancellationToken,
-    wake: &Notify,
+    wake: &MaintenanceWake,
     interval: Duration,
     mut run_tick: F,
 ) where
@@ -116,7 +153,7 @@ pub async fn run_maintenance_loop<F, Fut>(
                 lifecycle.record_cancellation();
                 break;
             }
-            () = wake.notified() => {}
+            () = wake.notify.notified() => {}
             () = tokio::time::sleep_until(deadline) => {}
         }
         if cancellation.is_cancelled() {
@@ -124,6 +161,9 @@ pub async fn run_maintenance_loop<F, Fut>(
             break;
         }
         let now = CadenceInstant::now();
+        if wake.take_due_request() {
+            deadline = cadence.pull_forward(now, deadline);
+        }
         if now < deadline || !cadence.reserve(now) {
             continue;
         }

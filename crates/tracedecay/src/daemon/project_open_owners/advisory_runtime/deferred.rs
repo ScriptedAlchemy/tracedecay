@@ -241,6 +241,12 @@ pub(super) fn spawn(
                         .code_index_schedulers
                         .subscribe_serving_generation_changes(&project_root)
                         .await;
+                    if serving_changes.is_some() {
+                        let _ = invocation
+                            .code_index_schedulers
+                            .request_complete_generation(&project_root)
+                            .await;
+                    }
                 }
                 match try_mount(&invocation, &project_root, &mut state).await {
                     Attempt::Terminal => return,

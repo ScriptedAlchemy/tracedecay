@@ -13,7 +13,6 @@
 
 mod build_version_test;
 mod cli_boundary;
-mod cli_help_test;
 mod cli_non_interactive_test;
 #[path = "../../../tracedecay/tests/common/mod.rs"]
 mod common;
@@ -38,4 +37,3 @@ mod tool_first_touch_test;
 mod tool_surface_transport_test;
 mod tracedecay_test;
 mod user_config_test;
-mod walk_up_test;

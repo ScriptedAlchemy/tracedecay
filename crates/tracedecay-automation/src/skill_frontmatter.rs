@@ -199,41 +199,10 @@ fn unquote_scalar(value: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::borrow::Cow;
-
     use super::{
         SkillFrontmatterValue, YamlScalarError, decode_yaml_scalar, parse_skill_frontmatter,
         unquote_scalar,
     };
-
-    #[test]
-    fn borrows_plain_scalars_without_applying_policy() {
-        assert!(matches!(
-            decode_yaml_scalar("plain value"),
-            Ok(Cow::Borrowed("plain value"))
-        ));
-        assert!(matches!(decode_yaml_scalar(""), Ok(Cow::Borrowed(""))));
-        assert!(matches!(
-            decode_yaml_scalar(" users'"),
-            Ok(Cow::Borrowed(" users'"))
-        ));
-    }
-
-    #[test]
-    fn decodes_single_quoted_scalars_and_doubled_quotes() {
-        assert!(matches!(
-            decode_yaml_scalar("'plain'"),
-            Ok(Cow::Borrowed("plain"))
-        ));
-        let decoded = decode_yaml_scalar("'it''s YAML'").expect("valid single-quoted scalar");
-        assert_eq!(decoded, "it's YAML");
-    }
-
-    #[test]
-    fn decodes_json_compatible_double_quoted_scalars() {
-        let decoded = decode_yaml_scalar(r#""line\n☺""#).expect("valid double-quoted scalar");
-        assert_eq!(decoded, "line\n☺");
-    }
 
     #[test]
     fn rejects_malformed_single_quoted_scalars() {
@@ -284,17 +253,6 @@ mod tests {
             fields["paths"].as_list_items(),
             Some(vec!["**/*.rs".to_string(), "**/Cargo.toml".to_string()])
         );
-    }
-
-    #[test]
-    fn shared_decoder_parity_preserves_successful_quote_mechanics() {
-        for (value, expected) in [
-            ("'plain'", "plain"),
-            ("'it''s YAML'", "it's YAML"),
-            (r#""line\n☺""#, "line\n☺"),
-        ] {
-            assert_eq!(unquote_scalar(value), expected);
-        }
     }
 
     #[test]

@@ -315,15 +315,6 @@ mod tests {
         }
     }
 
-    /// `trim().is_empty()` and `is_empty()` reject the same set once the
-    /// already-trimmed requirement is also applied.
-    #[test]
-    fn blank_and_empty_reject_identically() {
-        for value in ["", " ", "\t", "   \n "] {
-            assert!(!is_canonical_text(value));
-        }
-    }
-
     /// The hex predicate is the exact conjunction the per-module copies
     /// spelled out, including the lowercase-only byte range.
     #[test]

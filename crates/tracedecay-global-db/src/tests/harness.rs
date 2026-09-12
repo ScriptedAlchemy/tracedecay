@@ -167,36 +167,6 @@ impl RegisteredGlobalDbRetirementHarnessV1 {
     }
 }
 
-#[tokio::test]
-async fn weak_lease_issuer_survives_lease_drop() {
-    let fixture =
-        RegisteredGlobalDbRetirementHarnessV1::open("weak-lease-issuer-survives-lease-drop").await;
-    let (registered, owner, _retirement, _directory, _scope) = fixture.into_parts();
-    bind_test_session_relation_graph(&registered).expect("bind test session relation graph");
-    let expected_graph_identity = registered
-        .session_relation_graph_identity()
-        .expect("attached session relation graph identity");
-    let issuer = owner.weak_lease_issuer();
-
-    drop(registered);
-
-    let issued = issuer
-        .issue_lease()
-        .expect("live owner weak issuer survives unrelated lease drop");
-    assert_eq!(
-        issued
-            .session_relation_graph_identity()
-            .expect("issued lease retains attached relation graph identity"),
-        expected_graph_identity
-    );
-
-    owner.detach_session_relation_graph();
-    assert!(
-        issued.session_relation_graph_identity().is_err(),
-        "detaching the owner relation graph must invalidate existing lease graph access"
-    );
-}
-
 /// Which write authority a registered test fixture attaches to the database.
 ///
 /// `Fixture` keeps the unconditional Test-role escape hatch for fixtures whose
@@ -925,10 +895,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_domain::errors::Result<
-        tracedecay_session_temporal_store::SessionTemporalStore<
-            '_,
-            crate::RegisteredGlobalDb,
-        >,
+        tracedecay_session_temporal_store::SessionTemporalStore<'_, crate::RegisteredGlobalDb>,
     > {
         Ok(
             tracedecay_session_temporal_store::SessionTemporalStore::new(
@@ -1546,23 +1513,4 @@ pub(crate) async fn open_registered_test_fixture(
         database,
         _owner: owner,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::RegisteredGlobalDbTestRuntime;
-    use tracedecay_store::StoreShardScopeV1;
-
-    #[tokio::test]
-    async fn profile_runtime_publishes_a_profile_sessions_shard() {
-        let temporary = tempfile::tempdir().expect("temporary profile root");
-        let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())
-            .await
-            .expect("registered profile runtime");
-
-        assert!(matches!(
-            runtime.profile_database().binding().shard_id.scope,
-            StoreShardScopeV1::ProfileSessions
-        ));
-    }
 }

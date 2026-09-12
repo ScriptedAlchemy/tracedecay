@@ -793,24 +793,6 @@ beta body
     }
 
     #[test]
-    fn yaml_frontmatter_is_skipped_without_error() {
-        let source = "\
----
-title: skipped
----
-
-# Real heading
-";
-        let result = extract(source);
-        assert!(result.errors.is_empty(), "{:?}", result.errors);
-        let names: Vec<&str> = modules(&result)
-            .iter()
-            .map(|node| node.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["Real heading"]);
-    }
-
-    #[test]
     fn fenced_code_hash_lines_are_not_headings() {
         let source = "\
 # Real

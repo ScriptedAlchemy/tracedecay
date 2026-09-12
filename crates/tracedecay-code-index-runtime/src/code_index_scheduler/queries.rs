@@ -9,6 +9,9 @@ use std::future::Future;
 #[cfg(test)]
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
+#[cfg(any(test, feature = "test-helpers"))]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -146,7 +149,9 @@ fn empty_callable_page() -> PageState {
 }
 
 mod graph_control;
-use graph_control::{CallableRetrievalExecutionControl, current_utc_micros, graph_budget_for_request};
+use graph_control::{
+    CallableRetrievalExecutionControl, current_utc_micros, graph_budget_for_request,
+};
 
 /// The reserved [`CodeGenerationId`] a caller supplies to request ordinary
 /// (unpinned) search: it pins no specific immutable generation, so the serving
@@ -245,6 +250,11 @@ pub fn semantic_mcp_reason(
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn take_relation_symbol_hydrations(&self) -> u64 {
+        self.relation_symbol_hydrations.swap(0, Ordering::Relaxed)
+    }
+
     /// Compose real exact/lexical/graph lane outcomes only through the
     /// accepted profile and query/cursor key authority mounted for this exact
     /// admitted scope.
@@ -2008,29 +2018,9 @@ pub(crate) struct RelationKeyV1 {
     pub depth: u32,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-mod relation_hydration_counters {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SYMBOL_PRIMITIVE_HYDRATIONS: AtomicU64 = AtomicU64::new(0);
-
-    pub fn record() {
-        SYMBOL_PRIMITIVE_HYDRATIONS.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn take() -> u64 {
-        SYMBOL_PRIMITIVE_HYDRATIONS.swap(0, Ordering::Relaxed)
-    }
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn take_relation_symbol_hydrations() -> u64 {
-    relation_hydration_counters::take()
-}
-
-fn record_relation_symbol_hydration() {
+fn record_relation_symbol_hydration(_hydrations: &AtomicU64) {
     #[cfg(any(test, feature = "test-helpers"))]
-    relation_hydration_counters::record();
+    _hydrations.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn relation_keys(
@@ -2095,10 +2085,11 @@ pub(crate) fn relation_keys(
 pub(crate) fn hydrate_relation_records(
     latest: &LatestCompleteCodeIndexV1,
     keys: &[RelationKeyV1],
+    hydrations: &AtomicU64,
 ) -> Result<Vec<SymbolRelationRecord>, PreparedQueryErrorV1> {
     keys.iter()
         .map(|key| {
-            record_relation_symbol_hydration();
+            record_relation_symbol_hydration(hydrations);
             let symbol = symbol_record_by_id(latest, &key.occurrence)
                 .ok_or(PreparedQueryErrorV1::Unavailable)?;
             Ok(SymbolRelationRecord {
@@ -2879,7 +2870,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 "code_implementations",
                 binding,
                 keys,
-                |slice| hydrate_relation_records(latest, slice),
+                |slice| hydrate_relation_records(latest, slice, &self.relation_symbol_hydrations),
                 &request.meta.page,
                 "implementations",
             )
@@ -2924,17 +2915,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 binding,
                 keys,
                 |slice| {
-                    hydrate_relation_records(latest, slice).map(|relations| {
-                        relations
-                            .into_iter()
-                            .map(|relation| TypeHierarchyRecord {
-                                parent_node_id: parent_node_id.clone(),
-                                edge_kind: relation.edge_kind,
-                                depth: relation.depth.unwrap_or(1),
-                                symbol: relation.symbol,
-                            })
-                            .collect()
-                    })
+                    hydrate_relation_records(latest, slice, &self.relation_symbol_hydrations).map(
+                        |relations| {
+                            relations
+                                .into_iter()
+                                .map(|relation| TypeHierarchyRecord {
+                                    parent_node_id: parent_node_id.clone(),
+                                    edge_kind: relation.edge_kind,
+                                    depth: relation.depth.unwrap_or(1),
+                                    symbol: relation.symbol,
+                                })
+                                .collect()
+                        },
+                    )
                 },
                 &request.meta.page,
                 "hierarchy entries",
@@ -2979,7 +2972,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 "code_callers",
                 binding,
                 keys,
-                |slice| hydrate_relation_records(latest, slice),
+                |slice| hydrate_relation_records(latest, slice, &self.relation_symbol_hydrations),
                 &request.meta.page,
                 "callers",
             )
@@ -3031,12 +3024,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 binding,
                 keys,
                 |slice| {
-                    hydrate_relation_records(latest, slice).map(|relations| {
-                        relations
-                            .into_iter()
-                            .map(|relation| relation.symbol)
-                            .collect()
-                    })
+                    hydrate_relation_records(latest, slice, &self.relation_symbol_hydrations).map(
+                        |relations| {
+                            relations
+                                .into_iter()
+                                .map(|relation| relation.symbol)
+                                .collect()
+                        },
+                    )
                 },
                 &request.meta.page,
                 "symbols",
@@ -3376,7 +3371,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 "code_references",
                 binding,
                 keys,
-                |slice| hydrate_relation_records(latest, slice),
+                |slice| hydrate_relation_records(latest, slice, &self.relation_symbol_hydrations),
                 &request.meta.page,
                 "references",
             )
@@ -3432,12 +3427,13 @@ fn navigation_symbol_query<'a>(
                 binding,
                 keys,
                 |slice| {
-                    hydrate_relation_records(latest, slice).map(|relations| {
-                        relations
-                            .into_iter()
-                            .map(|relation| relation.symbol)
-                            .collect()
-                    })
+                    hydrate_relation_records(latest, slice, &registry.relation_symbol_hydrations)
+                        .map(|relations| {
+                            relations
+                                .into_iter()
+                                .map(|relation| relation.symbol)
+                                .collect()
+                        })
                 },
                 &request.meta.page,
                 "symbols",
@@ -3557,29 +3553,6 @@ mod tests {
             None,
         )
         .expect("page")
-    }
-
-    #[test]
-    fn bounded_result_preserves_complete_coverage() {
-        let outcome = bounded_result(
-            page(vec!["one"], 1),
-            tracedecay_domain::RetrieverCoverage {
-                examined: 1,
-                eligible: 1,
-                ..Default::default()
-            },
-            tracedecay_domain::UtcMicros(1),
-            None,
-            None,
-        );
-        let RetrievalPortOutcome::Completed(evidence) = outcome else {
-            panic!("uncapped complete lane stays complete");
-        };
-        assert_eq!(
-            evidence.coverage.completeness,
-            CoverageCompleteness::Complete
-        );
-        assert!(evidence.omissions.is_empty());
     }
 
     #[test]

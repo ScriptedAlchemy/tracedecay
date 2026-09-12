@@ -39,6 +39,28 @@ fn observation_write_at(
     end: u64,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> ObservationWrite {
+    observation_write_for_record(
+        body,
+        receipt_id,
+        generation,
+        start,
+        end,
+        expected_cursor,
+        "record.fixture",
+    )
+}
+
+/// The observation identity is the native record, so a second distinct
+/// observation needs its own record id.
+fn observation_write_for_record(
+    body: &str,
+    receipt_id: &str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    record_id: &str,
+) -> ObservationWrite {
     let source = ObservationSourceIdentityV1::for_provider(
         ProviderId::new("provider.fixture").unwrap(),
         SessionId::new("session.fixture").unwrap(),
@@ -69,7 +91,7 @@ fn observation_write_at(
             generation,
             range,
             ObservationOrderingDomainV1::SqliteRowId,
-            ObservationId::new("record.fixture").unwrap(),
+            ObservationId::new(record_id).unwrap(),
         )
         .unwrap(),
         receipt,
@@ -154,8 +176,36 @@ fn repository_write(
     branch: &str,
     evidence_class: EvidenceClass,
 ) -> AnchoredObservationWrite {
+    repository_write_for(
+        "receipt.repository-replay",
+        "record.fixture",
+        (0, 1),
+        None,
+        clock,
+        branch,
+        evidence_class,
+    )
+}
+
+fn repository_write_for(
+    receipt_id: &str,
+    record_id: &str,
+    range: (u64, u64),
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    clock: i64,
+    branch: &str,
+    evidence_class: EvidenceClass,
+) -> AnchoredObservationWrite {
     let write = anchored_at(
-        observation_write("repository replay", "receipt.repository-replay"),
+        observation_write_for_record(
+            &format!("repository replay {record_id}"),
+            receipt_id,
+            1,
+            range.0,
+            range.1,
+            expected_cursor,
+            record_id,
+        ),
         UtcMicros(clock),
     );
     let capture = RepositoryProvenanceV1::new(
@@ -245,6 +295,70 @@ fn repository_capture_replay_preserves_first_receipt_and_refuses_changed_evidenc
     assert_eq!(read(&mut connection, &request).unwrap(), retained);
 }
 
+#[test]
+fn repository_capture_is_persisted_once_and_hydrated_back_into_every_row() {
+    let mut connection = connection();
+    let first = repository_write(1, "refs/heads/main", EvidenceClass::Observed);
+    // A second observation taken under the same checkout state shares the
+    // capture but not the row.
+    let second = repository_write_for(
+        "receipt.repository-replay-2",
+        "record.fixture-2",
+        (1, 2),
+        Some(first.next_cursor().clone()),
+        1,
+        "refs/heads/main",
+        EvidenceClass::Observed,
+    );
+    assert_eq!(
+        first
+            .repository_provenance_attachment()
+            .provenance()
+            .map(|p| p.capture_id()),
+        second
+            .repository_provenance_attachment()
+            .provenance()
+            .map(|p| p.capture_id()),
+    );
+    execute(&mut connection, &first).unwrap();
+    execute(&mut connection, &second).unwrap();
+    for write in [&first, &second] {
+        let request = ObservationReadOperationV1::Observation {
+            observation_id: write.observation().observation_id().clone(),
+        };
+        let retained = read(&mut connection, &request).unwrap();
+        let ObservationReadResultV1::Observation(row) = retained else {
+            panic!("unexpected point-read result");
+        };
+        let row = row.expect("persisted observation must be readable");
+        assert_eq!(
+            &row.repository_provenance,
+            write.repository_provenance_attachment(),
+            "the hydrated row must decode to the attachment the writer was handed"
+        );
+    }
+    let (captures, embedded, slim_bytes): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM observation_repository_captures),
+                    (SELECT COUNT(*) FROM observation_repository_provenance
+                      WHERE json_type(capture_json, '$.capture') IS NOT NULL
+                         OR json_type(availability_json, '$.value.capture') IS NOT NULL),
+                    (SELECT MAX(LENGTH(availability_json) + LENGTH(capture_json))
+                       FROM observation_repository_provenance)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(captures, 1, "one capture shared by two rows is stored once");
+    assert_eq!(embedded, 0, "no row embeds its capture");
+    let full = super::encode(first.repository_provenance_attachment().availability()).unwrap();
+    assert!(
+        slim_bytes < full.len() as i64,
+        "both slim columns ({slim_bytes} bytes) must be smaller than one embedded copy ({})",
+        full.len()
+    );
+}
+
 fn connection() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     connection
@@ -308,6 +422,10 @@ fn connection() -> Connection {
                     capture_json TEXT,
                     retrieval_anchor_id TEXT UNIQUE,
                     owner_json TEXT
+                 );
+                 CREATE TABLE observation_repository_captures (
+                    capture_id TEXT PRIMARY KEY,
+                    capture_json TEXT NOT NULL
                  );
                  CREATE TABLE observation_projection_checkpoints (
                     projector_version TEXT PRIMARY KEY,

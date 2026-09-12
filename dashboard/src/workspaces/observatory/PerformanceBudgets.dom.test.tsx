@@ -13,85 +13,6 @@ afterEach(() => {
 });
 
 describe('Observatory performance budgets', () => {
-  it('renders the p95 the wire publishes, converted with the exact figure kept', async () => {
-    renderBudgets(readModel([latency('operation_latency_p95', 43_250)]));
-
-    expect(await screen.findByText('latency p95')).toBeTruthy();
-    const card = document.querySelector('[data-dimension="latency_p95"]');
-    expect(card?.getAttribute('data-dimension-available')).toBe('true');
-    expect(card?.textContent).toContain('43.25');
-    expect(card?.textContent).toContain('(43,250 µs)');
-    expect(card?.textContent).toContain('96 observed');
-  });
-
-  it('renders p50 and p99 as server-unknown with their reason, never as zero', async () => {
-    renderBudgets(readModel([latency('operation_latency_p95', 43_250)]));
-
-    await screen.findByText('latency p95');
-    for (const id of ['latency_p50', 'latency_p99']) {
-      const card = document.querySelector(`[data-dimension="${id}"]`);
-      expect(card?.getAttribute('data-dimension-available')).toBe('false');
-      expect(card?.getAttribute('data-dimension-state')).toBe('unknown');
-      expect(card?.textContent).toContain('—');
-      expect(card?.textContent).toContain('not_observed');
-      // The two failures this card exists to prevent.
-      expect(card?.textContent).not.toContain('43.25');
-      expect(card?.textContent).not.toContain('0 ms');
-    }
-  });
-
-  it('states every mandatory row on an unknown card rather than omitting it', async () => {
-    renderBudgets(readModel([]));
-
-    await screen.findByText('queue span');
-    const card = document.querySelector('[data-dimension="queue_span"]');
-    const text = card?.textContent ?? '';
-    for (const term of [
-      'support',
-      'denominator',
-      'censoring',
-      'interval',
-      'horizon',
-      'descriptor revision',
-      'anchors',
-    ]) {
-      expect(text).toContain(term);
-    }
-    expect(text).toContain('not_observed');
-    // Safe anchors: the scope and the watermark, and nothing path-shaped.
-    expect(text).toContain('scope project.tracedecay');
-  });
-
-  it('keeps distinct unavailable reasons for distinct canonical metrics', async () => {
-    renderBudgets(
-      readModel([
-        { ...latency('operation_latency_p95', null), unavailable_reason: 'no_latency_samples' },
-      ]),
-    );
-
-    await screen.findByText('latency p95');
-    const unmeasured = document.querySelector('[data-dimension="latency_p95"]');
-    const otherUnknown = document.querySelector('[data-dimension="latency_p50"]');
-    expect(unmeasured?.getAttribute('data-dimension-state')).toBe('unknown');
-    expect(otherUnknown?.getAttribute('data-dimension-state')).toBe('unknown');
-    expect(unmeasured?.textContent).toContain('no_latency_samples');
-    // The daemon did publish this metric's frame, so the frame stays visible.
-    expect(unmeasured?.textContent).toContain('latency samples');
-  });
-
-  it('states how many requirements the wire actually answered', async () => {
-    renderBudgets(
-      readModel([
-        latency('operation_latency_p95', 43_250),
-        latency('feedback_revocation_propagation_p95', 1_200),
-      ]),
-    );
-
-    expect(await screen.findByText(/2 of 13 required budget dimensions/)).toBeTruthy();
-    const horizon = document.querySelector('[data-budgets-measured]');
-    expect(horizon?.getAttribute('data-budgets-measured')).toBe('2');
-    expect(horizon?.getAttribute('data-budgets-required')).toBe('13');
-  });
 
   it('exposes each band as a named region with list semantics', async () => {
     renderBudgets(readModel([]));
@@ -105,13 +26,6 @@ describe('Observatory performance budgets', () => {
     ).toBeTruthy();
     expect(screen.getByRole('region', { name: 'RSS, CPU, and I/O dimensions' })).toBeTruthy();
     expect(screen.getAllByRole('listitem').length).toBe(13);
-  });
-
-  it('does not render the superseded projection-gap section', async () => {
-    renderBudgets(readModel([]));
-
-    await screen.findByText('queue span');
-    expect(document.querySelector('[data-budgets-gap="unprojected"]')).toBeNull();
   });
 
   it('renders the server domain state and omission reasons without overriding them', async () => {

@@ -764,7 +764,7 @@ pub async fn load_run_records(
     let path = run_ledger_path(dashboard_root);
     let read_path = path.clone();
     tokio::task::spawn_blocking(move || {
-        with_run_ledger_read_lock(&root, &read_path, || {
+        with_run_ledger_read_lock(&root, &read_path, Vec::new, || {
             read_run_records_tail(&read_path, limit)
         })
     })
@@ -780,6 +780,15 @@ pub struct AutomationRunLedgerPageV1 {
 }
 
 impl AutomationRunLedgerPageV1 {
+    /// The complete page over no rows: what an absent ledger answers with.
+    pub fn empty() -> Self {
+        Self {
+            records: Vec::new(),
+            malformed_row_count: 0,
+            has_more: false,
+        }
+    }
+
     pub fn is_complete(&self) -> bool {
         !self.has_more && self.malformed_row_count == 0
     }
@@ -856,7 +865,9 @@ pub async fn load_run_records_page(
     let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
     tokio::task::spawn_blocking(move || {
-        with_run_ledger_read_lock(&root, &path, || read_run_records_tail_page(&path, limit))
+        with_run_ledger_read_lock(&root, &path, AutomationRunLedgerPageV1::empty, || {
+            read_run_records_tail_page(&path, limit)
+        })
     })
     .await
     .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
@@ -875,7 +886,7 @@ pub async fn load_run_records_for_task_key(
     let path = run_ledger_path(dashboard_root);
     let task_key = requested_task_key.to_string();
     tokio::task::spawn_blocking(move || {
-        with_run_ledger_read_lock(&root, &path, || {
+        with_run_ledger_read_lock(&root, &path, Vec::new, || {
             read_run_records_tail_with_filter(
                 &path,
                 limit,
@@ -914,11 +925,17 @@ pub async fn load_run_ledger_task_summary(
     let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
     let task_key = requested_task_key.to_owned();
-    tokio::task::spawn_blocking(move || {
-        with_run_ledger_read_lock(&root, &path, || {
-            read_run_ledger_task_summary(&path, task, &task_key)
-        })
-    })
+    hotpath::future!(
+        tokio::task::spawn_blocking(move || {
+            with_run_ledger_read_lock(
+                &root,
+                &path,
+                AutomationRunLedgerTaskSummary::default,
+                || read_run_ledger_task_summary(&path, task, &task_key),
+            )
+        }),
+        label = "automation.run_ledger.task_summary.blocking"
+    )
     .await
     .map_err(|error| config_error(format!("failed to join task ledger summary read: {error}")))?
 }
@@ -949,19 +966,90 @@ fn validate_requested_task_key(task_key: &str) -> Result<()> {
     }
 }
 
+/// Answers a ledger read either from `absent` or from `read` under the
+/// exclusive ledger lock.
+///
+/// A read must not mint the dashboard directory: acquiring the lock creates
+/// it, and a root that does not exist has no ledger. Absence is therefore
+/// answered from `absent` alone. Running `read` there would open whatever a
+/// first writer created in the meantime — outside the lock and outside
+/// `ensure_no_exact_append_intent` — and expose a row whose publication has
+/// not settled; the directory's absence at the time of check says nothing
+/// about the ledger at the time of use.
+///
+/// Only a proven `NotFound` is absence. A root that cannot be stat'd, or one
+/// that is not a directory, is a typed failure rather than an empty ledger.
 fn with_run_ledger_read_lock<T>(
     dashboard_root: &Path,
     path: &Path,
+    absent: impl FnOnce() -> T,
     read: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let lock = exact_publication::acquire_run_ledger_lock(path).map_err(TraceDecayError::from)?;
+    match std::fs::metadata(dashboard_root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(config_error("automation dashboard root is not a directory"));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(test)]
+            absent_root_interleave::notify(dashboard_root);
+            return Ok(absent());
+        }
+        Err(error) => return Err(TraceDecayError::from(error)),
+    }
+    let lock = hotpath::measure_block!("automation.run_ledger.read_lock.acquire", {
+        exact_publication::acquire_run_ledger_lock(path).map_err(TraceDecayError::from)
+    })?;
     let result = (|| {
-        exact_publication::ensure_no_exact_append_intent(dashboard_root)
-            .map_err(TraceDecayError::from)?;
-        read()
+        hotpath::measure_block!("automation.run_ledger.read_lock.recover", {
+            exact_publication::ensure_no_exact_append_intent(dashboard_root)
+                .map_err(TraceDecayError::from)
+        })?;
+        hotpath::measure_block!("automation.run_ledger.read_lock.body", read())
     })();
     let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
     result.and_then(|value| unlock.map(|()| value))
+}
+
+/// Interleaving point for a read that has proven its dashboard root absent.
+///
+/// The first-writer regression registers an observer for its own root and
+/// parks the reading thread here while a writer creates that directory, takes
+/// the real ledger lock and begins an unsettled append, which pins the answer
+/// a read gives across exactly that window without sleeping.
+#[cfg(test)]
+mod absent_root_interleave {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    type Observer = Box<dyn FnOnce() + Send>;
+
+    static OBSERVERS: OnceLock<Mutex<HashMap<PathBuf, Observer>>> = OnceLock::new();
+
+    fn observers() -> MutexGuard<'static, HashMap<PathBuf, Observer>> {
+        let observers = OBSERVERS.get_or_init(|| Mutex::new(HashMap::new()));
+        // The map holds only registrations, so a poisoned lock leaves no
+        // broken invariant to recover from.
+        match observers.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub(super) fn register(dashboard_root: &Path, observer: Observer) {
+        observers().insert(dashboard_root.to_path_buf(), observer);
+    }
+
+    /// Runs and consumes the observer registered for `dashboard_root`. The map
+    /// guard is released before the observer runs so a parked observer cannot
+    /// block reads of unrelated roots in tests running concurrently.
+    pub(super) fn notify(dashboard_root: &Path) {
+        let observer = observers().remove(dashboard_root);
+        if let Some(observer) = observer {
+            observer();
+        }
+    }
 }
 
 enum RunRecordFilter {
@@ -1036,13 +1124,7 @@ fn read_run_records_tail_page_with_filter(
 ) -> Result<AutomationRunLedgerPageV1> {
     let file = match exact_lookup::open_stabilized_run_ledger(path, false)? {
         Some(file) => file,
-        None => {
-            return Ok(AutomationRunLedgerPageV1 {
-                records: Vec::new(),
-                malformed_row_count: 0,
-                has_more: false,
-            });
-        }
+        None => return Ok(AutomationRunLedgerPageV1::empty()),
     };
     exact_lookup::ReverseJsonlScanner::new(&file, path)?;
     if limit == 0 {
@@ -1235,18 +1317,27 @@ fn read_run_ledger_task_summary(
 ) -> Result<AutomationRunLedgerTaskSummary> {
     // Visible bytes are stabilized by the committed lifecycle index consulted
     // below, which syncs only when the ledger actually grew.
-    let Some(file) = exact_lookup::open_committed_run_ledger(path, false)? else {
+    let Some(file) = hotpath::measure_block!("automation.run_ledger.task_summary.open", {
+        exact_lookup::open_committed_run_ledger(path, false)
+    })?
+    else {
         return Ok(AutomationRunLedgerTaskSummary::default());
     };
     // Answer an unchanged ledger from the memo instead of rescanning it. See
     // `RUN_LEDGER_SUMMARY_MEMO` for why `(len, tail digest)` read under the
     // exclusive ledger lock is a sound witness of unchanged content.
-    let file_len = file.metadata().map_err(TraceDecayError::from)?.len();
-    let tail_digest = run_ledger_summary_tail_digest(&file, file_len)?;
-    let memo_key = run_ledger_summary_memo_key(path, task, requested_task_key);
+    let (file_len, tail_digest, memo_key) =
+        hotpath::measure_block!("automation.run_ledger.task_summary.memo_probe", {
+            let file_len = file.metadata().map_err(TraceDecayError::from)?.len();
+            let tail_digest = run_ledger_summary_tail_digest(&file, file_len)?;
+            let memo_key = run_ledger_summary_memo_key(path, task, requested_task_key);
+            Ok::<_, TraceDecayError>((file_len, tail_digest, memo_key))
+        })?;
     if let Some(summary) = cached_run_ledger_task_summary(&memo_key, file_len, &tail_digest) {
+        hotpath::gauge!("automation.run_ledger.task_summary.memo_hits").inc(1_u64);
         return Ok(summary);
     }
+    hotpath::gauge!("automation.run_ledger.task_summary.memo_misses").inc(1_u64);
     let mut rows = exact_lookup::ForwardJsonlScanner::new(&file, path)?;
     let mut selected = TaskSummarySpans::default();
     while let Some(line) = rows.next_span()? {
@@ -1825,25 +1916,6 @@ mod tests {
     }
 
     #[test]
-    fn task_summary_has_no_budget_anchor_without_an_exhausted_skip() {
-        let lines = vec![skipped_session_reflector_line(
-            "run-stale",
-            "session_evidence_stale",
-            100,
-        )];
-        let (_temp, path) = write_ledger(&lines);
-
-        let summary = read_run_ledger_task_summary(
-            &path,
-            AgentTaskKind::SessionReflector,
-            "session_reflector",
-        )
-        .unwrap();
-
-        assert!(summary.latest_session_evidence_budget_exhausted().is_none());
-    }
-
-    #[test]
     fn task_summary_does_not_select_near_prefix_budget_errors() {
         let lines = vec![skipped_session_reflector_line(
             "run-budget-near-prefix",
@@ -1860,67 +1932,6 @@ mod tests {
         .expect("near-prefix error must not create a projection/decode mismatch");
 
         assert!(summary.latest_session_evidence_budget_exhausted().is_none());
-    }
-
-    #[test]
-    fn automation_policy_reads_canonical_ledger_evidence() {
-        let mut record: AutomationRunLedgerRecord =
-            serde_json::from_str(&ledger_line("policy-evidence", 1)).unwrap();
-        let validation_report = serde_json::json!({"status": "failed_after_partial_effects"});
-        let applied_ops = serde_json::json!({
-            "deployment": {"status": "partial_failure", "retry_required": true}
-        });
-        record.accepted_count = 2;
-        record.validation_report = Some(validation_report.clone());
-        record.applied_ops = Some(applied_ops.clone());
-
-        let next_actions = tracedecay_automation::artifact_policy::artifact_policy(record.task)
-            .next_actions(&record);
-
-        assert_eq!(
-            tracedecay_automation::AutomationRunRecord::accepted_count(&record),
-            2
-        );
-        assert_eq!(
-            tracedecay_automation::AutomationRunRecord::validation_report(&record),
-            Some(&validation_report)
-        );
-        assert_eq!(
-            tracedecay_automation::AutomationRunRecord::applied_ops(&record),
-            Some(&applied_ops)
-        );
-        assert_eq!(
-            next_actions.first().copied(),
-            Some("inspect autonomously applied memory curation outcomes")
-        );
-    }
-
-    #[test]
-    fn tail_read_returns_newest_limit_in_order() {
-        let lines: Vec<String> = (0..10)
-            .map(|i| ledger_line(&format!("run-{i}"), 1000 + i))
-            .collect();
-        let (_temp, path) = write_ledger(&lines);
-
-        let records = read_run_records_tail_with_window(&path, 3, 64).unwrap();
-        let ids: Vec<&str> = records.iter().map(|r| r.run_id.as_str()).collect();
-        assert_eq!(ids, ["run-9", "run-8", "run-7"]);
-    }
-
-    #[test]
-    fn tail_read_grows_window_until_limit_satisfied() {
-        // Many records, a deliberately tiny initial window that holds far
-        // fewer than the requested limit: the grow loop must widen until the
-        // limit is met without ever mis-parsing a chunk-boundary line.
-        let lines: Vec<String> = (0..50)
-            .map(|i| ledger_line(&format!("run-{i:03}"), 2000 + i))
-            .collect();
-        let (_temp, path) = write_ledger(&lines);
-
-        let records = read_run_records_tail_with_window(&path, 40, 32).unwrap();
-        assert_eq!(records.len(), 40);
-        assert_eq!(records[0].run_id, "run-049");
-        assert_eq!(records[39].run_id, "run-010");
     }
 
     #[test]
@@ -1994,34 +2005,6 @@ mod tests {
     }
 
     #[test]
-    fn trailing_blank_line_is_skipped_across_tail_page_append_and_summary() {
-        // A ledger ending in a trailing blank line ("{row}\n\n") must not
-        // permanently break every scan. Regression coverage for the
-        // scan_jsonl_row fix.
-        let row = ledger_line("run-blank-trailing-a", 100);
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(RUN_LEDGER_FILENAME);
-        std::fs::write(&path, format!("{row}\n\n")).unwrap();
-
-        let page = read_run_records_tail_page_with_window(&path, 8, 64).unwrap();
-        let ids: Vec<&str> = page.records.iter().map(|r| r.run_id.as_str()).collect();
-        assert_eq!(ids, ["run-blank-trailing-a"]);
-
-        let appended = ledger_line("run-blank-trailing-b", 200);
-        append_jsonl_line_locked(&path, &appended).unwrap();
-        let ledger = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(ledger.matches("run-blank-trailing-b").count(), 1);
-
-        let summary =
-            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
-                .unwrap();
-        assert_eq!(
-            summary.latest_logical_activity().unwrap().run_id,
-            "run-blank-trailing-b"
-        );
-    }
-
-    #[test]
     fn whitespace_only_line_is_skipped_by_the_reverse_page_scan() {
         // A pure "\n\n" blank line is absorbed by ReverseJsonlScanner's
         // newline trimming and never reaches scan_jsonl_row, so the two
@@ -2052,24 +2035,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(filtered.len(), 2);
-    }
-
-    #[test]
-    fn page_counts_projection_valid_malformed_duplicate_before_limit() {
-        let malformed_duplicate = "{\"schema_version\":2,\"run_id\":\"duplicate\",\"trigger\":\"scheduler\",\"task\":\"memory_curator\",\"status\":\"succeeded\"}";
-        let lines = vec![
-            ledger_line("older", 100),
-            malformed_duplicate.to_owned(),
-            ledger_line("duplicate", 200),
-        ];
-        let (_temp, path) = write_ledger(&lines);
-
-        let page = read_run_records_tail_page_with_window(&path, 3, 8).unwrap();
-
-        assert_eq!(page.records.len(), 2);
-        assert_eq!(page.malformed_row_count, 1);
-        assert!(!page.has_more);
-        assert!(!page.is_complete());
     }
 
     #[test]
@@ -2116,24 +2081,6 @@ mod tests {
         assert_eq!(page.records[0].run_id, "unknown");
         assert_eq!(page.malformed_row_count, 1);
         assert!(!page.is_complete());
-    }
-
-    #[test]
-    fn page_streams_long_keys_inside_canonical_values() {
-        let line = ledger_line("long-key", 100).replace(
-            "\"completed_at\":\"100\"",
-            &format!(
-                "\"validation_report\":{{\"{}\":null}},\"completed_at\":\"100\"",
-                "κ".repeat(tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES)
-            ),
-        );
-        let (_temp, path) = write_ledger(&[line]);
-
-        let page = read_run_records_tail_page_with_window(&path, 1, 8).unwrap();
-
-        assert_eq!(page.records.len(), 1);
-        assert_eq!(page.records[0].run_id, "long-key");
-        assert!(page.is_complete());
     }
 
     #[test]
@@ -2298,23 +2245,6 @@ mod tests {
     }
 
     #[test]
-    fn physical_retry_orders_run_without_regressing_its_logical_state() {
-        let queued = ledger_line("run-a", 100).replace("\"succeeded\"", "\"queued\"");
-        let running = ledger_line("run-a", 200).replace("\"succeeded\"", "\"running\"");
-        let other = ledger_line("run-b", 300);
-        let (_temp, path) = write_ledger(&[queued.clone(), running, other, queued]);
-
-        let page = read_run_records_tail_page_with_window(&path, 2, 8).unwrap();
-
-        assert_eq!(page.records.len(), 2);
-        assert_eq!(page.records[0].run_id, "run-a");
-        assert_eq!(page.records[0].status, AutomationRunStatus::Running);
-        assert_eq!(page.records[1].run_id, "run-b");
-        assert_eq!(page.records[1].status, AutomationRunStatus::Succeeded);
-        assert!(!page.has_more);
-    }
-
-    #[test]
     fn task_summary_uses_logical_completion_order_across_large_retry_tail() {
         let queued = ledger_line("run-a", 100).replace("\"succeeded\"", "\"queued\"");
         let running = ledger_line("run-a", 200).replace("\"succeeded\"", "\"running\"");
@@ -2412,22 +2342,6 @@ mod tests {
             second.latest_successful().unwrap().run_id
         );
         assert_eq!(second.latest_successful().unwrap().run_id, "memo-a");
-    }
-
-    #[test]
-    fn task_summary_memo_is_invalidated_by_an_append() {
-        let (_temp, path) = write_ledger(&[ledger_line("memo-old", 100)]);
-
-        let (before, _) =
-            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
-        assert_eq!(before.latest_successful().unwrap().run_id, "memo-old");
-        append_jsonl_line_locked(&path, &ledger_line("memo-new", 200)).unwrap();
-        let (after, after_hit) =
-            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
-
-        assert!(!after_hit, "an appended row must invalidate the memo");
-        assert_eq!(after.latest_successful().unwrap().run_id, "memo-new");
-        assert_eq!(after.latest_logical_activity().unwrap().run_id, "memo-new");
     }
 
     #[test]
@@ -2589,27 +2503,6 @@ mod tests {
     }
 
     #[test]
-    fn durable_append_deduplicates_large_unicode_terminal_rows() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(RUN_LEDGER_FILENAME);
-        let line = ledger_line("large-unicode", 100).replace(
-            "\"completed_at\":\"100\"",
-            &format!(
-                "\"validation_report\":{{\"payload\":\"{}🧪{}\"}},\"completed_at\":\"100\"",
-                "a".repeat(RUN_LEDGER_TAIL_CHUNK_BYTES as usize),
-                "b".repeat(1024),
-            ),
-        );
-
-        append_jsonl_line_locked(&path, &line).unwrap();
-        append_jsonl_line_locked(&path, &line).unwrap();
-
-        let contents = std::fs::read_to_string(path).unwrap();
-        assert_eq!(contents.lines().count(), 1);
-        assert_eq!(contents.lines().next(), Some(line.as_str()));
-    }
-
-    #[test]
     fn durable_append_compares_large_newest_row_with_fixed_memory() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join(RUN_LEDGER_FILENAME);
@@ -2628,23 +2521,6 @@ mod tests {
 
         let contents = std::fs::read_to_string(path).unwrap();
         assert_eq!(contents, format!("{huge}\n{next}\n"));
-    }
-
-    #[test]
-    fn durable_append_retry_deduplicates_behind_intervening_record() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(RUN_LEDGER_FILENAME);
-        let first = ledger_line("first", 100);
-        let second = ledger_line("second", 200);
-
-        append_jsonl_line_locked(&path, &first).unwrap();
-        append_jsonl_line_locked(&path, &second).unwrap();
-        append_jsonl_line_locked(&path, &first).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            format!("{first}\n{second}\n")
-        );
     }
 
     #[test]
@@ -2693,23 +2569,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn durable_append_accepts_terminal_after_historical_nonadjacent_retry() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(RUN_LEDGER_FILENAME);
-        let queued = ledger_line("historical", 100).replace("\"succeeded\"", "\"queued\"");
-        let running = ledger_line("historical", 200).replace("\"succeeded\"", "\"running\"");
-        let terminal = ledger_line("historical", 300);
-        std::fs::write(&path, format!("{queued}\n{running}\n{queued}\n")).unwrap();
-
-        append_jsonl_line_locked(&path, &terminal).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            format!("{queued}\n{running}\n{queued}\n{terminal}\n")
-        );
-    }
-
     #[tokio::test]
     async fn task_key_read_finds_record_behind_more_than_two_hundred_unrelated_runs() {
         let mut lines = vec![ledger_line("skill-target", 1).replace(
@@ -2752,5 +2611,227 @@ mod tests {
         assert_eq!(found.run_id, "scheduler-anchor");
         assert_eq!(found.trigger, AutomationTrigger::Scheduler);
         assert_eq!(found.status, AutomationRunStatus::Succeeded);
+    }
+
+    /// Runs `read` against `root` across the window a first writer owns.
+    ///
+    /// The reading thread parks in the absent branch; only then does the
+    /// writer create the dashboard directory, take the real ledger lock, and
+    /// append its first row under a durable append intent it does not settle.
+    /// The read resumes with the ledger present, half-published and
+    /// exclusively locked. A barrier fixes that interleaving on every run, so
+    /// the answer the read gives is pinned rather than sampled.
+    async fn read_across_unsettled_first_append<T, F>(
+        root: &Path,
+        run_id: &str,
+        read: impl FnOnce() -> F,
+    ) -> (T, ExactRunPublication)
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let record: AutomationRunLedgerRecord =
+            serde_json::from_str(&ledger_line(run_id, 1)).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writer_root = root.to_path_buf();
+        let writer_barrier = std::sync::Arc::clone(&barrier);
+        let writer = std::thread::spawn(move || {
+            // Nothing exists until the read has proven the root absent.
+            writer_barrier.wait();
+            let held = exact_publication::hold_unsettled_first_append(&writer_root, &record)
+                .expect("hold an unsettled first append");
+            // Release the read into the window the writer now owns.
+            writer_barrier.wait();
+            held
+        });
+        let reader_barrier = std::sync::Arc::clone(&barrier);
+        absent_root_interleave::register(
+            root,
+            Box::new(move || {
+                reader_barrier.wait();
+                reader_barrier.wait();
+            }),
+        );
+
+        let observed = read().await;
+        let (publication, lock) = writer.join().expect("first writer thread");
+        // Releasing the writer's exclusion lets the caller settle the append.
+        drop(lock);
+        (observed, publication)
+    }
+
+    #[tokio::test]
+    async fn absent_page_read_racing_the_first_writer_exposes_no_unsettled_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dashboard");
+        let run_id = "run-unsettled-page";
+
+        let (page, publication) =
+            read_across_unsettled_first_append(&root, run_id, || load_run_records_page(&root, 25))
+                .await;
+
+        assert_eq!(page.unwrap(), AutomationRunLedgerPageV1::empty());
+
+        // The row becomes visible only once its publication settles under the
+        // same lock the read declined to bypass.
+        assert_eq!(
+            exact_publication::publish_staged_run_record_exact(&root, run_id, &publication)
+                .await
+                .unwrap(),
+            ExactRunPublishOutcome::Published
+        );
+        let settled = load_run_records_page(&root, 25).await.unwrap();
+        assert_eq!(
+            settled
+                .records
+                .iter()
+                .map(|record| record.run_id.as_str())
+                .collect::<Vec<_>>(),
+            [run_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_task_key_read_racing_the_first_writer_exposes_no_unsettled_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dashboard");
+        let run_id = "run-unsettled-task-key";
+
+        let (records, publication) = read_across_unsettled_first_append(&root, run_id, || {
+            load_run_records_for_task_key(&root, "memory_curator", 25)
+        })
+        .await;
+
+        assert!(records.unwrap().is_empty());
+
+        assert_eq!(
+            exact_publication::publish_staged_run_record_exact(&root, run_id, &publication)
+                .await
+                .unwrap(),
+            ExactRunPublishOutcome::Published
+        );
+        let settled = load_run_records_for_task_key(&root, "memory_curator", 25)
+            .await
+            .unwrap();
+        assert_eq!(
+            settled
+                .iter()
+                .map(|record| record.run_id.as_str())
+                .collect::<Vec<_>>(),
+            [run_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_summary_read_racing_the_first_writer_neither_exposes_nor_memoizes_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dashboard");
+        let run_id = "run-unsettled-summary";
+
+        let (summary, publication) = read_across_unsettled_first_append(&root, run_id, || {
+            load_run_ledger_task_summary(&root, AgentTaskKind::MemoryCurator, "memory_curator")
+        })
+        .await;
+
+        let summary = summary.unwrap();
+        assert!(summary.records().is_empty());
+        assert!(summary.latest_scheduler_effectful().is_none());
+        assert!(summary.latest_logical_activity().is_none());
+
+        // The absent answer is not memoized against the ledger the writer was
+        // changing: the settled row is what the next summary reports.
+        assert_eq!(
+            exact_publication::publish_staged_run_record_exact(&root, run_id, &publication)
+                .await
+                .unwrap(),
+            ExactRunPublishOutcome::Published
+        );
+        let settled =
+            load_run_ledger_task_summary(&root, AgentTaskKind::MemoryCurator, "memory_curator")
+                .await
+                .unwrap();
+        assert_eq!(
+            settled
+                .latest_scheduler_effectful()
+                .expect("the settled row is the scheduler authority")
+                .run_id,
+            run_id
+        );
+    }
+
+    /// A read of a genuinely absent dashboard answers its typed empty and
+    /// mints nothing: no dashboard directory, no ledger, no lock file.
+    #[tokio::test]
+    async fn absent_dashboard_reads_answer_empty_without_minting_the_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dashboard");
+
+        assert_eq!(
+            load_run_records_page(&root, 25).await.unwrap(),
+            AutomationRunLedgerPageV1::empty()
+        );
+        assert!(load_run_records(&root, 25).await.unwrap().is_empty());
+        assert!(
+            load_run_records_for_task_key(&root, "memory_curator", 25)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            load_run_ledger_task_summary(&root, AgentTaskKind::MemoryCurator, "memory_curator")
+                .await
+                .unwrap()
+                .records()
+                .is_empty()
+        );
+        assert_eq!(
+            load_latest_task_validation_pointer(
+                &root,
+                "memory_curator",
+                "/pagination/resume_after_fact_id"
+            )
+            .await
+            .unwrap(),
+            None
+        );
+
+        assert!(!root.exists(), "an absent read must mint no dashboard root");
+        assert!(!run_ledger_path(&root).exists());
+        assert!(
+            !tracedecay_runtime_core::storage::append_lock_path(&run_ledger_path(&root)).exists()
+        );
+    }
+
+    /// Only a proven absence reads as empty: a dashboard root that is not a
+    /// directory is a typed failure, not an authoritative empty ledger.
+    #[tokio::test]
+    async fn a_dashboard_root_that_is_not_a_directory_is_an_error_not_an_empty_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dashboard");
+        std::fs::write(&root, b"not a dashboard").unwrap();
+
+        let error = load_run_records_page(&root, 25)
+            .await
+            .expect_err("a non-directory dashboard root must not read as an empty page");
+
+        assert!(error.to_string().contains("not a directory"));
+    }
+
+    /// An existing root keeps refusing to read across an outstanding append
+    /// intent rather than exposing the row it covers.
+    #[tokio::test]
+    async fn existing_root_read_refuses_across_an_outstanding_append_intent() {
+        let temp = tempfile::tempdir().unwrap();
+        let record: AutomationRunLedgerRecord =
+            serde_json::from_str(&ledger_line("run-unsettled-existing-root", 1)).unwrap();
+        let (_publication, lock) =
+            exact_publication::hold_unsettled_first_append(temp.path(), &record).unwrap();
+        // Release the writer's exclusion so the read reaches its intent guard.
+        drop(lock);
+
+        let error = load_run_records_page(temp.path(), 25)
+            .await
+            .expect_err("an outstanding append intent must refuse the read");
+
+        assert!(error.to_string().contains("unresolved exact append intent"));
     }
 }

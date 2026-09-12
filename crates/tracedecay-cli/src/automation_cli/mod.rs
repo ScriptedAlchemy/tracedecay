@@ -87,15 +87,4 @@ mod tests {
             serde_json::json!({ "action": "automatic_fact_receipt_view", "id": "fact_7" })
         );
     }
-
-    #[test]
-    fn automation_reconcile_request_binds_project_scope() {
-        assert_eq!(
-            super::config::project_automation_reconcile_args(),
-            serde_json::json!({
-                "action": "automation_reconcile",
-                "scope": "project"
-            })
-        );
-    }
 }

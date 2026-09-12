@@ -10,8 +10,6 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-#[cfg(test)]
-use tracedecay_contracts::context_scout::ContextScoutFeedbackV1;
 use tracedecay_contracts::context_scout::{ContextScoutAddressV1, ContextScoutDeliveryReceiptV1};
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
@@ -25,7 +23,7 @@ use crate::agents::context_scout::ContextScoutDeliveryReceiptHookV1;
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::analytics::HookTimingSpan;
-use super::dispatch::NativeContextScoutLifecycleV1;
+use tracedecay_hooks::NativeContextScoutLifecycleV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DaemonAdmissionRetentionUnavailable;
@@ -377,77 +375,6 @@ impl AsyncHookFeedbackDeliveryPortV1<ContextScoutDeliveryReceiptHookV1>
     }
 }
 
-/// Typed Context Scout explicit-feedback payload for envelope-bound delivery.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ContextScoutFeedbackCommitV1 {
-    pub receipt: ContextScoutDeliveryReceiptV1,
-    pub feedback: ContextScoutFeedbackV1,
-}
-
-/// Daemon-backed Context Scout explicit-feedback commit.
-#[cfg(test)]
-pub(crate) struct DaemonContextScoutFeedbackPort<'a> {
-    runtime: &'a HookRuntimeV1,
-    project_root: &'a Path,
-}
-
-#[cfg(test)]
-impl<'a> DaemonContextScoutFeedbackPort<'a> {
-    pub(crate) fn new(runtime: &'a HookRuntimeV1, project_root: &'a Path) -> Self {
-        Self {
-            runtime,
-            project_root,
-        }
-    }
-
-    pub(crate) async fn post_feedback(
-        &self,
-        receipt: &ContextScoutDeliveryReceiptV1,
-        feedback: &ContextScoutFeedbackV1,
-        deadline: HookSynchronousDeadlineV1,
-    ) -> HookFeedbackDeliveryOutcomeV1 {
-        timed_daemon_hook_action(
-            self.runtime,
-            self.project_root,
-            serde_json::json!({
-                "action": "hook_v2_feedback",
-                "receipt": receipt,
-                "feedback": feedback,
-            }),
-            deadline,
-            None,
-        )
-        .await
-    }
-}
-
-#[cfg(test)]
-impl AsyncHookFeedbackDeliveryPortV1<ContextScoutFeedbackCommitV1>
-    for DaemonContextScoutFeedbackPort<'_>
-{
-    fn deliver_hook_v2<'a>(
-        &'a self,
-        _envelope: &'a HookEventEnvelopeV2,
-        feedback: &'a ContextScoutFeedbackCommitV1,
-        deadline: HookSynchronousDeadlineV1,
-    ) -> HookDeliveryFutureV1<'a> {
-        Box::pin(async move {
-            self.post_feedback(&feedback.receipt, &feedback.feedback, deadline)
-                .await
-        })
-    }
-
-    fn deliver_legacy<'a>(
-        &'a self,
-        _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a ContextScoutFeedbackCommitV1,
-        _deadline: HookSynchronousDeadlineV1,
-    ) -> HookDeliveryFutureV1<'a> {
-        Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
-    }
-}
-
 /// Daemon-backed `OpenCode` LSP update submission.
 pub(crate) struct DaemonOpenCodeLspUpdatePort<'a> {
     runtime: &'a HookRuntimeV1,
@@ -493,20 +420,8 @@ impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
 }
 
 #[cfg(test)]
-pub(crate) fn outcome_is_committed(outcome: HookFeedbackDeliveryOutcomeV1) -> bool {
-    matches!(
-        outcome,
-        HookFeedbackDeliveryOutcomeV1::Delivered | HookFeedbackDeliveryOutcomeV1::Duplicate
-    )
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::feedback::{FeedbackCycleId, FeedbackResultId, FeedbackScopeV1};
-    use tracedecay_domain::{
-        CodeGenerationId, CommitId, ManifestDigest, ProjectId, RepositoryId, WorktreeId,
-    };
 
     #[test]
     fn delivery_outcome_maps_superseded_as_duplicate() {
@@ -522,42 +437,5 @@ mod tests {
             delivery_outcome_from_status(Some("unavailable")),
             HookFeedbackDeliveryOutcomeV1::Unavailable
         );
-    }
-
-    #[test]
-    fn daemon_feedback_notice_survives_admission_decode() {
-        let notice = tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
-            scope: FeedbackScopeV1 {
-                project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
-                repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
-                worktree_id: WorktreeId::new("worktree.hook-dispatch-test").unwrap(),
-                branch_ref: "refs/heads/feature".to_owned(),
-                head_commit_id: CommitId::new("a".repeat(40)).unwrap(),
-            },
-            result_id: FeedbackResultId::new("result.hook-dispatch-test").unwrap(),
-            cycle_id: FeedbackCycleId::new("cycle.hook-dispatch-test").unwrap(),
-            generation_id: CodeGenerationId::new("generation.hook-dispatch-test").unwrap(),
-            generation_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
-            returned_findings: 2,
-            omitted_findings: 1,
-        };
-        let response = serde_json::json!({
-            "action": "hook_v2_admit",
-            "status": "accepted",
-            "disposition": HookTransportDispositionV1::Accepted,
-            "orchestration": null,
-            "ready_guidance": null,
-            "feedback_notice": notice,
-            "reason": null,
-        });
-        let admitted = daemon_admission_response(&response);
-        assert!(matches!(
-            admitted.immediate,
-            HookImmediateAdmissionV1::Accepted {
-                ready_guidance: None,
-                ..
-            }
-        ));
-        assert_eq!(admitted.feedback_notice, Some(notice));
     }
 }

@@ -24,8 +24,8 @@ use super::run_ledger::{
     latest_record_by_canonical_completion, load_run_ledger_task_summary,
 };
 use super::scheduler::{AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule};
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_automation::text::truncate_chars_for_prompt;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub(crate) mod effect_receipt;
@@ -1056,5 +1056,3 @@ mod scheduler_config_tests;
 #[path = "jobs/scheduler_gate.rs"]
 mod scheduler_gate;
 pub use scheduler_gate::evaluate_and_record_scheduler_skip;
-#[cfg(test)]
-use scheduler_gate::latest_effectful_scheduler_job_record;

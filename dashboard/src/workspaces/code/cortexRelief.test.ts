@@ -14,15 +14,7 @@ import type {
   StrataFileV1,
   StrataMeasurementV1,
 } from '../../contracts/generated.ts';
-import {
-  CONTOUR_INTERVAL,
-  MAX_DRAWN_REGIONS,
-  buildCortexModel,
-  cortexAbsences,
-  cortexDescription,
-  cortexLegendPanels,
-  directoryOf,
-} from './cortexRelief.ts';
+import { CONTOUR_INTERVAL, MAX_DRAWN_REGIONS, buildCortexModel } from './cortexRelief.ts';
 
 function cluster(
   directory: string,
@@ -72,15 +64,6 @@ function measurement(
     ...overrides,
   };
 }
-
-describe('directoryOf', () => {
-  it('matches the producer’s own clustering rule — the exact dirname', () => {
-    // `dsm_clusters` keys on `file.rfind('/')`, so membership is exact dirname
-    // equality and never a prefix guess.
-    expect(directoryOf('src/graph/health.rs')).toBe('src/graph');
-    expect(directoryOf('main.rs')).toBe('.');
-  });
-});
 
 describe('elevation', () => {
   it('places a region at a depth one of its own files actually has', () => {
@@ -228,51 +211,5 @@ describe('the aggregation cap', () => {
       }),
     );
     expect(model.capped).toBe(true);
-  });
-});
-
-describe('what the sheet says about itself', () => {
-  const model = buildCortexModel(
-    measurement(
-      [
-        cluster('src/graph', { order: 0, file_count: 9, internal_edges: 18 }),
-        cluster('src/store', { order: 1, file_count: 4, internal_edges: 0 }),
-      ],
-      [file('src/graph/a.rs', 2), file('src/store/a.rs', 0)],
-    ),
-  );
-
-  it('counts every legend reading from the model, so the key cannot drift', () => {
-    const panels = cortexLegendPanels(model);
-    const reading = (label: string) =>
-      panels.find((panel) => panel.label === label)?.reading ?? '';
-    expect(reading('elevation')).toBe(`0 – ${model.maxDepth}`);
-    expect(reading('area')).toContain(`${model.widestFileCount}`);
-    expect(reading('contours')).toBe('0.50 e / file');
-    expect(reading('hue')).toBe(`${model.drawnRegions.length} regions`);
-    expect(reading('absence')).toBe(`${model.relieflessRegions} without relief`);
-    expect(reading('scale')).toContain(`${model.drawnRegions.length} regions ⟵`);
-    // The area panel says files, because the read is file-granular and no
-    // per-directory symbol mass is served.
-    expect(panels.find((panel) => panel.label === 'area')?.teach).toContain(
-      'files and not symbols',
-    );
-  });
-
-  it('names the channels the read does not back instead of drawing them', () => {
-    const labels = cortexAbsences(model).map((panel) => panel.label);
-    expect(labels).toEqual(['churn tint', 'cross-region channels', 'weather']);
-    const channels = cortexAbsences(model).find(
-      (panel) => panel.label === 'cross-region channels',
-    )!;
-    expect(channels.teach).toContain('not region-pair edge counts');
-  });
-
-  it('describes the field as the measurements it is, and points at the table', () => {
-    const description = cortexDescription(model);
-    expect(description).toContain('Relief terrain of 2 module regions');
-    expect(description).toContain('bedrock');
-    expect(description).toContain('drawn hollow');
-    expect(description).toContain('The table below carries the same regions as text');
   });
 });

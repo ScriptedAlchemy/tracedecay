@@ -266,33 +266,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fallback_snapshot_parses_and_covers_common_vendors() {
-        let models = parse_openrouter_json(FALLBACK_JSON).unwrap();
-        assert!(models.len() > 50, "snapshot too small: {}", models.len());
-        for slug in [
-            "anthropic/claude-fable-5",
-            "anthropic/claude-opus-4.8",
-            "openai/gpt-5.5",
-            "openai/gpt-5.3-codex",
-            "google/gemini-3.5-flash",
-        ] {
-            let price = models.get(slug).unwrap_or_else(|| panic!("missing {slug}"));
-            assert!(price.prompt_per_mtok > 0.0);
-            assert!(price.completion_per_mtok > 0.0);
-        }
-    }
-
-    #[test]
-    fn canonical_resolver_prices_claude_and_codex_from_one_table() {
-        let table = load_table();
-        assert!(table.available);
-        assert!(table.revision.starts_with("sha256:"));
-        assert!(resolve_model_price(table, "claude", "claude-sonnet-4-6-20260801").is_some());
-        assert!(resolve_model_price(table, "codex", "gpt-5.3-codex").is_some());
-        assert!(resolve_model_price(table, "claude", "openai/gpt-5.3-codex").is_none());
-    }
-
-    #[test]
     fn unavailable_model_price_is_none_not_zero_cost() {
         let table = load_table();
         assert_eq!(

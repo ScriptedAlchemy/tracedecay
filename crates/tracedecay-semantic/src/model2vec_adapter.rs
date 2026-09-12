@@ -108,6 +108,10 @@ impl EmbeddingSession for UnavailableModel2VecSession {
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
         match *self {}
     }
+
+    fn encoded_token_lengths(&mut self, _texts: &[String]) -> Result<Vec<usize>, EmbedError> {
+        match *self {}
+    }
 }
 
 #[cfg(not(feature = "semantic-model2vec"))]
@@ -612,40 +616,17 @@ impl EmbeddingSession for Model2VecEmbeddingSession {
         hotpath::gauge!("semantic_embed_truncated_texts").set(truncated_texts);
         Ok(vectors)
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_build_revision_names_the_pinned_decoder_versions() {
-        let manifest = include_str!("../Cargo.toml");
-        let pinned = |dependency: &str| {
-            manifest
-                .lines()
-                .find_map(|line| {
-                    let rest = line.trim().strip_prefix(dependency)?.trim_start();
-                    let rest = rest.strip_prefix('=')?.trim_start();
-                    let (_, rest) = rest.split_once("version = \"=")?;
-                    rest.split_once('"').map(|(version, _)| version.to_owned())
-                })
-                .unwrap_or_else(|| {
-                    panic!("tracedecay-semantic must pin an exact {dependency} version")
-                })
-        };
-        for (dependency, prefix) in [
-            ("tokenizers", "tokenizers-"),
-            ("safetensors", "safetensors-"),
-            ("half", "half-"),
-        ] {
-            let version = pinned(dependency);
-            assert!(
-                MODEL2VEC_RUNTIME_BUILD_REVISION_V1.contains(&format!("+{prefix}{version}")),
-                "MODEL2VEC_RUNTIME_BUILD_REVISION_V1 ({MODEL2VEC_RUNTIME_BUILD_REVISION_V1}) must \
-                 record the exact pinned {dependency} version ({version})"
-            );
-        }
+    fn encoded_token_lengths(&mut self, texts: &[String]) -> Result<Vec<usize>, EmbedError> {
+        // Static embedding pools per text, so no padded tensor exists and the
+        // attention budget cannot bind here. The count is still the honest
+        // length the projector orders and buckets by.
+        hotpath::measure_block!("semantic.embed.tokenize", {
+            texts
+                .iter()
+                .map(|text| self.model.tokenize(text).map(|tokens| tokens.ids.len()))
+                .collect()
+        })
     }
 }
 

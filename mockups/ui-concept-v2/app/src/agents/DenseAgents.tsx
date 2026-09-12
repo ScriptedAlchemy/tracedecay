@@ -398,7 +398,7 @@ export function DenseAgents() {
           <button type="button" aria-pressed={exact} onClick={() => setExact((value) => !value)}>EXACT ROWS</button>
           <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search branch or agent" aria-label="Search branches" />
         </div>
-        <div className="ag-relation-legend"><i className="parentage" /> parentage · parent_session_id <i className="handoff" /> handoff · exact ledger <i className="rejoin" /> rejoin · explicit result</div>
+        <div className="ag-relation-legend"><i className="parentage" /> parentage · EXACT parent record <i className="handoff" /> handoff · exact ledger <i className="rejoin" /> rejoin · explicit result <strong>FRONTIER:</strong> click a bundle to expand its deterministic branch</div>
         <DenseField altitude={altitude} branch={branch} selectedId={selectedId} relationId={relationId} pathFocus={pathFocus} navigatorFocus={navigatorFocus} pinnedBranches={pinnedBranches} onNode={selectNode} onRelation={(id) => { setRelationId(id); const relation = fixtureRelation(id); if (relation) setSelectedId(relation.to); if (matchMedia("(max-width: 900px)").matches) setPane("details"); }} />
         <nav className="ag-minimap" aria-label="Branch navigator">
           <span>BRANCH NAVIGATOR</span>

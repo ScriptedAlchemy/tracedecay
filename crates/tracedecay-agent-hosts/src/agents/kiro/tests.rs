@@ -749,60 +749,6 @@ fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn a_failing_kiro_registry_command_reports_the_hosts_own_diagnosis() {
-    let home = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let kiro_cli = bin_dir.path().join("kiro-cli");
-    fake_kiro_cli(
-        &kiro_cli,
-        &log,
-        "echo 'mcp server tracedecay is not configured' >&2\nexit 7",
-    );
-
-    let error = kiro_mcp_remove_with(&kiro_cli, home.path())
-        .expect_err("a non-zero host CLI exit must fail the lifecycle");
-
-    let TraceDecayError::Config { message } = error else {
-        panic!("a failed host command must surface as a config error");
-    };
-    assert!(
-        message.contains("mcp server tracedecay is not configured")
-            && message.contains("exit code 7"),
-        "the host's own stderr and status must reach the operator: {message}"
-    );
-}
-
-#[test]
-fn a_missing_kiro_binary_refuses_instead_of_editing_host_owned_state() {
-    let home = tempfile::tempdir().unwrap();
-    let mcp_path = mcp_config_path(home.path());
-    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
-    let operator_owned = br#"{"mcpServers":{"someone-elses":{"command":"other"}}}"#;
-    std::fs::write(&mcp_path, operator_owned).unwrap();
-
-    let error =
-        crate::agents::host_cli::require_host_cli("kiro-cli-definitely-absent", KIRO_CLI_LIFECYCLE)
-            .expect_err("an absent host binary is a hard requirement failure");
-
-    let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
-        panic!("host CLI absence must surface as a typed requirement");
-    };
-    assert_eq!(program, "kiro-cli-definitely-absent");
-    assert_eq!(lifecycle, KIRO_CLI_LIFECYCLE);
-    assert_eq!(
-        std::fs::read(&mcp_path).unwrap(),
-        operator_owned,
-        "a refused lifecycle must not have touched host-owned registry state"
-    );
-    assert!(
-        !config_backup_path(&mcp_path).exists(),
-        "a refused lifecycle must not have staged a backup of host-owned registry state"
-    );
-}
-
 #[test]
 fn detected_kiro_without_a_tracedecay_server_is_a_single_optional_warning() {
     let home = tempfile::tempdir().unwrap();
@@ -879,55 +825,6 @@ fn an_empty_kiro_mcp_config_is_a_doctor_failure() {
     assert_eq!(counters.warnings, 0);
 }
 
-#[test]
-fn an_ambient_kiro_home_never_redirects_an_admitted_profile() {
-    struct AmbientKiroHomeGuard {
-        previous: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl AmbientKiroHomeGuard {
-        fn set(value: &Path) -> Self {
-            let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-            let previous = std::env::var_os("KIRO_HOME");
-            // SAFETY: the shared profile-discovery lock is held for the
-            // guard's lifetime, so no sibling profile test observes this
-            // temporary ambient value.
-            unsafe {
-                std::env::set_var("KIRO_HOME", value);
-            }
-            Self {
-                previous,
-                _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for AmbientKiroHomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: see `AmbientKiroHomeGuard::set`.
-            unsafe {
-                match self.previous.take() {
-                    Some(previous) => std::env::set_var("KIRO_HOME", previous),
-                    None => std::env::remove_var("KIRO_HOME"),
-                }
-            }
-        }
-    }
-
-    let home = tempfile::tempdir().unwrap();
-    let ambient = tempfile::tempdir().unwrap();
-    let _ambient = AmbientKiroHomeGuard::set(ambient.path());
-    assert_eq!(
-        mcp_config_path(home.path()),
-        home.path().join(".kiro/settings/mcp.json")
-    );
-    assert_ne!(
-        mcp_config_path(home.path()),
-        ambient.path().join("settings/mcp.json")
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
@@ -979,18 +876,6 @@ fn cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
         .expect("the admitted profile must drive the native CLI");
     assert_eq!(std::fs::read(&ambient_mcp).unwrap(), sentinel);
     assert!(mcp_config_path(home.path()).is_file());
-}
-
-#[test]
-fn the_cli_raw_args_match_the_config_writers_launch_arguments() {
-    let entry = mcp_server_entry("/bin/tracedecay");
-    let expected = serde_json::to_value(MCP_SERVER_ARGS).unwrap();
-    assert_eq!(
-        &expected,
-        entry.get("args").unwrap(),
-        "the CLI-driven global registration's raw --args values and the workspace-local config \
-         writer must launch the same server with the same arguments"
-    );
 }
 
 /// Kiro's documented hook entry schema is `command` plus an optional

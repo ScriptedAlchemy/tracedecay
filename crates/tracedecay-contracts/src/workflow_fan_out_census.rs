@@ -8,17 +8,22 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{
     ExecutionPlacementV1, ExecutionTopologyKindV1, IntegrationStrategyV1, ReviewTopologyV1, RunId,
-    UtcMicros, WorkAttemptIdentityV1, WorkAttemptV1, WorkAuthority, WorkProjectionCoverageV1,
-    WorkProjectionSnapshotV1, WorkTopologyBranchV1, WorkflowCensusCountV1,
-    WorkflowCensusDurationV1, WorkflowCensusEvidenceReasonV1, WorkflowCensusGenerationV1,
-    WorkflowExecutionTopologyClassificationV1, WorkflowExecutionTopologyEvidenceV1,
-    WorkflowFanOutCensusV1, WorkflowProviderCapacityEvidenceV1, WorkflowProviderCapacityV1,
-    WorkflowRunEventKind, WorkflowRunProjection, WorkflowRunStatus, WorkflowStepId,
+    UtcMicros, WorkAttemptIdentityV1, WorkAttemptV1, WorkAuthority, WorkTopologyBranchV1,
+    WorkflowCensusCountV1, WorkflowCensusDurationV1, WorkflowCensusEvidenceReasonV1,
+    WorkflowCensusGenerationV1, WorkflowExecutionTopologyClassificationV1,
+    WorkflowExecutionTopologyEvidenceV1, WorkflowFanOutCensusV1,
+    WorkflowProviderCapacityEvidenceV1, WorkflowProviderCapacityV1, WorkflowRunEventKind,
+    WorkflowRunProjection, WorkflowRunStatus, WorkflowStepId,
 };
 
 /// Evidence read from the exact Work authority at the census transition.
+pub enum WorkflowNonDuplicateAttemptsEvidenceV1 {
+    Complete(BTreeSet<WorkAttemptIdentityV1>),
+    Unavailable(WorkflowCensusEvidenceReasonV1),
+}
+
 pub struct WorkflowFanOutCensusEvidenceV1<'a> {
-    pub work_snapshot: Option<&'a WorkProjectionSnapshotV1>,
+    pub work_snapshot: Option<&'a crate::WorkGraphVersionEntryV1>,
     /// Every successfully read child attempt. A child absent from this slice is
     /// counted as not admitted only when `attempt_reads_complete` is true.
     pub attempts: &'a [WorkAttemptV1],
@@ -28,7 +33,7 @@ pub struct WorkflowFanOutCensusEvidenceV1<'a> {
     pub shared_authority_waits: Option<&'a BTreeSet<WorkAttemptIdentityV1>>,
     /// Exact duplicate adjudication negatives. Advancement is useful only
     /// when its attempt is present here; absence of this authority is typed.
-    pub non_duplicate_attempts: Option<&'a BTreeSet<WorkAttemptIdentityV1>>,
+    pub non_duplicate_attempts: WorkflowNonDuplicateAttemptsEvidenceV1,
     /// Exact readiness/control verdicts over every unfinished child.
     pub runnable_children: Option<&'a BTreeSet<WorkAttemptIdentityV1>>,
     pub blocked_children: Option<&'a BTreeSet<WorkAttemptIdentityV1>>,
@@ -144,11 +149,13 @@ pub fn derive_workflow_fan_out_census(
                 .iter()
                 .any(|child| projection.active_fan_out_attempt(&child.attempt_identity) == identity)
         })
-        || evidence.non_duplicate_attempts.is_some_and(|classified| {
-            classified
+        || matches!(
+            &evidence.non_duplicate_attempts,
+            WorkflowNonDuplicateAttemptsEvidenceV1::Complete(classified)
+                if classified
                 .iter()
                 .any(|identity| !attempts.contains_key(identity))
-        })
+        )
     {
         return Err(WorkflowFanOutCensusError::InvalidInput);
     }
@@ -204,7 +211,7 @@ pub fn derive_workflow_fan_out_census(
         &attempts,
         attempts_exact,
         generation_id,
-        evidence.non_duplicate_attempts,
+        &evidence.non_duplicate_attempts,
         active_observed,
     )?;
     let (runnable_count, blocked_count) = readiness_widths(
@@ -270,7 +277,7 @@ pub fn derive_workflow_fan_out_census(
 
 fn classify_work_projection(
     children: &[&tracedecay_domain::WorkflowFanOutChildPlanV1],
-    snapshot: Option<&WorkProjectionSnapshotV1>,
+    snapshot: Option<&crate::WorkGraphVersionEntryV1>,
 ) -> Result<
     (
         WorkflowCensusGenerationV1,
@@ -294,47 +301,29 @@ fn classify_work_projection(
             None,
         ));
     };
-    if !matches!(
-        snapshot.coverage(),
-        WorkProjectionCoverageV1::Complete { .. }
-    ) {
-        return Ok((
-            WorkflowCensusGenerationV1::Unavailable {
-                reason: WorkflowCensusEvidenceReasonV1::WorkProjectionUnavailable,
-            },
-            WorkflowCensusCountV1::Partial {
-                observed: 0,
-                reason: WorkflowCensusEvidenceReasonV1::WorkProjectionUnavailable,
-            },
-            WorkflowCensusCountV1::Partial {
-                observed: 0,
-                reason: WorkflowCensusEvidenceReasonV1::WorkProjectionUnavailable,
-            },
-            None,
-        ));
-    }
+    let generation = crate::work_product_projection_generation(snapshot)
+        .map_err(|_| WorkflowFanOutCensusError::Unavailable)?;
     let accepted = children
         .iter()
         .filter(|child| {
-            snapshot.projections().iter().any(|projection| {
-                projection.task_id() == &child.task_id
-                    && projection.accepted_proposal() == Some(child.proposal.proposal_id())
-            })
+            snapshot
+                .graph()
+                .item(&child.task_id)
+                .is_some_and(|item| item.accepted_proposal() == Some(child.proposal.proposal_id()))
         })
         .count();
     let admitted = children
         .iter()
         .filter(|child| {
-            snapshot.projections().iter().any(|projection| {
-                projection.task_id() == &child.task_id
-                    && projection.accepted_proposal() == Some(child.proposal.proposal_id())
-                    && projection.is_execution_admitted()
+            snapshot.graph().item(&child.task_id).is_some_and(|item| {
+                item.accepted_proposal() == Some(child.proposal.proposal_id())
+                    && item.is_execution_admitted()
             })
         })
         .count();
     Ok((
         WorkflowCensusGenerationV1::Exact {
-            generation_id: snapshot.generation_id().clone(),
+            generation_id: generation.clone(),
         },
         WorkflowCensusCountV1::Known {
             value: count(accepted)?,
@@ -342,7 +331,7 @@ fn classify_work_projection(
         WorkflowCensusCountV1::Known {
             value: count(admitted)?,
         },
-        Some(snapshot.generation_id().clone()),
+        Some(generation),
     ))
 }
 
@@ -352,7 +341,7 @@ fn useful_width(
     attempts: &BTreeMap<WorkAttemptIdentityV1, &WorkAttemptV1>,
     attempts_exact: bool,
     generation: Option<&tracedecay_domain::ProjectionGenerationId>,
-    non_duplicate_attempts: Option<&BTreeSet<WorkAttemptIdentityV1>>,
+    non_duplicate_attempts: &WorkflowNonDuplicateAttemptsEvidenceV1,
     active_width: usize,
 ) -> Result<WorkflowCensusCountV1, WorkflowFanOutCensusError> {
     let Some(previous) = previous else {
@@ -397,10 +386,11 @@ fn useful_width(
             WorkflowCensusEvidenceReasonV1::ProgressFrontierUnavailable,
         );
     }
-    let Some(non_duplicate_attempts) = non_duplicate_attempts else {
-        return Ok(WorkflowCensusCountV1::Unavailable {
-            reason: WorkflowCensusEvidenceReasonV1::DuplicateAdjudicationUnavailable,
-        });
+    let non_duplicate_attempts = match non_duplicate_attempts {
+        WorkflowNonDuplicateAttemptsEvidenceV1::Complete(attempts) => attempts,
+        WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(reason) => {
+            return Ok(WorkflowCensusCountV1::Unavailable { reason: *reason });
+        }
     };
     let useful = advanced
         .iter()
@@ -456,7 +446,7 @@ fn readiness_widths(
 
 fn provider_capacities(
     projection: &WorkflowRunProjection,
-    work_snapshot: Option<&WorkProjectionSnapshotV1>,
+    work_snapshot: Option<&crate::WorkGraphVersionEntryV1>,
     attempts: &BTreeMap<WorkAttemptIdentityV1, &WorkAttemptV1>,
     attempts_exact: bool,
     generation: Option<&tracedecay_domain::ProjectionGenerationId>,
@@ -493,13 +483,9 @@ fn provider_capacities(
         }
         for child in &plan.children {
             if work_snapshot.is_some_and(|snapshot| {
-                matches!(
-                    snapshot.coverage(),
-                    WorkProjectionCoverageV1::Complete { .. }
-                ) && snapshot.projections().iter().any(|projection| {
-                    projection.task_id() == &child.task_id
-                        && projection.accepted_proposal() == Some(child.proposal.proposal_id())
-                        && projection.is_execution_admitted()
+                snapshot.graph().item(&child.task_id).is_some_and(|item| {
+                    item.accepted_proposal() == Some(child.proposal.proposal_id())
+                        && item.is_execution_admitted()
                 })
             }) {
                 providers
@@ -542,12 +528,7 @@ fn provider_capacities(
                     maximum_parallel_per_task: task,
                     admitted: exact_or_partial_count(
                         admitted,
-                        work_snapshot.is_some_and(|snapshot| {
-                            matches!(
-                                snapshot.coverage(),
-                                WorkProjectionCoverageV1::Complete { .. }
-                            )
-                        }),
+                        work_snapshot.is_some(),
                         WorkflowCensusEvidenceReasonV1::WorkProjectionUnavailable,
                     )?,
                     active: exact_or_partial_count(
@@ -782,15 +763,15 @@ fn exact_or_partial_count(
 
 fn attempt_matches_work_snapshot(
     attempt: &WorkAttemptV1,
-    snapshot: Option<&WorkProjectionSnapshotV1>,
+    snapshot: Option<&crate::WorkGraphVersionEntryV1>,
 ) -> bool {
     snapshot.is_some_and(|snapshot| {
-        snapshot.projections().iter().any(|projection| {
-            projection.task_id() == attempt.identity().task_id()
-                && projection.version().get() == attempt.projection_binding().graph_version().get()
-                && projection.accepted_proposal()
-                    == Some(attempt.projection_binding().accepted_proposal())
-        })
+        snapshot
+            .graph()
+            .item(attempt.identity().task_id())
+            .is_some_and(|item| {
+                item.accepted_proposal() == Some(attempt.projection_binding().accepted_proposal())
+            })
     })
 }
 

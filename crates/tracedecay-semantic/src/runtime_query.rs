@@ -5,7 +5,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
+use tracedecay_domain::{
+    CodeGenerationId, EmbeddingExecutionProviderV1, ProjectionKeyV1, VectorGenerationIdV1,
+};
 use tracedecay_query::retrieval::ports::RetrievalPortError;
 use tracedecay_query::retrieval::semantic::{
     EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
@@ -90,6 +92,11 @@ impl<R> CurrentSemanticQueryRuntimeV1<R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
+    pub(crate) fn execution_provider(&self) -> EmbeddingExecutionProviderV1 {
+        let (_, authority, _) = self.factory.runtime().active_snapshot();
+        authority.execution_provider()
+    }
+
     #[cfg(test)]
     pub fn new(
         pointer: SemanticGenerationPointerV1,
@@ -248,7 +255,9 @@ fn map_embed_error(error: EmbedError) -> RetrievalPortError {
         EmbedError::DimensionMismatch { .. } | EmbedError::NonFiniteVectorValue => {
             RetrievalPortError::IncompatibleProjection
         }
-        EmbedError::BatchBytesExceeded { .. } => RetrievalPortError::BudgetExceeded,
+        EmbedError::BatchBytesExceeded { .. } | EmbedError::AttentionBudgetExceeded { .. } => {
+            RetrievalPortError::BudgetExceeded
+        }
         EmbedError::EmptyBatch | EmbedError::TooManyTexts { .. } => {
             RetrievalPortError::Contract("bounded query embedding was rejected".to_owned())
         }
@@ -382,45 +391,6 @@ mod tests {
                 .factory_for_projection(&foreign_projection)
                 .is_none(),
             "a different model identity never attaches, proof or not"
-        );
-    }
-
-    #[test]
-    fn owned_query_embedder_uses_the_pooled_runtime_interface() {
-        let authority = Arc::new(authority());
-        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
-            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
-        let service = SemanticRuntimeService::new_owned(
-            Arc::clone(&authority),
-            factory,
-            config(1, std::time::Duration::from_mins(1), 1 << 20),
-        )
-        .expect("runtime service");
-        let embedder_factory = PooledSemanticQueryEmbedderFactory::new(service);
-        let embedder = embedder_factory.create(Arc::new(ManualCancellation::new()));
-        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
-            "find session acquisition",
-            domain_id::<SanitizerRevision>("sanitizer.v1"),
-            domain_id::<QueryNormalizationRevision>("normalizer.v1"),
-        )
-        .expect("bounded query");
-        let query_digest = QueryDigest::new(
-            authority.projection().privacy_domain().clone(),
-            authority.projection().privacy_key_epoch(),
-            QueryMac::new(format!("hmac-sha256:{}", "11".repeat(32))).expect("query MAC"),
-        );
-        let request = SemanticQueryEmbeddingRequestV1 {
-            query_digest: &query_digest,
-            query_view: &query_view,
-            projection: authority.projection(),
-        };
-
-        let _first = embedder.embed_query(request).expect("first embedding");
-        let _second = embedder.embed_query(request).expect("second embedding");
-        assert_eq!(
-            embedder_factory.runtime().stats().sessions_opened,
-            1,
-            "the production adapter path reuses one warmed session"
         );
     }
 

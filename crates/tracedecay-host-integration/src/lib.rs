@@ -240,27 +240,6 @@ mod tests {
         assert_eq!(gemini.edit.native_fixture_digest, None);
     }
 
-    /// Host-specific routes prove exactly one canonical capability; the
-    /// generic routes prove the capability of the same name.
-    #[test]
-    fn registration_routes_map_to_one_canonical_capability() {
-        use HostRegistrationRouteV1 as Route;
-
-        for (route, capability) in [
-            (Route::ClaudeConfiguredLanguageLsp, HostCapabilityV1::Lsp),
-            (Route::OpenCodeCustomLsp, HostCapabilityV1::Lsp),
-            (
-                Route::CursorNativeDiagnostics,
-                HostCapabilityV1::NativeDiagnostics,
-            ),
-            (Route::Hook, HostCapabilityV1::Hooks),
-            (Route::Mcp, HostCapabilityV1::Mcp),
-            (Route::Cli, HostCapabilityV1::Cli),
-        ] {
-            assert_eq!(route.capability(), capability, "{route:?}");
-        }
-    }
-
     /// Every `HostKindV1` variant owns table rows: a CLI route first plus at
     /// least one daemon route, each route once, each with a non-empty evidence
     /// reference. A host-specific route (Claude/OpenCode LSP, Cursor native

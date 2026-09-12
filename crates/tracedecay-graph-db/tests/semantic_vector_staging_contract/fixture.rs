@@ -125,7 +125,6 @@ pub enum NativeMismatch {
     Metric,
     VectorValues,
     ProjectionReceipt,
-    PageSourceManifest,
     SameProfileProjection,
     ExtraEffect,
     MissingEffect,
@@ -633,20 +632,6 @@ impl ContractFixture {
         (batch, receipt)
     }
 
-    pub fn append(
-        &self,
-        authority: &mut SemanticVectorStagingExactSqlStorage,
-        plan: &SemanticVectorStagePlan,
-        receipt: &SemanticVectorStageBatchReceipt,
-        suffix: &str,
-    ) {
-        with_context(&format!("{suffix}.append"), |context| {
-            authority
-                .append_stage_batch(receipt, &plan.writer_fence, context)
-                .unwrap();
-        });
-    }
-
     pub fn semantic_entity_reference(&self, plan: &SemanticVectorStagePlan) -> GraphEntityRef {
         let name = plan
             .key
@@ -838,36 +823,6 @@ fn mutate_native_effect(mutations: &mut Vec<GraphMutation>, mismatch: NativeMism
                 GraphPropertyName::new("receipt").unwrap(),
                 GraphProperty::Bytes(vec![0xff]),
             );
-        }
-        NativeMismatch::PageSourceManifest => {
-            let receipt = mutations
-                .iter_mut()
-                .find_map(|mutation| match mutation {
-                    GraphMutation::UpsertEntity(entity)
-                        if entity.labels.iter().any(|label| {
-                            label.as_str() == "semantic-vector-generation-receipt-v1"
-                        }) =>
-                    {
-                        Some(entity)
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            let property = receipt
-                .properties
-                .get_mut(&GraphPropertyName::new("receipt").unwrap())
-                .unwrap();
-            let GraphProperty::Bytes(bytes) = property else {
-                unreachable!()
-            };
-            let mut decoded = semantic_vector_native::decode_generation_receipt(bytes).unwrap();
-            let page_manifest = digest::<ManifestDigest>('9');
-            decoded.source_manifest_digest = page_manifest.clone();
-            for chunk in &mut decoded.receipts {
-                chunk.source_manifest_digest = page_manifest.clone();
-            }
-            decoded.publication_digest = projection_batch_publication_digest(&decoded).unwrap();
-            *bytes = semantic_vector_native::encode_generation_receipt(&decoded).unwrap();
         }
         NativeMismatch::SameProfileProjection => {
             let receipt = mutations
@@ -1295,6 +1250,7 @@ fn admitted_embedding_with_dimensions(dimensions: u32) -> AdmittedEmbeddingProje
         runtime_backend: "fixture-runtime".to_owned(),
         runtime_build_revision: "fixture-runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,

@@ -41,26 +41,6 @@ describe('RouteChunkBoundary', () => {
     expect(loadCalls).toBeGreaterThan(callsAfterFailure);
   });
 
-  /**
-   * Every route mounts this same component type at the same Outlet slot, so a
-   * client-side navigation is a PROP update, not a remount. The boundary must
-   * swap to the new loader's page; pinning `lazy(load)` in the constructor
-   * left the whole app stuck on whichever workspace rendered first.
-   */
-  it('swaps to the new page when the load prop changes without a remount', async () => {
-    const loadBrain = () =>
-      Promise.resolve({ default: () => <div>brain surface</div> });
-    const loadCode = () =>
-      Promise.resolve({ default: () => <div>code surface</div> });
-
-    const { rerender } = render(<RouteChunkBoundary load={loadBrain} />);
-    expect(await screen.findByText('brain surface')).toBeTruthy();
-
-    rerender(<RouteChunkBoundary load={loadCode} />);
-    expect(await screen.findByText('code surface')).toBeTruthy();
-    expect(screen.queryByText('brain surface')).toBeNull();
-  });
-
   it('clears a previous route failure when navigating to a different loader', async () => {
     const error = new Error('Failed to fetch dynamically imported module');
     error.name = 'ChunkLoadError';

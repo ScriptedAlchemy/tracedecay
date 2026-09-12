@@ -901,36 +901,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn caller_supplied_profile_identity_controls_registered_fixture_binding() {
-        let root = tempfile::tempdir().expect("registered fixture root");
-        let path = root.path().join("sessions.db");
-        let authority = DatabaseAuthority::acquire_test(&path, "explicit fixture identity")
-            .expect("acquire fixture authority");
-        let identity = TestRuntimeProfileIdentityV1::new(
-            BrainId::new("brain.explicit-fixture").expect("fixture brain identity"),
-            UserProfileId::new("profile.explicit-fixture").expect("fixture profile identity"),
-        );
-
-        let (database, _) = Database::publish_registered_test_runtime_for_profile_identity(
-            &path,
-            &authority,
-            TestDatabaseRuntimeMode::Initialize,
-            identity.clone(),
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("publish explicitly identified fixture");
-
-        assert_eq!(
-            database.registered_binding().shard_id,
-            StoreShardIdV1::profile_sessions(
-                identity.brain_id().clone(),
-                identity.profile_id().clone(),
-            )
-        );
-    }
-
-    #[tokio::test]
     async fn daemon_scoped_registered_fixture_requires_exact_daemon_authority() {
         let root = tempfile::tempdir().expect("daemon-scoped fixture root");
         let _scope = crate::db::enter_daemon_database_scope(

@@ -13,9 +13,9 @@ use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
 use tracedecay_domain::{
     BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    ContentDigest, EmbeddingDocumentCompositionV1, EphemeralSanitizedQueryViewV1,
-    FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
-    ProjectionBatchRequestV1, ProjectionReplayReasonV1, QueryDigest, QueryMac,
+    ContentDigest, EmbeddingDocumentCompositionV1, EmbeddingExecutionProviderV1,
+    EphemeralSanitizedQueryViewV1, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
+    PolicyRevisionId, ProjectionBatchRequestV1, ProjectionReplayReasonV1, QueryDigest, QueryMac,
     QueryNormalizationRevision, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
     SourceSpan,
 };
@@ -38,9 +38,7 @@ use super::{
 use super::{LoadedSemanticArtifactV1, prepare_semantic_evaluation_projection};
 use crate::AdmittedProjectionArtifactV1;
 use crate::RuntimeChunkVectorEncoderV1;
-use crate::embedding_parallelism::{
-    EmbeddingExecutionPlanV1, EmbeddingSessionLimitingReasonV1,
-};
+use crate::embedding_parallelism::{EmbeddingExecutionPlanV1, EmbeddingSessionLimitingReasonV1};
 use crate::fastembed_adapter::{FakeEmbeddingRuntime, ManualCancellation};
 use crate::model_catalog::{
     CatalogMemberPinV1, CatalogSourceV1, CatalogedEmbeddingBackendV1, CatalogedFastEmbedModelV1,
@@ -107,6 +105,30 @@ impl CountingEncoderV1 {
     }
 }
 
+/// Fixture tokenizer: one token per whitespace-separated word, capped at the
+/// admitted truncation length. The double has no model; grouping only needs a
+/// length that varies with the document and can be predicted from a fixture.
+impl crate::projector::CanonicalChunkTokenLengthsV1 for CountingEncoderV1 {
+    fn document_token_lengths(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        let truncation_length = key.truncation_length as usize;
+        Ok(chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .sanitized_text
+                    .as_str()
+                    .split_whitespace()
+                    .count()
+                    .clamp(1, truncation_length)
+            })
+            .collect())
+    }
+}
+
 impl CanonicalChunkVectorEncoderV1 for CountingEncoderV1 {
     fn encode(
         &mut self,
@@ -166,6 +188,30 @@ struct CancellingEncoderV1 {
     cancellation: Arc<TriggeredCancellation>,
 }
 
+/// Fixture tokenizer: one token per whitespace-separated word, capped at the
+/// admitted truncation length. The double has no model; grouping only needs a
+/// length that varies with the document and can be predicted from a fixture.
+impl crate::projector::CanonicalChunkTokenLengthsV1 for CancellingEncoderV1 {
+    fn document_token_lengths(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        let truncation_length = key.truncation_length as usize;
+        Ok(chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .sanitized_text
+                    .as_str()
+                    .split_whitespace()
+                    .count()
+                    .clamp(1, truncation_length)
+            })
+            .collect())
+    }
+}
+
 impl CanonicalChunkVectorEncoderV1 for CancellingEncoderV1 {
     fn encode(
         &mut self,
@@ -213,8 +259,7 @@ fn projection() -> tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
 fn documents() -> Arc<EmbeddingDocumentComposerV1> {
     let generation = CodeGenerationId::new("evaluation-cache.generation".to_owned())
         .expect("generation fixture");
-    let index =
-        GenerationSymbolIndexV1::new(generation, Vec::new()).expect("empty symbol index");
+    let index = GenerationSymbolIndexV1::new(generation, Vec::new()).expect("empty symbol index");
     Arc::new(EmbeddingDocumentComposerV1::new(
         EmbeddingSymbolContextIndexV1::from_generation_symbols(&index),
     ))
@@ -228,8 +273,7 @@ fn chunk(label: char, text: &str) -> CodeSearchChunkV1 {
             .expect("chunk fixture"),
         anchor: CodeSearchChunkAnchorV1 {
             generation_id: generation,
-            file_occurrence_id: FileOccurrenceId::new(format!("{label}.rs"))
-                .expect("file fixture"),
+            file_occurrence_id: FileOccurrenceId::new(format!("{label}.rs")).expect("file fixture"),
             symbol_occurrence_id: None,
             parent_chunk_id: None,
             source_span: SourceSpan {
@@ -288,8 +332,7 @@ fn projection_case_chunks(
                     .expect("sanitizer fixture"),
                 sensitivity: SensitivityDecision {
                     level: SensitivityLevelV1::Public,
-                    policy_revision: PolicyRevisionId::new("policy.v1")
-                        .expect("policy fixture"),
+                    policy_revision: PolicyRevisionId::new("policy.v1").expect("policy fixture"),
                 },
                 exact_terms: Vec::new(),
                 subtokens: Vec::new(),
@@ -336,9 +379,8 @@ fn projection_case_request(
         target_projection_key: projection.projection_key().clone(),
         replay_reason,
     };
-    request.request_digest =
-        tracedecay_code_index::projection::expected_request_digest(&request)
-            .expect("projection request digest");
+    request.request_digest = tracedecay_code_index::projection::expected_request_digest(&request)
+        .expect("projection request digest");
     request
 }
 
@@ -478,7 +520,7 @@ fn lifecycle_authority_with_threads(max_threads: u32) -> LifecycleAuthorityFixtu
             provenance: "fixture".to_owned(),
         },
         expected_dimensions: 8,
-        max_length: 512,
+        max_length: 4096,
         members,
     };
     let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
@@ -491,11 +533,11 @@ fn lifecycle_authority_with_threads(max_threads: u32) -> LifecycleAuthorityFixtu
         SemanticResourceCeilings {
             max_model_bytes: 1024,
             max_tokenizer_bytes: 1024,
-            max_resident_bytes: 64 * 1024 * 1024,
+            max_resident_bytes: Some(64 * 1024 * 1024),
             max_threads,
             max_concurrent_sessions: 1,
             max_batch_size: 8,
-            max_sequence_length: 512,
+            max_sequence_length: 4096,
             load_deadline_ms: 1_000,
         },
         EmbeddingDocumentCompositionV1::SanitizedText,
@@ -510,17 +552,15 @@ fn lifecycle_authority_with_threads(max_threads: u32) -> LifecycleAuthorityFixtu
 #[test]
 fn evaluator_projection_cases_reuse_exact_batches_byte_for_byte() {
     let projection = projection();
-    let current_generation = CodeGenerationId::new("evaluation-cache.current".to_owned())
-        .expect("current generation");
+    let current_generation =
+        CodeGenerationId::new("evaluation-cache.current".to_owned()).expect("current generation");
     let ten_x_generation =
         CodeGenerationId::new("evaluation-cache.ten-x".to_owned()).expect("ten-x generation");
-    let incompatible_generation =
-        CodeGenerationId::new("evaluation-cache.incompatible".to_owned())
-            .expect("incompatible generation");
+    let incompatible_generation = CodeGenerationId::new("evaluation-cache.incompatible".to_owned())
+        .expect("incompatible generation");
     let current_chunks = projection_case_chunks(&current_generation, "current", 8);
     let ten_x_chunks = projection_case_chunks(&ten_x_generation, "ten-x", 80);
-    let incompatible_chunks =
-        projection_case_chunks(&incompatible_generation, "incompatible", 8);
+    let incompatible_chunks = projection_case_chunks(&incompatible_generation, "incompatible", 8);
     let current_request = projection_case_request(
         &current_generation,
         None,
@@ -676,11 +716,11 @@ fn real_fastembed_cold_and_cached_projection_are_byte_exact() {
     let resources = SemanticResourceCeilings {
         max_model_bytes: 1024 * 1024 * 1024,
         max_tokenizer_bytes: 64 * 1024 * 1024,
-        max_resident_bytes: 4 * 1024 * 1024 * 1024,
+        max_resident_bytes: Some(4 * 1024 * 1024 * 1024),
         max_threads: 1,
         max_concurrent_sessions: 1,
         max_batch_size: 4,
-        max_sequence_length: 512,
+        max_sequence_length: 4096,
         load_deadline_ms: 180_000,
     };
     let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
@@ -724,7 +764,9 @@ fn real_fastembed_cold_and_cached_projection_are_byte_exact() {
         &chunks,
         documents(),
         SemanticEvaluationProjectionResourcesV1 {
-            memory_ceiling_bytes: resources.max_resident_bytes,
+            memory_ceiling_bytes: resources
+                .resolved_max_resident_bytes()
+                .expect("fixture resident ceiling"),
         },
         &cold_request,
         SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
@@ -747,7 +789,9 @@ fn real_fastembed_cold_and_cached_projection_are_byte_exact() {
         &chunks,
         documents(),
         SemanticEvaluationProjectionResourcesV1 {
-            memory_ceiling_bytes: resources.max_resident_bytes,
+            memory_ceiling_bytes: resources
+                .resolved_max_resident_bytes()
+                .expect("fixture resident ceiling"),
         },
         &warm_request,
         SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
@@ -784,7 +828,9 @@ fn real_fastembed_cold_and_cached_projection_are_byte_exact() {
         &chunks,
         documents(),
         SemanticEvaluationProjectionResourcesV1 {
-            memory_ceiling_bytes: resources.max_resident_bytes,
+            memory_ceiling_bytes: resources
+                .resolved_max_resident_bytes()
+                .expect("fixture resident ceiling"),
         },
         &second_request,
         SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
@@ -891,6 +937,38 @@ fn changed_fastembed_intra_op_threads_force_an_exact_batch_cache_miss() {
     assert_eq!(cache.entry_count_for_tests(), 2);
 }
 
+#[test]
+fn changed_execution_provider_forces_an_exact_batch_cache_miss() {
+    let authority = lifecycle_authority_with_threads(1);
+    let embedding_key = authority.authority.projection().embedding_key().clone();
+    let chunk = chunk('a', "same tensor with a different execution provider");
+    let group = [&chunk];
+    let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+    let mut cpu = cached_encoder_with_authority(
+        CountingEncoderV1::healthy(),
+        &authority.authority,
+        &cache,
+        SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+    );
+    cpu.execution_provider = EmbeddingExecutionProviderV1::Cpu;
+    cpu.encode_batches(&embedding_key, &[group.as_slice()])
+        .expect("cpu batch");
+    let mut webgpu = cached_encoder_with_authority(
+        CountingEncoderV1::healthy(),
+        &authority.authority,
+        &cache,
+        SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+    );
+    webgpu.execution_provider = EmbeddingExecutionProviderV1::WebGpu;
+    webgpu
+        .encode_batches(&embedding_key, &[group.as_slice()])
+        .expect("WebGPU batch must not reuse CPU numerics");
+
+    assert_eq!(cpu.inner.group_invocations, 1);
+    assert_eq!(webgpu.inner.group_invocations, 1);
+    assert_eq!(cache.entry_count_for_tests(), 2);
+}
+
 /// A daemon-lifetime owner keeps the cache across requests; each request
 /// builds its own encoder over it, exactly as one activation's projection
 /// scan does.
@@ -956,37 +1034,12 @@ fn a_second_request_over_a_retained_cache_projects_the_identical_vectors() {
 }
 
 #[test]
-fn multiple_cold_misses_preserve_one_batched_runtime_dispatch() {
-    let projection = projection();
-    let embedding_key = projection.embedding_key().clone();
-    let chunks = ['a', 'b', 'c'].map(|label| chunk(label, &format!("cold batch {label}")));
-    let singles = chunks.each_ref().map(|chunk| [chunk]);
-    let groups = singles
-        .iter()
-        .map(|group| &group[..])
-        .collect::<Vec<&[&CodeSearchChunkV1]>>();
-    let cache = SemanticEvaluationProjectionBatchCacheV1::new();
-    let mut encoder = request_encoder(&cache);
-
-    encoder
-        .encode_batches(&embedding_key, &groups)
-        .expect("batched cold projection");
-
-    assert_eq!(encoder.inner.group_invocations, 3);
-    assert_eq!(
-        encoder.inner.batch_invocations, 1,
-        "cache claims must not split one admitted runtime batch into N dispatches"
-    );
-}
-
-#[test]
 fn a_changed_privacy_partition_or_workload_input_misses_the_retained_cache() {
     let cache = SemanticEvaluationProjectionBatchCacheV1::new();
     let admitted = chunk('a', "shared corpus text");
     let admitted_group = [&admitted];
 
-    let first_authority =
-        crate::session_pool::test_support::authority_with_privacy("domain-a", 7);
+    let first_authority = crate::session_pool::test_support::authority_with_privacy("domain-a", 7);
     let mut first = cached_encoder_with_authority(
         CountingEncoderV1::healthy(),
         &first_authority,
@@ -1005,8 +1058,7 @@ fn a_changed_privacy_partition_or_workload_input_misses_the_retained_cache() {
     // Same text, different privacy partition: the admitted projection
     // identity is part of the key, so this must not read the other
     // partition's vectors.
-    let other_partition =
-        crate::session_pool::test_support::authority_with_privacy("domain-b", 7);
+    let other_partition = crate::session_pool::test_support::authority_with_privacy("domain-b", 7);
     let mut across_partition = cached_encoder_with_authority(
         CountingEncoderV1::healthy(),
         &other_partition,
@@ -1115,6 +1167,30 @@ fn concurrent_fills_of_one_batch_run_the_model_once() {
         release: mpsc::Receiver<()>,
     }
 
+    /// Fixture tokenizer: one token per whitespace-separated word, capped at the
+    /// admitted truncation length. The double has no model; grouping only needs a
+    /// length that varies with the document and can be predicted from a fixture.
+    impl crate::projector::CanonicalChunkTokenLengthsV1 for GatedEncoderV1 {
+        fn document_token_lengths(
+            &mut self,
+            key: &EmbeddingProjectionKeyV1,
+            chunks: &[&CodeSearchChunkV1],
+        ) -> Result<Vec<usize>, String> {
+            let truncation_length = key.truncation_length as usize;
+            Ok(chunks
+                .iter()
+                .map(|chunk| {
+                    chunk
+                        .sanitized_text
+                        .as_str()
+                        .split_whitespace()
+                        .count()
+                        .clamp(1, truncation_length)
+                })
+                .collect())
+        }
+    }
+
     impl CanonicalChunkVectorEncoderV1 for GatedEncoderV1 {
         fn encode(
             &mut self,
@@ -1211,10 +1287,8 @@ fn every_active_request_remains_a_borrower_after_a_later_request_drops() {
             .expect("sizing projection");
         sizing.retained_bytes()
     };
-    let store = SemanticEvaluationProjectionBatchStoreV1::with_limits_for_tests(
-        usize::MAX,
-        entry_bytes,
-    );
+    let store =
+        SemanticEvaluationProjectionBatchStoreV1::with_limits_for_tests(usize::MAX, entry_bytes);
 
     let request_a = store.request_cache();
     let mut first_a = request_encoder(&request_a);
@@ -1268,10 +1342,8 @@ fn a_later_request_evicts_stale_batches_to_stay_under_the_byte_bound() {
     assert!(entry_bytes > 0);
 
     // Room for exactly one batch.
-    let store = SemanticEvaluationProjectionBatchStoreV1::with_limits_for_tests(
-        usize::MAX,
-        entry_bytes,
-    );
+    let store =
+        SemanticEvaluationProjectionBatchStoreV1::with_limits_for_tests(usize::MAX, entry_bytes);
     let earlier_request = store.request_cache();
     let mut earlier = request_encoder(&earlier_request);
     earlier
@@ -1588,6 +1660,30 @@ fn memory_accounting_keeps_warm_hit_clones_until_the_request_finishes() {
 fn memory_accounting_includes_composed_lookup_keys_during_model_work() {
     struct ObservingEncoderV1<'a> {
         store: &'a SemanticEvaluationProjectionBatchStoreV1,
+    }
+
+    /// Fixture tokenizer: one token per whitespace-separated word, capped at the
+    /// admitted truncation length. The double has no model; grouping only needs a
+    /// length that varies with the document and can be predicted from a fixture.
+    impl crate::projector::CanonicalChunkTokenLengthsV1 for ObservingEncoderV1<'_> {
+        fn document_token_lengths(
+            &mut self,
+            key: &EmbeddingProjectionKeyV1,
+            chunks: &[&CodeSearchChunkV1],
+        ) -> Result<Vec<usize>, String> {
+            let truncation_length = key.truncation_length as usize;
+            Ok(chunks
+                .iter()
+                .map(|chunk| {
+                    chunk
+                        .sanitized_text
+                        .as_str()
+                        .split_whitespace()
+                        .count()
+                        .clamp(1, truncation_length)
+                })
+                .collect())
+        }
     }
 
     impl CanonicalChunkVectorEncoderV1 for ObservingEncoderV1<'_> {

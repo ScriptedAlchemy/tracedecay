@@ -215,11 +215,6 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # v0.5.0 plus the upstream fix (yutaro-sakamoto/tree-sitter-cobol#42), which
 # is still unmerged upstream (#1104).
 tokensave-large-treesitters = { git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters", rev = "102d0103b6fd093c1e5989cceede1ed9f08fe6a9" }
-# FastEmbed's user-defined constructor owns the ORT SessionBuilder but did not
-# expose rc.12's load canceler. This reviewed fork publishes that existing
-# handle immediately before CreateSessionFromArray so TraceDecay can enforce
-# its typed cold-load deadline during graph construction.
-fastembed = { git = "https://github.com/ScriptedAlchemy/fastembed-rs.git", rev = "ad2af71090615b4e36bb106ce19207f84cbe38e0" }
 
 # Patched grafeo 0.5.42, consumed from our fork at the reviewed head of
 # ScriptedAlchemy/grafeo#1 (codex/checked-lpg-block-ranges): the accumulated

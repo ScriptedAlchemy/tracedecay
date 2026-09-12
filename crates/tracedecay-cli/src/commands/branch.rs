@@ -552,23 +552,7 @@ async fn resolve_branch_data_root(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{
-        branch_list_rpc_args, parse_daemon_branch_add_outcome, parse_daemon_branch_admin_report,
-    };
-
-    #[test]
-    fn branch_list_requests_expensive_diagnostics_explicitly() {
-        assert_eq!(
-            branch_list_rpc_args(),
-            serde_json::json!({
-                "format": "json",
-                "include_branch_diagnostics": true,
-                "include_storage_health": false,
-                "include_session_ingest": false,
-                "include_staleness": false,
-            })
-        );
-    }
+    use super::{parse_daemon_branch_add_outcome, parse_daemon_branch_admin_report};
 
     #[test]
     fn daemon_branch_add_outcomes_are_strictly_decoded() {

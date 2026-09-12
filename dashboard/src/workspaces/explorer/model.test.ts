@@ -1,12 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactRelativeAge } from '../../ui/time.ts';
-import {
-  LANES,
-  codeHits,
-  facetCounts,
-  knowledgeHits,
-  sessionHits,
-} from './model.ts';
+import { codeHits, facetCounts, knowledgeHits, sessionHits } from './model.ts';
 
 function canonicalFactId(seed: number): string {
   return `fact.${'a'.repeat(64)}.${seed.toString(16).padStart(64, '0')}`;
@@ -149,20 +142,6 @@ describe('knowledgeHits', () => {
   });
 });
 
-describe('LANES', () => {
-  it('describes the bounded canonical fields without claiming evidence or all providers', () => {
-    expect(LANES.map(({ id, searches }) => [id, searches])).toEqual([
-      ['code', 'name, qualified_name, signature, and file_path'],
-      ['sessions', 'message content and summary text in the active LCM store'],
-      ['knowledge', 'content and tags in a bounded fact overview'],
-      [
-        'semantic',
-        'nothing yet from this surface — the coordinator reports the semantic provider’s typed state per run',
-      ],
-    ]);
-  });
-});
-
 describe('facetCounts', () => {
   it('counts loaded rows only and sorts ties by label', () => {
     const hits = knowledgeHits(
@@ -178,18 +157,5 @@ describe('facetCounts', () => {
       { id: 'project', label: 'project', count: 2 },
       { id: 'decision', label: 'decision', count: 1 },
     ]);
-  });
-});
-
-// The source-state cases that lived here moved to laneModel.test.ts when
-// `plannerLaneState` became `laneFromSourceProgress`; both invariants they
-// protected are asserted there against the same two shapes.
-
-describe('compactRelativeAge', () => {
-  it('uses unix seconds and handles future observations explicitly', () => {
-    const now = Date.parse('2026-07-25T18:00:00Z') / 1000;
-    expect(compactRelativeAge(now + 10, now)).toBe('now');
-    expect(compactRelativeAge(now - 120, now)).toBe('2m');
-    expect(compactRelativeAge(undefined, now)).toBeNull();
   });
 });

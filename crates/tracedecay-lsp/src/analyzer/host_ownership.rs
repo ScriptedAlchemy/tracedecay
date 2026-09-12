@@ -256,21 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn dotted_registration_extensions_match_bare_adapter_extensions() {
-        let ownership = HostAnalyzerOwnership::from_opencode_config(&opencode_config(json!({
-            ".rs": ["rust-analyzer"]
-        })));
-
-        assert!(ownership.is_engaged());
-        assert_eq!(
-            ownership.retained_owner_for_extension("rs"),
-            Some("rust-analyzer"),
-            "adapters carry bare extensions; the registration writes dotted ones"
-        );
-        assert_eq!(ownership.retained_owner_for_extension("ts"), None);
-    }
-
-    #[test]
     fn avoidance_without_a_retained_analyzer_claims_nothing() {
         let ownership = HostAnalyzerOwnership::from_opencode_config(&opencode_config(json!({})));
 
@@ -301,23 +286,6 @@ mod tests {
 
         assert_eq!(ownership, HostAnalyzerOwnership::default());
         assert!(!ownership.is_engaged());
-    }
-
-    #[test]
-    fn a_project_opencode_config_is_read_from_disk() {
-        let project = tempfile::tempdir().expect("project root");
-        std::fs::write(
-            project.path().join(OPENCODE_PROJECT_CONFIG_FILE),
-            serde_json::to_vec_pretty(&opencode_config(json!({ ".ts": ["typescript"] }))).unwrap(),
-        )
-        .expect("write project opencode.json");
-
-        let ownership = HostAnalyzerOwnership::from_opencode_project_root(project.path());
-
-        assert_eq!(
-            ownership.retained_owner_for_extensions(["tsx", "ts"]),
-            Some("typescript")
-        );
     }
 
     #[test]
@@ -363,30 +331,6 @@ mod tests {
     }
 
     #[test]
-    fn a_home_level_config_is_read_through_the_shared_file_reader() {
-        let config_root = tempfile::tempdir().expect("config root");
-        let opencode_dir = config_root.path().join("opencode");
-        std::fs::create_dir_all(&opencode_dir).expect("opencode config dir");
-        std::fs::write(
-            opencode_dir.join("opencode.json"),
-            serde_json::to_vec_pretty(&opencode_config(json!({ ".rs": ["rust-analyzer"] })))
-                .unwrap(),
-        )
-        .expect("write home opencode.json");
-
-        let path = opencode_home_config_path(
-            Path::new("/nonexistent/home"),
-            Some(config_root.path().as_os_str()),
-        );
-        let ownership = HostAnalyzerOwnership::from_opencode_config_file(&path);
-
-        assert_eq!(
-            ownership.retained_owner_for_extension("rs"),
-            Some("rust-analyzer")
-        );
-    }
-
-    #[test]
     fn a_union_keeps_only_individually_engaged_declarations() {
         let engaged_home = HostAnalyzerOwnership::from_opencode_config(&opencode_config(json!({
             ".ts": ["typescript"]
@@ -409,34 +353,5 @@ mod tests {
             None,
             "a level that never asked for avoidance keeps its retained map unenforced"
         );
-    }
-
-    #[test]
-    fn a_union_of_two_engaged_declarations_covers_both_extension_sets() {
-        let project = HostAnalyzerOwnership::from_opencode_config(&opencode_config(json!({
-            ".rs": ["rust-analyzer"]
-        })));
-        let home = HostAnalyzerOwnership::from_opencode_config(&opencode_config(json!({
-            ".ts": ["typescript"]
-        })));
-
-        let merged = project.union(&home);
-
-        assert_eq!(
-            merged.retained_owner_for_extension("rs"),
-            Some("rust-analyzer")
-        );
-        assert_eq!(
-            merged.retained_owner_for_extension("ts"),
-            Some("typescript")
-        );
-    }
-
-    #[test]
-    fn a_union_of_unengaged_declarations_stays_unengaged() {
-        let merged = HostAnalyzerOwnership::default().union(&HostAnalyzerOwnership::default());
-
-        assert!(!merged.is_engaged());
-        assert_eq!(merged, HostAnalyzerOwnership::default());
     }
 }

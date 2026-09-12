@@ -232,12 +232,13 @@ fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
         document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
-        truncation_length: 512,
+        truncation_length: 4096,
         inference_batch_size: 8,
         inference_batch_bytes: 16 * 1024,
         runtime_backend: "fastembed-ort".to_owned(),
         runtime_build_revision: "runtime.maintenance-retention.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions: 2,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,
@@ -960,6 +961,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
                 .as_ref(),
             &code_store_root,
             &canonical_root,
+            graph.db(),
         )
         .await,
         DoctorStorageFamilyReadV1::ObservedIncomplete { .. }
@@ -1134,6 +1136,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             .as_ref(),
         &code_store_root,
         &canonical_root,
+        restarted_graph.db(),
     )
     .await;
     let DoctorStorageFamilyReadV1::ObservedIncomplete { findings, reason } = doctor else {

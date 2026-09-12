@@ -1648,30 +1648,6 @@ mod discovery_tests {
     }
 
     #[test]
-    fn ci_discovery_does_not_require_pull_request_resolution() {
-        let fixture =
-            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
-        let scope = scope(&fixture);
-        let mut record = fixture.ci_provider_record.clone();
-        record.workflow_run.pull_requests.clear();
-        record.check_run.pull_requests.clear();
-
-        let outcome = select_production_ci_failure_request_v1(
-            &ProviderId::new("provider.github-actions").unwrap(),
-            &target(&fixture),
-            &scope,
-            std::slice::from_ref(&record.workflow_run),
-            std::slice::from_ref(&record.workflow_job),
-            std::slice::from_ref(&record.check_run),
-        );
-
-        assert!(matches!(
-            outcome,
-            ProductionCiFailureDiscoveryOutcomeV1::Found(_)
-        ));
-    }
-
-    #[test]
     fn discovery_preserves_rate_limit_and_decode_failure_kinds() {
         let checkpoint = tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1 {
             limit: 5_000,

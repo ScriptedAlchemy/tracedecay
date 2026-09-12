@@ -643,6 +643,21 @@ pub(in crate::fact_store) async fn update_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactUpdateCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
+    update_project_memory_fact_with_cas_tx(transaction, request, false).await
+}
+
+pub(in crate::fact_store) async fn update_project_memory_fact_after_curation_review_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactUpdateCommandV1,
+) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
+    update_project_memory_fact_with_cas_tx(transaction, request, true).await
+}
+
+async fn update_project_memory_fact_with_cas_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactUpdateCommandV1,
+    use_transaction_current_cas: bool,
+) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
     let request_digest = project_memory_digest(json!({
         "fact_id": request.target().fact_id().as_str(),
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
@@ -714,10 +729,14 @@ pub(in crate::fact_store) async fn update_project_memory_fact_tx(
         sanitized.payload,
         sanitized.access,
         new_trust,
-        request
-            .expected_last_event_id()
-            .cloned()
-            .or_else(|| Some(current.last_event_id().clone())),
+        if use_transaction_current_cas {
+            Some(current.last_event_id().clone())
+        } else {
+            request
+                .expected_last_event_id()
+                .cloned()
+                .or_else(|| Some(current.last_event_id().clone()))
+        },
         request.actor().cloned(),
         now,
     )?;
@@ -797,6 +816,21 @@ pub(in crate::fact_store) async fn remove_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactRemoveCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
+    remove_project_memory_fact_with_cas_tx(transaction, request, false).await
+}
+
+pub(in crate::fact_store) async fn remove_project_memory_fact_after_curation_review_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactRemoveCommandV1,
+) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
+    remove_project_memory_fact_with_cas_tx(transaction, request, true).await
+}
+
+async fn remove_project_memory_fact_with_cas_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactRemoveCommandV1,
+    use_transaction_current_cas: bool,
+) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
     let request_digest = project_memory_digest(json!({
         "fact_id": request.target().fact_id().as_str(),
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
@@ -866,16 +900,20 @@ pub(in crate::fact_store) async fn remove_project_memory_fact_tx(
         .await?;
         return ProjectMemoryFactRemoveOutcomeV1::already_removed(fact, remaining_fact_count);
     }
-    let expected_last_event_id = request
-        .expected_last_event_id()
-        .cloned()
-        .or(current.last_event_id.clone())
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "remove target has no lineage CAS identity",
-            )
-        })?;
+    let expected_last_event_id = if use_transaction_current_cas {
+        current.last_event_id.clone()
+    } else {
+        request
+            .expected_last_event_id()
+            .cloned()
+            .or(current.last_event_id.clone())
+    }
+    .ok_or_else(|| {
+        storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "remove target has no lineage CAS identity",
+        )
+    })?;
     let batch = project_memory_removal_batch(
         request.target().owner(),
         &fact_id,

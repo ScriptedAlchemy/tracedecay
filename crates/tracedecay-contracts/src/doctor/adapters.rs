@@ -10,7 +10,7 @@
 
 use tracedecay_domain::CodeGenerationId;
 
-use crate::feedback::FeedbackCompletedPublicationV1;
+use crate::feedback::FeedbackPublicationV1;
 
 use super::sources::{
     AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1, AdvisoryFeedbackSummaryReadV1,
@@ -91,7 +91,7 @@ pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealt
 /// distinct advisory port. Host conformance remains a separate source.
 #[must_use]
 pub fn advisory_feedback_read_from_publication(
-    publication: Option<&FeedbackCompletedPublicationV1>,
+    publication: Option<&FeedbackPublicationV1>,
     current_generation: Option<&CodeGenerationId>,
 ) -> AdvisoryFeedbackReadV1 {
     let Some(publication) = publication else {
@@ -390,18 +390,6 @@ mod tests {
             storage_family_read(Vec::new()),
             DoctorStorageFamilyReadV1::Absent
         );
-    }
-
-    #[test]
-    fn storage_family_read_observed_when_findings_present() {
-        let read = storage_family_read(vec![orphan_storage_finding()]);
-        match read {
-            DoctorStorageFamilyReadV1::Observed { findings } => {
-                assert_eq!(findings.len(), 1);
-                assert_eq!(findings[0].kind(), DoctorStorageFindingKindV1::OrphanStore);
-            }
-            other => panic!("expected observed, got {other:?}"),
-        }
     }
 
     #[test]

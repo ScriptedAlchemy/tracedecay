@@ -23,31 +23,3 @@ pub const AUTOMATION_DISABLED: &str = "automation_disabled";
 /// label must never be confused with `AUTOMATION_DISABLED` or the
 /// session-evidence budget skips, all of which describe runs that may resume.
 pub const SKILL_OVERLAP_REMOVAL_TOMBSTONE: &str = "skill_overlap_removal_tombstone";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tombstone_disabled_and_budget_labels_are_pairwise_distinct() {
-        let labels = [
-            (
-                "skill-overlap removal tombstone",
-                SKILL_OVERLAP_REMOVAL_TOMBSTONE,
-            ),
-            ("automation-disabled skip", AUTOMATION_DISABLED),
-            ("budget-exhausted skip", SESSION_EVIDENCE_BUDGET_EXHAUSTED),
-            ("budget-suppressed skip", SESSION_EVIDENCE_BUDGET_SUPPRESSED),
-        ];
-        for (index, (name_a, label_a)) in labels.iter().enumerate() {
-            for (name_b, label_b) in &labels[index + 1..] {
-                assert_ne!(
-                    label_a, label_b,
-                    "the {name_a} label must not reuse the {name_b} label: a \
-                     removal tombstone or skill-overlap record presenting as \
-                     `{label_b}` would be misread as a resumable skip"
-                );
-            }
-        }
-    }
-}

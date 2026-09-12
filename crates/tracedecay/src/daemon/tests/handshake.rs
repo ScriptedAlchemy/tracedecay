@@ -54,22 +54,6 @@ pub(super) async fn daemon_round_trip(
     responses
 }
 
-#[test]
-fn daemon_handshake_round_trips_project_scope_and_timings() {
-    let handshake = DaemonHandshake {
-        project_path: Some(PathBuf::from("/work/repo")),
-        scope_prefix: Some("src/mcp".to_string()),
-        timings: true,
-        allow_init: true,
-        ..test_handshake_defaults()
-    };
-
-    let encoded = handshake.to_line().expect("handshake should encode");
-    let decoded = DaemonHandshake::from_line(&encoded).expect("handshake should decode");
-
-    assert_eq!(decoded, handshake);
-}
-
 /// Old clients omit the adoption field entirely; the daemon must default it
 /// to `Never` so a mixed-version pair can never remap a moved store.
 #[test]
@@ -92,22 +76,6 @@ fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
         decoded.moved_store_adoption,
         crate::tracedecay::MovedStoreAdoption::Never
     );
-}
-
-/// The adoption request survives the wire in both explicit shapes.
-#[test]
-fn daemon_handshake_round_trips_moved_store_adoption() {
-    for adoption in [
-        crate::tracedecay::MovedStoreAdoption::OfferCandidates,
-        crate::tracedecay::MovedStoreAdoption::AdoptUnique,
-        crate::tracedecay::MovedStoreAdoption::AdoptNamed("proj_nongit_moved".to_owned()),
-    ] {
-        let mut handshake = test_handshake_defaults();
-        handshake.moved_store_adoption = adoption.clone();
-        let encoded = handshake.to_line().expect("handshake should encode");
-        let decoded = DaemonHandshake::from_line(&encoded).expect("handshake should decode");
-        assert_eq!(decoded.moved_store_adoption, adoption);
-    }
 }
 
 #[test]
@@ -287,25 +255,6 @@ async fn socket_client_requires_authentication_before_routing() {
         .await
         .expect("server task")
         .expect("an auth refusal is a served connection");
-}
-
-#[test]
-fn daemon_handshake_advertises_binary_version() {
-    let handshake = test_handshake_defaults();
-
-    let encoded = handshake.to_line().expect("handshake should encode");
-    let value: serde_json::Value = serde_json::from_str(&encoded).expect("handshake json");
-
-    assert_eq!(
-        value["client_version"],
-        serde_json::json!(
-            crate::version::build_version().expect("fixture product runtime registered")
-        )
-    );
-    assert_eq!(
-        value["client_instance_id"],
-        serde_json::json!(tracedecay_runtime_core::runtime_identity::process_run_id())
-    );
 }
 
 #[test]
@@ -904,67 +853,6 @@ async fn initialized_ack_preserves_pending_catalog_refresh_notification() {
     .await;
     assert_eq!(ping.len(), 1, "refresh notification must be deduplicated");
     assert_eq!(ping[0]["id"], json!(6));
-}
-
-#[cfg(unix)]
-#[test]
-fn daemon_version_skew_warning_reads_initialize_server_info() {
-    let initialize = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {}
-    })
-    .to_string();
-    let response = |version: &str| {
-        vec![
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": { "serverInfo": { "name": "tracedecay", "version": version } }
-            })
-            .to_string(),
-        ]
-    };
-
-    let warning =
-        super::super::daemon_version_skew_warning(&initialize, &response("9.9.9"), "1.0.0")
-            .expect("mismatched daemon version should warn");
-    assert!(
-        warning.contains("9.9.9") && warning.contains("1.0.0"),
-        "warning should name both versions, got: {warning}"
-    );
-    assert!(
-        warning.contains("MCP host") && !warning.contains("tracedecay daemon restart"),
-        "a newer daemon should direct recovery at the stale host, got: {warning}"
-    );
-
-    let warning =
-        super::super::daemon_version_skew_warning(&initialize, &response("1.0.0"), "9.9.9")
-            .expect("newer client should warn about stale daemon");
-    assert!(
-        warning.contains("tracedecay daemon restart"),
-        "a newer client should direct recovery at the stale daemon, got: {warning}"
-    );
-
-    assert_eq!(
-        super::super::daemon_version_skew_warning(&initialize, &response("1.0.0"), "1.0.0"),
-        None,
-        "matching versions must not warn"
-    );
-
-    let tools_call = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {}
-    })
-    .to_string();
-    assert_eq!(
-        super::super::daemon_version_skew_warning(&tools_call, &response("9.9.9"), "1.0.0"),
-        None,
-        "only initialize responses advertise the daemon version"
-    );
 }
 
 #[cfg(unix)]

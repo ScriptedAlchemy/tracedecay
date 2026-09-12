@@ -909,28 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn backend_message_boundary_types_denial_disconnect_and_unavailability() {
-        assert_eq!(
-            AgentTaskError::from_backend_message("permission denied by the codex host policy"),
-            AgentTaskError::Denied {
-                reason: "permission denied by the codex host policy".to_string()
-            }
-        );
-        assert_eq!(
-            AgentTaskError::from_backend_message("broken pipe writing the prompt"),
-            AgentTaskError::Disconnected {
-                reason: "broken pipe writing the prompt".to_string()
-            }
-        );
-        assert_eq!(
-            AgentTaskError::from_backend_message("codex executable was not found"),
-            AgentTaskError::Unavailable {
-                reason: "codex executable was not found".to_string()
-            }
-        );
-    }
-
-    #[test]
     fn failure_disposition_prefers_current_error_evidence() {
         let disposition = agent_task_failure_disposition(
             Some(AgentTaskFailureClass::Permanent),

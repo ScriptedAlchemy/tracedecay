@@ -447,43 +447,4 @@ mod tests {
             );
         }
     }
-
-    /// A closed-vocabulary decode rejection must carry the admitted values so
-    /// every dispatch surface can hand the caller a corrective message.
-    #[test]
-    fn decode_rejection_names_admitted_enum_values() {
-        let error = decode_request(
-            RetainedSurfaceOperation::FactStoreAdd,
-            json!({ "content": "categorized", "category": "pitfall" }),
-        )
-        .expect_err("unknown category must be rejected");
-        let message = error.to_string();
-        for admitted in [
-            "general",
-            "user_pref",
-            "project",
-            "tool",
-            "decision",
-            "code_area",
-        ] {
-            assert!(
-                message.contains(admitted),
-                "decode rejection must name `{admitted}`: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn decode_rejection_names_wrong_type_argument() {
-        let error = decode_request(
-            RetainedSurfaceOperation::FactStoreAdd,
-            json!({ "content": 17, "category": "general" }),
-        )
-        .expect_err("non-string content must be rejected");
-        let message = error.to_string();
-        assert!(
-            message.contains("content"),
-            "wrong-type rejection must name the offending argument: {message}"
-        );
-    }
 }

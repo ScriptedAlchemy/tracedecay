@@ -58,7 +58,7 @@ fn cancellation_before_commit_rolls_back_and_after_commit_returns_the_receipt() 
     assert_eq!(marker_count(&database), 0);
     for table in [
         "td_runtime_writer_checkpoint_v1",
-        "td_runtime_writer_idempotency_v1",
+        "td_runtime_writer_idempotency_v2",
         "td_runtime_writer_outbox_v1",
     ] {
         assert_eq!(

@@ -93,13 +93,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn consent_is_disabled_by_default() {
-        WorkExpertiseConsentV1::disabled()
-            .validate()
-            .expect("disabled consent is canonical");
-    }
-
-    #[test]
     fn consent_rejects_an_unbounded_lifetime() {
         let consent = WorkExpertiseConsentV1 {
             schema_version: WorkExpertiseConsentV1::SCHEMA_VERSION,

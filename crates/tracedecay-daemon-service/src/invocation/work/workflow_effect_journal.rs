@@ -2,12 +2,13 @@
 
 use serde::Serialize;
 use tracedecay_contracts::{
-    ApplicationContractError, ApplicationOutcome, AuthorityReceipt, Deadline, EffectId,
-    EffectTermination, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
-    TaskHandoffError, TaskHandoffGrant, TaskHandoffRedeemed, WorkflowDefinitionDisposition,
-    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectOperationV1,
-    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
-    WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1, WorkflowEffectTerminalV1,
+    ApplicationContractError, ApplicationOutcome, ApplicationProblem, AuthorityReceipt, Deadline,
+    EffectId, EffectTermination, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
+    TaskHandoffError, TaskHandoffGrant, TaskHandoffRedeemed, WorkflowCoordinationError,
+    WorkflowDefinitionDisposition, WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1,
+    WorkflowEffectOperationV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
+    WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
+    WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
     ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
@@ -21,6 +22,9 @@ use tracedecay_daemon_protocol::{
 use tracedecay_domain::errors::TraceDecayError;
 
 use super::super::current_micros;
+use super::workflow_run_control::{
+    workflow_coordination_application_problem, workflow_coordination_problem,
+};
 use super::{RegisteredWorkRuntime, work_command_effect, work_effect, work_evidence_packet};
 
 #[allow(clippy::too_many_arguments)]
@@ -226,6 +230,19 @@ pub(super) fn execute_journaled_workflow_effect(
     // `execute_effect` has durably published this terminal before returning
     // it. Wake project recovery even if response translation below fails.
     registered.durable_write_signal.bump();
+    if let WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::InvalidRequestDiagnostic(
+        diagnostic,
+    )) = terminal.outcome()
+    {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            ApplicationProblem::InvalidRequest {
+                diagnostic: diagnostic.clone(),
+                retry: tracedecay_contracts::RetryDirective::Never,
+                legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+            },
+        );
+    }
     let outcome = match workflow_effect_outcome(terminal) {
         Ok(outcome) => outcome,
         Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
@@ -369,12 +386,37 @@ pub(super) fn workflow_effect_problem(problem: DaemonInvocationProblem) -> Workf
     }
 }
 
+pub(super) fn workflow_coordination_effect_problem(
+    error: WorkflowCoordinationError,
+) -> WorkflowEffectProblemV1 {
+    match workflow_coordination_application_problem(&error) {
+        Some(ApplicationProblem::InvalidRequest { diagnostic, .. }) => {
+            WorkflowEffectProblemV1::InvalidRequestDiagnostic(diagnostic)
+        }
+        Some(
+            ApplicationProblem::NotFoundOrNotAuthorized { .. }
+            | ApplicationProblem::Conflict { .. }
+            | ApplicationProblem::PartialEffect { .. }
+            | ApplicationProblem::Stale { .. }
+            | ApplicationProblem::Unsupported { .. }
+            | ApplicationProblem::Unavailable { .. }
+            | ApplicationProblem::ExecutionFailed { .. }
+            | ApplicationProblem::ResetRequired { .. }
+            | ApplicationProblem::Saturated { .. }
+            | ApplicationProblem::Cancelled { .. }
+            | ApplicationProblem::TimedOut { .. },
+        )
+        | None => workflow_effect_problem(workflow_coordination_problem(error)),
+    }
+}
+
 fn workflow_effect_daemon_problem(problem: WorkflowEffectProblemV1) -> DaemonInvocationProblem {
     match problem {
         WorkflowEffectProblemV1::NotFoundOrNotAuthorized => {
             DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
         WorkflowEffectProblemV1::InvalidRequest
+        | WorkflowEffectProblemV1::InvalidRequestDiagnostic(_)
         | WorkflowEffectProblemV1::Conflict
         | WorkflowEffectProblemV1::TimedOut => DaemonInvocationProblem::InvalidRequest,
     }
@@ -421,7 +463,9 @@ fn workflow_effect_outcome(
                 }
             }
         }
-        WorkflowEffectOutcomeV1::Problem(problem) => Err(workflow_effect_daemon_problem(*problem)),
+        WorkflowEffectOutcomeV1::Problem(problem) => {
+            Err(workflow_effect_daemon_problem(problem.clone()))
+        }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(result)) => {
             work_effect(
                 terminal,

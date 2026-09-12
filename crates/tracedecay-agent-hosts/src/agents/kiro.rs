@@ -422,9 +422,7 @@ impl AgentIntegration for KiroIntegration {
         component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::{
-            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
-        };
+        use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1 as State};
 
         if component != HostBundleComponentV1::ContextMcp {
             return State::Missing;

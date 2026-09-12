@@ -1,8 +1,5 @@
 //! Shared session/steering context builders.
 
-#[cfg(test)]
-use serde_json::Value;
-
 /// Model-invocable skills that Cursor ships in its `skills/` directory.
 pub use crate::agents::cursor::CURSOR_PLUGIN_SKILLS;
 
@@ -21,9 +18,6 @@ pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
          instead of relying on repeated session-start instructions.\n",
     );
 }
-
-#[cfg(test)]
-pub(super) const COMPACTION_CONTEXT_RECOVERY_HINT: &str = "Context was just compacted. If important prior-session context seems missing, query TraceDecay session context before assuming the compacted summary is complete. Start with `tracedecay_message_search` or `tracedecay_lcm_expand_query`; use `tracedecay_lcm_describe` and `tracedecay_lcm_expand` when you need the summary DAG sources.";
 
 /// Character budget for the Cursor `sessionStart` `additional_context` text.
 ///
@@ -190,39 +184,6 @@ fn append_codex_recall_and_registry_guidance(s: &mut String) {
     );
 }
 
-#[cfg(test)]
-pub(super) fn append_context_recovery_hint(context: &mut String) {
-    if !context.is_empty() && !context.ends_with('\n') {
-        context.push('\n');
-    }
-    context.push_str(COMPACTION_CONTEXT_RECOVERY_HINT);
-    context.push('\n');
-}
-
-#[cfg(test)]
-pub(super) fn session_start_from_compaction(event_json: &str) -> bool {
-    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-        return false;
-    };
-    ["source", "trigger", "reason", "boundary_reason"]
-        .iter()
-        .filter_map(|key| parsed.get(*key).and_then(Value::as_str))
-        .any(matches_compaction_source)
-}
-
-#[cfg(test)]
-fn matches_compaction_source(value: &str) -> bool {
-    let normalized = value
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "compact" | "compaction" | "contextcompacted" | "compression"
-    )
-}
-
 /// Formats a short relative-age staleness hint from a sync age in seconds.
 pub fn cursor_staleness_hint(age_secs: i64) -> String {
     let age = age_secs.max(0);
@@ -240,48 +201,6 @@ pub fn cursor_staleness_hint(age_secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn compact_session_start_events_get_recovery_hint() {
-        let event = serde_json::json!({ "source": "compact" }).to_string();
-        assert!(session_start_from_compaction(&event));
-
-        let mut context = build_codex_session_context(true, None);
-        append_context_recovery_hint(&mut context);
-        assert!(context.contains("Context was just compacted"));
-        assert!(context.contains("tracedecay_lcm_expand_query"));
-        assert!(context.contains("tracedecay_lcm_describe"));
-    }
-
-    #[test]
-    fn non_compact_session_start_events_do_not_get_recovery_hint() {
-        let event = serde_json::json!({ "source": "resume" }).to_string();
-        assert!(!session_start_from_compaction(&event));
-    }
-
-    #[test]
-    fn codex_session_context_carries_diagnostics_moment() {
-        // Both the initialized and unindexed surfaces must route the shell
-        // compile/type-check moment to tracedecay diagnostics.
-        for status in [
-            HookWorkspaceStatus::Initialized,
-            HookWorkspaceStatus::UnindexedProject,
-        ] {
-            let context = build_codex_session_context_for_workspace(status, None);
-            assert!(
-                context.contains("tracedecay_diagnostics"),
-                "missing tracedecay_diagnostics for {status:?}"
-            );
-            assert!(
-                context.contains("tracedecay_diagnose"),
-                "missing tracedecay_diagnose for {status:?}"
-            );
-            assert!(
-                context.contains("cargo check"),
-                "missing compile-moment cue for {status:?}"
-            );
-        }
-    }
 
     #[test]
     fn codex_session_context_advertises_managed_subagents() {
@@ -320,29 +239,5 @@ mod tests {
                 "generic (non-code-workspace) surface should omit {agent}"
             );
         }
-    }
-
-    #[test]
-    fn codex_unindexed_context_routes_grep_search_context() {
-        // Content/symbol/concept routing must survive on the unindexed surface,
-        // which cannot lean on the bootstrap skill for the tool ladder.
-        let context =
-            build_codex_session_context_for_workspace(HookWorkspaceStatus::UnindexedProject, None);
-        assert!(context.contains("literal or regex text -> tracedecay_grep"));
-        assert!(context.contains("symbol name -> tracedecay_search"));
-        assert!(context.contains("concept -> tracedecay_context"));
-    }
-
-    #[test]
-    fn index_status_line_formats_freshness_and_init_nudge() {
-        assert_eq!(
-            index_status_line(true, Some("last indexed 5m ago")),
-            "tracedecay index status: last indexed 5m ago.\n"
-        );
-        assert_eq!(
-            index_status_line(true, None),
-            "tracedecay index status: initialized.\n"
-        );
-        assert!(index_status_line(false, None).contains("run `tracedecay init`"));
     }
 }

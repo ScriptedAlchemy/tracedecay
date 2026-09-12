@@ -11,6 +11,10 @@ use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
     generate_node_id,
 };
+use crate::{
+    ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1, ExtractionArtifactV1, SchemaEvidenceIssueV1,
+    SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1,
+};
 
 /// Extracts code graph nodes and edges from Protobuf source files using tree-sitter.
 pub struct ProtoExtractor;
@@ -20,6 +24,9 @@ struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     errors: Vec<String>,
+    schema_facts: Vec<ExtractedSchemaFactV1>,
+    schema_issues: Vec<SchemaEvidenceIssueV1>,
+    package: Option<String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
@@ -34,6 +41,9 @@ impl<'s> ExtractionState<'s> {
             nodes: Vec::new(),
             edges: Vec::new(),
             errors: Vec::new(),
+            schema_facts: Vec::new(),
+            schema_issues: Vec::new(),
+            package: None,
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes(),
@@ -64,17 +74,37 @@ impl<'s> ExtractionState<'s> {
     fn node_text(&self, node: TsNode<'_>) -> &'s str {
         node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
+
+    fn schema_prefix(&self) -> String {
+        self.package
+            .iter()
+            .map(String::as_str)
+            .chain(
+                self.node_stack
+                    .iter()
+                    .skip(1)
+                    .map(|(name, _)| name.as_str()),
+            )
+            .collect::<Vec<_>>()
+            .join(".")
+    }
 }
 
 impl ProtoExtractor {
-    fn extract_tree(
+    fn extract_tree_artifact(
         file_path: &str,
         source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        state.package = find_direct_child_by_kind(tree.root_node(), "package")
+            .and_then(|package| find_direct_child_by_kind(package, "fullIdent"))
+            .map(|full_ident| state.node_text(full_ident).to_owned());
+        if tree.root_node().has_error() {
+            state.schema_issues.push(SchemaEvidenceIssueV1::ParseError);
+        }
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -112,8 +142,8 @@ impl ProtoExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            Self::build_artifact(state, start),
             scope,
             metrics,
         )
@@ -139,6 +169,8 @@ impl ProtoExtractor {
                 || "<unknown>".to_string(),
                 |n| state.node_text(n).to_string(),
             );
+        state.package = find_direct_child_by_kind(node, "fullIdent")
+            .map(|full_ident| state.node_text(full_ident).to_owned());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -285,6 +317,12 @@ impl ProtoExtractor {
             node,
         );
         let signature = Some(format!("message {name}"));
+        state
+            .schema_facts
+            .push(ExtractedSchemaFactV1::ProtobufMessage {
+                qualified_name: qualified_schema_name(&state.schema_prefix(), &name),
+                span: source_span(node),
+            });
 
         let graph_node = Node {
             id: id.clone(),
@@ -338,6 +376,7 @@ impl ProtoExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "field" => Self::visit_field(state, child),
+                    "mapField" => Self::visit_map_field(state, child),
                     "message" => Self::visit_message(state, child),
                     "enum" => Self::visit_enum(state, child),
                     "oneof" => Self::visit_oneof(state, child),
@@ -366,6 +405,7 @@ impl ProtoExtractor {
         let field_number = find_direct_child_by_kind(node, "fieldNumber")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "intLit"))
             .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
+        Self::record_field_fact(state, node, &name, &type_text, &field_number);
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -419,8 +459,60 @@ impl ProtoExtractor {
         }
     }
 
+    fn visit_map_field(state: &mut ExtractionState, node: TsNode<'_>) {
+        let name = find_direct_child_by_kind(node, "mapName")
+            .and_then(|map_name| find_direct_child_by_kind(map_name, "ident"))
+            .map_or_else(
+                || "<anonymous>".to_owned(),
+                |n| state.node_text(n).to_owned(),
+            );
+        let key_type =
+            find_direct_child_by_kind(node, "keyType").map_or("unknown", |n| state.node_text(n));
+        let value_type =
+            find_direct_child_by_kind(node, "type").map_or("unknown", |n| state.node_text(n));
+        let field_number = find_direct_child_by_kind(node, "fieldNumber")
+            .and_then(|field_number| find_direct_child_by_kind(field_number, "intLit"))
+            .map_or("?", |n| state.node_text(n));
+        Self::record_field_fact(
+            state,
+            node,
+            &name,
+            &format!("map<{key_type},{value_type}>"),
+            field_number,
+        );
+    }
+
+    fn record_field_fact(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        name: &str,
+        type_name: &str,
+        field_number: &str,
+    ) {
+        let Ok(tag) = field_number.parse::<u32>() else {
+            state.schema_issues.push(SchemaEvidenceIssueV1::ParseError);
+            return;
+        };
+        if name.starts_with('<') || type_name == "unknown" {
+            state.schema_issues.push(SchemaEvidenceIssueV1::ParseError);
+            return;
+        }
+        state
+            .schema_facts
+            .push(ExtractedSchemaFactV1::ProtobufField {
+                message_qualified_name: state.schema_prefix(),
+                name: name.to_owned(),
+                type_name: type_name.to_owned(),
+                tag,
+                span: source_span(node),
+            });
+    }
+
     /// Extract an `enum` definition.
     fn visit_enum(state: &mut ExtractionState, node: TsNode<'_>) {
+        state
+            .schema_issues
+            .push(SchemaEvidenceIssueV1::UnsupportedSyntax);
         // enum -> enumName -> ident, enumBody -> enumField*
         let name = find_direct_child_by_kind(node, "enumName")
             .and_then(|en| find_direct_child_by_kind(en, "ident"))
@@ -585,6 +677,12 @@ impl ProtoExtractor {
             node,
         );
         let signature = Some(format!("service {name}"));
+        state
+            .schema_facts
+            .push(ExtractedSchemaFactV1::ProtobufService {
+                qualified_name: qualified_schema_name(&state.schema_prefix(), &name),
+                span: source_span(node),
+            });
 
         let graph_node = Node {
             id: id.clone(),
@@ -674,6 +772,23 @@ impl ProtoExtractor {
             .next()
             .map(|l| l.trim().trim_end_matches(';').trim().to_string())
             .filter(|l| !l.is_empty());
+        let mut cursor = node.walk();
+        let mut message_types = node
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "enumMessageType")
+            .map(|child| state.node_text(child).trim().to_owned());
+        match (message_types.next(), message_types.next()) {
+            (Some(request_type), Some(response_type)) if !name.starts_with('<') => {
+                state.schema_facts.push(ExtractedSchemaFactV1::ProtobufRpc {
+                    service_qualified_name: state.schema_prefix(),
+                    name: name.clone(),
+                    request_type,
+                    response_type,
+                    span: source_span(node),
+                });
+            }
+            _ => state.schema_issues.push(SchemaEvidenceIssueV1::ParseError),
+        }
 
         let graph_node = Node {
             id: id.clone(),
@@ -747,6 +862,7 @@ impl ProtoExtractor {
         let field_number = find_direct_child_by_kind(node, "fieldNumber")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "intLit"))
             .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
+        Self::record_field_fact(state, node, &name, &type_text, &field_number);
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -824,15 +940,46 @@ impl ProtoExtractor {
         Some(comments.join("\n"))
     }
 
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: Vec::new(),
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
+    fn build_artifact(state: ExtractionState<'_>, start: Instant) -> ExtractionArtifactV1 {
+        let status = if state.schema_issues.is_empty() {
+            SchemaEvidenceStatusV1::Complete
+        } else {
+            SchemaEvidenceStatusV1::Partial
+        };
+        let mut artifact = ExtractionArtifactV1 {
+            result: ExtractionResult {
+                nodes: state.nodes,
+                edges: state.edges,
+                unresolved_refs: Vec::new(),
+                errors: state.errors,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            imports: Vec::new(),
+            schema_evidence: Some(ExtractedSchemaEvidenceV1 {
+                logical_path: state.file_path,
+                language: SchemaEvidenceLanguageV1::Protobuf,
+                status,
+                issues: state.schema_issues,
+                facts: state.schema_facts,
+            }),
+        };
+        artifact.canonicalize_order();
+        artifact
+    }
+}
+
+fn source_span(node: TsNode<'_>) -> tracedecay_domain::SourceSpan {
+    tracedecay_domain::SourceSpan {
+        start_byte: node.start_byte() as u64,
+        end_byte: node.end_byte() as u64,
+    }
+}
+
+fn qualified_schema_name(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}.{name}")
     }
 }
 
@@ -853,8 +1000,22 @@ impl crate::LanguageExtractor for ProtoExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
-            file_path, source, tree, scope,
-        ))
+        if matches!(
+            scope,
+            crate::parsed_extraction::ParsedExtractionScope::ChangedRegions(_)
+        ) {
+            let full = Self::extract_tree_artifact(
+                file_path,
+                source,
+                tree,
+                crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+            );
+            return crate::parsed_extraction::ParsedExtractionArtifactV1::reset(
+                full.artifact,
+                crate::parsed_extraction::ParsedExtractionResetReason::ChangedRootIdentity,
+                source.len(),
+            );
+        }
+        Self::extract_tree_artifact(file_path, source, tree, scope)
     }
 }

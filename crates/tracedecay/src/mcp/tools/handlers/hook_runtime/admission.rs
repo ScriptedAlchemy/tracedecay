@@ -267,14 +267,46 @@ fn cursor_stack_wakeup_allowed(
     first_admission && producer == tracedecay_hooks::HookHostV1::CursorDesktop
 }
 
+/// The project-sessions authority a hook admission may bind a native
+/// context-scout lifecycle into, with the CPU authority that binding runs
+/// under. Absent when the caller has no project sessions to bind into.
+pub(crate) struct HookV2LifecycleMountV1<'a> {
+    pub lifecycle: Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1>,
+    pub project_sessions: &'a RegisteredGlobalDb,
+    pub background_cpu: Option<&'a std::sync::Arc<ProcessBackgroundCpuV1>>,
+}
+
 pub(crate) async fn admit_hook_v2_envelope(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     native_session_id: Option<SessionId>,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {
-    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, None, None, now)
-        .await
+    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, false, now).await
+}
+
+pub(crate) async fn admit_hook_v2_replayed_envelope_with_lifecycle(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_session_id: Option<SessionId>,
+    native_lifecycle: Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1>,
+    project_sessions: &RegisteredGlobalDb,
+    background_cpu: &std::sync::Arc<ProcessBackgroundCpuV1>,
+    now: UtcMicros,
+) -> HookV2AdmissionOutcomeV1 {
+    admit_hook_v2_envelope_with_lifecycle(
+        cg,
+        envelope,
+        native_session_id,
+        Some(HookV2LifecycleMountV1 {
+            lifecycle: native_lifecycle,
+            project_sessions,
+            background_cpu: Some(background_cpu),
+        }),
+        false,
+        now,
+    )
+    .await
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.admit")]
@@ -286,9 +318,8 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     native_session_id: Option<SessionId>,
-    native_lifecycle: Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1>,
-    project_sessions: Option<&RegisteredGlobalDb>,
-    background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,
+    mount: Option<HookV2LifecycleMountV1<'_>>,
+    host_response_available: bool,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {
     let provider_envelope = envelope;
@@ -315,8 +346,8 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             return HookV2AdmissionOutcomeV1::Conflict;
         }
     }
-    if let (Some(native_lifecycle), Some(project_sessions)) =
-        (native_lifecycle.as_ref(), project_sessions)
+    if let Some(mount) = mount.as_ref()
+        && let Some(native_lifecycle) = mount.lifecycle.as_ref()
     {
         let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
             return HookV2AdmissionOutcomeV1::Backpressured;
@@ -325,8 +356,8 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             return HookV2AdmissionOutcomeV1::Backpressured;
         };
         if !admit_native_context_scout_lifecycle(
-            project_sessions,
-            background_cpu,
+            mount.project_sessions,
+            mount.background_cpu,
             provider,
             native_lifecycle,
             range,
@@ -376,7 +407,9 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     // working in this project — the primary live hook path for every v2-bound
     // host. Publish it here, where the project scope is already resolved; the
     // application lane retains it across dashboard disconnects and restarts.
-    if first_admission && let Some(project_sessions) = project_sessions {
+    if first_admission
+        && let Some(project_sessions) = mount.as_ref().map(|mount| mount.project_sessions)
+    {
         tracedecay_session_memory::event_lane::publish(
             project_sessions,
             tracedecay_session_memory::event_lane::ActivityFamilyV1::Hook,
@@ -388,18 +421,22 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         .await;
     }
     let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
-    let claim_authority = match (
-        tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1::new(
-            envelope.clone(),
-            &snapshot.binding,
-        ),
-        lifecycle.as_ref(),
-    ) {
-        (Some(hook), Some(lifecycle)) => {
-            cg.resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
-                .await
+    let claim_authority = if host_response_available {
+        match (
+            tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1::new(
+                envelope.clone(),
+                &snapshot.binding,
+            ),
+            lifecycle.as_ref(),
+        ) {
+            (Some(hook), Some(lifecycle)) => {
+                cg.resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
+                    .await
+            }
+            _ => None,
         }
-        _ => None,
+    } else {
+        None
     };
     let context_scout_address = claim_authority
         .as_ref()
@@ -500,9 +537,12 @@ pub(super) async fn hook_v2_admit(
             cg,
             &envelope,
             native_session_id,
-            native_lifecycle,
-            Some(project_sessions),
-            session_authorities.background_cpu.as_ref(),
+            Some(HookV2LifecycleMountV1 {
+                lifecycle: native_lifecycle,
+                project_sessions,
+                background_cpu: session_authorities.background_cpu.as_ref(),
+            }),
+            true,
             now,
         )
         .await

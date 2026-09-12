@@ -96,6 +96,14 @@ def main() -> int:
             f"unexpected historical production features: {historical_production!r}"
         )
 
+    historical_macos = resolver.production_release_features(
+        {"production": []}, "aarch64-apple-darwin"
+    )
+    if historical_macos != ("production",):
+        raise SystemExit(
+            f"unexpected historical macOS features: {historical_macos!r}"
+        )
+
     partial_hotpath = resolver.production_release_features(
         {"production": [], "hotpath": []}, "x86_64-unknown-linux-gnu"
     )

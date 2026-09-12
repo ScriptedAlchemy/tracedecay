@@ -519,6 +519,230 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
 }
 
 #[tokio::test]
+async fn claude_native_compaction_recognizes_production_boundary_id() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-claude-prod-boundary").await;
+    let db = harness.registered.clone();
+    assert!(
+        db.upsert_session(&session("claude", "claude-native-session"))
+            .await
+    );
+    let claude_text = "production Claude compact pair body";
+    let summary_metadata = canonical_envelope(
+        "claude",
+        "claude-native-session",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        Some("ffffffff-0000-4000-8000-000000000001"),
+        vec![
+            serde_json::json!({
+                "kind": "message",
+                "role": "user",
+                "content": claude_text
+            }),
+            serde_json::json!({
+                "kind": "compaction",
+                "summary": {
+                    "isCompactSummary": true,
+                    "isVisibleInTranscriptOnly": true
+                }
+            }),
+        ],
+    );
+    insert_summary_evidence(
+        (&db, "claude"),
+        "claude-native-session",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+        11,
+        claude_text,
+        "message",
+        &summary_metadata,
+    )
+    .await;
+    let boundary_envelope = canonical_envelope(
+        "claude",
+        "claude-native-session",
+        "ffffffff-0000-4000-8000-000000000001",
+        Some("pre-compact-parent"),
+        vec![serde_json::json!({
+            "kind": "compaction",
+            "summary": {
+                "preservedSegment": {
+                    "anchorUuid": "aaaaaaaa-0000-4000-8000-000000000001"
+                }
+            }
+        })],
+    );
+    insert_summary_evidence(
+        (&db, "claude"),
+        "claude-native-session",
+        "compact_boundary:ffffffff-0000-4000-8000-000000000001",
+        10,
+        "Claude compaction boundary",
+        "compact_boundary",
+        &serde_json::json!({
+            "source": "claude_compact_boundary",
+            "trigger": "manual",
+            "canonical_envelope": boundary_envelope
+        }),
+    )
+    .await;
+    let claude = super::super::lcm_summarization::native_summary_evidence(
+        &db,
+        "claude",
+        "claude-native-session",
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(claude.text, claude_text);
+    assert_eq!(claude.route, "claude_native_compaction");
+}
+
+/// Ingests one recognizable Claude compact pair and returns the store's
+/// session id. `leading_role` is the role of the rows before the pair:
+/// `system` rows are policy anchors compression pins separately, so a
+/// summary behind only those rows is owed no conversational interval.
+async fn ingest_claude_compact_pair(db: &RegisteredGlobalDb, session_id: &str, leading_role: &str) {
+    let boundary_id = format!("{session_id}-boundary");
+    let summary_id = format!("{session_id}-summary");
+    let mut messages = Vec::new();
+    for ordinal in 1..=2 {
+        let mut record = message(session_id, ordinal);
+        record.provider = "claude".to_string();
+        record.message_id = format!("{session_id}-leading-{ordinal}");
+        record.role = leading_role.to_string();
+        messages.push(record);
+    }
+    let mut boundary = message(session_id, 3);
+    boundary.provider = "claude".to_string();
+    boundary.message_id = boundary_id.clone();
+    boundary.role = "system".to_string();
+    boundary.kind = Some("compaction".to_string());
+    boundary.metadata_json = Some(
+        canonical_envelope(
+            "claude",
+            session_id,
+            &boundary_id,
+            None,
+            vec![
+                serde_json::json!({
+                    "kind": "boundary",
+                    "boundary_kind": "compaction_boundary"
+                }),
+                serde_json::json!({
+                    "kind": "compaction",
+                    "summary": {"preservedSegment": {"anchorUuid": summary_id}}
+                }),
+            ],
+        )
+        .to_string(),
+    );
+    messages.push(boundary);
+    let mut summary = message(session_id, 4);
+    summary.provider = "claude".to_string();
+    summary.message_id = summary_id.clone();
+    summary.role = "user".to_string();
+    summary.text = "authoritative Claude compaction".to_string();
+    summary.metadata_json = Some(
+        canonical_envelope(
+            "claude",
+            session_id,
+            &summary_id,
+            Some(&boundary_id),
+            vec![serde_json::json!({
+                "kind": "compaction",
+                "summary": {
+                    "isCompactSummary": true,
+                    "isVisibleInTranscriptOnly": true
+                }
+            })],
+        )
+        .to_string(),
+    );
+    messages.push(summary);
+    assert!(
+        db.upsert_transcript_batch(
+            &session("claude", session_id),
+            &messages,
+            &format!("/tmp/{session_id}.jsonl"),
+            ParseOffset::default(),
+        )
+        .await
+    );
+}
+
+/// An absent predecessor interval must never reach a published summary as
+/// an unannotated empty range: a session's genuinely-first conversational
+/// message has no predecessor, while an interval that is owed and missing
+/// is unavailable and the caller refuses.
+#[tokio::test]
+async fn claude_native_summary_without_a_persisted_range_is_typed_absent() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-claude-absent-range").await;
+    let db = harness.registered.clone();
+    let owed_session = "claude-owed-range-session";
+    ingest_claude_compact_pair(&db, owed_session, "assistant").await;
+
+    let ingested =
+        super::super::lcm_summarization::native_summary_evidence(&db, "claude", owed_session, None)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        ingested.source_range.interval().is_some(),
+        "ordinary ingest must persist the conversational interval: {:?}",
+        ingested.source_range
+    );
+
+    // Model the #843 window: a preserved row whose interval the
+    // background rewrite has not produced yet.
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM lcm_raw_predecessor_ranges
+                 WHERE provider = 'claude' AND session_id = ?1",
+            params![owed_session],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let unavailable =
+        super::super::lcm_summarization::native_summary_evidence(&db, "claude", owed_session, None)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        unavailable.source_range,
+        tracedecay_lcm::raw::LcmPredecessorRangeState::Unavailable
+    );
+    assert_eq!(
+        unavailable.source_range.absent_reason(),
+        Some("predecessor_interval_unavailable")
+    );
+
+    // A summary whose only earlier rows are policy anchors genuinely has
+    // no conversational predecessor, which is a different typed state.
+    let first_session = "claude-first-conversational-session";
+    ingest_claude_compact_pair(&db, first_session, "system").await;
+    let first = super::super::lcm_summarization::native_summary_evidence(
+        &db,
+        "claude",
+        first_session,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        first.source_range,
+        tracedecay_lcm::raw::LcmPredecessorRangeState::NoPredecessor
+    );
+    assert_eq!(
+        first.source_range.absent_reason(),
+        Some("no_predecessor_interval")
+    );
+}
+
+#[tokio::test]
 async fn transcript_ingest_persists_native_compaction_raw_range() {
     let harness = RegisteredGlobalDbHarness::open("lcm-native-summary-range").await;
     let db = harness.registered.clone();
@@ -581,10 +805,12 @@ async fn transcript_ingest_persists_native_compaction_raw_range() {
     assert_eq!(evidence.text, "production Codex compaction text");
     assert_eq!(
         evidence.source_range,
-        Some(tracedecay_lcm::LcmSummarySourceRange {
-            from_store_id: first,
-            to_store_id: last,
-        })
+        tracedecay_lcm::raw::LcmPredecessorRangeState::Interval(
+            tracedecay_lcm::LcmSummarySourceRange {
+                from_store_id: first,
+                to_store_id: last,
+            }
+        )
     );
     let converged =
         super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
@@ -595,8 +821,8 @@ async fn transcript_ingest_persists_native_compaction_raw_range() {
     let mut rows = snapshot
         .query(
             "SELECT summary_text, json_extract(metadata_json, '$.summary_route')
-             FROM lcm_summary_nodes
-             WHERE provider = 'codex' AND session_id = ?1",
+                 FROM lcm_summary_nodes
+                 WHERE provider = 'codex' AND session_id = ?1",
             params![session_id],
         )
         .await
@@ -738,9 +964,9 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
     let mut rows = snapshot
         .query(
             "SELECT store_id, message_id, role
-             FROM lcm_raw_messages
-             WHERE provider = 'claude' AND session_id = ?1
-             ORDER BY store_id",
+                 FROM lcm_raw_messages
+                 WHERE provider = 'claude' AND session_id = ?1
+                 ORDER BY store_id",
             params![session_id],
         )
         .await
@@ -846,7 +1072,7 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
     .unwrap();
     assert_eq!(second.text, "second authoritative Claude compaction");
     assert_eq!(
-        second.source_range.as_ref().unwrap().from_store_id,
+        second.source_range.interval().unwrap().from_store_id,
         first_summary_store_id
     );
 }
@@ -907,12 +1133,12 @@ fn native_compaction_requires_exact_selected_raw_membership() {
             r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
-*'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
-*'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread-1","model":"codex-membership-model"}}}' ;;
-*'"id":2'*)
-  printf '%s\n' '{"method":"item/completed","params":{"model":"codex-membership-model","item":{"content":[{"type":"output_text","text":"auxiliary membership-bound summary"}]}}}'
-  printf '%s\n' '{"method":"turn/completed"}'
-  ;;
+    *'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+    *'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread-1","model":"codex-membership-model"}}}' ;;
+    *'"id":2'*)
+      printf '%s\n' '{"method":"item/completed","params":{"model":"codex-membership-model","item":{"content":[{"type":"output_text","text":"auxiliary membership-bound summary"}]}}}'
+      printf '%s\n' '{"method":"turn/completed"}'
+      ;;
   esac
 done
 "#,
@@ -935,8 +1161,8 @@ done
         let mut rows = snapshot
             .query(
                 "SELECT node_id, summary_text
-                 FROM lcm_summary_nodes
-                 WHERE provider = 'codex' AND session_id = ?1",
+                     FROM lcm_summary_nodes
+                     WHERE provider = 'codex' AND session_id = ?1",
                 params![session_id],
             )
             .await
@@ -951,8 +1177,8 @@ done
         let mut sources = snapshot
             .query(
                 "SELECT source_id FROM lcm_summary_sources
-                 WHERE node_id = ?1 AND source_kind = 'raw_message'
-                 ORDER BY ordinal",
+                     WHERE node_id = ?1 AND source_kind = 'raw_message'
+                     ORDER BY ordinal",
                 params![node_id],
             )
             .await
@@ -1251,49 +1477,6 @@ async fn summary_convergence_keeps_unsupported_provider_typed_pending() {
 }
 
 #[tokio::test]
-async fn mounted_profile_scheduler_runs_summary_convergence_on_startup() {
-    let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-scheduler").await;
-    let db = harness.registered.clone();
-    let storage_root = db.db_path().parent().unwrap();
-    let session_id = "mounted-convergence-session";
-    assert!(db.upsert_session(&session("codex", session_id)).await);
-    for ordinal in 1..=4 {
-        let mut record = message(session_id, ordinal);
-        record.message_id = format!("{session_id}-message-{ordinal}");
-        record.provider = "codex".to_string();
-        db.lcm_ingest_raw_message(storage_root, &record)
-            .await
-            .unwrap();
-    }
-    let summary_text = "native summary consumed by the mounted scheduler";
-    ingest_codex_compaction_evidence(
-        &db,
-        session_id,
-        "mounted-convergence-summary",
-        5,
-        summary_text,
-    )
-    .await;
-
-    let registry =
-        super::super::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry::default();
-    let database_path = db.db_path().to_path_buf();
-    registry
-        .ensure_profile(database_path.clone(), db.clone())
-        .await;
-    assert!(
-        registry
-            .wait_profile_idle(&database_path, Duration::from_secs(10))
-            .await
-    );
-    let status = db.lcm_status("codex", Some(session_id)).await.unwrap();
-    registry.shutdown().await;
-
-    assert_eq!(status.summary_node_count, 1);
-    assert_eq!(status.raw_message_count, 6);
-}
-
-#[tokio::test]
 async fn mounted_schedulers_share_historical_work_admission() {
     let mut stores = Vec::new();
     for index in 0..3 {
@@ -1446,8 +1629,8 @@ async fn permanent_session_failure_does_not_starve_later_sessions_after_restart(
     transaction
         .execute(
             "UPDATE lcm_raw_messages
-             SET metadata_json = '{\"ingest_protection\":{\"sanitization_receipt\":\"invalid\"}}'
-             WHERE provider = 'codex' AND session_id = 'permanent-session-a'",
+                 SET metadata_json = '{\"ingest_protection\":{\"sanitization_receipt\":\"invalid\"}}'
+                 WHERE provider = 'codex' AND session_id = 'permanent-session-a'",
             (),
         )
         .await
@@ -1537,12 +1720,12 @@ async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
     transaction
         .execute(
             "INSERT INTO lcm_summary_nodes(
-                 node_id, provider, conversation_id, session_id, depth,
-                 summary_text, summary_hash, summary_token_count, source_token_count
-             ) VALUES (
-                 'synthetic-fairness-dependent', 'cursor', ?1, ?1, 0,
-                 'second dependent summary', 'synthetic-fairness-hash', 3, 4
-             )",
+                     node_id, provider, conversation_id, session_id, depth,
+                     summary_text, summary_hash, summary_token_count, source_token_count
+                 ) VALUES (
+                     'synthetic-fairness-dependent', 'cursor', ?1, ?1, 0,
+                     'second dependent summary', 'synthetic-fairness-hash', 3, 4
+                 )",
             params![large_session],
         )
         .await
@@ -1550,7 +1733,7 @@ async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
     transaction
         .execute(
             "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-             VALUES ('synthetic-fairness-dependent', 'raw_message', CAST(?1 AS TEXT), 0)",
+                 VALUES ('synthetic-fairness-dependent', 'raw_message', CAST(?1 AS TEXT), 0)",
             params![first_store_id],
         )
         .await
@@ -1567,8 +1750,8 @@ async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
     transaction
         .execute(
             "UPDATE lcm_summary_convergence_queue
-             SET attempt_generation = 0, next_attempt_at_ms = 0
-             WHERE provider = 'cursor' AND session_id IN (?1, ?2)",
+                 SET attempt_generation = 0, next_attempt_at_ms = 0
+                 WHERE provider = 'cursor' AND session_id IN (?1, ?2)",
             params![large_session, peer_session],
         )
         .await
@@ -1647,7 +1830,7 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     let mut projection_rows = snapshot
         .query(
             "SELECT projection_json FROM session_relation_effect_journal
-             WHERE session_id = ?1",
+                 WHERE session_id = ?1",
             params![poison_session],
         )
         .await
@@ -1665,8 +1848,8 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     transaction
         .execute(
             "UPDATE session_relation_effect_journal
-             SET projection_json = '{}'
-             WHERE session_id = ?1",
+                 SET projection_json = '{}'
+                 WHERE session_id = ?1",
             params![poison_session],
         )
         .await
@@ -1702,8 +1885,8 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     let mut rows = snapshot
         .query(
             "SELECT recovery_state, recovery_failure_code
-             FROM session_relation_receipts
-             WHERE session_id = ?1",
+                 FROM session_relation_receipts
+                 WHERE session_id = ?1",
             params![poison_session],
         )
         .await
@@ -1723,8 +1906,8 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     transaction
         .execute(
             "UPDATE session_relation_effect_journal
-             SET projection_json = ?2
-             WHERE session_id = ?1",
+                 SET projection_json = ?2
+                 WHERE session_id = ?1",
             params![poison_session, cyclic_projection.to_string()],
         )
         .await
@@ -1732,9 +1915,9 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     transaction
         .execute(
             "UPDATE session_relation_receipts
-             SET recovery_state = 'pending', recovery_failure_code = NULL,
-                 recovery_failure_count = 0, recovery_next_attempt_at = 0
-             WHERE session_id = ?1",
+                 SET recovery_state = 'pending', recovery_failure_code = NULL,
+                     recovery_failure_count = 0, recovery_next_attempt_at = 0
+                 WHERE session_id = ?1",
             params![poison_session],
         )
         .await
@@ -1751,8 +1934,8 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     let mut rows = snapshot
         .query(
             "SELECT recovery_state, recovery_failure_code
-             FROM session_relation_receipts
-             WHERE session_id = ?1",
+                 FROM session_relation_receipts
+                 WHERE session_id = ?1",
             params![poison_session],
         )
         .await
@@ -1769,8 +1952,8 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     transaction
         .execute(
             "UPDATE session_relation_receipts
-             SET recovery_state = 'retryable', recovery_next_attempt_at = unixepoch() + 60
-             WHERE session_id = ?1",
+                 SET recovery_state = 'retryable', recovery_next_attempt_at = unixepoch() + 60
+                 WHERE session_id = ?1",
             params![poison_session],
         )
         .await
@@ -1926,10 +2109,10 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
         let mut rows = snapshot
             .query(
                 "SELECT summary_text
-                 FROM lcm_summary_nodes
-                 WHERE provider = 'cursor' AND session_id = ?1 AND depth = 0
-                 ORDER BY created_at, node_id
-                 LIMIT 2",
+                     FROM lcm_summary_nodes
+                     WHERE provider = 'cursor' AND session_id = ?1 AND depth = 0
+                     ORDER BY created_at, node_id
+                     LIMIT 2",
                 params![session_id],
             )
             .await
@@ -2004,7 +2187,7 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
             let mut rows = snapshot
                 .query(
                     "SELECT node_id FROM lcm_summary_nodes
-                     WHERE provider = 'cursor' AND session_id = ?1",
+                         WHERE provider = 'cursor' AND session_id = ?1",
                     params![session_id],
                 )
                 .await
@@ -2060,15 +2243,15 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
         let mut rows = snapshot
             .query(
                 "SELECT availability.summary_id, availability.availability,
-                        availability.reason, node.summary_text
-                 FROM session_temporal_generations AS generation
-                 JOIN session_summary_availability AS availability
-                   ON availability.session_id = generation.session_id
-                  AND availability.generation = generation.generation
-                 JOIN session_summary_nodes AS node
-                   ON node.summary_id = availability.summary_id
-                 WHERE generation.session_id = ?1 AND generation.state = 'active'
-                 ORDER BY availability.summary_id",
+                            availability.reason, node.summary_text
+                     FROM session_temporal_generations AS generation
+                     JOIN session_summary_availability AS availability
+                       ON availability.session_id = generation.session_id
+                      AND availability.generation = generation.generation
+                     JOIN session_summary_nodes AS node
+                       ON node.summary_id = availability.summary_id
+                     WHERE generation.session_id = ?1 AND generation.state = 'active'
+                     ORDER BY availability.summary_id",
                 params![session_id],
             )
             .await
@@ -2172,13 +2355,13 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
         let mut rows = snapshot
             .query(
                 "SELECT node.node_id, MIN(CAST(source.source_id AS INTEGER))
-                 FROM lcm_summary_nodes AS node
-                 JOIN lcm_summary_sources AS source ON source.node_id = node.node_id
-                 WHERE node.provider = 'cursor' AND node.session_id = ?1
-                   AND node.depth = 0 AND source.source_kind = 'raw_message'
-                 GROUP BY node.node_id
-                 ORDER BY MIN(CAST(source.source_id AS INTEGER))
-                 LIMIT 2",
+                     FROM lcm_summary_nodes AS node
+                     JOIN lcm_summary_sources AS source ON source.node_id = node.node_id
+                     WHERE node.provider = 'cursor' AND node.session_id = ?1
+                       AND node.depth = 0 AND source.source_kind = 'raw_message'
+                     GROUP BY node.node_id
+                     ORDER BY MIN(CAST(source.source_id AS INTEGER))
+                     LIMIT 2",
                 params![session_id],
             )
             .await
@@ -2270,11 +2453,11 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
         let mut rows = snapshot
             .query(
                 "SELECT availability.summary_id, availability.availability
-                 FROM session_temporal_generations AS generation
-                 JOIN session_summary_availability AS availability
-                   ON availability.session_id = generation.session_id
-                  AND availability.generation = generation.generation
-                 WHERE generation.session_id = ?1 AND generation.state = 'active'",
+                     FROM session_temporal_generations AS generation
+                     JOIN session_summary_availability AS availability
+                       ON availability.session_id = generation.session_id
+                      AND availability.generation = generation.generation
+                     WHERE generation.session_id = ?1 AND generation.state = 'active'",
                 params![session_id],
             )
             .await
@@ -2297,17 +2480,17 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
             let mut sources = snapshot
                 .query(
                     "SELECT COUNT(*)
-                     FROM session_temporal_generations AS generation
-                     JOIN session_summary_availability AS availability
-                       ON availability.session_id = generation.session_id
-                      AND availability.generation = generation.generation
-                      AND availability.availability = 'available'
-                     JOIN lcm_summary_sources AS source
-                       ON source.node_id = availability.summary_id
-                      AND source.source_kind = 'raw_message'
-                     WHERE generation.session_id = ?1
-                       AND generation.state = 'active'
-                       AND source.source_id = ?2",
+                         FROM session_temporal_generations AS generation
+                         JOIN session_summary_availability AS availability
+                           ON availability.session_id = generation.session_id
+                          AND availability.generation = generation.generation
+                          AND availability.availability = 'available'
+                         JOIN lcm_summary_sources AS source
+                           ON source.node_id = availability.summary_id
+                          AND source.source_kind = 'raw_message'
+                         WHERE generation.session_id = ?1
+                           AND generation.state = 'active'
+                           AND source.source_id = ?2",
                     params![session_id, revised_store_id.to_string()],
                 )
                 .await
@@ -2403,7 +2586,7 @@ fn retained_summary_rejects_a_role_revision_during_model_generation() {
         let mut rows = snapshot
             .query(
                 "SELECT summary_text FROM lcm_summary_nodes
-                 WHERE provider = 'cursor' AND session_id = ?1",
+                     WHERE provider = 'cursor' AND session_id = ?1",
                 params![session_id],
             )
             .await
@@ -2476,7 +2659,7 @@ async fn raw_message_identity_cannot_move_between_sessions_after_summary_publica
     let mut rows = snapshot
         .query(
             "SELECT session_id FROM lcm_raw_messages
-             WHERE provider = 'cursor' AND message_id = 'owned-message-1'",
+                 WHERE provider = 'cursor' AND message_id = 'owned-message-1'",
             (),
         )
         .await
@@ -2521,8 +2704,8 @@ async fn retained_summary_publication_requires_the_exact_planned_source_range() 
     let mut rows = snapshot
         .query(
             "SELECT store_id FROM lcm_raw_messages
-             WHERE provider = 'cursor' AND session_id = ?1
-             ORDER BY store_id LIMIT 2",
+                 WHERE provider = 'cursor' AND session_id = ?1
+                 ORDER BY store_id LIMIT 2",
             params![session_id],
         )
         .await
@@ -2584,8 +2767,8 @@ async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
         transaction
             .execute(
                 "INSERT INTO session_messages (
-                    provider, message_id, session_id, role, timestamp, ordinal, text
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        provider, message_id, session_id, role, timestamp, ordinal, text
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     record.provider.as_str(),
                     record.message_id.as_str(),
@@ -2601,10 +2784,10 @@ async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
         transaction
             .execute(
                 "INSERT INTO lcm_raw_messages (
-                    provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, snippet_text, index_text,
-                    metadata_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?2, 'inline', '', '', '{}')",
+                        provider, message_id, session_id, role, ordinal, timestamp,
+                        content, content_hash, storage_kind, snippet_text, index_text,
+                        metadata_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?2, 'inline', '', '', '{}')",
                 params![
                     record.provider.as_str(),
                     record.message_id.as_str(),
@@ -2664,8 +2847,8 @@ fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
             transaction
                 .execute(
                     "INSERT INTO session_messages (
-                        provider, message_id, session_id, role, timestamp, ordinal, text, kind
-                     ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, ?4, 'tool_result')",
+                            provider, message_id, session_id, role, timestamp, ordinal, text, kind
+                         ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, ?4, 'tool_result')",
                     params![
                         format!("barrier-message-{ordinal}"),
                         session_id,
@@ -2678,11 +2861,11 @@ fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
             transaction
                 .execute(
                     "INSERT INTO lcm_raw_messages (
-                        provider, message_id, session_id, role, ordinal, timestamp,
-                        content, content_hash, storage_kind, snippet_text, index_text,
-                        metadata_json
-                     ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, '', ?1,
-                               'inline', '', '', '{}')",
+                            provider, message_id, session_id, role, ordinal, timestamp,
+                            content, content_hash, storage_kind, snippet_text, index_text,
+                            metadata_json
+                         ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, '', ?1,
+                                   'inline', '', '', '{}')",
                     params![format!("barrier-message-{ordinal}"), session_id, ordinal],
                 )
                 .await
@@ -2763,7 +2946,7 @@ fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
         let mut rows = snapshot
             .query(
                 "SELECT store_id, content_hash FROM lcm_raw_messages
-                 WHERE provider = 'cursor' AND message_id = 'barrier-message-1'",
+                     WHERE provider = 'cursor' AND message_id = 'barrier-message-1'",
                 (),
             )
             .await
@@ -2823,9 +3006,9 @@ async fn insert_summary_evidence(
     let mut source_rows = snapshot
         .query(
             "SELECT store_id FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2
-             ORDER BY store_id
-             LIMIT 9",
+                 WHERE provider = ?1 AND session_id = ?2
+                 ORDER BY store_id
+                 LIMIT 9",
             params![provider, session_id],
         )
         .await
@@ -2856,8 +3039,8 @@ async fn insert_summary_evidence(
     transaction
         .execute(
             "INSERT INTO session_messages (
-                 provider, message_id, session_id, role, ordinal, text, kind, metadata_json
-             ) VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?6, ?7)",
+                     provider, message_id, session_id, role, ordinal, text, kind, metadata_json
+                 ) VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?6, ?7)",
             tracedecay_runtime_core::db::engine::params![
                 provider,
                 message_id,
@@ -2925,12 +3108,12 @@ fn codex_and_cursor_daemon_adapters_commit_exact_authoritative_summaries() {
             r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
-*'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
-*'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread-1","model":"codex-test-model"}}}' ;;
-*'"id":2'*)
-  printf '%s\n' '{"method":"item/completed","params":{"model":"codex-test-model","item":{"content":[{"type":"output_text","text":"codex authoritative summary"}]}}}'
-  printf '%s\n' '{"method":"turn/completed"}'
-  ;;
+    *'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+    *'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread-1","model":"codex-test-model"}}}' ;;
+    *'"id":2'*)
+      printf '%s\n' '{"method":"item/completed","params":{"model":"codex-test-model","item":{"content":[{"type":"output_text","text":"codex authoritative summary"}]}}}'
+      printf '%s\n' '{"method":"turn/completed"}'
+      ;;
   esac
 done
 "#,
@@ -3058,8 +3241,8 @@ async fn boundary_apply_and_cancelled_rollback_are_observable() {
     let mut rows = snapshot
         .query(
             "SELECT conversation_id FROM lcm_lifecycle_state
-             WHERE provider = 'cursor'
-             ORDER BY conversation_id",
+                 WHERE provider = 'cursor'
+                 ORDER BY conversation_id",
             (),
         )
         .await

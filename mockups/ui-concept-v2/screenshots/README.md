@@ -1,6 +1,6 @@
 # Current UI screenshots
 
-Captured 2026-09-10 from the concept application in TraceDecay. These are full-resolution desktop screenshots, not design plates.
+Captured 2026-09-11 from the concept application in TraceDecay. These are full-resolution desktop screenshots, not design plates.
 
 The source column distinguishes authored examples from recorded data. Some example screens also display explicitly labeled snapshot evidence; each screen states its own coverage.
 

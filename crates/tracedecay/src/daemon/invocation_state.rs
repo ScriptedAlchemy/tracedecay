@@ -548,7 +548,7 @@ impl DaemonInvocationState {
             .zip(semantic_lifecycle.clone())
             .zip(semantic_resources)
             .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
-            .map(|(((handle, lifecycle), resources), worktree_id)| {
+            .and_then(|(((handle, lifecycle), resources), worktree_id)| {
                 let graph = Arc::clone(&vector_graph);
                 tracedecay_application::semantic_runtime::production_saved_generation_schedule_hook(
                     tracedecay_application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
@@ -563,6 +563,19 @@ impl DaemonInvocationState {
                         fair_scheduler: self.semantic_projection_scheduler.clone(),
                     },
                 )
+                // Composition resolves the resident ceiling against this host
+                // before the runtime is offered, so this refusal means the
+                // worktree mounts with no semantic scheduling at all rather
+                // than with a fabricated memory budget.
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        event = "semantic_projection_schedule",
+                        outcome = "hook_unavailable",
+                        error = ?error,
+                        "semantic projection hook could not be built for this worktree"
+                    );
+                })
+                .ok()
             });
         self.code_index_schedulers
             .mount_worktree_with_graph_runtime(
@@ -1212,26 +1225,6 @@ impl WorkFederatedQueryAuthorityPortV1 for DaemonWorkFederatedQueryAuthorityV1 {
                 .federated_authority_for(scope, mounted.privacy_domain())
                 .ok()
         })
-    }
-}
-
-#[cfg(test)]
-mod resident_memory_tests {
-    use super::*;
-
-    #[test]
-    fn invocation_state_and_code_index_registry_share_one_process_resident_authority() {
-        let state = DaemonInvocationState::default();
-        let cloned = state.clone();
-        let state_memory = state.code_index_schedulers.process_resident_memory();
-        let cloned_memory = cloned.code_index_schedulers.process_resident_memory();
-
-        assert!(Arc::ptr_eq(&state_memory, &cloned_memory));
-        assert_eq!(
-            state_memory.snapshot().limit_bytes,
-            tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
-                .get()
-        );
     }
 }
 

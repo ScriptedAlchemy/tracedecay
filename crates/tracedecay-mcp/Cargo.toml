@@ -35,6 +35,8 @@ glob = "0.3"
 hotpath.workspace = true
 libc = "0.2"
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
+# The multi-root execute tool derives its input schema from the contracts DTO.
+schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

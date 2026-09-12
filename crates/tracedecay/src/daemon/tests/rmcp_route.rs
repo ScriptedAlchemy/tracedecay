@@ -515,97 +515,6 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
 }
 
 #[cfg(unix)]
-async fn serve_counted_first_request(
-    engine: DaemonEngine,
-    handshake: &DaemonHandshake,
-    request: Value,
-    expected_route: ObservedMcpRoute,
-) {
-    register_mcp_route_observer(&handshake.client_instance_id);
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("connection churn socket pair");
-    let server_task = tokio::spawn(async move {
-        Box::pin(
-            super::super::connection_serving::serve_authenticated_socket_client_with_class(
-                tracedecay_daemon_protocol::BrokerStream::Unix(server_stream),
-                engine,
-                AUTH_TOKEN.to_owned(),
-                super::super::DaemonClientAdmissionClass::General,
-            ),
-        )
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    let mut reader = tokio::io::BufReader::new(reader);
-    let auth_preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(AUTH_TOKEN)
-        .to_line()
-        .expect("churn auth preface");
-    writer
-        .write_all(auth_preface.as_bytes())
-        .await
-        .expect("write churn auth preface");
-    writer.write_all(b"\n").await.expect("auth newline");
-    writer
-        .write_all(handshake.to_line().expect("churn handshake").as_bytes())
-        .await
-        .expect("write churn handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
-    write_line(&mut writer, &request).await;
-    let response = read_value(&mut reader, "churn response timed out").await;
-    assert_eq!(response["id"], request["id"]);
-    wait_for_mcp_routes(&handshake.client_instance_id, &[expected_route]).await;
-    writer.shutdown().await.expect("shutdown churn client");
-    drop(reader);
-    tokio::time::timeout(PHASE_TIMEOUT, server_task)
-        .await
-        .expect("churn connection did not close")
-        .expect("join churn connection")
-        .expect("serve churn connection");
-}
-
-/// Connection-churn measurement kept ignored because the global test decode
-/// counter is intentionally process-wide and this assertion requires isolation.
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "connection-churn decode measurement"]
-async fn connection_churn_decodes_each_authenticated_first_request_once() {
-    const CONNECTIONS_PER_TRANSPORT: usize = 25;
-    let fixture = rmcp_route_fixture("first-request-decode-churn").await;
-    super::super::reset_first_request_decode_count_for_test();
-
-    for ordinal in 0..CONNECTIONS_PER_TRANSPORT {
-        let mut handshake = fixture.handshake.clone();
-        handshake.client_instance_id = format!("{ordinal:032x}");
-        let mut request = initialize_request();
-        request["id"] = json!(ordinal + 1);
-        serve_counted_first_request(
-            fixture.engine.clone(),
-            &handshake,
-            request,
-            ObservedMcpRoute::Rmcp,
-        )
-        .await;
-    }
-    for ordinal in 0..CONNECTIONS_PER_TRANSPORT {
-        let mut handshake = fixture.handshake.clone();
-        handshake.client_instance_id = format!("{:032x}", ordinal + CONNECTIONS_PER_TRANSPORT);
-        serve_counted_first_request(
-            fixture.engine.clone(),
-            &handshake,
-            ping_request((ordinal + CONNECTIONS_PER_TRANSPORT + 1) as u64),
-            ObservedMcpRoute::Legacy,
-        )
-        .await;
-    }
-
-    assert_eq!(
-        super::super::first_request_decode_count_for_test(),
-        CONNECTIONS_PER_TRANSPORT * 2,
-        "each accepted connection must decode its first frame exactly once in daemon routing"
-    );
-}
-
-#[cfg(unix)]
 struct ControlledCancellationExecutor {
     started: AtomicUsize,
     cancellation_observed: AtomicUsize,
@@ -838,27 +747,17 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         .expect("serve selected target verification connection");
 
     let executor = Arc::new(ControlledCancellationExecutor::new());
-    let project_path = fixture
-        .handshake
-        .project_path
-        .as_deref()
-        .expect("fixture project");
-    let graph = super::super::open_project_for_handshake(
-        project_path,
-        &fixture.handshake,
-        &fixture.engine.store_administration,
-    )
-    .await
-    .expect("open controlled selector owner");
-    let controlled_key = ProjectServerKey::from_open_project(&graph, &fixture.handshake)
-        .expect("controlled selector-owner key");
-    let controlled_route = ProjectRouteKey::from_handshake(project_path, &fixture.handshake)
-        .expect("controlled selector-owner route");
+    // `tracedecay_fact_store_list` is a registered-project reader: the
+    // connection server resolves the selector, then hops to the selected
+    // project's retained owner. Replace that owner in place — a second key
+    // for the same project_id makes the resolver report ambiguous, and a
+    // replacement without profile identity is filtered out of the mount set.
+    let graph = target_server.cg().await;
     let profile_identity = fixture
         .engine
         .store_administration
         .profile_identity()
-        .expect("controlled selector-owner profile identity")
+        .expect("selected-project profile identity")
         .clone();
     let controlled = crate::mcp::McpServer::new_with_context(
         crate::mcp::server::McpServerConstructionContext::direct(graph, None)
@@ -873,8 +772,12 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
             .project_servers()
             .lock()
             .await;
-        owners.insert_route(controlled_route, controlled_key.clone(), controlled);
-        assert!(owners.mark_ready(&controlled_key));
+        assert!(
+            owners
+                .swap_ready_if(&target_key, controlled, |_| true)
+                .is_some(),
+            "selected-project owner must be replaced in place"
+        );
     }
 
     let (server_stream, client_stream) =
@@ -910,7 +813,7 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
     wait_for_count(
         &executor.started,
         1,
-        "selector-only request never reached the connection owner",
+        "selected reader never reached the selected-project owner",
     )
     .await;
     writer

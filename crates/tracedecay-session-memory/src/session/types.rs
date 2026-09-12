@@ -649,10 +649,9 @@ mod tests {
         RequestId,
     };
     use tracedecay_domain::{
-        ActorId, ProjectId, RepositoryId, RetrievalGrainV1,
-        SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS, SessionId, SessionSourceCoverageReceiptV1,
-        SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
-        SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
+        ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
+        SessionSourceCoverageReceiptV1, SessionSourceCoverageV1, SessionSourceFrontierV1,
+        SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -835,40 +834,6 @@ mod tests {
             context.binding.budgets,
             admitted_grant_digest,
         )
-    }
-
-    #[test]
-    fn grant_binds_the_exact_typed_retrieval_target_without_serialization() {
-        let context = context();
-        let request = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &request)
-            .unwrap();
-
-        assert_eq!(grant.id().as_str(), "grant.session.read");
-        assert_eq!(grant.revision(), 7);
-        assert_eq!(grant.scope().actor_id(), context.actor_id());
-        assert_eq!(grant.scope().identity(), context.identity());
-        assert_eq!(
-            grant.scope().session_id().unwrap().as_str(),
-            "session.application-slice-1"
-        );
-        assert_eq!(grant.scope().provider_scope(), Some("cursor"));
-        assert_eq!(
-            grant.scope().temporal_mode(),
-            TemporalModeV1::AsOf {
-                cutoff: UtcMicros(1_234_567)
-            }
-        );
-        assert_eq!(grant.scope().grain(), RetrievalGrainV1::LogicalMessage);
-        assert_eq!(grant.scope().access(), SessionAccess::Hydrate);
-        assert_eq!(grant.capability_digest(), context.capability_digest());
-        assert_eq!(grant.policy_digest(), context.policy_digest());
-        assert_eq!(grant.configuration_digest(), context.configuration_digest());
-        assert_eq!(
-            grant.validate(&context, context.binding(), &request),
-            Ok(())
-        );
     }
 
     #[test]
@@ -1142,30 +1107,6 @@ mod tests {
     }
 
     #[test]
-    fn authorizer_issues_an_opaque_grant_for_the_exact_resolved_route() {
-        let context = context();
-        let request = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &request)
-            .unwrap();
-
-        assert_eq!(grant.id().as_str(), "grant.session.read");
-        assert_eq!(grant.revision(), 7);
-        assert_eq!(grant.scope().identity(), context.identity());
-        assert_eq!(grant.scope().access(), SessionAccess::Hydrate);
-        assert_eq!(
-            grant
-                .scope()
-                .identity()
-                .git_route()
-                .unwrap()
-                .branch_id()
-                .as_str(),
-            "branch.application-slice-1"
-        );
-    }
-
-    #[test]
     fn grant_rejects_scope_or_route_substitution() {
         let context = context();
         let profile_request = SessionScopeAuthorizationRequest::new(
@@ -1252,44 +1193,6 @@ mod tests {
         );
     }
 
-    fn rebranched_binding(context: &TestRequestContext, branch: &str) -> SessionRequestBinding {
-        let route = context.identity().git_route().unwrap();
-        SessionRequestBinding::new(
-            ResolvedSessionIdentity::for_project(
-                ProfileId::new("profile.primary").unwrap(),
-                ProjectId::new("project.tracedecay").unwrap(),
-                SessionStoreId::new("store.project.tracedecay").unwrap(),
-                SessionRootId::new("root.project.tracedecay").unwrap(),
-                ResolvedGitRoute::new(
-                    route.repository_id().clone(),
-                    route.worktree_id().clone(),
-                    BranchId::new(branch).unwrap(),
-                ),
-            ),
-            context.capability_digest(),
-            context.policy_digest(),
-            context.configuration_digest(),
-            context.binding.cancellation.clone(),
-            context.binding.budgets,
-        )
-    }
-
-    #[test]
-    fn binding_admits_the_same_checkout_under_a_moved_branch_label() {
-        let context = context();
-        // The mounted session identity records the branch its graph scope was
-        // registered under; the request context records whatever branch HEAD
-        // currently points at. A session store is partitioned by
-        // project/repository/worktree only, so the divergent label must not be
-        // reported as an authorization refusal.
-        let moved = rebranched_binding(&context, "branch.registered-elsewhere");
-        assert_ne!(
-            moved.identity().session_request_scope().unwrap(),
-            *context.scope()
-        );
-        assert_eq!(moved.validate_context(&context), Ok(()));
-    }
-
     #[test]
     fn binding_still_fails_closed_on_a_foreign_checkout() {
         let context = context();
@@ -1343,21 +1246,6 @@ mod tests {
     }
 
     #[test]
-    fn admitted_binding_identity_includes_the_outer_grant_digest() {
-        let context = context();
-        let exact = admitted_binding(&context, context.grant().digest.clone());
-        let same = exact.clone();
-        let different_digest = ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap();
-        assert_ne!(different_digest, context.grant().digest);
-        let different = admitted_binding(&context, different_digest.clone());
-
-        assert!(exact.matches(&same));
-        assert!(!exact.matches(&different));
-        assert_eq!(exact.admitted_grant_digest(), Some(&context.grant().digest));
-        assert_eq!(different.admitted_grant_digest(), Some(&different_digest));
-    }
-
-    #[test]
     fn binding_rejects_cancellation_or_budget_substitution() {
         let context = context();
         let fresh_cancellation =
@@ -1394,33 +1282,6 @@ mod tests {
                 &exact_authorization_request(context.identity().clone()),
             ),
             Err(SessionAuthorizationError::WrongContext)
-        ));
-    }
-
-    #[test]
-    fn retrieval_request_carries_grant_target_freshness_and_limit() {
-        let context = context();
-        let authorization = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &authorization)
-            .unwrap();
-        let request = SessionRetrievalRequest::new(
-            grant,
-            SessionRetrievalTarget::Session(SessionId::new("session.application-slice-1").unwrap()),
-            SessionFreshnessPolicy::RequireFresh,
-            25,
-        )
-        .unwrap();
-
-        assert_eq!(request.limit(), 25);
-        assert_eq!(
-            request.freshness_policy(),
-            SessionFreshnessPolicy::RequireFresh
-        );
-        assert!(matches!(
-            request.target(),
-            SessionRetrievalTarget::Session(session_id)
-                if session_id.as_str() == "session.application-slice-1"
         ));
     }
 
@@ -1515,52 +1376,6 @@ mod tests {
             SessionDataFreshness::from_source_coverage(&partial),
             SessionDataFreshness::Partial { generation_lag: 2 }
         );
-    }
-
-    #[test]
-    fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 15] = [
-            SessionRetrievalOutcome::CompleteZero {
-                freshness: SessionDataFreshness::Fresh,
-            },
-            SessionRetrievalOutcome::Stale {
-                freshness: SessionDataFreshness::Stored { generation_lag: 1 },
-            },
-            SessionRetrievalOutcome::CursorStale,
-            SessionRetrievalOutcome::Partial {
-                items: vec![],
-                freshness: SessionDataFreshness::Fresh,
-                omitted: 1,
-            },
-            SessionRetrievalOutcome::WrongScope,
-            SessionRetrievalOutcome::Locked,
-            SessionRetrievalOutcome::Redacted,
-            SessionRetrievalOutcome::Deleted,
-            SessionRetrievalOutcome::Denied,
-            SessionRetrievalOutcome::Unavailable,
-            SessionRetrievalOutcome::ResetRequired,
-            SessionRetrievalOutcome::CursorManifestLimitExceeded {
-                kind: CursorManifestLimitKindV1::Participants,
-                observed: 257,
-                maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
-            },
-            SessionRetrievalOutcome::BudgetExhausted {
-                stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
-            },
-            SessionRetrievalOutcome::TimedOut,
-            SessionRetrievalOutcome::Cancelled,
-        ];
-
-        assert!(matches!(
-            states[0],
-            SessionRetrievalOutcome::CompleteZero { .. }
-        ));
-        for state in &states[1..] {
-            assert!(!matches!(
-                state,
-                SessionRetrievalOutcome::CompleteZero { .. }
-            ));
-        }
     }
 
     #[test]

@@ -957,11 +957,7 @@ mod tests {
     use tracedecay_runtime_core::shard_runtime::registry::{
         StoreRuntimeRetirementBlocker, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
     };
-    use tracedecay_store::{
-        FactReadControl, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-        RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1,
-        StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
-    };
+    use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
     use super::RegisteredGlobalDb;
 
@@ -1007,43 +1003,6 @@ mod tests {
         ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
             Ok(None)
         }
-    }
-
-    struct ActiveSnapshotProbe {
-        cancellation: RuntimeCancellationIdentityV1,
-        deadline: RuntimeDeadlineV1,
-    }
-
-    impl RuntimeRequestProbeV1 for ActiveSnapshotProbe {
-        fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
-            &self.cancellation
-        }
-
-        fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
-            &self.deadline
-        }
-
-        fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-            None
-        }
-
-        fn try_begin_commit(&self) -> bool {
-            false
-        }
-    }
-
-    fn active_snapshot_probe() -> Arc<dyn RuntimeRequestProbeV1> {
-        Arc::new(ActiveSnapshotProbe {
-            cancellation: RuntimeCancellationIdentityV1 {
-                cancellation_id: RuntimeCancellationIdV1::new("cancellation.global-snapshot")
-                    .expect("valid global snapshot cancellation identity"),
-                generation: 1,
-            },
-            deadline: RuntimeDeadlineV1 {
-                deadline_id: RuntimeDeadlineIdV1::new("deadline.global-snapshot")
-                    .expect("valid global snapshot deadline identity"),
-            },
-        })
     }
 
     #[tokio::test]
@@ -1247,22 +1206,5 @@ mod tests {
                 .verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false)),),
             Err(GraphDbError::Unavailable { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn registered_database_interruptible_snapshot_returns_the_canonical_receipt() {
-        let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
-            "registered-global-db-interruptible-snapshot",
-        )
-        .await;
-        let (database, _owner, _retirement, directory, _scope) = fixture.into_parts();
-        let destination = directory.path().join("backup/registered-snapshot.db");
-
-        let receipt = database
-            .snapshot_to_interruptible(&destination, active_snapshot_probe())
-            .await
-            .expect("guarded registered database produces an interruptible snapshot");
-        assert!(destination.is_file());
-        assert!(receipt.destination_bytes > 0);
     }
 }

@@ -9,8 +9,6 @@ use super::fence::{
     StoreContentFence, StoreDirectoryFence, capture_store_content_fence,
     capture_store_content_fence_controlled, capture_store_directory_fence,
 };
-#[cfg(test)]
-use super::quarantine::store_finding_is_profile_contained;
 use super::quarantine::{RegularFileSnapshot, read_regular_file};
 use super::unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
@@ -21,7 +19,10 @@ use super::{
     StoreDisposition, classify_one,
 };
 #[cfg(test)]
-use super::{CollectionFailure, classify_stores, execute_registered_collection, plan_collection};
+use super::{
+    CollectionFailure, classify_stores, execute_registered_collection, plan_collection,
+    quarantine::store_finding_is_profile_contained,
+};
 
 pub(super) struct StoreWalkStats {
     pub(super) newest_mtime_secs: i64,
@@ -534,6 +535,11 @@ pub struct UnregisteredStoreFinding {
     pub expected_data_root_fence: StoreDirectoryFence,
     /// Exact no-follow inventory/content identity captured at census time.
     pub expected_content_fence: StoreContentFence,
+    /// The store's own manifest names a project root that can never be
+    /// registered here again: it lies under the OS temp directory while this
+    /// profile is durable, or it no longer exists on disk. Such a store is
+    /// collectable without waiting out the retention window.
+    pub abandoned_root: bool,
 }
 
 /// Test-only one-page census convenience. Production callers use
@@ -596,7 +602,7 @@ pub fn plan_unregistered_collection(
 ) -> UnregisteredCollectionPlan {
     let mut plan = UnregisteredCollectionPlan::default();
     for finding in findings {
-        if finding.age_secs >= retention_secs {
+        if finding.abandoned_root || finding.age_secs >= retention_secs {
             plan.collect.push(finding);
         } else {
             plan.retained_immature.push(finding);
@@ -605,6 +611,31 @@ pub fn plan_unregistered_collection(
     plan
 }
 
+/// Whether the manifest under `data_root` names a project root this durable
+/// profile can never register again: one under the OS temp directory, or one
+/// that is definitively gone. A missing or unreadable manifest, a root that
+/// still exists, or an unreadable root all answer `false` and leave the
+/// retention window in charge.
+pub(crate) fn manifest_names_abandoned_root(data_root: &Path, profile_root: &Path) -> bool {
+    let Ok(manifest) = tracedecay_runtime_core::storage::read_store_manifest(
+        &data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+    ) else {
+        return false;
+    };
+    if manifest.project_root.as_os_str().is_empty() {
+        return false;
+    }
+    tracedecay_global_db::ephemeral_root_rejection(&manifest.project_root, profile_root).is_some()
+        || matches!(
+            std::fs::symlink_metadata(&manifest.project_root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+}
+
+/// Deletes unregistered directories through the same two-phase boundary:
+/// content/durable inspection and quarantine first, then a short final
+/// still-unregistered confirmation before the irreversible phase.
+///
 /// Compatibility convenience for one bounded read/apply page. The daemon uses
 /// [`sweep_unregistered_store_page`] directly so it can persist the returned
 /// cursor across maintenance cadences; Doctor deliberately receives one

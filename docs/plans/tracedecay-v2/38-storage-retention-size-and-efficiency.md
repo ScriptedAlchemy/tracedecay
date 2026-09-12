@@ -291,3 +291,63 @@ measurements, not inferred table sizes.
 - No lossy deletion of live, referenced evidence: retention acts on
   superseded, orphaned, or projected-and-durable data only.
 - No background compaction that competes with foreground writes.
+
+## Dated amendment (2026-09-12, measured): session-store residue after the receipt cutover
+
+**Landed 2026-09-12** (PR #707 lane): retire-on-head-install for sealed
+graph generations, staging sweep on open, retention due on publish,
+immediate collection of vanished worktree scopes and `/tmp`-rooted or
+root-less unregistered stores, enrolled-only writers for response handles
+and the run ledger, the activity index without `metadata_json`, a rowid
+idempotency ledger, one `mutation_json` per mutation, slim receipts with
+frontiers stored once, and a Doctor census of dead sealed artifacts. On the
+measured 16 GB `sessions.db` those remove roughly 7 GB.
+
+**Also landed 2026-09-12 (graph side):** a deferred retirement now deletes
+the retired generation's sealed artifact on its first pass — the directory
+needs no engine — and the Doctor `RetentionBacklog` finding reports the
+live container against its sealed heads with the deferred native
+retirement count. Plan 39's corrected amendment records why the container
+of an inactive project still needs a design.
+
+**Also landed 2026-09-12:** `observation_repository_provenance` embedded the
+repository capture twice per row (`capture_json` and
+`availability_json.value`). Twenty-nine distinct captures stood behind
+187,002 rows — 495 MB, of which 396 MB was the repeated capture. The capture
+now lives once in `observation_repository_captures`; rows keep a reference
+and every reader hydrates through one shared SQL projection. Measured on a
+copy of the live table: 494.6 MB → 98.6 MB.
+
+Two residues remain, each blocked on a design decision outside retention:
+
+1. **`retrieval_anchors` (0.67 GB; 441k anchors at ~1.5 KB).** Measured on
+   the same store, the constant structure inside `anchor_json` is smaller
+   than it looks: `coverage` is one distinct value (154 B × 441k = 68 MB),
+   `projection_watermark` one (17 B, 7 MB), and `authorization` has 249,889
+   distinct values across 441k rows because it carries the per-observation
+   `canonical_request_digest` — interning it saves ~50 MB. A slim persisted
+   shape therefore reclaims ~20 % while touching 126 `anchor_json` read
+   sites across the temporal store and the foreign keys from
+   `retrieval_anchor_aliases`, `retrieval_anchor_dispositions`, and the
+   derived-evidence tables into `retrieval_anchors(anchor_id, owner_json)`.
+   That trade is not worth taking. The cost is structural: 71-byte
+   identifiers repeated in `anchor_id`, `source_observations`, the target,
+   and the owner of every document. The real fix is a columnar anchor table
+   (identifier columns, a small `target_kind`, and only the variable part
+   as JSON) — a `RetrievalAnchorRecordV3` persisted shape with the
+   dependent foreign keys moving with it. `anchor_id` derives from owner and
+   target only, so the identity is unaffected. Cardinality is the other
+   lever: 187,002 `repository_capture` anchors name 29 captures because the
+   anchor target folds in the observation's sanitization receipt; whether a
+   capture anchor should be per observation or per capture is a retrieval
+   model decision, not a storage one.
+2. **`observations.observation_json` (1.3 GB) after projection.** Plan 38
+   §4 asks for one content copy; the observation payload is the third beside
+   `session_messages.text` and `lcm_raw_messages.content`. It cannot be
+   released on projection durability today because temporal retrieval reads
+   `observation.observation_json` as the content authority when matching
+   evidence (`tracedecay-session-temporal-store/src/retrieval.rs`), and the
+   retention module correctly never releases active evidence. Release becomes
+   possible once temporal hydration reads message content from the LCM raw
+   store (content-addressed, offloadable) and the observation row keeps only
+   its identity, receipt, and cursor.

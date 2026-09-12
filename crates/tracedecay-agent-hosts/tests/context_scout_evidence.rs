@@ -127,6 +127,7 @@ fn source_receipt(
             requested_at: UtcMicros(100),
             resolved_at: UtcMicros(110),
             source_generation: Some(id("generation.scout.1")),
+            code_graph_freshness: None,
             watermark_digest: Some(digest('e')),
             freshness: match contribution_state {
                 RetrieverContributionState::Stale => FreshnessState::Stale,

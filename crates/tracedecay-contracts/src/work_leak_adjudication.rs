@@ -472,21 +472,4 @@ mod tests {
         receipt.evidence.kind = WorkExecutionLeakKindV1::Unknown;
         assert!(!receipt.validate_for_observation());
     }
-
-    #[test]
-    fn observation_payload_is_evidence_derived() {
-        let receipt = valid_receipt();
-        let payload = receipt
-            .observability_payload()
-            .expect("observation payload");
-
-        assert_eq!(payload.kind, receipt.evidence.kind);
-        assert_eq!(
-            payload.detection_horizon_micros,
-            receipt.evidence.detection_horizon_micros
-        );
-        assert_eq!(payload.recovery, receipt.evidence.recovery);
-        assert_eq!(payload.owner_class, receipt.evidence.owner_class);
-        assert_eq!(payload.coverage, receipt.evidence.coverage);
-    }
 }

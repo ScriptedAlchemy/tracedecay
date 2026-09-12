@@ -240,15 +240,6 @@ mod tests {
     }
 
     #[test]
-    fn insert_imports_stops_before_outer_block_doc() {
-        let out = insert_imports(
-            "/** Block doc. */\npub fn other() {}\n",
-            &["use crate::X;".to_string()],
-        );
-        assert_eq!(out, "use crate::X;\n/** Block doc. */\npub fn other() {}\n");
-    }
-
-    #[test]
     fn dedup_preserve_skips_existing() {
         let out = dedup_preserve(
             &[

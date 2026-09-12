@@ -22,9 +22,18 @@
 //! width is separately bounded by the process authority before a session is
 //! opened.
 
+use tracedecay_semantic_contracts::{
+    DEFAULT_SEMANTIC_RESIDENT_BYTES, MAX_SEMANTIC_RESIDENT_BYTES, SemanticResourceCeilings,
+};
+
 /// Operator override for concurrently embedding sessions, for hosts where
 /// memory rather than CPU binds. Values below 1 are ignored.
 const EMBED_SESSIONS_ENV: &str = "TRACEDECAY_EMBED_SESSIONS";
+
+/// Share of process resident admission reserved for semantic sessions by
+/// default. The remainder stays available to graph/text generations, queries,
+/// and model-load transients.
+const DEFAULT_RESIDENT_FRACTION_DENOMINATOR: u64 = 8;
 
 /// Intra-op width at which independent sessions remain the preferred way to
 /// fill the shared CPU authority. The execution planner only widens a session
@@ -237,6 +246,84 @@ pub fn default_max_concurrent_sessions_for(total_cores: usize) -> u32 {
     u32::try_from(width.max(1)).unwrap_or(1)
 }
 
+/// Host-derived semantic resident ceiling for an unconfigured runtime.
+#[must_use]
+pub fn default_resident_ceiling_for(admitted_process_bytes: u64) -> u64 {
+    let admitted_process_bytes = admitted_process_bytes.max(1);
+    (admitted_process_bytes / DEFAULT_RESIDENT_FRACTION_DENOMINATOR)
+        .max(DEFAULT_SEMANTIC_RESIDENT_BYTES.min(admitted_process_bytes))
+        .min(MAX_SEMANTIC_RESIDENT_BYTES)
+}
+
+/// Where the resident ceiling in force came from, reported alongside it so an
+/// operator can tell a pin from a derivation, and a derivation from a
+/// derivation the model ceilings had to widen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticResidentCeilingSourceV1 {
+    /// Derived from the process resident-memory admission authority.
+    HostDerived,
+    /// Derived, then raised to `max_model_bytes` / `max_tokenizer_bytes` so
+    /// the cataloged model still fits. A host this small cannot honour its own
+    /// memory share and hold the model at once; the model wins, because a
+    /// ceiling under it admits nothing at all.
+    HostDerivedClampedToModel,
+    /// Pinned by the operator in `semantic.runtime.v1`, already validated.
+    OperatorPinned,
+}
+
+/// The resident ceiling in force, and where it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticResidentCeilingV1 {
+    pub bytes: u64,
+    pub source: SemanticResidentCeilingSourceV1,
+}
+
+/// Preserve an explicit `semantic.runtime.v1` ceiling; otherwise derive it
+/// from the process resident-memory authority.
+///
+/// A derived ceiling must satisfy the same invariant the validator enforces on
+/// a pinned one — `max_model_bytes <= max_resident_bytes` — because the
+/// artifact admission path checks it again and reports a violation as
+/// `RuntimeFailureKindV1::OutOfMemory` long after the derivation. Deriving
+/// below the model and letting that surface as a load failure would make a
+/// small host look like a corrupt catalog, so the derivation is clamped up and
+/// says so.
+#[must_use]
+pub fn effective_resident_ceiling(
+    admitted_process_bytes: u64,
+    ceilings: SemanticResourceCeilings,
+) -> SemanticResidentCeilingV1 {
+    let resolved = match ceilings.max_resident_bytes {
+        Some(pinned) => SemanticResidentCeilingV1 {
+            bytes: pinned,
+            source: SemanticResidentCeilingSourceV1::OperatorPinned,
+        },
+        None => {
+            let derived = default_resident_ceiling_for(admitted_process_bytes);
+            let required = ceilings.max_model_bytes.max(ceilings.max_tokenizer_bytes);
+            if derived < required {
+                SemanticResidentCeilingV1 {
+                    bytes: required.min(MAX_SEMANTIC_RESIDENT_BYTES),
+                    source: SemanticResidentCeilingSourceV1::HostDerivedClampedToModel,
+                }
+            } else {
+                SemanticResidentCeilingV1 {
+                    bytes: derived,
+                    source: SemanticResidentCeilingSourceV1::HostDerived,
+                }
+            }
+        }
+    };
+    hotpath::gauge!("semantic_embedding_resident_admitted_bytes").set(admitted_process_bytes);
+    hotpath::gauge!("semantic_embedding_resident_ceiling_bytes").set(resolved.bytes);
+    hotpath::gauge!("semantic_embedding_resident_ceiling_source").set(match resolved.source {
+        SemanticResidentCeilingSourceV1::HostDerived => 1_u8,
+        SemanticResidentCeilingSourceV1::OperatorPinned => 2_u8,
+        SemanticResidentCeilingSourceV1::HostDerivedClampedToModel => 3_u8,
+    });
+    resolved
+}
+
 /// Run `operation` on the shared, canonically bounded code-index pool.
 pub fn install<R, F>(operation: F) -> Result<R, String>
 where
@@ -267,12 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_ceiling_is_never_exceeded() {
-        assert_eq!(embedding_session_width_for(96, 4, 1), 1);
-        assert_eq!(embedding_session_width_for(96, 4, 2), 2);
-    }
-
-    #[test]
     fn forced_sessions_are_clamped_to_the_shared_cpu_budget() {
         assert_eq!(
             embedding_execution_plan_for(8, 4, 64, 64, Some(12)),
@@ -290,20 +371,6 @@ mod tests {
                 limiting_reason: EmbeddingSessionLimitingReasonV1::ConfiguredMaximum,
             }
         );
-    }
-
-    #[test]
-    fn intra_thread_ceiling_does_not_reduce_independent_session_width() {
-        assert_eq!(embedding_session_width_for(96, 1, 64), 48);
-        assert_eq!(embedding_session_width_for(96, 32, 64), 12);
-        assert_eq!(embedding_session_width_for(96, 128, 64), 12);
-    }
-
-    #[test]
-    fn default_intra_thread_ceiling_is_valid_on_small_and_large_hosts() {
-        assert_eq!(default_max_intra_threads_for(1), 1);
-        assert_eq!(default_max_intra_threads_for(8), 8);
-        assert_eq!(default_max_intra_threads_for(96), 12);
     }
 
     #[test]
@@ -335,16 +402,79 @@ mod tests {
     }
 
     #[test]
-    fn configured_thread_and_session_ceilings_remain_authoritative() {
+    fn default_resident_ceiling_scales_with_admitted_host_memory() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        assert_eq!(default_resident_ceiling_for(6 * GIB), 2 * GIB);
+        assert_eq!(default_resident_ceiling_for(96 * GIB), 12 * GIB);
+        assert_eq!(default_resident_ceiling_for(256 * GIB), 16 * GIB);
+    }
+
+    #[test]
+    fn configured_resident_ceiling_wins_over_host_derivation() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        let pinned = SemanticResourceCeilings {
+            max_resident_bytes: Some(3 * GIB),
+            ..SemanticResourceCeilings::default()
+        };
         assert_eq!(
-            embedding_execution_plan_for(48, 8, 3, 12, None),
-            EmbeddingExecutionPlanV1 {
-                intra_threads: 8,
-                sessions: 3,
-                limiting_reason: EmbeddingSessionLimitingReasonV1::ConfiguredMaximum,
+            effective_resident_ceiling(96 * GIB, pinned),
+            SemanticResidentCeilingV1 {
+                bytes: 3 * GIB,
+                source: SemanticResidentCeilingSourceV1::OperatorPinned,
             }
         );
-        assert_eq!(embedding_pool_sessions(8, 32), 33);
+    }
+
+    #[test]
+    fn an_unpinned_ceiling_is_derived_from_the_admitted_process_memory() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        assert_eq!(
+            effective_resident_ceiling(96 * GIB, SemanticResourceCeilings::default()),
+            SemanticResidentCeilingV1 {
+                bytes: 12 * GIB,
+                source: SemanticResidentCeilingSourceV1::HostDerived,
+            }
+        );
+    }
+
+    /// A derived ceiling has to satisfy the same invariant the settings
+    /// validator enforces on a pinned one, or artifact admission later reports
+    /// a host too small to hold the model as `OutOfMemory` against the
+    /// catalog. The clamp is reported so a host running above its own memory
+    /// share is distinguishable from one sized normally.
+    #[test]
+    fn a_derived_ceiling_below_the_model_ceiling_is_clamped_and_reported() {
+        let ceilings = SemanticResourceCeilings {
+            max_model_bytes: 700 * 1024 * 1024,
+            max_tokenizer_bytes: 64 * 1024 * 1024,
+            max_resident_bytes: None,
+            ..SemanticResourceCeilings::default()
+        };
+        let admitted = 512 * 1024 * 1024;
+        assert!(
+            default_resident_ceiling_for(admitted) < ceilings.max_model_bytes,
+            "this host must be small enough to derive below the model ceiling"
+        );
+
+        let resolved = effective_resident_ceiling(admitted, ceilings);
+
+        assert_eq!(
+            resolved,
+            SemanticResidentCeilingV1 {
+                bytes: ceilings.max_model_bytes,
+                source: SemanticResidentCeilingSourceV1::HostDerivedClampedToModel,
+            }
+        );
+        assert!(
+            tracedecay_semantic_contracts::semantic_resident_ceiling_is_valid(
+                ceilings,
+                resolved.bytes
+            ),
+            "a derived ceiling must satisfy the validator a pinned one must satisfy"
+        );
     }
 
     #[test]

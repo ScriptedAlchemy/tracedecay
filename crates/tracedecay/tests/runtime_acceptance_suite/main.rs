@@ -10,6 +10,7 @@ mod common;
 
 mod advisory_runtime_acceptance;
 mod application_production_reachability;
+mod canonical_git_observation_correlation;
 #[allow(clippy::unwrap_used)]
 mod cross_host_handoff_test;
 mod daemon_runtime_acceptance;

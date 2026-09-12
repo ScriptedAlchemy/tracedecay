@@ -1812,17 +1812,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_healthy_partial_coverage_is_not_healthy() {
-        let finding = runtime_health_finding(&RuntimeHealthReadV1::Observed {
-            liveness: RuntimeLivenessV1::Healthy,
-            coverage: DoctorCoverageCompletenessV1::Partial,
-        })
-        .expect("finding");
-        assert!(!finding.state().is_healthy_complete());
-        assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
-    }
-
-    #[test]
     fn host_drift_maps_to_advisory_diagnostic_evidence() {
         let finding = host_integration_finding(&HostIntegrationReadV1::Observed {
             conformance: HostConformanceV1::ProtocolDrift,

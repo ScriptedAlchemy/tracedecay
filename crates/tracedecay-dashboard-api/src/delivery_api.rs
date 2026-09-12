@@ -1524,10 +1524,8 @@ fn generation_projection(
 #[cfg(test)]
 mod tests {
     use crate::read_model::{DashboardCoverageCompletenessV1, DashboardFreshnessStateV1};
-    use tracedecay_domain::feedback::{
-        FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadCheckpointV1,
-    };
-    use tracedecay_domain::{ProjectId, ProviderId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_domain::feedback::FeedbackScopeV1;
+    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
     use super::*;
 
@@ -1650,37 +1648,5 @@ mod tests {
             panic!("a refused credential must project as typed unavailable");
         };
         assert!(refused_reason.contains("refused"));
-    }
-
-    #[test]
-    fn provider_qualified_pull_request_preserves_optional_generations() {
-        let complete = ProjectDeliveryGitHubOperationSnapshotV1 {
-            provider_base_commit_id: CommitId::new("commit.base").unwrap(),
-            provider_head_commit_id: CommitId::new("commit.head").unwrap(),
-            merge_base_commit_id: CommitId::new("commit.merge-base").unwrap(),
-            outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
-            coverage: GitHubReviewCoverageV1::Complete,
-            fetched_at: UtcMicros(7),
-            checkpoint: GitHubReviewReadCheckpointV1 {
-                etag: None,
-                next_cursor: None,
-                rate_limit: None,
-            },
-        };
-        let mapped = map_pull_request(ProjectDeliveryPullRequestV1 {
-            provider: ProviderId::new("provider.github").unwrap(),
-            pull_request_id: GitHubPullRequestIdV1::new("42").unwrap(),
-            identity: None,
-            operations: vec![ProjectDeliveryPullRequestOperationV1 {
-                operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
-                latest_attempt: None,
-                last_complete: Some(complete),
-            }],
-        });
-
-        assert_eq!(mapped.id, "provider.github:42");
-        assert_eq!(mapped.operations.len(), 1);
-        assert!(mapped.operations[0].latest_attempt.is_none());
-        assert!(mapped.operations[0].last_complete.is_some());
     }
 }

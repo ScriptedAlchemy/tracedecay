@@ -14,11 +14,206 @@ use tracedecay_store::{
     apply_source_projection_owned, build_source_projection,
 };
 
-use super::support::{decode, encode, invalid};
+use super::support::{decode, encode, invalid, same_json};
 
 // Immutable histories stay append-only until the canonical retention policy
 // explicitly covers external-source receipts. Current-state reads and writes
 // use only primary-key/index probes and normalized current rows.
+//
+// A mutation's JSON lives once, in `external_source_mutations_v1`, keyed by
+// its digest. The current-object, projected-object, and projection-effect
+// tables reference it by digest and join for the payload: the earlier shape
+// stored the same ~2 KB encoding in all four tables, which on one store was
+// 2.4 GB of byte-identical copies beside the 1 GB history. Commit and
+// projection receipts likewise persist slim (see `slim.rs`): their mutations
+// and aggregate frontiers are digests into the history and
+// `external_source_frontiers_v1`, and effects hydrate from the effects table.
+/// Retired tables that carried their own copy of payloads the history tables
+/// already hold, paired with the statements that move one bounded chunk of
+/// rows into the digest-referencing successors and then remove that chunk
+/// from the retired table. `json_extract` reads every digest out of the
+/// retired row's own encoding, so no row needs another table migrated first.
+///
+/// `?1` is the chunk's inclusive `rowid` ceiling in every statement, so the
+/// moves and the removal in one chunk describe exactly the same rows. The
+/// removal is last: a chunk that commits has moved its rows, and a chunk that
+/// does not commit has moved none.
+pub const RETIRED_MUTATION_COPY_TABLES: &[(&str, &[&str])] = &[
+    (
+        "external_source_objects_v1",
+        &[
+            "INSERT OR IGNORE INTO external_source_objects_v2 (
+                binding_id, native_object_digest, partition_digest, mutation_digest
+             )
+             SELECT binding_id, native_object_digest, partition_digest, mutation_digest
+             FROM external_source_objects_v1
+             WHERE rowid <= ?1",
+            "DELETE FROM external_source_objects_v1 WHERE rowid <= ?1",
+        ],
+    ),
+    (
+        "external_source_projected_objects_v1",
+        &[
+            "INSERT OR IGNORE INTO external_source_projected_objects_v2 (
+                binding_id, native_object_digest, mutation_digest
+             )
+             SELECT binding_id, native_object_digest,
+                    json_extract(mutation_json, '$.mutation_digest')
+             FROM external_source_projected_objects_v1
+             WHERE rowid <= ?1
+               AND json_extract(mutation_json, '$.mutation_digest') IS NOT NULL",
+            "DELETE FROM external_source_projected_objects_v1 WHERE rowid <= ?1",
+        ],
+    ),
+    (
+        "external_source_projection_effects_v1",
+        &[
+            "INSERT OR IGNORE INTO external_source_projection_effects_v2 (
+                binding_id, projection_digest, effect_index,
+                native_object_digest, mutation_digest, effect_json
+             )
+             SELECT binding_id, projection_digest, effect_index, native_object_digest,
+                    json_extract(mutation_json, '$.mutation_digest'), effect_json
+             FROM external_source_projection_effects_v1
+             WHERE rowid <= ?1
+               AND json_extract(mutation_json, '$.mutation_digest') IS NOT NULL",
+            "DELETE FROM external_source_projection_effects_v1 WHERE rowid <= ?1",
+        ],
+    ),
+    // Receipts embedded their mutations and aggregate frontiers. The slim
+    // shape keeps mutation digests in place of mutations, frontier digests in
+    // place of frontiers (the payloads move to `external_source_frontiers_v1`),
+    // and, for projections, an empty effects list that hydrates from the
+    // effects table. Every replacement value is read out of the retired row's
+    // own encoding.
+    (
+        "external_source_commit_receipts_v1",
+        &[
+            "INSERT OR IGNORE INTO external_source_frontiers_v1 (
+                binding_id, frontier_digest, frontier_json
+             )
+             SELECT binding_id,
+                    json_extract(receipt_json, '$.source_frontier.digest'),
+                    json_extract(receipt_json, '$.source_frontier')
+             FROM external_source_commit_receipts_v1
+             WHERE rowid <= ?1
+               AND json_extract(receipt_json, '$.source_frontier.digest') IS NOT NULL",
+            "INSERT OR IGNORE INTO external_source_frontiers_v1 (
+                binding_id, frontier_digest, frontier_json
+             )
+             SELECT binding_id,
+                    json_extract(receipt_json, '$.prior_source_frontier.digest'),
+                    json_extract(receipt_json, '$.prior_source_frontier')
+             FROM external_source_commit_receipts_v1
+             WHERE rowid <= ?1
+               AND json_extract(receipt_json, '$.prior_source_frontier.digest') IS NOT NULL",
+            "INSERT OR IGNORE INTO external_source_commit_receipts_v2 (
+                binding_id, idempotency_key, request_digest, definition_revision,
+                binding_revision, predecessor_frontier_digest, successor_frontier_digest,
+                receipt_digest, receipt_json
+             )
+             SELECT binding_id, idempotency_key, request_digest, definition_revision,
+                    binding_revision, predecessor_frontier_digest, successor_frontier_digest,
+                    receipt_digest,
+                    json_set(
+                        receipt_json,
+                        '$.mutations', json((
+                            SELECT json_group_array(
+                                json_extract(mutation.value, '$.mutation_digest')
+                            )
+                            FROM json_each(receipt_json, '$.mutations') AS mutation
+                        )),
+                        '$.source_frontier',
+                        json_extract(receipt_json, '$.source_frontier.digest'),
+                        '$.prior_source_frontier',
+                        json_extract(receipt_json, '$.prior_source_frontier.digest')
+                    )
+             FROM external_source_commit_receipts_v1
+             WHERE rowid <= ?1",
+            "DELETE FROM external_source_commit_receipts_v1 WHERE rowid <= ?1",
+        ],
+    ),
+    (
+        "external_source_projection_publications_v1",
+        &[
+            "INSERT OR IGNORE INTO external_source_frontiers_v1 (
+                binding_id, frontier_digest, frontier_json
+             )
+             SELECT binding_id,
+                    json_extract(receipt_json, '$.source_frontier.digest'),
+                    json_extract(receipt_json, '$.source_frontier')
+             FROM external_source_projection_publications_v1
+             WHERE rowid <= ?1
+               AND json_extract(receipt_json, '$.source_frontier.digest') IS NOT NULL",
+            "INSERT OR IGNORE INTO external_source_frontiers_v1 (
+                binding_id, frontier_digest, frontier_json
+             )
+             SELECT binding_id,
+                    json_extract(receipt_json, '$.expected_projection_frontier.digest'),
+                    json_extract(receipt_json, '$.expected_projection_frontier')
+             FROM external_source_projection_publications_v1
+             WHERE rowid <= ?1
+               AND json_extract(
+                     receipt_json, '$.expected_projection_frontier.digest'
+                   ) IS NOT NULL",
+            "INSERT OR IGNORE INTO external_source_projection_publications_v2 (
+                binding_id, projection_digest, source_receipt_digest,
+                predecessor_frontier_digest, successor_frontier_digest, receipt_json
+             )
+             SELECT binding_id, projection_digest, source_receipt_digest,
+                    predecessor_frontier_digest, successor_frontier_digest,
+                    json_set(
+                        receipt_json,
+                        '$.mutations', json((
+                            SELECT json_group_array(
+                                json_extract(mutation.value, '$.mutation_digest')
+                            )
+                            FROM json_each(receipt_json, '$.mutations') AS mutation
+                        )),
+                        '$.effects', json('[]'),
+                        '$.source_frontier',
+                        json_extract(receipt_json, '$.source_frontier.digest'),
+                        '$.expected_projection_frontier',
+                        json_extract(receipt_json, '$.expected_projection_frontier.digest')
+                    )
+             FROM external_source_projection_publications_v1
+             WHERE rowid <= ?1",
+            "DELETE FROM external_source_projection_publications_v1 WHERE rowid <= ?1",
+        ],
+    ),
+];
+
+/// Refuses a history read while the store is still being moved off the
+/// payload-copying predecessors.
+///
+/// Retiring those tables moves rows in chunks, so between chunks the current
+/// tables hold only part of a store's history. Composing an answer from that
+/// would understate what the store knows, and blaming an absent row would
+/// name the wrong cause. Both become this one typed state, which clears when
+/// the last chunk drops the last predecessor — the same presence the
+/// migration itself uses as its progress marker.
+fn refuse_while_history_migrates(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let placeholders = RETIRED_MUTATION_COPY_TABLES
+        .iter()
+        .map(|(table, _)| format!("'{table}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let migrating = connection
+        .prepare_cached(&format!(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name IN ({placeholders})
+             ORDER BY name LIMIT 1"
+        ))?
+        .query_row([], |row| row.get::<_, String>(0))
+        .optional()?;
+    match migrating {
+        Some(table) => Err(invalid(format!(
+            "external source history is still migrating out of {table}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub const EXTERNAL_SOURCE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS external_source_states_v1 (
     binding_id TEXT PRIMARY KEY,
@@ -61,7 +256,13 @@ CREATE TABLE IF NOT EXISTS external_source_authority_receipts_v1 (
     receipt_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, idempotency_key)
 );
-CREATE TABLE IF NOT EXISTS external_source_commit_receipts_v1 (
+CREATE TABLE IF NOT EXISTS external_source_frontiers_v1 (
+    binding_id TEXT NOT NULL,
+    frontier_digest TEXT NOT NULL,
+    frontier_json TEXT NOT NULL,
+    PRIMARY KEY (binding_id, frontier_digest)
+);
+CREATE TABLE IF NOT EXISTS external_source_commit_receipts_v2 (
     binding_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     request_digest TEXT NOT NULL,
@@ -92,12 +293,11 @@ CREATE TABLE IF NOT EXISTS external_source_lineage_v1 (
     lineage_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, lineage_digest)
 );
-CREATE TABLE IF NOT EXISTS external_source_objects_v1 (
+CREATE TABLE IF NOT EXISTS external_source_objects_v2 (
     binding_id TEXT NOT NULL,
     native_object_digest TEXT NOT NULL,
     partition_digest TEXT NOT NULL,
     mutation_digest TEXT NOT NULL,
-    mutation_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, native_object_digest)
 );
 CREATE TABLE IF NOT EXISTS external_source_pending_projections_v1 (
@@ -110,7 +310,7 @@ CREATE TABLE IF NOT EXISTS external_source_pending_projections_v1 (
     UNIQUE (binding_id, successor_frontier_digest),
     UNIQUE (binding_id, source_receipt_digest)
 );
-CREATE TABLE IF NOT EXISTS external_source_projection_publications_v1 (
+CREATE TABLE IF NOT EXISTS external_source_projection_publications_v2 (
     binding_id TEXT NOT NULL,
     projection_digest TEXT NOT NULL,
     source_receipt_digest TEXT NOT NULL,
@@ -121,13 +321,13 @@ CREATE TABLE IF NOT EXISTS external_source_projection_publications_v1 (
     UNIQUE (binding_id, source_receipt_digest),
     UNIQUE (binding_id, successor_frontier_digest)
 );
-CREATE TABLE IF NOT EXISTS external_source_projection_effects_v1 (
+CREATE TABLE IF NOT EXISTS external_source_projection_effects_v2 (
     binding_id TEXT NOT NULL,
     projection_digest TEXT NOT NULL,
     effect_index INTEGER NOT NULL CHECK (effect_index >= 0),
     native_object_digest TEXT NOT NULL,
+    mutation_digest TEXT NOT NULL,
     effect_json TEXT NOT NULL,
-    mutation_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, projection_digest, effect_index)
 );
 CREATE TABLE IF NOT EXISTS external_source_projection_lineage_v1 (
@@ -138,10 +338,10 @@ CREATE TABLE IF NOT EXISTS external_source_projection_lineage_v1 (
     lineage_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, projection_digest, lineage_index)
 );
-CREATE TABLE IF NOT EXISTS external_source_projected_objects_v1 (
+CREATE TABLE IF NOT EXISTS external_source_projected_objects_v2 (
     binding_id TEXT NOT NULL,
     native_object_digest TEXT NOT NULL,
-    mutation_json TEXT NOT NULL,
+    mutation_digest TEXT NOT NULL,
     PRIMARY KEY (binding_id, native_object_digest)
 );
 CREATE TABLE IF NOT EXISTS external_source_acquisition_queue_v1 (
@@ -349,6 +549,7 @@ impl ExternalSourceExecutor {
         match operation {
             ExternalSourceReadOperationV1::State { binding } => {
                 binding.validate().map_err(invalid)?;
+                refuse_while_history_migrates(snapshot)?;
                 load_state(snapshot, binding)
                     .map(|state| ExternalSourceReadResultV1::State(state.map(Box::new)))
             }
@@ -358,10 +559,12 @@ impl ExternalSourceExecutor {
             } => {
                 binding.validate().map_err(invalid)?;
                 idempotency_key.validate().map_err(invalid)?;
+                refuse_while_history_migrates(snapshot)?;
                 load_commit_receipt_by_idempotency(snapshot, binding, idempotency_key)
                     .map(|receipt| ExternalSourceReadResultV1::CommitReceipt(receipt.map(Box::new)))
             }
             ExternalSourceReadOperationV1::NextPendingProjection { binding } => {
+                refuse_while_history_migrates(snapshot)?;
                 let pending = match binding {
                     Some(binding) => {
                         binding.validate().map_err(invalid)?;
@@ -565,12 +768,12 @@ fn load_state(
         .flatten();
     let observed = load_current_mutations(
         connection,
-        "external_source_objects_v1",
+        "external_source_objects_v2",
         binding.binding_id.as_str(),
     )?;
     let projected = load_current_mutations(
         connection,
-        "external_source_projected_objects_v1",
+        "external_source_projected_objects_v2",
         binding.binding_id.as_str(),
     )?;
     let state = SourceStoreStateV1::restore(
@@ -624,18 +827,36 @@ fn load_current_mutations(
     table: &str,
     binding_id: &str,
 ) -> rusqlite::Result<Vec<SourceObjectMutationV1>> {
+    // LEFT JOIN so a current row whose digest names no history row surfaces
+    // as corruption instead of silently vanishing from the current state.
     let sql = match table {
-        "external_source_objects_v1" => {
-            "SELECT mutation_json FROM external_source_objects_v1 WHERE binding_id = ?1"
+        "external_source_objects_v2" => {
+            "SELECT history.mutation_json
+             FROM external_source_objects_v2 AS current
+             LEFT JOIN external_source_mutations_v1 AS history
+               ON history.binding_id = current.binding_id
+              AND history.mutation_digest = current.mutation_digest
+             WHERE current.binding_id = ?1"
         }
-        "external_source_projected_objects_v1" => {
-            "SELECT mutation_json FROM external_source_projected_objects_v1 WHERE binding_id = ?1"
+        "external_source_projected_objects_v2" => {
+            "SELECT history.mutation_json
+             FROM external_source_projected_objects_v2 AS current
+             LEFT JOIN external_source_mutations_v1 AS history
+               ON history.binding_id = current.binding_id
+              AND history.mutation_digest = current.mutation_digest
+             WHERE current.binding_id = ?1"
         }
         _ => return Err(invalid("unknown external source current-object table")),
     };
     let mut statement = connection.prepare_cached(sql)?;
     statement
-        .query_map([binding_id], |row| decode(row.get::<_, String>(0)?))?
+        .query_map([binding_id], |row| {
+            let encoded: Option<String> = row.get(0)?;
+            let encoded = encoded.ok_or_else(|| {
+                invalid("external source current object names a mutation absent from history")
+            })?;
+            decode(encoded)
+        })?
         .collect()
 }
 
@@ -654,12 +875,16 @@ fn persist_source_commit(
     persist_definition_and_binding(savepoint, state.definition(), state.binding())?;
     let predecessor = frontier_key(receipt.prior_source_frontier());
     let successor = receipt.source_frontier().digest().as_str();
-    let receipt_json = encode(receipt)?;
+    let slim::SlimReceiptV1 {
+        json: receipt_json,
+        frontiers,
+    } = slim::slim_commit_receipt(receipt)?;
+    persist_frontiers(savepoint, binding.binding_id.as_str(), &frontiers)?;
     // `INSERT OR IGNORE` reports zero changed rows only when a conflict was
     // swallowed; only then can the stored row differ from this write, so the
     // read-back proof is needed only on that path.
     let changed = savepoint.execute(
-        "INSERT OR IGNORE INTO external_source_commit_receipts_v1 (
+        "INSERT OR IGNORE INTO external_source_commit_receipts_v2 (
             binding_id, idempotency_key, request_digest,
             definition_revision, binding_revision,
             predecessor_frontier_digest, successor_frontier_digest,
@@ -683,7 +908,7 @@ fn persist_source_commit(
     if changed == 0 {
         verify_encoded_row(
             savepoint,
-            "SELECT receipt_json FROM external_source_commit_receipts_v1
+            "SELECT receipt_json FROM external_source_commit_receipts_v2
              WHERE binding_id = ?1 AND idempotency_key = ?2",
             binding.binding_id.as_str(),
             receipt.idempotency_key().as_str(),
@@ -726,20 +951,17 @@ fn persist_source_commit(
             )?;
         }
         savepoint.execute(
-            "INSERT INTO external_source_objects_v1 (
-                binding_id, native_object_digest, partition_digest,
-                mutation_digest, mutation_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO external_source_objects_v2 (
+                binding_id, native_object_digest, partition_digest, mutation_digest
+             ) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(binding_id, native_object_digest) DO UPDATE SET
                 partition_digest = excluded.partition_digest,
-                mutation_digest = excluded.mutation_digest,
-                mutation_json = excluded.mutation_json",
+                mutation_digest = excluded.mutation_digest",
             params![
                 binding.binding_id.as_str(),
                 native_object.digest().as_str(),
                 mutation.evidence().partition().digest().as_str(),
                 mutation.mutation_digest().as_str(),
-                mutation_json,
             ],
         )?;
     }
@@ -818,9 +1040,13 @@ fn persist_projection(
     projection.validate().map_err(invalid)?;
     let binding = projection.source_frontier().binding();
     let predecessor = frontier_key(projection.expected_projection_frontier());
-    let encoded = encode(projection)?;
+    let slim::SlimReceiptV1 {
+        json: encoded,
+        frontiers,
+    } = slim::slim_projection_receipt(projection)?;
+    persist_frontiers(savepoint, binding.binding_id.as_str(), &frontiers)?;
     savepoint.execute(
-        "INSERT OR IGNORE INTO external_source_projection_publications_v1 (
+        "INSERT OR IGNORE INTO external_source_projection_publications_v2 (
             binding_id, projection_digest, source_receipt_digest,
             predecessor_frontier_digest, successor_frontier_digest, receipt_json
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -835,7 +1061,7 @@ fn persist_projection(
     )?;
     verify_encoded_row(
         savepoint,
-        "SELECT receipt_json FROM external_source_projection_publications_v1
+        "SELECT receipt_json FROM external_source_projection_publications_v2
          WHERE binding_id = ?1 AND projection_digest = ?2",
         binding.binding_id.as_str(),
         projection.receipt_digest().as_str(),
@@ -852,31 +1078,47 @@ fn persist_projection(
             invalid("external source projection effect index exceeds SQLite INTEGER")
         })?;
         let effect_json = encode(effect)?;
-        let mutation_json = encode(mutation)?;
+        // The projection applies the commit's own mutations, so each one is
+        // already in the history table under this binding; a digest with no
+        // history row is a corrupt projection, refused before any row lands.
+        let mutation_recorded = savepoint
+            .prepare_cached(
+                "SELECT 1 FROM external_source_mutations_v1
+                 WHERE binding_id = ?1 AND mutation_digest = ?2",
+            )?
+            .exists(params![
+                binding.binding_id.as_str(),
+                mutation.mutation_digest().as_str()
+            ])?;
+        if !mutation_recorded {
+            return Err(invalid(
+                "external source projection names a mutation absent from history",
+            ));
+        }
         savepoint.execute(
-            "INSERT INTO external_source_projection_effects_v1 (
+            "INSERT INTO external_source_projection_effects_v2 (
                 binding_id, projection_digest, effect_index,
-                native_object_digest, effect_json, mutation_json
+                native_object_digest, mutation_digest, effect_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 binding.binding_id.as_str(),
                 projection.receipt_digest().as_str(),
                 index,
                 mutation.observation().native_object().digest().as_str(),
+                mutation.mutation_digest().as_str(),
                 effect_json,
-                mutation_json,
             ],
         )?;
         savepoint.execute(
-            "INSERT INTO external_source_projected_objects_v1 (
-                binding_id, native_object_digest, mutation_json
+            "INSERT INTO external_source_projected_objects_v2 (
+                binding_id, native_object_digest, mutation_digest
              ) VALUES (?1, ?2, ?3)
              ON CONFLICT(binding_id, native_object_digest) DO UPDATE SET
-                mutation_json = excluded.mutation_json",
+                mutation_digest = excluded.mutation_digest",
             params![
                 binding.binding_id.as_str(),
                 mutation.observation().native_object().digest().as_str(),
-                mutation_json,
+                mutation.mutation_digest().as_str(),
             ],
         )?;
     }
@@ -1175,7 +1417,26 @@ fn validate_revision_collisions(
     Ok(encodings)
 }
 
+/// Store every frontier a receipt referenced, once per digest. An identical
+/// digest already present is the same document by construction.
+fn persist_frontiers(
+    savepoint: &Savepoint<'_>,
+    binding_id: &str,
+    frontiers: &[(String, String)],
+) -> rusqlite::Result<()> {
+    for (digest, frontier_json) in frontiers {
+        savepoint.execute(
+            "INSERT OR IGNORE INTO external_source_frontiers_v1 (
+                binding_id, frontier_digest, frontier_json
+             ) VALUES (?1, ?2, ?3)",
+            params![binding_id, digest, frontier_json],
+        )?;
+    }
+    Ok(())
+}
+
 mod reads;
+mod slim;
 use reads::{
     load_authority_receipt, load_commit_receipt_by_digest, load_commit_receipt_by_idempotency,
     load_next_pending_projection, load_next_pending_projection_any, load_projection_receipt,

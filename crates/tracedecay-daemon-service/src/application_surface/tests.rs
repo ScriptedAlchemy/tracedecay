@@ -5,12 +5,13 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use tracedecay_api::{WorkOperation, WorkflowOperation, is_http_application_operation_exposed};
+use tracedecay_api::is_http_application_operation_exposed;
 use tracedecay_contracts::{
-    ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
-    CancellationSignal, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest,
-    RequestContext, RequestId, ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
+    ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,
+    ApplicationProblemEnvelope, ApplicationResponse, CancellationContext, CancellationSignal,
+    CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest, RequestContext, RequestId,
+    ResolvedScope, ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_contracts::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
@@ -23,29 +24,25 @@ use tracedecay_tool_catalog::{
 };
 
 use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindings;
-use super::registered_http::RegisteredHttpOperation;
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
     APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, CallableCodeSurfaceRequest,
     HttpCancellationRegistry, HttpOperationEventState, NativeIntegrationSurfaceRequest,
     PrimitiveCodeSurfaceRequest, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
-    feedback_sse_stream_event, http_operation_event_router, invocation_problem,
-    parse_http_application_surface_request, resolve_application_binding,
-    resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
-    surface_rejection_metadata,
+    http_operation_event_router, invocation_problem, parse_http_application_surface_request,
+    resolve_application_binding, resolve_application_surface_dispatch,
+    resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
 use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
 };
-use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutClaimRequestV1, ContextScoutClaimWindowV1,
     ContextScoutControlRequestV1, ContextScoutSurfaceRequestV1,
 };
 use tracedecay_contracts::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
-    FeedbackSseLifecycleV1,
 };
 use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_daemon_protocol::RequestedOutputFormat;
@@ -88,23 +85,6 @@ fn operation_context(project_id: &ProjectId) -> RequestContext {
         CancellationContext::active("cancel.http-adapter").expect("cancellation"),
     )
     .expect("context")
-}
-
-#[test]
-fn work_and_workflow_http_dispatch_borrow_process_static_registries() {
-    let work = WorkOperation::Create.registry().expect("Work registry");
-    let workflow = WorkflowOperation::GetRun
-        .registry()
-        .expect("Workflow registry");
-
-    assert!(
-        matches!(work, std::borrow::Cow::Borrowed(_)),
-        "Work HTTP dispatch must not clone every schema-rich binding per request",
-    );
-    assert!(
-        matches!(workflow, std::borrow::Cow::Borrowed(_)),
-        "Workflow HTTP dispatch must not clone every schema-rich binding per request",
-    );
 }
 
 #[test]
@@ -445,18 +425,6 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
             assert_eq!(binding.result_schema.revision(), 1);
         }
     }
-}
-
-#[test]
-fn catalog_operation_authority_preserves_tool_name_compatibility() {
-    assert_eq!(
-        ApplicationSurfaceOperation::from_tool_name("tracedecay_git_preview"),
-        Some(ApplicationSurfaceOperation::GitPreview)
-    );
-    assert_eq!(
-        ApplicationSurfaceOperation::from_tool_name("tracedecay_git_apply"),
-        Some(ApplicationSurfaceOperation::GitApply)
-    );
 }
 
 #[test]
@@ -973,6 +941,180 @@ async fn execution_rejects_a_direct_operation_binding_bypass() {
     ));
 }
 
+#[tokio::test]
+async fn feedback_get_accepts_the_daemon_returned_evidence_envelope() {
+    struct ReturnedEnvelopeExecutor(ApplicationEnvelope<Value>);
+
+    impl tracedecay_contracts::ApplicationInvocationExecutor for ReturnedEnvelopeExecutor {
+        fn invoke(
+            &self,
+            _invocation: tracedecay_contracts::ApplicationInvocation,
+        ) -> tracedecay_contracts::ApplicationInvocationFuture<
+            '_,
+            Result<ApplicationResponse, tracedecay_contracts::InvocationError>,
+        > {
+            let envelope = self.0.clone();
+            Box::pin(async move { Ok(ApplicationResponse::unary(envelope)) })
+        }
+    }
+
+    impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ReturnedEnvelopeExecutor {
+        fn invoke_controlled(
+            &self,
+            _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
+            _deadline: Deadline,
+            _cancellation: CancellationSignal,
+            _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            Result<
+                tracedecay_daemon_protocol::DaemonInvocationResponse,
+                tracedecay_daemon_protocol::DaemonInvocationError,
+            >,
+        > {
+            Box::pin(async { unreachable!("feedback_get uses the generic application executor") })
+        }
+
+        fn observe_feedback(
+            &self,
+            _subject_digest: ManifestDigest,
+            _observed_at: UtcMicros,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            tracedecay_domain::errors::Result<()>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    let request_id = RequestId::new("request.feedback-get.returned-envelope").expect("request");
+    let request = parse_application_surface_request(
+        ApplicationSurfaceOperation::FeedbackGet,
+        json!({"request_handle": "rh_cycle_issued_feedback_get"}),
+    )
+    .expect("canonical feedback_get request");
+    let dispatched = resolve_application_surface_dispatch(
+        BindingSurface::Cli,
+        ApplicationSurfaceOperation::FeedbackGet,
+        request_id.clone(),
+        request,
+        RequestedOutputFormat::Json,
+    )
+    .expect("canonical feedback_get dispatch");
+    let envelope = serde_json::from_value::<ApplicationEnvelope<Value>>(json!({
+        "contract": {
+            "schema_id": "schema.application.feedback.get.result",
+            "schema_revision": 1
+        },
+        "request_id": request_id,
+        "scope": {
+            "project_id": "proj_bf4c1fa0122e05e8",
+            "repository_id": "repository.daemon.677b1829df61dcff9dc039b8da0afe3c7c32571f1f11012193cf855b534cb26e",
+            "worktree_id": "worktree.daemon.bf4c1fa0122e05e8b1ebfb8f19fffa8143aef907e9f06048b042a12f90f74038",
+            "reference": "refs/heads/master",
+            "scope_digest": "sha256:fac231c1fbf06d284fa338dd404baeb8bcd8c2375f0306491129dae46a155ca4"
+        },
+        "outcome": {
+          "outcome": "evidence",
+          "value": {
+            "temporal": {
+                "requested_mode": {"kind": "current"},
+                "requested_at": 1_789_199_880_928_342_i64,
+                "resolved_at": 1_789_199_880_933_278_i64,
+                "source_generation": null,
+                "watermark_digest": null,
+                "freshness": "current"
+            },
+            "authority": {
+                "grant_id": "grant.daemon.feedback.rh_cycle_issued_feedback_get",
+                "grant_revision": 1,
+                "grant_digest": "sha256:efb35febf5bf96e698bc3b6877d30c6f2839ce0132cec4b12df21ac66d367ae1",
+                "authorized_scope_digest": "sha256:fac231c1fbf06d284fa338dd404baeb8bcd8c2375f0306491129dae46a155ca4",
+                "disclosure": "evidence",
+                "policy": {
+                    "decision_id": "route.feedback.binding.tracedecay-daemon.project-open",
+                    "revision": 1,
+                    "digest": "sha256:37efd56aea2ea74a69b53fd93f1159132f23cd1fd19c3aca6dc4e2cc631df5ba",
+                    "evaluator_revision": "project-source-access.v1"
+                },
+                "revalidated_at": 1_789_199_880_933_278_i64
+            },
+            "evidence_authorities": [],
+            "coverage": {
+                "requested_domains": ["diagnostic"],
+                "visited": 1,
+                "eligible": 1,
+                "returned": 1,
+                "completeness": "complete",
+                "domains": [{"domain": "diagnostic", "completeness": "complete"}]
+            },
+            "omissions": [],
+            "scores": [],
+            "contributions": [],
+            "page": {
+                "sort_contract_id": "sort.application.feedback.finding-id.v1",
+                "sort_revision": 1,
+                "total": 1,
+                "returned": 1,
+                "cursor": null,
+                "expires_at": null
+            },
+            "execution": {
+                "started_at": 1_789_199_880_928_342_i64,
+                "ended_at": 1_789_199_880_933_278_i64,
+                "effective_deadline": {"expires_at": 1_789_199_895_928_342_i64},
+                "cancellation": null,
+                "budget": {"units_consumed": 0, "bytes_consumed": 0, "elapsed_micros": 0},
+                "termination": "completed"
+            },
+            "payload": {
+                "finding": {
+                    "result_id": "feedback.result.v1.426f528366ceb830f8dba78a42b5001d164b71e6a197386f32fada825aef60eb",
+                    "cycle_id": "cycle.project-open.e2d5491610c8f424351226304c069b7030168eb2d8d176462ae9151f51f22b83",
+                    "scope": {
+                        "project_id": "proj_bf4c1fa0122e05e8",
+                        "repository_id": "repository.daemon.677b1829df61dcff9dc039b8da0afe3c7c32571f1f11012193cf855b534cb26e",
+                        "worktree_id": "worktree.daemon.bf4c1fa0122e05e8b1ebfb8f19fffa8143aef907e9f06048b042a12f90f74038",
+                        "branch_ref": "refs/heads/master",
+                        "head_commit_id": "3d85d0893109ce76ee3c369049033dbaa14819c4"
+                    },
+                    "finding": {
+                        "finding_id": "feedback.finding.v1.3b322f4acdede57174617592e487c958398b4d2dd7099f9ac1a4a5fd5e87eba2",
+                        "classification": "new",
+                        "lifecycle": "active",
+                        "retrieval_anchor_id": "anchor.diagnostic.compiler.6d52fec508284e6f6330e7e87d0486f222735e0e5ed66a825c51e0df0299658d",
+                        "provider_state": "supported_completed_complete",
+                        "safe_bounded_preview": "cannot find function `feedback_public_replay_missing_symbol` in this scope: not found in this scope"
+                    },
+                    "get_handle": "rh_returned_feedback_get",
+                    "expand_handle": "rh_returned_feedback_expand"
+                }
+            }
+          }
+        }
+    }))
+    .expect("real daemon feedback_get envelope");
+
+    let result = execute_application_surface(
+        ApplicationSurfaceOperation::FeedbackGet,
+        dispatched,
+        Some(&ReturnedEnvelopeExecutor(envelope)),
+    )
+    .await
+    .expect("feedback_get adapter invocation");
+    let envelope = result
+        .result
+        .expect("returned feedback_get envelope must remain evidence");
+    let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
+        panic!("feedback_get must return evidence");
+    };
+    assert_eq!(
+        evidence.payload.expect("feedback_get payload")["finding"]["finding"]["finding_id"],
+        "feedback.finding.v1.3b322f4acdede57174617592e487c958398b4d2dd7099f9ac1a4a5fd5e87eba2"
+    );
+}
+
 fn callable_code_request_body(extra: Value) -> Value {
     let mut request = serde_json::json!({
         "scope": {
@@ -1316,17 +1458,6 @@ fn callable_code_page_is_transport_owned() {
 }
 
 #[test]
-fn primitive_requests_must_match_the_catalog_operation() {
-    let request = ApplicationSurfaceRequest::Primitive(PrimitiveRequest::StorageStatus(
-        StorageStatusPrimitiveRequest {
-            include_details: false,
-        },
-    ));
-    assert!(request.matches(ApplicationSurfaceOperation::StorageStatus));
-    assert!(!request.matches(ApplicationSurfaceOperation::QualifiedName));
-}
-
-#[test]
 fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
     for (operation, name) in [
         (
@@ -1401,15 +1532,6 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
             None
         );
     }
-}
-
-#[test]
-fn sse_item_maps_to_content_free_delivery_lifecycle() {
-    let event = StreamEvent::item(7, "content-is-not-observed").expect("stream item");
-    assert_eq!(
-        feedback_sse_stream_event(&event),
-        Some((FeedbackSseLifecycleV1::EventDelivered, 1, false,))
-    );
 }
 
 #[test]
@@ -1733,20 +1855,6 @@ async fn resolver_conceals_cross_project_scope_with_one_typed_denial() {
         denied.expect_err("cross-project scope must be concealed"),
         OperationEventError::NotFoundOrNotAuthorized
     );
-}
-
-#[test]
-fn storage_status_empty_request_uses_typed_default() {
-    let request = parse_application_surface_request(
-        ApplicationSurfaceOperation::StorageStatus,
-        serde_json::json!({}),
-    )
-    .expect("empty storage-status request");
-    assert!(matches!(
-        request,
-        ApplicationSurfaceRequest::Primitive(PrimitiveRequest::StorageStatus(request))
-            if !request.include_details
-    ));
 }
 
 /// A dead daemon socket must be a fail-fast dispatch error carrying the

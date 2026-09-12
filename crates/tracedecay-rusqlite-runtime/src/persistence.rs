@@ -84,6 +84,9 @@ fn map_operation_error(error: StorageOperationError) -> StorageRuntimeErrorV1 {
         StorageOperationError::ObservationSourceCursorConflict { expected, actual } => {
             StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual }
         }
+        StorageOperationError::ObservationCursorAdvanceCollision => {
+            StorageRuntimeErrorV1::ObservationCursorAdvanceCollision
+        }
         StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } => {
             StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement }
         }

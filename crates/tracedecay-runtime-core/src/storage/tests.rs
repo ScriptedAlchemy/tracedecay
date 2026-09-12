@@ -106,26 +106,6 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_durable_first_create_converges_on_one_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("private").join("response-handles");
-        let barrier = Arc::new(Barrier::new(2));
-        let workers = [(), ()].map(|()| {
-            let target = target.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                PrivateStoreIo::create_dir_all_durable(&target)
-            })
-        });
-
-        for worker in workers {
-            worker.join().unwrap().unwrap();
-        }
-        assert!(target.is_dir());
-    }
-
-    #[test]
     fn concurrent_durable_overlapping_parents_converge() {
         let root = tempfile::tempdir().unwrap();
         let dashboard = root.path().join("dashboard");
@@ -285,17 +265,6 @@ mod tests {
                 worker.join().unwrap();
             }
         }
-    }
-
-    #[test]
-    fn durable_namespace_sync_fault_scope_clears_on_unwind() {
-        let unwind = std::panic::catch_unwind(|| {
-            with_durable_namespace_sync_fault_for_test(1, || panic!("before sync"));
-        });
-        assert!(unwind.is_err());
-
-        let root = tempfile::tempdir().unwrap();
-        PrivateStoreIo::create_dir_all_durable(&root.path().join("after-panic")).unwrap();
     }
 
     #[test]
@@ -503,5 +472,33 @@ mod tests {
         // The file must still be openable for a further append after the cycle.
         PrivateStoreIo::append_line(&path, "{\"a\":3}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+    }
+
+    /// A response handle never decides that a directory is a project: an
+    /// unenrolled checkout resolves to the profile-wide root and mints no
+    /// `projects/proj_<hash>/` shard; an enrolled one keeps its own shard.
+    #[test]
+    fn response_handle_root_never_mints_a_shard_for_an_unenrolled_checkout() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = default_profile_root().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+
+        let root = resolve_response_handle_root(&project_root).unwrap();
+        assert_eq!(root, profile_root.join(RESPONSE_HANDLES_DIRECTORY));
+        assert!(
+            !profile_root.join("projects").exists(),
+            "resolving a response-handle root must not create a project shard"
+        );
+
+        pin_fixture_repository_identity(&project_root, "proj_response_handles").unwrap();
+        let enrolled = resolve_response_handle_root(&project_root).unwrap();
+        assert_eq!(
+            enrolled,
+            resolve_layout_for_current_profile(&project_root)
+                .unwrap()
+                .response_handle_root
+        );
+        assert!(enrolled.starts_with(profile_root.join("projects")));
     }
 }

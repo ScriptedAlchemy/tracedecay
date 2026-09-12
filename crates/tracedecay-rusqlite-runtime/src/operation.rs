@@ -76,6 +76,7 @@ pub enum StorageOperationError {
         expected: Box<Option<ObservationSourceCursorV1>>,
         actual: Box<Option<ObservationSourceCursorV1>>,
     },
+    ObservationCursorAdvanceCollision,
     CursorAdvanceLedgerDisagreement {
         disagreement: Box<CursorAdvanceLedgerDisagreementV1>,
     },
@@ -90,6 +91,8 @@ impl fmt::Display for StorageOperationError {
                 formatter,
                 "observation source cursor conflict: expected {expected:?}, found {actual:?}"
             ),
+            Self::ObservationCursorAdvanceCollision => formatter
+                .write_str("observation cursor advance receipt collided with different contents"),
             Self::CursorAdvanceLedgerDisagreement { .. } => formatter
                 .write_str("observation cursor-advance ledger disagrees with immutable coverage"),
         }
@@ -102,6 +105,7 @@ impl Error for StorageOperationError {
             Self::Contract(error) => Some(error),
             Self::Native(error) => Some(error),
             Self::ObservationSourceCursorConflict { .. }
+            | Self::ObservationCursorAdvanceCollision
             | Self::CursorAdvanceLedgerDisagreement { .. } => None,
         }
     }

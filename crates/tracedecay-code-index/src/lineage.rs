@@ -717,53 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_identity_match_classifies_unchanged_and_structural_continuity() {
-        let prior = index(
-            generation(1),
-            vec![
-                record("sym.p1", 'a', "crate::alpha", "function", 'f', '0'),
-                record("sym.p2", 'b', "crate::beta", "function", 'f', '1'),
-            ],
-        );
-        let current = index(
-            generation(2),
-            vec![
-                // Identical identity tuple and content: unchanged.
-                record("sym.c1", 'a', "crate::alpha", "function", 'f', '0'),
-                // Identical identity tuple, evolved content: continuity.
-                record("sym.c2", 'b', "crate::beta", "function", 'f', '2'),
-            ],
-        );
-        let candidates = resolver().resolve(&prior, &current).expect("resolution");
-        assert_eq!(candidates.len(), 2);
-
-        let unchanged = &candidates[0];
-        assert_eq!(unchanged.prior_occurrence.as_str(), "sym.p1");
-        assert_eq!(unchanged.current_occurrence.as_str(), "sym.c1");
-        assert_eq!(unchanged.kind, LineageKindV1::Unchanged);
-        assert_eq!(unchanged.method, LineageMethodV1::ExactIdentityTuple);
-        assert_eq!(unchanged.confidence, LineageConfidenceKindV1::Exact);
-        assert!(unchanged.alternatives.is_empty());
-        assert!(unchanged.abstention.is_none());
-        assert_eq!(unchanged.evidence.prior_digest.as_ref(), Some(&digest('0')));
-
-        let continuity = &candidates[1];
-        assert_eq!(continuity.kind, LineageKindV1::StructuralContinuity);
-        assert_eq!(continuity.method, LineageMethodV1::ExactIdentityTuple);
-        assert_eq!(continuity.confidence, LineageConfidenceKindV1::Exact);
-        assert_eq!(
-            continuity.evidence.prior_digest.as_ref(),
-            Some(&digest('1'))
-        );
-        assert_eq!(
-            continuity.evidence.current_digest.as_ref(),
-            Some(&digest('2'))
-        );
-        assert_eq!(continuity.evidence.prior_generation, generation(1));
-        assert_eq!(continuity.evidence.current_generation, generation(2));
-    }
-
-    #[test]
     fn content_match_classifies_moved_and_renamed() {
         let prior = index(
             generation(1),

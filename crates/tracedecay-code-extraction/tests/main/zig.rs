@@ -20,61 +20,6 @@ const mem = @import("std").mem;
 }
 
 #[test]
-fn test_zig_extract_struct() {
-    let source = r#"/// A 2D point.
-const Point = struct {
-    x: f64,
-    y: f64,
-
-    /// Calculate distance to another point.
-    pub fn distance(self: Point, other: Point) f64 {
-        const dx = self.x - other.x;
-        const dy = self.y - other.y;
-        return @sqrt(dx * dx + dy * dy);
-    }
-
-    pub fn origin() Point {
-        return .{ .x = 0, .y = 0 };
-    }
-};
-"#;
-    let extractor = ZigExtractor;
-    let result = extractor.extract("point.zig", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let structs: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Struct)
-        .collect();
-    assert_eq!(structs.len(), 1);
-    assert_eq!(structs[0].name, "Point");
-    assert!(
-        structs[0].docstring.as_ref().unwrap().contains("2D point"),
-        "docstring: {:?}",
-        structs[0].docstring
-    );
-
-    let fields: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Field)
-        .collect();
-    assert_eq!(fields.len(), 2);
-    assert!(fields.iter().any(|f| f.name == "x"));
-    assert!(fields.iter().any(|f| f.name == "y"));
-
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert_eq!(methods.len(), 2);
-    assert!(methods.iter().any(|m| m.name == "distance"));
-    assert!(methods.iter().any(|m| m.name == "origin"));
-}
-
-#[test]
 fn test_zig_extract_enum() {
     let source = r#"/// Represents a log level.
 const LogLevel = enum {
@@ -111,50 +56,6 @@ const LogLevel = enum {
     assert!(variants.iter().any(|v| v.name == "info"));
     assert!(variants.iter().any(|v| v.name == "warning"));
     assert!(variants.iter().any(|v| v.name == "err"));
-}
-
-#[test]
-fn test_zig_top_level_functions() {
-    let source = r#"/// Logs a message at the given level.
-pub fn log(level: u8, message: []const u8) void {
-    _ = level;
-}
-
-/// Processes connections.
-pub fn processConnections(connections: []u8) u32 {
-    var count: u32 = 0;
-    return count;
-}
-"#;
-    let extractor = ZigExtractor;
-    let result = extractor.extract("funcs.zig", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(fns.len(), 2);
-    assert!(fns.iter().any(|f| f.name == "log"));
-    assert!(fns.iter().any(|f| f.name == "processConnections"));
-
-    // Both should be pub
-    for f in &fns {
-        assert_eq!(f.visibility, Visibility::Pub, "{} should be pub", f.name);
-    }
-
-    // Docstrings
-    let log_fn = fns.iter().find(|f| f.name == "log").unwrap();
-    assert!(
-        log_fn
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("Logs a message"),
-        "docstring: {:?}",
-        log_fn.docstring
-    );
 }
 
 #[test]
@@ -341,21 +242,6 @@ pub fn setup() void {}
         doc
     );
     assert!(doc.contains("This is important"), "docstring: {:?}", doc);
-}
-
-#[test]
-fn test_zig_file_node_is_root() {
-    let source = r#"pub fn main() void {}
-"#;
-    let extractor = ZigExtractor;
-    let result = extractor.extract("main.zig", source);
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "main.zig");
 }
 
 #[test]

@@ -152,11 +152,6 @@ impl<'a> StreamingWriter<'a> {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn output_capacity(&self) -> usize {
-        self.output.as_ref().map_or(0, String::capacity)
-    }
-
     pub fn finish(
         mut self,
         result: Result<(), serde_json::Error>,

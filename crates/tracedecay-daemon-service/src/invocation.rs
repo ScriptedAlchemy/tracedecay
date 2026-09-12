@@ -94,6 +94,8 @@ use tracedecay_configuration::{
     ProjectConfigurationRuntime,
 };
 use tracedecay_contracts::ConfigurationWireRequestV1;
+use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
+use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 use tracedecay_global_db::configuration::contracts::ports::{
     ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
@@ -101,8 +103,6 @@ use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
     ConfigurationRollbackRequest, DirectConfigurationMutation, configuration_layer_scope_digest,
 };
-use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 
 use tracedecay_application::advisory::{
     AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,

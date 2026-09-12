@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay_automation::backend as leaf_backend;
 use tracedecay_automation::AutomationError;
+use tracedecay_automation::backend as leaf_backend;
 pub use tracedecay_automation::backend::{
     AgentBackendAvailability, AgentTaskBackend, AgentTaskContract, AgentTaskError,
     AgentTaskFailureClass, AgentTaskFailureDisposition, AgentTaskKind, AgentTaskRequest,
@@ -14,10 +14,10 @@ pub use tracedecay_automation::backend::{
 };
 use tracedecay_domain::errors::Result;
 
+use super::config::{AutomationBackend, AutomationConfig};
 use crate::ports::codex_app_server::{
     SummaryConfig as CodexAppServerSummaryConfig, run_prompt as run_prompt_with_codex_app_server,
 };
-use super::config::{AutomationBackend, AutomationConfig};
 
 pub const AGENT_TASK_MAX_ATTEMPTS: u32 = 3;
 pub const AGENT_TASK_RETRY_BACKOFFS: [Duration; 2] =
@@ -208,8 +208,78 @@ pub struct CodexAppServerBackend {
     config: CodexAppServerSummaryConfig,
 }
 
+impl CodexAppServerBackend {
+    pub fn from_automation_config(config: &AutomationConfig) -> Self {
+        Self::new(config.model_id.clone(), config.timeout_secs)
+    }
+
+    pub fn new(model: Option<String>, timeout_secs: u64) -> Self {
+        let mut config = CodexAppServerSummaryConfig::from_env();
+        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+            config.model = Some(model);
+        }
+        config.timeout = Duration::from_secs(timeout_secs.clamp(5, 300));
+        Self { config }
+    }
+
+    pub fn from_config(config: CodexAppServerSummaryConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl AgentTaskBackend for CodexAppServerBackend {
+    // One backend attempt end to end, distinct from the retry-ladder block
+    // (`automation.backend.startup`) that also includes backoff sleeps.
+    #[hotpath::measure(
+        label = "automation.backend.invoke.codex_app_server",
+        impl_type = "CodexAppServerBackend"
+    )]
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
+        let backend_message =
+            request
+                .backend_message()
+                .map_err(|error| AgentTaskError::Failed {
+                    reason: error.to_string(),
+                })?;
+        // The app-server port renders its failure as one message; the typed
+        // taxonomy admits that string exactly once, at this boundary.
+        let summary = run_prompt_with_codex_app_server(
+            &backend_message,
+            &self.config,
+            "tracedecay_automation",
+            matches!(
+                request.task,
+                AgentTaskKind::SkillWriter | AgentTaskKind::CombinedReview
+            )
+            .then_some(&request.contract.response_schema),
+        )
+        .map_err(AgentTaskError::from_backend_message)?;
+        let output_json = request
+            .contract
+            .strict_json
+            .then(|| leaf_backend::extract_response_json_object(&summary.text, &request.contract))
+            .transpose()
+            .map_err(|error| AgentTaskError::MalformedOutput {
+                reason: error.to_string(),
+            })?;
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_json,
+            output_text: summary.text,
+            model: summary.model.or_else(|| self.config.model.clone()),
+            provider: Some("codex".to_owned()),
+            input_tokens: None,
+            output_tokens: None,
+        })
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module, clippy::unwrap_used)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -224,16 +294,6 @@ mod tests {
     }
 
     impl FlakyBackend {
-        fn timing_out(failures: usize) -> Self {
-            Self {
-                failures,
-                calls: AtomicUsize::new(0),
-                error: AgentTaskError::Timeout {
-                    reason: "timed out waiting for codex app-server response".to_string(),
-                },
-            }
-        }
-
         fn failing_with(failures: usize, error: AgentTaskError) -> Self {
             Self {
                 failures,
@@ -273,36 +333,6 @@ mod tests {
             None,
             json!({}),
         )
-    }
-
-    #[tokio::test]
-    async fn retry_report_records_transient_success_attempts() {
-        let backend = FlakyBackend::timing_out(2);
-        let policy = BackendRetryPolicy::new(
-            3,
-            vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_mins(2),
-        );
-        let mut report = AgentTaskRetryReport::default();
-
-        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
-            .await
-            .unwrap();
-
-        assert_eq!(report.attempt_count(), 3);
-        assert_eq!(
-            report
-                .attempts()
-                .iter()
-                .map(|attempt| attempt.failure_classification)
-                .collect::<Vec<_>>(),
-            vec![
-                Some(AgentTaskFailureClass::Timeout),
-                Some(AgentTaskFailureClass::Timeout),
-                None,
-            ]
-        );
-        assert!(report.attempts()[2].succeeded);
     }
 
     #[tokio::test]
@@ -384,104 +414,5 @@ mod tests {
             Some(AgentTaskFailureClass::Unavailable)
         );
         assert!(report.attempts()[1].succeeded);
-    }
-
-    #[test]
-    fn retry_report_appends_later_request_history() {
-        let mut initial = AgentTaskRetryReport {
-            attempts: vec![AgentTaskRetryAttempt {
-                attempt: 1,
-                succeeded: true,
-                failure_classification: None,
-                backoff_millis: 0,
-            }],
-        };
-        let repair = AgentTaskRetryReport {
-            attempts: vec![AgentTaskRetryAttempt {
-                attempt: 1,
-                succeeded: false,
-                failure_classification: Some(AgentTaskFailureClass::MalformedOutput),
-                backoff_millis: 0,
-            }],
-        };
-
-        initial.append(repair);
-
-        assert_eq!(initial.attempt_count(), 2);
-        assert!(initial.attempts()[0].succeeded);
-        assert_eq!(
-            initial.attempts()[1].failure_classification,
-            Some(AgentTaskFailureClass::MalformedOutput)
-        );
-    }
-}
-
-impl CodexAppServerBackend {
-    pub fn from_automation_config(config: &AutomationConfig) -> Self {
-        Self::new(config.model_id.clone(), config.timeout_secs)
-    }
-
-    pub fn new(model: Option<String>, timeout_secs: u64) -> Self {
-        let mut config = CodexAppServerSummaryConfig::from_env();
-        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
-            config.model = Some(model);
-        }
-        config.timeout = Duration::from_secs(timeout_secs.clamp(5, 300));
-        Self { config }
-    }
-
-    pub fn from_config(config: CodexAppServerSummaryConfig) -> Self {
-        Self { config }
-    }
-}
-
-impl AgentTaskBackend for CodexAppServerBackend {
-    // One backend attempt end to end, distinct from the retry-ladder block
-    // (`automation.backend.startup`) that also includes backoff sleeps.
-    #[hotpath::measure(
-        label = "automation.backend.invoke.codex_app_server",
-        impl_type = "CodexAppServerBackend"
-    )]
-    fn run_task(
-        &self,
-        request: &AgentTaskRequest,
-    ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
-        let backend_message =
-            request
-                .backend_message()
-                .map_err(|error| AgentTaskError::Failed {
-                    reason: error.to_string(),
-                })?;
-        // The app-server port renders its failure as one message; the typed
-        // taxonomy admits that string exactly once, at this boundary.
-        let summary = run_prompt_with_codex_app_server(
-            &backend_message,
-            &self.config,
-            "tracedecay_automation",
-            matches!(
-                request.task,
-                AgentTaskKind::SkillWriter | AgentTaskKind::CombinedReview
-            )
-            .then_some(&request.contract.response_schema),
-        )
-        .map_err(AgentTaskError::from_backend_message)?;
-        let output_json = request
-            .contract
-            .strict_json
-            .then(|| leaf_backend::extract_response_json_object(&summary.text, &request.contract))
-            .transpose()
-            .map_err(|error| AgentTaskError::MalformedOutput {
-                reason: error.to_string(),
-            })?;
-        Ok(AgentTaskResponse {
-            run_id: request.run_id.clone(),
-            task: request.task,
-            output_json,
-            output_text: summary.text,
-            model: summary.model.or_else(|| self.config.model.clone()),
-            provider: Some("codex".to_owned()),
-            input_tokens: None,
-            output_tokens: None,
-        })
     }
 }

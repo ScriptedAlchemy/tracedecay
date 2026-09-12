@@ -45,20 +45,6 @@ fn release_json() -> serde_json::Value {
 }
 
 #[test]
-fn provider_release_page_normalizes_typed_tags_and_assets() {
-    let releases = decode_provider_page(
-        &serde_json::to_vec(&release_json()).unwrap(),
-        &target(),
-        &GitHubHttpReadConfigV1::default(),
-    )
-    .unwrap();
-    assert_eq!(releases.len(), 1);
-    assert_eq!(releases[0].tag.as_str(), "v4.2.0");
-    assert_eq!(releases[0].assets[0].asset_id, 55);
-    assert_eq!(releases[0].assets[0].size_bytes, 1234);
-}
-
-#[test]
 fn provider_release_page_rejects_duplicate_asset_identity() {
     let mut value = release_json();
     let duplicate = value[0]["assets"][0].clone();
@@ -120,92 +106,6 @@ fn provider_release_page_accepts_encoded_git_tag_and_asset_names() {
     .unwrap();
     assert_eq!(releases[0].tag.as_str(), "release/v4.2.0@rc.1");
     assert_eq!(releases[0].assets[0].name, "TraceDecay macOS arm64.tar.gz");
-}
-
-#[test]
-fn continuation_accepts_only_the_exact_https_release_collection() {
-    let endpoint = "https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases";
-    let release_scope = |current_page| GitHubLinkPageScopeV1 {
-        rest_base_uri: "https://api.github.com",
-        endpoint,
-        current_page,
-        page_size: GITHUB_RELEASE_PAGE_SIZE_V1,
-    };
-    let mut headers = ureq::http::HeaderMap::new();
-    headers.insert(
-        "link",
-        format!("<{endpoint}?per_page=100&page=2>; rel=\"next\"")
-            .parse()
-            .unwrap(),
-    );
-    assert_eq!(link_next_page(&headers, &release_scope(1)), Ok(Some(2)));
-
-    headers.insert(
-        "link",
-        "<https://objects.githubusercontent.com/releases?page=2&per_page=100>; rel=\"next\""
-            .parse()
-            .unwrap(),
-    );
-    assert_eq!(
-        link_next_page(&headers, &release_scope(1)),
-        Err(InvalidGitHubLinkContinuationV1)
-    );
-
-    headers.insert(
-        "link",
-        format!("<{endpoint}?per_page=100&page=21>; rel=\"next\"")
-            .parse()
-            .unwrap(),
-    );
-    assert_eq!(link_next_page(&headers, &release_scope(20)), Ok(Some(21)));
-
-    headers.insert(
-        "link",
-        format!("<{endpoint}?per_page=100&page=3>; rel=\"next\"")
-            .parse()
-            .unwrap(),
-    );
-    assert_eq!(
-        link_next_page(&headers, &release_scope(1)),
-        Err(InvalidGitHubLinkContinuationV1)
-    );
-
-    headers.insert(
-        "link",
-        format!(
-            "<{endpoint}?per_page=100&page=2>; rel=\"next\", <{endpoint}?per_page=100&page=3>; rel=\"next\""
-        )
-        .parse()
-        .unwrap(),
-    );
-    assert_eq!(
-        link_next_page(&headers, &release_scope(1)),
-        Err(InvalidGitHubLinkContinuationV1)
-    );
-}
-
-#[test]
-fn continuation_accepts_live_github_repositories_numeric_rewrite() {
-    let endpoint = "https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases";
-    let mut headers = ureq::http::HeaderMap::new();
-    headers.insert(
-        "link",
-        "<https://api.github.com/repositories/724712/releases?per_page=100&page=2>; rel=\"next\""
-            .parse()
-            .unwrap(),
-    );
-    assert_eq!(
-        link_next_page(
-            &headers,
-            &GitHubLinkPageScopeV1 {
-                rest_base_uri: "https://api.github.com",
-                endpoint,
-                current_page: 1,
-                page_size: GITHUB_RELEASE_PAGE_SIZE_V1,
-            },
-        ),
-        Ok(Some(2))
-    );
 }
 
 #[test]

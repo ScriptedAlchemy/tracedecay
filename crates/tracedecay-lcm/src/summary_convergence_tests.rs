@@ -265,6 +265,242 @@ async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
     );
 }
 
+/// Raw fixture whose persisted ranges predate the policy-anchor role filter.
+///
+/// `first-user` owns a range it must lose (its only earlier row is an anchor)
+/// and `compact-summary` owns an interval widened past the compact boundary.
+async fn seed_preserved_role_filter_store(conn: &TestConnection) {
+    create_session_host_tables(conn).await;
+    conn.execute_batch(
+        "INSERT INTO sessions(provider, session_id, project_key, project_path)
+         VALUES ('claude', 'preserved', 'project.preserved', '/preserved');",
+    )
+    .await
+    .unwrap();
+    schema::ensure_lcm_schema(conn).await.unwrap();
+    for (store_id, message_id, role) in [
+        (1_i64, "session-open-system", "system"),
+        (2, "first-user", "user"),
+        (3, "compact_boundary:marker", "system"),
+        (4, "compact-summary", "user"),
+        (5, "reply", "assistant"),
+        (6, "follow-up", "user"),
+    ] {
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                 store_id, provider, message_id, session_id, role, ordinal,
+                 content, content_hash, storage_kind, snippet_text, index_text,
+                 metadata_json
+             ) VALUES (?1, 'claude', ?2, 'preserved', ?3, ?1, 'body', ?2,
+                       'inline', 'body', 'body', '{}')",
+            params![store_id, message_id, role],
+        )
+        .await
+        .unwrap();
+    }
+    seed_pre_role_filter_ranges(conn).await;
+}
+
+/// The session tables the LCM schema's raw-identity triggers read. Store open
+/// installs LCM objects beside them, so a store without them is not a shape
+/// any profile presents.
+async fn create_session_host_tables(conn: &TestConnection) {
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );
+         CREATE TABLE session_messages (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            timestamp INTEGER,
+            ordinal INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            metadata_json TEXT,
+            PRIMARY KEY(provider, message_id)
+         );",
+    )
+    .await
+    .unwrap();
+}
+
+/// Ranges an ingest before the role filter would have written, and a journal
+/// that has never recorded the rewrite: this is the store shape a preserved
+/// profile presents on its first open under the role filter.
+async fn seed_pre_role_filter_ranges(conn: &TestConnection) {
+    conn.execute_batch(
+        "INSERT INTO lcm_raw_predecessor_ranges (
+             provider, message_id, session_id, from_store_id, to_store_id
+         ) VALUES ('claude', 'first-user', 'preserved', 1, 1),
+                  ('claude', 'compact-summary', 'preserved', 1, 3),
+                  ('claude', 'follow-up', 'preserved', 1, 5);
+         DELETE FROM lcm_gc_meta
+         WHERE key = 'predecessor_range_role_filter_v1';",
+    )
+    .await
+    .unwrap();
+}
+
+async fn predecessor_range(conn: &TestConnection, message_id: &str) -> Option<(i64, i64)> {
+    let mut rows = conn
+        .query(
+            "SELECT from_store_id, to_store_id
+             FROM lcm_raw_predecessor_ranges
+             WHERE provider = 'claude' AND message_id = ?1",
+            params![message_id],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .map(|row| (row.get::<i64>(0).unwrap(), row.get::<i64>(1).unwrap()))
+}
+
+async fn journaled_rewrite_cursor(conn: &TestConnection) -> Option<String> {
+    schema::get_gc_meta(
+        &**conn,
+        summary_convergence::PREDECESSOR_RANGE_ROLE_FILTER_KEY,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn role_filter_range_rewrite_pages_in_background_without_blocking_admission() {
+    const PAGE_ROWS: usize = 2;
+    let temp = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    seed_preserved_role_filter_store(&conn).await;
+
+    // Admission: reopening an existing store must not perform the rewrite.
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+    assert_eq!(
+        predecessor_range(&conn, "compact-summary").await,
+        Some((1, 3)),
+        "store open must leave historical convergence to the background pass"
+    );
+    assert_eq!(
+        journaled_rewrite_cursor(&conn).await,
+        None,
+        "store open must not journal rewrite progress"
+    );
+    assert!(
+        summary_convergence::predecessor_range_rewrite_has_work(&*conn)
+            .await
+            .unwrap()
+    );
+    // Retrieval answers from the unrewritten store before the pass runs.
+    assert_eq!(
+        fetch_i64(
+            &conn,
+            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = 'preserved'",
+            (),
+        )
+        .await,
+        6
+    );
+
+    // First page covers store ids 1..=2 only: the range `first-user` must
+    // lose is already gone while later stale rows are untouched.
+    let first = summary_convergence::predecessor_range_rewrite_page(&*conn, PAGE_ROWS)
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        summary_convergence::LcmPredecessorRangeRewritePage {
+            rows_rewritten: PAGE_ROWS,
+            has_more: true,
+        }
+    );
+    assert_eq!(
+        predecessor_range(&conn, "first-user").await,
+        None,
+        "a row whose only predecessors are policy anchors must lose its range"
+    );
+    assert_eq!(
+        predecessor_range(&conn, "compact-summary").await,
+        Some((1, 3)),
+        "a page must not rewrite rows above its keyset cursor"
+    );
+    assert_eq!(
+        journaled_rewrite_cursor(&conn).await.as_deref(),
+        Some("2"),
+        "each page must journal its own keyset cursor"
+    );
+
+    // Restart mid-rewrite: a fresh pass resumes from the journaled cursor.
+    drop(conn);
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    let resumed = summary_convergence::predecessor_range_rewrite_page(&*conn, PAGE_ROWS)
+        .await
+        .unwrap();
+    assert_eq!(resumed.rows_rewritten, PAGE_ROWS);
+    assert_eq!(
+        predecessor_range(&conn, "compact-summary").await,
+        Some((2, 2)),
+        "the rewrite must narrow the interval to the conversational backlog"
+    );
+
+    let last = summary_convergence::predecessor_range_rewrite_page(&*conn, PAGE_ROWS)
+        .await
+        .unwrap();
+    assert_eq!(last.rows_rewritten, PAGE_ROWS);
+    assert_eq!(
+        predecessor_range(&conn, "follow-up").await,
+        Some((2, 5)),
+        "the last page rewrites its own rows from the same authority"
+    );
+    assert!(
+        summary_convergence::predecessor_range_rewrite_has_work(&*conn)
+            .await
+            .unwrap(),
+        "the pass still owes its completion marker"
+    );
+
+    // The drained page retires the pass exactly once.
+    let drained = summary_convergence::predecessor_range_rewrite_page(&*conn, PAGE_ROWS)
+        .await
+        .unwrap();
+    assert_eq!(
+        drained,
+        summary_convergence::LcmPredecessorRangeRewritePage::default()
+    );
+    assert_eq!(
+        journaled_rewrite_cursor(&conn).await.as_deref(),
+        Some("applied")
+    );
+    assert!(
+        !summary_convergence::predecessor_range_rewrite_has_work(&*conn)
+            .await
+            .unwrap()
+    );
+    conn.execute(
+        "UPDATE lcm_raw_predecessor_ranges SET to_store_id = 3
+         WHERE provider = 'claude' AND message_id = 'compact-summary'",
+        (),
+    )
+    .await
+    .unwrap();
+    let after_marker = summary_convergence::predecessor_range_rewrite_page(&*conn, PAGE_ROWS)
+        .await
+        .unwrap();
+    assert_eq!(
+        after_marker,
+        summary_convergence::LcmPredecessorRangeRewritePage::default()
+    );
+    assert_eq!(
+        predecessor_range(&conn, "compact-summary").await,
+        Some((2, 3)),
+        "a completed rewrite must not run a second time"
+    );
+}
+
 #[tokio::test]
 async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_corpus() {
     let temp = tempfile::tempdir().unwrap();
@@ -820,5 +1056,37 @@ async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// A store created after the role-aware filter owes no rewrite: ingest writes
+/// every interval under the current filter, so paging the corpus to re-derive
+/// them would be pure waste.
+#[tokio::test]
+async fn a_fresh_store_opens_with_the_range_rewrite_already_retired() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    create_session_host_tables(&conn).await;
+
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+
+    assert_eq!(
+        journaled_rewrite_cursor(&conn).await.as_deref(),
+        Some("applied"),
+        "a fresh install must journal the rewrite as already retired"
+    );
+    assert!(
+        !summary_convergence::predecessor_range_rewrite_has_work(&*conn)
+            .await
+            .unwrap(),
+        "a fresh store must not hand the background worker a corpus-wide pass"
+    );
+
+    // Reopening preserves the retirement rather than re-arming the pass.
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+    assert!(
+        !summary_convergence::predecessor_range_rewrite_has_work(&*conn)
+            .await
+            .unwrap()
     );
 }

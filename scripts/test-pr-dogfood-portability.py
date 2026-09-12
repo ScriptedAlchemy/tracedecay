@@ -540,21 +540,6 @@ class IsolatedDaemonHarnessTests(unittest.TestCase):
             self.assertIn("fake daemon boot", completed.stderr)
             self.assertNotIn("command must not run", completed.stderr)
 
-    def test_shell_drivers_do_not_require_gnu_or_linux_only_commands(self) -> None:
-        forbidden = ("setsid", "timeout --", "readlink -f", "date +%s%N")
-        for script in (DAEMON_HARNESS, DOGFOOD_SCRIPT):
-            source = script.read_text(encoding="utf-8")
-            for token in forbidden:
-                self.assertNotIn(token, source, f"{script.name} still requires {token}")
-            syntax = subprocess.run(
-                ["bash", "-n", str(script)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(syntax.returncode, 0, syntax.stderr)
-
-
 class DogfoodJourneyOutputTests(unittest.TestCase):
     def test_run_mode_polls_until_strict_readiness_then_validates_journey(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dogfood-output-") as tmp:

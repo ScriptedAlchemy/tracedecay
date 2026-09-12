@@ -6,9 +6,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use tracedecay_domain::{
-    CodeGenerationId, CompactCandidate, EvidenceRole, FixedPointScore, FreshnessCompatibilityV1,
-    RetrievalBudget, RetrievalFailure, RetrieverBatch, RetrieverContinuation, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, SourceFreshness, UtcMicros,
+    CodeGenerationId, CompactCandidate, EvidenceRole, ExactTechnicalTermKindV1, FixedPointScore,
+    FreshnessCompatibilityV1, RetrievalBudget, RetrievalFailure, RetrieverBatch,
+    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceFreshness,
+    UtcMicros,
 };
 
 use super::{
@@ -610,4 +611,46 @@ fn routes_that_disagree_on_occurrence_identity_are_a_contract_violation() {
         matches!(error, RetrievalPortError::Contract(_)),
         "{error:?}"
     );
+}
+
+#[test]
+fn routes_merge_match_kinds_but_reject_source_binding_drift() {
+    let query = pair(
+        "occ.invoice",
+        &[(LexicalFieldV1::BodyText, 100)],
+        &["invoice"],
+    );
+    let mut anchor = pair(
+        "occ.invoice",
+        &[(LexicalFieldV1::SymbolName, 200)],
+        &["invoice_total"],
+    );
+    anchor.1.binding.matched_term_kinds = vec![ExactTechnicalTermKindV1::WholeSymbol];
+    let merge = |anchor| {
+        merge_lexical_routes(
+            &generation(),
+            &budget(8),
+            &budget(8),
+            vec![
+                route(LexicalRouteKindV1::Query, lane_batch(vec![query.clone()])),
+                route(anchor_kind("invoice_total"), lane_batch(vec![anchor])),
+            ],
+        )
+    };
+    let (RetrieverOutcome::Complete(batch), _) = merge(anchor.clone()).expect("same source") else {
+        panic!("both routes completed");
+    };
+    assert_eq!(batch.candidates.len(), 1);
+    assert_eq!(batch.candidates[0].raw_score, FixedPointScore(300));
+    assert_eq!(
+        batch.evidence_by_occurrence[&id::<tracedecay_domain::SourceOccurrenceId>("occ.invoice")]
+            .binding
+            .matched_term_kinds,
+        [ExactTechnicalTermKindV1::WholeSymbol]
+    );
+    anchor.1.binding.occurrence.generation = id("generation.other");
+    assert!(matches!(
+        merge(anchor),
+        Err(RetrievalPortError::Contract(_))
+    ));
 }

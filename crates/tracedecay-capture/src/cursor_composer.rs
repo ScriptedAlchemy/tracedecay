@@ -4,16 +4,14 @@ use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowSemanticKindV1,
-    ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceIdentityV1, ProviderId, ProviderUsageCounterSemanticsV1,
-    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, SessionId,
+    ObservationId, ObservationOrderingDomainV1, ObservationSourceIdentityV1, ProviderId,
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1, SessionId,
 };
 use tracedecay_store::cursor_dispatch::cursor_model_string;
 
-use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse::sha256_hex,
-};
 use crate::git_facts::append_diff_and_pull_request_facts;
+use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse::sha256_hex};
 
 const PROVIDER: &str = "cursor";
 

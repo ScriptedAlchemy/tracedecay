@@ -35,6 +35,37 @@ pub(super) const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical
 pub const OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION: &str =
     "observations-native-source-scheme-v2-cline-ui-messages";
 
+/// Marker proving every `observation_repository_provenance` row references
+/// its repository capture through `observation_repository_captures` instead of
+/// embedding it. One checkout state is shared by every observation taken under
+/// it, so the embedded copy — held twice per row, in `capture_json` and inside
+/// `availability_json.value` — repeated a handful of distinct captures hundreds
+/// of thousands of times. Rows written before the marker are split in place on
+/// the next schema admission.
+pub(super) const OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION: &str =
+    "observation-repository-captures-v1-shared";
+
+/// Moves embedded repository captures into `observation_repository_captures`
+/// and slims the rows that carried them. The immutability trigger is lifted
+/// only for this rewrite; the released marker rows carry no capture id and are
+/// left alone.
+const REPOSITORY_CAPTURE_DEDUPE_SQL: &str = "
+    DROP TRIGGER IF EXISTS observation_repository_provenance_immutable_update;
+    INSERT OR IGNORE INTO observation_repository_captures (capture_id, capture_json)
+    SELECT json_extract(capture_json, '$.capture_id'), json_extract(capture_json, '$.capture')
+    FROM observation_repository_provenance
+    WHERE json_type(capture_json, '$.capture') = 'object'
+      AND json_extract(capture_json, '$.capture_id') IS NOT NULL;
+    UPDATE observation_repository_provenance
+    SET capture_json = json_remove(capture_json, '$.capture'),
+        availability_json = json_remove(availability_json, '$.value.capture')
+    WHERE json_type(capture_json, '$.capture') = 'object'
+      AND json_extract(capture_json, '$.capture_id') IS NOT NULL;
+    CREATE TRIGGER IF NOT EXISTS observation_repository_provenance_immutable_update
+    BEFORE UPDATE ON observation_repository_provenance BEGIN
+        SELECT RAISE(ABORT, 'observation repository provenance is immutable');
+    END;";
+
 /// Source-key suffix of the native `ui_messages.json` source a Cline-like task
 /// gained under [`OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION`] (the sessions
 /// crate's `ui_messages_source_key`).
@@ -385,6 +416,10 @@ pub(super) const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             FOREIGN KEY(retrieval_anchor_id, owner_json)
                 REFERENCES retrieval_anchors(anchor_id, owner_json)
         );
+        CREATE TABLE IF NOT EXISTS observation_repository_captures (
+            capture_id TEXT PRIMARY KEY,
+            capture_json TEXT NOT NULL CHECK(json_valid(capture_json))
+        );
         CREATE TRIGGER IF NOT EXISTS observation_retrieval_anchors_immutable_update
         BEFORE UPDATE ON observation_retrieval_anchors BEGIN
             SELECT RAISE(ABORT, 'observation retrieval anchor bindings are immutable');
@@ -475,6 +510,17 @@ pub async fn ensure_observation_schema(
         conn.execute(
             "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
             params![OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    }
+    if !migration_recorded(conn, OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION).await? {
+        conn.execute_batch(REPOSITORY_CAPTURE_DEDUPE_SQL)
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+            params![OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION],
         )
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
@@ -604,6 +650,200 @@ mod tests {
             migration_recorded(&transaction, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION)
                 .await
                 .unwrap()
+        );
+        transaction.rollback().await.unwrap();
+    }
+
+    /// A provenance row written before the shared-capture migration embeds the
+    /// same capture twice; re-admission must split it into a shared row plus a
+    /// slim reference and still hydrate the original documents for readers.
+    #[tokio::test]
+    async fn embedded_repository_captures_are_split_into_the_shared_table_on_admission() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let fixture = crate::tests::harness::open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
+        let transaction = fixture.database().begin_write_transaction().await.unwrap();
+        ensure_observation_schema(&transaction).await.unwrap();
+        let capture = serde_json::json!({
+            "capture_id": "repository.capture.v1.fixture",
+            "repository_id": "repository.fixture",
+            "evidence": {"attached_ref": {"availability": "known", "value": "refs/heads/main"}},
+            "captured_at": 7,
+        });
+        let embedded = |observation: &str| {
+            serde_json::json!({
+                "generation_id": "projection.fixture.v1",
+                "capture_id": "repository.capture.v1.fixture",
+                "capture": capture,
+                "source_observation": observation,
+            })
+        };
+        let released_marker = super::super::retention::PROVENANCE_RELEASED_MARKER;
+        transaction
+            .execute_batch("DROP TRIGGER observation_repository_provenance_immutable_update")
+            .await
+            .unwrap();
+        // The provenance row points at an observation and an anchor, so seed
+        // both before it.
+        let mut observation_ids = Vec::new();
+        for (index, label) in ["a", "b", "released"].into_iter().enumerate() {
+            let (observation, cursor) =
+                crate::schema_contract::invariants::test_fixture::authority_fixture(
+                    index as u64,
+                    label,
+                );
+            let receipt = observation.receipt();
+            transaction
+                .execute(
+                    "INSERT INTO sanitization_receipts
+                     (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        receipt.receipt().receipt_id().as_str(),
+                        receipt.receipt().sanitizer_version().as_str(),
+                        observation.payload_reference().digest().as_str(),
+                        serde_json::to_string(receipt).unwrap()
+                    ],
+                )
+                .await
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO observations
+                     (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        observation.observation_id().as_str(),
+                        observation.payload_reference().digest().as_str(),
+                        receipt.receipt().receipt_id().as_str(),
+                        serde_json::to_string(&observation).unwrap(),
+                        serde_json::to_string(&cursor).unwrap()
+                    ],
+                )
+                .await
+                .unwrap();
+            let anchor_id = format!("anchor.{label}");
+            transaction
+                .execute(
+                    "INSERT INTO retrieval_anchors
+                     (anchor_id, anchor_json, owner_json, projection_generation)
+                     VALUES (?1, '{}', '{}', 'projection.fixture.v1')",
+                    params![anchor_id.as_str()],
+                )
+                .await
+                .unwrap();
+            let observation_id = observation.observation_id().as_str().to_owned();
+            let (availability_json, capture_json) = if label == "released" {
+                (released_marker.to_owned(), released_marker.to_owned())
+            } else {
+                let provenance = embedded(&observation_id);
+                (
+                    serde_json::json!({"availability": "known", "value": provenance}).to_string(),
+                    provenance.to_string(),
+                )
+            };
+            transaction
+                .execute(
+                    "INSERT INTO observation_repository_provenance
+                     (observation_id, availability_json, capture_json, retrieval_anchor_id, owner_json)
+                     VALUES (?1, ?2, ?3, ?4, '{}')",
+                    params![
+                        observation_id.as_str(),
+                        availability_json,
+                        capture_json,
+                        anchor_id.as_str()
+                    ],
+                )
+                .await
+                .unwrap();
+            observation_ids.push((label, observation_id));
+        }
+        let released_observation = observation_ids
+            .iter()
+            .find(|(label, _)| *label == "released")
+            .map(|(_, id)| id.clone())
+            .unwrap();
+        transaction
+            .execute(
+                "DELETE FROM global_schema_migrations WHERE migration = ?1",
+                params![OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION],
+            )
+            .await
+            .unwrap();
+
+        ensure_observation_schema(&transaction).await.unwrap();
+
+        let mut rows = transaction
+            .query(
+                &format!(
+                    "SELECT repository.observation_id, repository.capture_json,
+                            {}
+                     FROM observation_repository_provenance AS repository
+                     {}
+                     ORDER BY repository.observation_id",
+                    tracedecay_rusqlite_runtime::repository::REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,
+                    tracedecay_rusqlite_runtime::repository::REPOSITORY_PROVENANCE_CAPTURE_JOIN,
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+        let mut seen = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let observation: String = row.get(0).unwrap();
+            let slim_capture: String = row.get(1).unwrap();
+            let hydrated_availability: String = row.get(2).unwrap();
+            let hydrated_capture: String = row.get(3).unwrap();
+            seen.push((
+                observation,
+                slim_capture,
+                hydrated_availability,
+                hydrated_capture,
+            ));
+        }
+        assert_eq!(seen.len(), 3);
+        for (observation, slim_capture, hydrated_availability, hydrated_capture) in &seen {
+            if *observation == released_observation {
+                assert_eq!(slim_capture, released_marker);
+                assert_eq!(hydrated_availability, released_marker);
+                assert_eq!(hydrated_capture, released_marker);
+                continue;
+            }
+            let slim: serde_json::Value = serde_json::from_str(slim_capture).unwrap();
+            assert!(
+                slim.get("capture").is_none(),
+                "{observation} still embeds its capture"
+            );
+            let expected = embedded(observation);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(hydrated_capture).unwrap(),
+                expected
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(hydrated_availability).unwrap(),
+                serde_json::json!({"availability": "known", "value": expected})
+            );
+        }
+        let mut rows = transaction
+            .query("SELECT COUNT(*) FROM observation_repository_captures", ())
+            .await
+            .unwrap();
+        let captures: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(
+            captures, 1,
+            "two rows under one capture share a single stored copy"
+        );
+        assert!(
+            migration_recorded(
+                &transaction,
+                OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION
+            )
+            .await
+            .unwrap()
         );
         transaction.rollback().await.unwrap();
     }

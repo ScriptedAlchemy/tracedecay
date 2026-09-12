@@ -21,9 +21,9 @@ use thiserror::Error;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1,
-    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1, ManifestDigest,
-    SemanticSearchIndexKeyV1,
+    EmbeddingDocumentCompositionV1, EmbeddingExecutionProviderV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1,
+    ManifestDigest, SemanticSearchIndexKeyV1,
 };
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
@@ -50,6 +50,14 @@ const MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 10
 // This checked-in gzip is generated only from a genuine `qualify-native` run.
 // The decoded canonical JSON remains the validation authority; compression
 // keeps the package and shipped binary from carrying 7.6 MiB of repeated JSON.
+//
+// These bytes no longer bind the current evaluator: the workload's
+// query-fallback digests have been re-pinned since they were produced, and
+// their retained aggregates were computed before nDCG stopped crediting one
+// label through its aliases. Loading therefore refuses them, which is why
+// nothing here activates semantics from the package. Replacing them requires a
+// genuine `qualify-native` run whose report passes `evaluate.rs` — including
+// the pairwise natural-language gain the candidate currently ties.
 const PACKAGED_NATIVE_QUALIFICATION_GZIP: &[u8] =
     include_bytes!("../../assets/native-qualification-v1.json.gz");
 const PACKAGED_NATIVE_QUALIFICATION_BYTES: usize = 7_644_855;
@@ -131,6 +139,8 @@ pub struct NativeQualificationModelKeyV1 {
     pub runtime_backend: String,
     pub runtime_build_revision: String,
     pub device_class: EmbeddingDeviceClassV1,
+    #[serde(default, skip_serializing_if = "EmbeddingExecutionProviderV1::is_cpu")]
+    pub execution_provider: EmbeddingExecutionProviderV1,
     pub dimensions: u32,
     pub metric: EmbeddingMetricV1,
     pub normalization: EmbeddingNormalizationV1,
@@ -157,6 +167,7 @@ impl NativeQualificationModelKeyV1 {
             runtime_backend: projection.runtime_backend.clone(),
             runtime_build_revision: projection.runtime_build_revision.clone(),
             device_class: projection.device_class,
+            execution_provider: projection.execution_provider,
             dimensions: projection.dimensions,
             metric: projection.metric,
             normalization: projection.normalization,

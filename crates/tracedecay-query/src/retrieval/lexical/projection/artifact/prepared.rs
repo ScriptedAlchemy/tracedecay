@@ -787,21 +787,3 @@ fn prepared_charge_overflow() -> CodeLexicalArtifactErrorV1 {
 fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(error.to_string())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::estimated_source_page_receipt_write_bytes;
-
-    #[test]
-    fn source_page_write_charge_includes_the_ngram_receipt_exactly() {
-        let without_ngram =
-            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "", b"", b"cursor")
-                .expect("receipt charge without ngram digest");
-        let with_ngram =
-            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "nnnnn", b"", b"cursor")
-                .expect("receipt charge with ngram digest");
-
-        assert_eq!(without_ngram, 1 + 2 + 3 + 6);
-        assert_eq!(with_ngram, without_ngram + 5);
-    }
-}

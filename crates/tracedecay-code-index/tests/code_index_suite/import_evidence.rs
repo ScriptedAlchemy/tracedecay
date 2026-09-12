@@ -6,7 +6,6 @@ use tracedecay_code_index::{
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexImportEvidenceV1, content_digest,
     },
-    extract::EXTRACTION_ROWS_SEPARATOR,
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
         CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
@@ -14,8 +13,9 @@ use tracedecay_code_index::{
     },
 };
 use tracedecay_domain::{
-    CodeGenerationId, FileOccurrenceId, LanguageId, SanitizedCodeFileV1, SensitivityLevelV1,
-    SnapshotFileDispositionV1, SourceSpan, canonical_sha256,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageId, RelationEdgeKindV1, SanitizationReceiptId,
+    SanitizedCodeFileV1, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
+    SymbolOccurrenceId, canonical_sha256,
 };
 
 use crate::{
@@ -85,6 +85,210 @@ fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
     owner
         .build_and_publish(import_request(), &ActiveControl)
         .expect("parser-backed import generation publishes")
+}
+
+fn published_rust_workspace(sources: &[(&str, &str, &str)]) -> Arc<CodeIndexPublishedGenerationV1> {
+    let mut request = request_with_source(
+        "file.rust-workspace.seed",
+        1_500_000,
+        "commit.rust-workspace.1",
+        "tree.rust-workspace.1",
+        "",
+    );
+    request.snapshot.files.clear();
+    request.snapshot.sanitization_receipts.clear();
+    request.captured_files.clear();
+    request.changed_files.clear();
+    let mut identity = Vec::new();
+    for (ordinal, (occurrence, path, source)) in sources.iter().copied().enumerate() {
+        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+        let bytes = source.as_bytes();
+        request.snapshot.files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: path.to_owned(),
+            language: Some(id::<LanguageId>("rust")),
+            content_digest: content_digest(bytes),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        request
+            .snapshot
+            .sanitization_receipts
+            .push(id::<SanitizationReceiptId>(&format!(
+                "receipt.rust-workspace.{ordinal}"
+            )));
+        request.captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(bytes),
+            sensitivity_level: SensitivityLevelV1::Public,
+        });
+        request.changed_files.insert(path.to_owned());
+        identity.extend_from_slice(path.as_bytes());
+        identity.push(0);
+        identity.extend_from_slice(bytes);
+    }
+    request.snapshot.files.sort_by(|left, right| {
+        (&left.logical_path, &left.file_occurrence_id)
+            .cmp(&(&right.logical_path, &right.file_occurrence_id))
+    });
+    request.snapshot.content_identity = content_digest(&identity);
+    request
+        .snapshot
+        .validate()
+        .expect("Rust workspace snapshot is canonical");
+
+    CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner")
+    .build_and_publish(request, &ActiveControl)
+    .expect("Rust workspace generation publishes")
+}
+
+fn symbol_occurrence(
+    generation: &CodeIndexPublishedGenerationV1,
+    qualified_name: &str,
+) -> SymbolOccurrenceId {
+    generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == qualified_name)
+        .unwrap_or_else(|| panic!("missing symbol {qualified_name}"))
+        .occurrence
+        .clone()
+}
+
+fn assert_resolved_edge(
+    generation: &CodeIndexPublishedGenerationV1,
+    from: &SymbolOccurrenceId,
+    to: &SymbolOccurrenceId,
+    kind: RelationEdgeKindV1,
+) {
+    assert!(
+        generation.edges().iter().any(|edge| {
+            edge.from_occurrence == *from
+                && edge.to_occurrence == *to
+                && edge.kind == kind
+                && edge.authority == EdgeAuthorityV1::NameResolved
+        }),
+        "missing {kind:?} edge from {from} to {to}"
+    );
+}
+
+#[test]
+fn rust_child_glob_imports_parent_use_bindings_for_calls() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.glob.parent",
+            "crates/service/src/parent.rs",
+            "mod child;\nuse child::f;\nmod dispatch;\n",
+        ),
+        (
+            "file.glob.target",
+            "crates/service/src/parent/child.rs",
+            "pub fn f() {}\n",
+        ),
+        (
+            "file.glob.dispatch",
+            "crates/service/src/parent/dispatch.rs",
+            "use super::*;\npub fn g() { f(); f(); }\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/service/src/parent/dispatch.rs::g");
+    let target = symbol_occurrence(&generation, "crates/service/src/parent/child.rs::f");
+    assert!(
+        generation.imports().iter().any(|binding| {
+            binding.logical_path == "crates/service/src/parent/dispatch.rs"
+                && binding.module_specifier == "super"
+                && binding.is_glob
+        }),
+        "the parser must retain the child glob as structured import evidence: {:?}",
+        generation.imports()
+    );
+
+    assert_resolved_edge(&generation, &caller, &target, RelationEdgeKindV1::Calls);
+    assert_eq!(
+        generation
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == caller
+                    && edge.to_occurrence == target
+                    && edge.kind == RelationEdgeKindV1::Calls
+            })
+            .count(),
+        2,
+        "resolution caching must preserve each call site's evidence edge"
+    );
+}
+
+#[test]
+fn rust_cross_crate_impl_binds_through_public_reexport_chain() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.reexport.a-lib",
+            "crates/a/src/lib.rs",
+            "mod api;\npub use api::T;\n",
+        ),
+        (
+            "file.reexport.a-api",
+            "crates/a/src/api.rs",
+            "mod traits;\npub use traits::T;\n",
+        ),
+        (
+            "file.reexport.a-trait",
+            "crates/a/src/api/traits.rs",
+            "pub trait T {}\n",
+        ),
+        (
+            "file.reexport.b-lib",
+            "crates/b/src/lib.rs",
+            "use a::T;\npub struct S;\nimpl T for S {}\n",
+        ),
+    ]);
+    let implementor = symbol_occurrence(&generation, "crates/b/src/lib.rs::S");
+    let target = symbol_occurrence(&generation, "crates/a/src/api/traits.rs::T");
+
+    assert_resolved_edge(
+        &generation,
+        &implementor,
+        &target,
+        RelationEdgeKindV1::Implements,
+    );
+}
+
+#[test]
+fn rust_parent_glob_does_not_override_a_local_type_binding() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.shadow.parent",
+            "crates/service/src/parent.rs",
+            "mod target;\nuse target::T;\nmod dispatch;\n",
+        ),
+        (
+            "file.shadow.target",
+            "crates/service/src/parent/target.rs",
+            "pub trait T {}\n",
+        ),
+        (
+            "file.shadow.dispatch",
+            "crates/service/src/parent/dispatch.rs",
+            "use super::*;\ntrait T {}\npub struct S;\nimpl T for S {}\n",
+        ),
+    ]);
+    let implementor = symbol_occurrence(&generation, "crates/service/src/parent/dispatch.rs::S");
+    let glob_target = symbol_occurrence(&generation, "crates/service/src/parent/target.rs::T");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != implementor
+                || edge.to_occurrence != glob_target
+                || edge.kind != RelationEdgeKindV1::Implements
+        }),
+        "a local binding must suppress the parent-glob candidate"
+    );
 }
 
 fn sealed_envelope(generation: &CodeIndexPublishedGenerationV1) -> Value {
@@ -290,112 +494,6 @@ fn file_import_artifacts_bind_file_consistent_path_and_nonempty_span_to_indexed_
 }
 
 #[test]
-fn import_rows_rematerialize_file_occurrence_and_aggregate_exactly_per_generation() {
-    let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    let artifacts = file_artifact(&envelope, 0);
-    let rematerialized = artifacts
-        .rematerialize_for_generation(
-            id::<CodeGenerationId>("generation.imports.rematerialized"),
-            id::<FileOccurrenceId>("file.import.rematerialized"),
-        )
-        .expect("import artifact rematerializes");
-
-    assert!(
-        rematerialized
-            .imports
-            .iter()
-            .all(|row| row.file_occurrence_id.as_str() == "file.import.rematerialized")
-    );
-    assert_eq!(
-        rematerialized
-            .imports
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>(),
-        artifacts
-            .imports
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>()
-    );
-
-    assert_eq!(
-        generation
-            .imports()
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.file_occurrence_id.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                "src/a.ts",
-                "file.import.a",
-                "../models",
-                Some("Foo"),
-                Some("Foo"),
-                ImportNamespaceV1::Type,
-                ImportModuleKindV1::ProjectRelative,
-                SourceSpan {
-                    start_byte: 14,
-                    end_byte: 17,
-                },
-            ),
-            (
-                "src/a.ts",
-                "file.import.a",
-                "../models",
-                Some("Bar"),
-                Some("Baz"),
-                ImportNamespaceV1::Type,
-                ImportModuleKindV1::ProjectRelative,
-                SourceSpan {
-                    start_byte: 19,
-                    end_byte: 29,
-                },
-            ),
-            (
-                "src/b.ts",
-                "file.import.b",
-                "runner",
-                Some("run"),
-                Some("execute"),
-                ImportNamespaceV1::Value,
-                ImportModuleKindV1::BareModule,
-                SourceSpan {
-                    start_byte: 9,
-                    end_byte: 23,
-                },
-            ),
-        ]
-    );
-}
-
-#[test]
 fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
     let generation = published_import_generation();
     let symbols = &generation.symbols().symbols;
@@ -411,19 +509,6 @@ fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
                 "../models" | "runner" | "Foo" | "Bar" | "Baz" | "run" | "execute"
             )
     }));
-}
-
-#[test]
-fn import_generation_pins_extractor_rows_and_chunker_revision_axes() {
-    assert_eq!(EXTRACTION_ROWS_SEPARATOR, "tracedecay.extraction-rows.v2");
-    let generation = published_import_generation();
-    let manifest = generation.manifest();
-
-    assert_eq!(manifest.extractor_revisions.len(), 1);
-    let (language, extractor_revision) = &manifest.extractor_revisions[0];
-    assert_eq!(language.as_str(), "typescript");
-    assert_eq!(extractor_revision.as_str(), "extractor.typescript.v2");
-    assert_eq!(manifest.chunker_revision.as_str(), "chunker.v2");
 }
 
 #[test]

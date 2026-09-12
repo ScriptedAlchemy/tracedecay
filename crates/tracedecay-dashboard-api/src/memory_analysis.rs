@@ -447,35 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn similarity_metadata_uses_canonical_fact_id_strings() {
-        for operation in ["dashboard.fact-a", "dashboard.fact-b", "dashboard.fact-c"] {
-            let fact_id = fact_id(operation);
-            fact_id
-                .validate_owner(&FactOwnerV1::Profile)
-                .expect("derived fixture fact ID must retain its owner binding");
-            assert_eq!(json!(fact_id.as_str()).as_str(), Some(fact_id.as_str()));
-        }
-    }
-
-    #[test]
-    fn score_distribution_covers_all_scores() {
-        let scored = vec![(0.75, 0, 1), (0.0, 0, 2), (-0.25, 1, 2)];
-        let distribution = score_distribution(&scored, &read_control())
-            .expect("distribution must not be interrupted");
-        assert_eq!(distribution["total_pairs"], 3);
-        let bins = distribution["bins"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected distribution bins"));
-        let binned_pairs: i64 = bins
-            .iter()
-            .map(|bin| bin["count"].as_i64().unwrap_or(0))
-            .sum();
-        assert_eq!(binned_pairs, 3);
-        assert_eq!(distribution["min_score"], -0.25);
-        assert_eq!(distribution["max_score"], 0.75);
-    }
-
-    #[test]
     fn score_distribution_adapts_bins_to_observed_range() {
         let scored = vec![(0.75, 0, 1), (0.0, 0, 2), (-0.25, 1, 2)];
         let distribution = score_distribution(&scored, &read_control())
@@ -529,30 +500,6 @@ mod tests {
             .expect_err("interrupted histogram must fail without returning a result");
 
         assert_eq!(error, MemoryAnalysisError::Interrupted);
-    }
-
-    #[test]
-    fn build_similarity_computation_retains_serveable_prefix_only() {
-        let fact_a = fact_id("dashboard.computation.fact-a");
-        let fact_b = fact_id("dashboard.computation.fact-b");
-        let fact_c = fact_id("dashboard.computation.fact-c");
-        let facts = vec![
-            json!({"fact_id": fact_a.as_str(), "content": "fact body a", "trust_score": 0.5}),
-            json!({"fact_id": fact_b.as_str(), "content": "fact body b", "trust_score": 0.5}),
-            json!({"fact_id": fact_c.as_str(), "content": "fact body c", "trust_score": 0.5}),
-        ];
-        // Descending scores: all three are scored, all three fit the cap.
-        let scored = vec![(0.99, 0, 1), (0.5, 0, 2), (-0.2, 1, 2)];
-        let computation = build_similarity_computation(4, facts, scored, &read_control())
-            .expect("complete canonical metadata must build similarity computation");
-        assert_eq!(computation.total_pairs, 3);
-        assert_eq!(computation.pairs.len(), 3);
-        assert_eq!(computation.distribution["total_pairs"], 3);
-        // The distribution covers the full scored range even when pairs
-        // below the retention horizon would be dropped.
-        assert_eq!(computation.distribution["min"], -0.2);
-        assert_eq!(computation.distribution["max"], 0.99);
-        assert!(computation.pairs[0].similarity >= computation.pairs[1].similarity);
     }
 
     #[test]

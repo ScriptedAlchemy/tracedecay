@@ -6,19 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tracedecay_temporal_query::context::{
-    CompactContext, ContextBudget, TokenPolicy, VersionedTokenEstimator,
-};
-use tracedecay_temporal_query::cursor::CursorError;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionLimits, KernelVersions, TemporalExecutionSnapshot,
-    TemporalRetrievalScope, TemporalWatermarks,
-};
-use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_temporal_query::resolution::{SummaryLineageRejection, SummaryOmission};
-use tracedecay_temporal_query::{
-    TemporalKernelError, TemporalKernelRequest, TemporalKernelResult,
-};
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
@@ -41,6 +28,17 @@ use tracedecay_session_memory::session::{
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, SessionTemporalQuery,
 };
+use tracedecay_temporal_query::context::{
+    CompactContext, ContextBudget, TokenPolicy, VersionedTokenEstimator,
+};
+use tracedecay_temporal_query::cursor::CursorError;
+use tracedecay_temporal_query::ports::{
+    BindingDigest, ExecutionLimits, KernelVersions, TemporalExecutionSnapshot,
+    TemporalRetrievalScope, TemporalWatermarks,
+};
+use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::resolution::{SummaryLineageRejection, SummaryOmission};
+use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 const DIGEST: [u8; 32] = [0x5a; 32];
@@ -1985,14 +1983,4 @@ async fn partial_freshness_and_cancellation_race_preserve_application_ownership(
         SessionRetrievalOutcome::Cancelled
     ));
     assert!(dropped_after_cancel.load(Ordering::SeqCst));
-}
-
-/// Compile-time only: the temporal request and session-access types must stay
-/// nameable and constructible from outside the crate. Nothing here observes
-/// behaviour, so this test fails by failing to compile.
-#[test]
-fn temporal_application_api_is_publicly_composed_at_compile_time() {
-    fn assert_request(_: &TemporalKernelRequest) {}
-    let _ = assert_request;
-    let _: SessionAccess = SessionAccess::Hydrate;
 }

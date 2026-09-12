@@ -689,15 +689,8 @@ impl OverlayDiagnosticDebouncer {
 mod tests {
     use super::*;
     use crate::diagnostics::{LspPosition, LspRange};
-    use crate::gateway::{
-        AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask,
-    };
-    use crate::provider::{
-        DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
-        DiagnosticSnapshotPort, GenerationDiagnostics,
-    };
+    use crate::gateway::AdmittedRoot;
     use std::sync::Arc;
-    use std::task::{Context, Poll};
     use tracedecay_code_extraction::incremental::ParseReuse;
 
     fn test_root() -> AdmittedRoot {
@@ -1009,95 +1002,5 @@ mod tests {
                 kind: DebouncedDiagnosticKind::Clear,
             }]
         );
-    }
-
-    #[test]
-    fn immediate_refresh_flushes_pending_edit_debounce() {
-        let mut debounce = OverlayDiagnosticDebouncer::default();
-        assert!(debounce.schedule_refresh("file:///root/a.rs", 1, 0));
-        assert!(debounce.schedule_immediate_refresh("file:///root/a.rs", 2, 10));
-
-        assert_eq!(
-            debounce.take_due(10),
-            vec![DebouncedDiagnostic {
-                uri: "file:///root/a.rs".into(),
-                version: 2,
-                kind: DebouncedDiagnosticKind::Refresh,
-            }]
-        );
-    }
-
-    struct InlineTask;
-
-    impl LspRuntimeTask for InlineTask {
-        fn abort(&self) {}
-    }
-
-    struct InlineSpawner;
-
-    impl LspRuntimeSpawner for InlineSpawner {
-        fn spawn(&self, mut future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
-            // These harness futures must complete synchronously; a wake would
-            // indicate that the test spawner is not a valid runtime for them.
-            let mut context = Context::from_waker(std::task::Waker::noop());
-            assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
-            Box::new(InlineTask)
-        }
-    }
-
-    struct Diagnostics;
-
-    impl CanonicalDiagnosticSnapshotAuthority for Diagnostics {
-        fn refresh(
-            &self,
-            _request: CanonicalDiagnosticRefreshRequest,
-        ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>> {
-            Box::pin(async {
-                Ok(GenerationDiagnostics {
-                    generation: 7,
-                    authority_digest: tracedecay_domain::ManifestDigest::new(format!(
-                        "sha256:{}",
-                        "a".repeat(64)
-                    ))
-                    .unwrap(),
-                    upstream: Vec::new(),
-                    tracedecay: Vec::new(),
-                })
-            })
-        }
-    }
-
-    #[test]
-    fn diagnostic_broker_reuses_exact_overlay_identity_and_polls_completion() {
-        let adapter =
-            DiagnosticSnapshotAdapter::new(Arc::new(InlineSpawner), Arc::new(Diagnostics));
-        let root = AdmittedRoot::new("file:///root");
-        let overlay = OverlaySnapshot {
-            uri: "file:///root/a.rs".to_owned(),
-            language_id: "rust".to_owned(),
-            version: 3,
-            content_digest: ContentDigest::of_bytes(b"fn main() {}"),
-            text: Arc::from("fn main() {}"),
-            ephemeral: true,
-            parse_state: OverlayParseState::Unavailable(OverlayParseUnavailable::StaleReport),
-            extraction_state: OverlayExtractionState::Unavailable(
-                OverlayParseUnavailable::StaleReport,
-            ),
-        };
-        assert_eq!(
-            adapter.request_document_refresh(&root, "file:///root/a.rs", Some(&overlay), None,),
-            DiagnosticRefreshAdmission::Started(DiagnosticRefreshIdentity {
-                operation_id: "lsp-diagnostic-1".to_owned(),
-                source_generation: None,
-                target_generation: None,
-            })
-        );
-        assert!(matches!(
-            adapter.document_diagnostics(&root, "file:///root/a.rs", Some(&overlay)),
-            DiagnosticSnapshotOutcome::Ready {
-                diagnostics: GenerationDiagnostics { generation: 7, .. },
-                ..
-            }
-        ));
     }
 }

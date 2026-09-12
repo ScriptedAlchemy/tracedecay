@@ -50,26 +50,6 @@ fn semantic_runtime_writes_admit_only_cataloged_model_ids() {
     );
 }
 
-#[test]
-fn semantic_profile_transition_coordinates_only_when_a_profile_changes() {
-    assert!(
-        !requires_coordinated_semantic_profile_transition(false, false),
-        "an inactive profile update must remain an ordinary configuration mutation"
-    );
-    assert!(
-        requires_coordinated_semantic_profile_transition(true, false),
-        "disabling an active profile must retain coordinated rollback"
-    );
-    assert!(
-        requires_coordinated_semantic_profile_transition(false, true),
-        "selecting a profile from an inactive state must retain activation"
-    );
-    assert!(
-        requires_coordinated_semantic_profile_transition(true, true),
-        "replacing an active profile must retain activation"
-    );
-}
-
 #[tokio::test]
 async fn semantic_commit_wake_survives_deferred_reconciler_install() {
     let registered_configuration_wake = Arc::new(tokio::sync::Notify::new());

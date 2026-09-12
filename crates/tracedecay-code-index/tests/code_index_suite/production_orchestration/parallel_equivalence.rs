@@ -9,9 +9,9 @@ use tracedecay_code_index::{
     },
 };
 use tracedecay_domain::{
-    FileOccurrenceId, LanguageId, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    UtcMicros, canonical_sha256,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageId, RepositoryDirtyStateV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SnapshotFileDispositionV1, UtcMicros, canonical_sha256,
 };
 
 use super::{
@@ -19,40 +19,31 @@ use super::{
 };
 use crate::support::{RUST_SOURCE, id};
 
-/// Read one `/proc/self/status` figure in KiB.
-fn status_kib(field: &str) -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    status
-        .lines()
-        .find(|line| line.starts_with(&format!("{field}:")))?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
-}
-
-fn mib(kib: u64) -> f64 {
-    kib as f64 / 1024.0
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+/// One module's source: a body whose size varies with `index`, so per-file
+/// parse and chunk cost varies widely, plus a uniquely named helper and an
+/// imported call into the next module's helper.
+fn module_source(index: usize, file_count: usize) -> String {
+    let body = RUST_SOURCE.repeat(1 + (index % 7));
+    let neighbour = (index + 1) % file_count;
+    format!(
+        "{body}\n\
+         use crate::equivalence::module_{neighbour:04}::equivalence_helper_{neighbour:04};\n\
+         pub fn equivalence_helper_{index:04}() {{}}\n\
+         pub fn equivalence_caller_{index:04}() {{ equivalence_helper_{neighbour:04}(); }}\n\
+         // file {index}\n"
+    )
 }
 
 /// Multi-file build request whose files differ in content and in cost, so a
-/// parallel sweep genuinely reorders completion relative to snapshot order.
+/// parallel sweep genuinely reorders completion relative to snapshot order,
+/// and whose modules cross-reference each other, so sealing has real cross-file
+/// references to resolve against the whole file set.
 fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildRequestV1 {
     let mut files = Vec::with_capacity(file_count);
     let mut captured = Vec::with_capacity(file_count);
     let mut receipts = Vec::with_capacity(file_count);
     for index in 0..file_count {
-        // Vary body size so per-file parse/chunk cost varies widely.
-        let body = RUST_SOURCE.repeat(1 + (index % 7));
-        let source = format!("{body}\n// file {index}\n");
-        let bytes = source.as_bytes().to_vec();
+        let bytes = module_source(index, file_count).into_bytes();
         let occurrence = id::<FileOccurrenceId>(&format!("file.equivalence.{index:04}"));
         files.push(SanitizedCodeFileV1 {
             file_occurrence_id: occurrence.clone(),
@@ -104,7 +95,14 @@ fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildReques
     }
 }
 
-fn sealed_bytes_at_width(width: usize, file_count: usize) -> Vec<u8> {
+/// Build the equivalence generation with the indexing pool forced to `width`,
+/// then read from it at that same width — encoding fans out too, so the width
+/// must still be in force when the caller takes what it wants to compare.
+fn at_width<R>(
+    width: usize,
+    file_count: usize,
+    read: impl FnOnce(&CodeIndexPublishedGenerationV1) -> R,
+) -> R {
     parallelism::force_indexing_workers_for_test(width);
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
@@ -112,9 +110,62 @@ fn sealed_bytes_at_width(width: usize, file_count: usize) -> Vec<u8> {
     let generation = owner
         .build_and_publish(multi_file_request(file_count, 1_100_000), &ActiveControl)
         .expect("equivalence generation publishes");
-    let bytes = generation.encode_sealed().expect("sealed encoding");
+    let read = read(&generation);
     parallelism::clear_forced_indexing_workers_for_test();
-    bytes
+    read
+}
+
+fn sealed_bytes_at_width(width: usize, file_count: usize) -> Vec<u8> {
+    at_width(width, file_count, |generation| {
+        generation.encode_sealed().expect("sealed encoding")
+    })
+}
+
+/// Every cross-file edge sealing bound, in the generation's own edge order.
+fn name_resolved_edges(generation: &CodeIndexPublishedGenerationV1) -> Vec<String> {
+    generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.authority == EdgeAuthorityV1::NameResolved)
+        .map(|edge| {
+            format!(
+                "{}|{}|{:?}|{}..{}",
+                edge.from_occurrence.as_str(),
+                edge.to_occurrence.as_str(),
+                edge.kind,
+                edge.evidence_span.start_byte,
+                edge.evidence_span.end_byte,
+            )
+        })
+        .collect()
+}
+
+/// Cross-file references only resolve at sealing, where every file's symbols
+/// finally exist together, and that resolution now fans out per file. A memo
+/// that leaked between files, or a concatenation that lost file order, would
+/// change which edges bind or where they sort — so the resolved edge vector
+/// must be identical at width 1 and at full machine width. The count is pinned
+/// so a fixture that stopped producing cross-file references cannot make this
+/// pass by comparing two empty vectors.
+pub(super) fn assert_cross_file_resolution_is_width_invariant() {
+    const FILES: usize = 64;
+
+    let sequential = at_width(1, FILES, name_resolved_edges);
+    let parallel = at_width(
+        parallelism::indexing_worker_target(64),
+        FILES,
+        name_resolved_edges,
+    );
+
+    assert_eq!(
+        sequential.len(),
+        FILES,
+        "fixture stopped exercising cross-file resolution: {sequential:?}"
+    );
+    assert_eq!(
+        sequential, parallel,
+        "cross-file reference resolution changed with indexing width"
+    );
 }
 
 pub(super) fn assert_parallel_and_sequential_generations_are_byte_identical() {
@@ -212,60 +263,4 @@ pub(super) fn assert_parallel_and_sequential_decodes_are_byte_identical() {
         canonical_sha256(&sequential_bytes).expect("sequential digest"),
         canonical_sha256(&parallel_bytes).expect("parallel digest"),
     );
-}
-
-/// Sealed-decode measurement harness. Not a contract — nothing here asserts on
-/// a timing or a memory figure.
-///
-/// `VmHWM` only ever rises within a process, so a peak-RSS figure is only
-/// comparable across widths when each width runs in its own process. Run one
-/// width per invocation:
-///
-/// ```text
-/// TRACEDECAY_DECODE_WIDTH=1 TRACEDECAY_DECODE_FILES=4000 \
-///   cargo test -p tracedecay-code-index --all-features --profile perf \
-///   --test code_index_suite -- --ignored --nocapture --exact \
-///   production_orchestration::sealed_decode_width_probe
-/// ```
-///
-/// `TRACEDECAY_DECODE_WIDTH=0` (the default) uses the host width.
-pub(super) fn run_sealed_decode_width_probe() {
-    let files = env_usize("TRACEDECAY_DECODE_FILES", 4_000);
-    let width = env_usize("TRACEDECAY_DECODE_WIDTH", 0);
-
-    // Build and seal at full width; only the decode is under measurement.
-    let sealed = sealed_bytes_at_width(parallelism::indexing_worker_target(64), files);
-
-    if width > 0 {
-        parallelism::force_indexing_workers_for_test(width);
-    }
-    let effective = parallelism::indexing_workers();
-
-    let before_rss = status_kib("VmRSS").unwrap_or(0);
-    let started = std::time::Instant::now();
-    let generation =
-        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("sealed generation decodes");
-    let decode_wall = started.elapsed();
-    let after_rss = status_kib("VmRSS").unwrap_or(0);
-    let peak_rss = status_kib("VmHWM").unwrap_or(0);
-
-    let chunks = generation.chunks().chunks().len();
-    let symbols = generation.symbols().symbols.len();
-    drop(generation);
-    parallelism::clear_forced_indexing_workers_for_test();
-
-    println!("=== sealed decode width probe ===");
-    println!("files              {files}");
-    println!("chunks             {chunks}");
-    println!("symbols            {symbols}");
-    println!("sealed bytes       {}", sealed.len());
-    println!("effective width    {effective}");
-    println!("decode wall        {decode_wall:?}");
-    println!("VmRSS before       {:.1} MiB", mib(before_rss));
-    println!("VmRSS after        {:.1} MiB", mib(after_rss));
-    println!(
-        "VmRSS delta        {:.1} MiB",
-        mib(after_rss.saturating_sub(before_rss))
-    );
-    println!("VmHWM (peak)       {:.1} MiB", mib(peak_rss));
 }

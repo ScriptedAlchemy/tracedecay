@@ -186,6 +186,64 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
     }
 }
 
+// === Pending schema migrations (Storage family) ==============================
+
+/// Report the shards whose historical schema convergence has not completed.
+///
+/// Convergence carries the migrations whose cost scales with store size — a
+/// full index rebuild, a whole-table rewrite — so on a large store it runs for
+/// minutes after the daemon is already serving. That is deliberate: it runs
+/// after the fail-closed admission checks and outside any caller's write
+/// lease, so it blocks neither admission nor retrieval. What it must not do is
+/// stay invisible. A shard still pending or running reads as `Stale` — the
+/// store is behind its current schema but readable — and one whose migration
+/// failed reads as `Degraded`, carrying the failure the convergence task
+/// recorded. An empty set is absent rather than a healthy claim, since a
+/// daemon with no mounted shard has converged nothing.
+#[must_use]
+pub(in crate::daemon) fn pending_schema_migration_read(
+    unconverged: &[(
+        tracedecay_store::StoreShardIdV1,
+        tracedecay_store_runtime::RegisteredSchemaConvergenceStatus,
+    )],
+) -> DoctorStorageFamilyReadV1 {
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1;
+    use tracedecay_contracts::storage::{StoreKeyV1, pending_schema_migration_finding};
+    use tracedecay_store_runtime::RegisteredSchemaConvergenceStatus;
+
+    let mut findings = Vec::new();
+    for (shard, status) in unconverged {
+        let (state, detail, statement) = match status {
+            RegisteredSchemaConvergenceStatus::Pending => (
+                DoctorEvidenceStateV1::Stale,
+                "queued".to_owned(),
+                "schema migrations are queued and have not started",
+            ),
+            RegisteredSchemaConvergenceStatus::Running => (
+                DoctorEvidenceStateV1::Stale,
+                "running".to_owned(),
+                "schema migrations are running; the store stays served meanwhile",
+            ),
+            RegisteredSchemaConvergenceStatus::Degraded { message } => (
+                DoctorEvidenceStateV1::Degraded,
+                format!("stopped.{message}"),
+                "schema migrations stopped on a failure and left the store behind its schema",
+            ),
+            // Filtered by the authority; a converged shard has nothing to report.
+            RegisteredSchemaConvergenceStatus::Complete => continue,
+        };
+        let Ok(store) = StoreKeyV1::new(format!("{shard:?}")) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let Ok(finding) = pending_schema_migration_finding(&store, state, &detail, statement)
+        else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
 // === Language server/analyzer (LanguageServer family) ========================
 
 /// Map the daemon diagnostic broker's project-active engine statuses.
@@ -536,6 +594,7 @@ pub(super) async fn collect_code_generation_retention_findings(
     >,
     code_index_store_root: &Path,
     project_root: &Path,
+    graph: &tracedecay_runtime_core::db::Database,
 ) -> DoctorStorageFamilyReadV1 {
     use tracedecay_code_index_retention::code_index_generations::{
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
@@ -582,7 +641,21 @@ pub(super) async fn collect_code_generation_retention_findings(
     let scope_store_root = code_index_store_root.parent().map(Path::to_path_buf);
     let project_root = project_root.to_path_buf();
     let now = now_secs();
+    // The graph store's sealed artifacts are the third dead-bytes class: a
+    // superseded generation whose retirement has not run, or staging an
+    // interrupted seal left behind. Liveness comes from the journal, so an
+    // unreadable journal leaves the census unknown rather than zero.
+    let head_generations = live_sealed_generations(graph).await;
+    // Retirements the journal has decided but the engine has not applied: a
+    // hibernated engine is never opened to delete, so these rows sit in the
+    // live container until the next publication holds it open.
+    let deferred_retirements = deferred_native_retirements(graph).await;
+    let graph_container = graph.database_path().with_extension("grafeo");
     let Ok(census) = tokio::task::spawn_blocking(move || {
+        let live_container_bytes = live_graph_container_bytes(&graph_container);
+        let sealed = head_generations.and_then(|heads| {
+            tracedecay_graph_db::census_sealed_store(&graph_container, &heads).ok()
+        });
         let plan = plan_code_generation_retention_with_verification(
             &root,
             &vector_readable_sources,
@@ -605,24 +678,29 @@ pub(super) async fn collect_code_generation_retention_findings(
             )
             .ok()
         });
-        (plan, scopes)
+        (plan, scopes, sealed, live_container_bytes)
     })
     .await
     else {
         return semantic_only_unknown();
     };
-    let (plan, scopes) = census;
+    let (plan, scopes, sealed, live_container_bytes) = census;
     let Ok(plan) = plan else {
         return semantic_only_unknown();
     };
     let Ok(store) = StoreKeyV1::new("code-index-v1") else {
         return semantic_only_unknown();
     };
-    let completeness = if scopes.is_some() && !vector_liveness_incomplete {
+    let completeness = if scopes.is_some()
+        && sealed.is_some()
+        && deferred_retirements.is_some()
+        && !vector_liveness_incomplete
+    {
         DoctorCoverageCompletenessV1::Complete
     } else {
         DoctorCoverageCompletenessV1::Partial
     };
+    let sealed = sealed.unwrap_or_default();
     let record = CodeGenerationRetentionRecordV1 {
         store,
         superseded_generation_count: plan.superseded_generations.len() as u64,
@@ -653,6 +731,26 @@ pub(super) async fn collect_code_generation_retention_findings(
                     .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_bytes),
             )
         },
+        // Same rule as the collectable figures: while the vector pin set is
+        // unknown, dead sealed bytes are published as zero under `Partial`
+        // rather than as a staleness claim the census cannot yet stand behind.
+        superseded_sealed_generation_count: if vector_liveness_incomplete {
+            0
+        } else {
+            sealed.superseded_count
+        },
+        superseded_sealed_generation_bytes: if vector_liveness_incomplete {
+            StorageByteSizeV1::ZERO
+        } else {
+            StorageByteSizeV1(sealed.superseded_bytes)
+        },
+        abandoned_sealed_staging_count: sealed.abandoned_staging_count,
+        abandoned_sealed_staging_bytes: StorageByteSizeV1(sealed.abandoned_staging_bytes),
+        sealed_head_generation_bytes: StorageByteSizeV1(sealed.head_bytes),
+        live_graph_container_bytes: StorageByteSizeV1(live_container_bytes),
+        // Unknown deferrals publish as zero under `Partial`, never as a claim
+        // that nothing is waiting.
+        deferred_native_retirement_count: deferred_retirements.unwrap_or(0),
     };
     let Ok(finding) = code_generation_retention_finding(&record, completeness) else {
         return semantic_only_unknown();
@@ -666,6 +764,78 @@ pub(super) async fn collect_code_generation_retention_findings(
     } else {
         storage_family_read(findings)
     }
+}
+
+/// The journaled generation ids whose sealed artifacts are still live in the
+/// project graph store: each projection's verified head, every publication
+/// newer than its head (pending), and every generation an active replay
+/// depends on. A sealed directory outside this set is one the ordinary
+/// retirement pass reclaims; `None` when the journal cannot be read (an
+/// absent table on a store that never published, a lock, a corrupt row).
+async fn live_sealed_generations(
+    graph: &tracedecay_runtime_core::db::Database,
+) -> Option<BTreeSet<String>> {
+    let mut rows = graph
+        .read_connection()
+        .query(
+            "SELECT replay.generation
+             FROM graph_publication_replay_v1 AS replay
+             LEFT JOIN graph_verified_heads_v1 AS head
+               ON head.shard_id = replay.shard_id
+              AND head.namespace = replay.namespace
+              AND head.projection = replay.projection
+             WHERE head.replay_sequence IS NULL
+                OR replay.sequence >= head.replay_sequence
+             UNION
+             SELECT generation FROM graph_publication_replay_dependencies_v1",
+            (),
+        )
+        .await
+        .ok()?;
+    let mut heads = BTreeSet::new();
+    while let Some(row) = rows.next().await.ok()? {
+        heads.insert(row.get::<String>(0).ok()?);
+    }
+    Some(heads)
+}
+
+/// Retirements the journal has linearized whose native rows are still in the
+/// live container: retirement tombstones awaiting their engine delete, plus
+/// replays behind an installed head that no active replay depends on and
+/// that retirement has not yet reached. `None` when the journal cannot be
+/// read.
+async fn deferred_native_retirements(graph: &tracedecay_runtime_core::db::Database) -> Option<u64> {
+    let mut rows = graph
+        .read_connection()
+        .query(
+            "SELECT (SELECT COUNT(*) FROM graph_publication_replay_tombstones_v1)
+                  + (SELECT COUNT(*)
+                     FROM graph_publication_replay_v1 AS replay
+                     JOIN graph_verified_heads_v1 AS head
+                       ON head.shard_id = replay.shard_id
+                      AND head.namespace = replay.namespace
+                      AND head.projection = replay.projection
+                     WHERE replay.sequence < head.replay_sequence
+                       AND replay.generation NOT IN (
+                           SELECT generation FROM graph_publication_replay_dependencies_v1
+                       ))",
+            (),
+        )
+        .await
+        .ok()?;
+    let row = rows.next().await.ok()??;
+    u64::try_from(row.get::<i64>(0).ok()?).ok()
+}
+
+/// On-disk bytes of the live staging container and its WAL sidecar; a
+/// container that does not exist yet weighs nothing.
+fn live_graph_container_bytes(container: &Path) -> u64 {
+    let wal = container.with_extension("grafeo.wal");
+    [container, wal.as_path()]
+        .into_iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum()
 }
 
 /// Resolved kernel reads wired into the Doctor composer for one report.
@@ -830,6 +1000,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
+    pending_schema_migrations: Arc<dyn Fn() -> DoctorStorageFamilyReadV1 + Send + Sync>,
     retention: tracedecay_configuration::RetentionConfig,
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -849,6 +1020,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let profile_root = profile_root.clone();
         let host_home = host_home.clone();
         let remote_operational = Arc::clone(&remote_operational);
+        let pending_schema_migrations = Arc::clone(&pending_schema_migrations);
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
@@ -1004,6 +1176,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                         semantic_configuration_inventory.as_ref(),
                         &code_index_store_root,
                         &project_root,
+                        &graph,
                     ),
                     language_server_read_from_broker(&diagnostic_broker),
                     tracedecay_application::feedback::concrete::feedback_observation_read_model(
@@ -1051,6 +1224,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 profile_retention_backlog,
                 project_retention_backlog,
                 code_generation_retention,
+                pending_schema_migrations(),
             ]
             .into_iter()
             .reduce(merge_storage_reads)

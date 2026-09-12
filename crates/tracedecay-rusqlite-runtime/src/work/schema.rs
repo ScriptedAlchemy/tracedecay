@@ -3,40 +3,6 @@
 use super::*;
 
 pub const WORK_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS work_owner_cursors_v1 (
-    project_id TEXT NOT NULL,
-    repository_id TEXT NOT NULL,
-    worktree_id TEXT NOT NULL,
-    actor_id TEXT NOT NULL,
-    policy_digest TEXT NOT NULL,
-    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    PRIMARY KEY (project_id, repository_id, worktree_id, actor_id, policy_digest)
-) STRICT;
-
--- `owner_sequence` is the value `work_owner_cursors_v1.sequence` took when the
--- event committed: the same transaction advances the cursor and binds its new
--- value here, so it is the journal's durable append order. Projection deltas
--- page by it; `task_id, version` remains the per-task fold and CAS order.
-CREATE TABLE IF NOT EXISTS work_events_v1 (
-    project_id TEXT NOT NULL,
-    repository_id TEXT NOT NULL,
-    worktree_id TEXT NOT NULL,
-    actor_id TEXT NOT NULL,
-    policy_digest TEXT NOT NULL,
-    task_id TEXT NOT NULL,
-    version INTEGER NOT NULL CHECK (version > 0),
-    command_id TEXT NOT NULL,
-    input_digest TEXT NOT NULL,
-    occurred_at INTEGER NOT NULL,
-    event_payload TEXT NOT NULL,
-    owner_sequence INTEGER NOT NULL CHECK (owner_sequence > 0),
-    PRIMARY KEY (
-        project_id, repository_id, worktree_id, actor_id, policy_digest, task_id, version
-    ),
-    UNIQUE (
-        project_id, repository_id, worktree_id, actor_id, policy_digest, task_id, command_id
-    )
-) STRICT;
 CREATE TABLE IF NOT EXISTS work_attempt_fences_v1 (
     project_id TEXT NOT NULL,
     repository_id TEXT NOT NULL,
@@ -319,11 +285,8 @@ ON work_duplicate_adjudications_v1 (
 /// The canonical Work product graph authority: its immutable event journal,
 /// and the verified graph versions committed atomically with it.
 ///
-/// This is a second, deliberately separate Work authority. `work_events_v1`
-/// above is scoped by [`WorkAuthority`](tracedecay_domain::WorkAuthority)
-/// (project/repository/worktree/actor/policy) and carries the task command
-/// history; the product journal is scoped by the registered profile OWNER
-/// (brain + profile), because that is the scope
+/// The product journal is scoped by the registered profile OWNER (brain +
+/// profile), because that is the scope
 /// `WorkProductEventV1::owner_scope` declares and the only scope its
 /// authorization port resolves. The two are never joined: correlating a task
 /// row with a product item would invent a correspondence neither authority
@@ -366,58 +329,15 @@ CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
 ) STRICT;
 ";
 
-/// The column `v0.1.0-beta.37` shipped `work_events_v1` without.
-pub const WORK_EVENT_OWNER_SEQUENCE_COLUMN: &str = "owner_sequence";
-
-/// Adds `owner_sequence` to a journal created before it existed. `ALTER TABLE`
-/// cannot add a `NOT NULL` column without a default, so a migrated journal
-/// carries the column nullable; the backfill below fills it and the unique
-/// index then guards every row the same way the fresh shape's constraint does.
-pub const WORK_EVENT_OWNER_SEQUENCE_COLUMN_DDL: &str =
-    "ALTER TABLE work_events_v1 ADD COLUMN owner_sequence INTEGER";
-
-/// Assigns append positions to rows that predate `owner_sequence`, then indexes
-/// the column. Idempotent: the update touches only unassigned rows.
-///
-/// A shipped journal never deleted or updated a row, so SQLite's `rowid` is its
-/// insertion order — the only record of how those appends interleaved. Numbering
-/// each authority's rows 1..n in `rowid` order reproduces the value the owner
-/// cursor held when each committed, which is why the cursor itself needs no
-/// repair. Cursor tokens minted under the earlier task-sorted contract are not
-/// reinterpreted; they carry a different prefix and are refused as stale.
-///
-/// ponytail: the correlated `COUNT(*)` is O(n²) per authority. It runs once per
-/// pre-`owner_sequence` journal; switch to `ROW_NUMBER() OVER` if such a journal
-/// is ever large enough to notice.
-pub const WORK_EVENT_OWNER_SEQUENCE_BACKFILL_V1: &str = "
-UPDATE work_events_v1
-SET owner_sequence = (
-    SELECT COUNT(*) FROM work_events_v1 AS earlier
-    WHERE earlier.project_id = work_events_v1.project_id
-      AND earlier.repository_id = work_events_v1.repository_id
-      AND earlier.worktree_id = work_events_v1.worktree_id
-      AND earlier.actor_id = work_events_v1.actor_id
-      AND earlier.policy_digest = work_events_v1.policy_digest
-      AND earlier.rowid <= work_events_v1.rowid
-)
-WHERE owner_sequence IS NULL;
-
-CREATE UNIQUE INDEX IF NOT EXISTS work_events_v1_owner_sequence
-    ON work_events_v1 (
-        project_id, repository_id, worktree_id, actor_id, policy_digest, owner_sequence
-    );
+/// `work_events_v1` shipped in `v0.1.0-beta.37`; retirement must therefore be
+/// journaled rather than erased from migration history.
+pub const RETIRE_WORK_EVENT_JOURNAL_V1: &str = "
+DROP TABLE IF EXISTS work_events_v1;
+DROP TABLE IF EXISTS work_owner_cursors_v1;
 ";
 
 pub fn install_work_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(WORK_SCHEMA_V1)?;
-    let has_owner_sequence = connection.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('work_events_v1') WHERE name = ?1",
-        [WORK_EVENT_OWNER_SEQUENCE_COLUMN],
-        |row| row.get::<_, i64>(0),
-    )? > 0;
-    if !has_owner_sequence {
-        connection.execute_batch(WORK_EVENT_OWNER_SEQUENCE_COLUMN_DDL)?;
-    }
-    connection.execute_batch(WORK_EVENT_OWNER_SEQUENCE_BACKFILL_V1)?;
+    connection.execute_batch(RETIRE_WORK_EVENT_JOURNAL_V1)?;
     connection.execute_batch(WORK_PRODUCT_SCHEMA_V1)
 }

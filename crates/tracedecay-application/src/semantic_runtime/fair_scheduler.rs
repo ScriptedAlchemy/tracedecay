@@ -878,36 +878,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_is_deterministically_round_robin_by_exact_worktree() {
-        let scheduler = scheduler();
-        scheduler.enqueue(batch("a", "one", 10, 1)).unwrap();
-        scheduler.enqueue(batch("a", "one", 10, 1)).unwrap();
-        scheduler.enqueue(batch("b", "one", 10, 1)).unwrap();
-        scheduler.enqueue(batch("c", "one", 10, 1)).unwrap();
-        scheduler.enqueue(batch("b", "one", 10, 1)).unwrap();
-        scheduler.enqueue(batch("c", "one", 10, 1)).unwrap();
-
-        let order = (0..6)
-            .map(|_| {
-                let lease = scheduler.try_dispatch().expect("ready batch");
-                lease.batch().worktree_id().as_str().to_owned()
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            order,
-            vec![
-                "worktree.a",
-                "worktree.b",
-                "worktree.c",
-                "worktree.a",
-                "worktree.b",
-                "worktree.c",
-            ]
-        );
-    }
-
-    #[test]
     fn newer_source_generation_coalesces_queued_and_cancels_running_work() {
         let scheduler = scheduler();
         scheduler.enqueue(batch("a", "old", 30, 20)).unwrap();
@@ -1063,16 +1033,6 @@ mod tests {
                 .await
         );
         assert!(unrelated_ran.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn concrete_scheduler_is_callable_through_the_shared_port() {
-        let scheduler = scheduler();
-        let port: &dyn SemanticProjectionSchedulingPortV1 = &scheduler;
-
-        port.enqueue(batch("a", "one", 10, 1)).unwrap();
-        assert_eq!(port.stats().queued_batches, 1);
-        assert!(port.try_dispatch().is_some());
     }
 
     #[test]

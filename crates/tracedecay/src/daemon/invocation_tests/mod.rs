@@ -47,26 +47,27 @@ pub(super) fn empty_work_proposal_routing(
         tracedecay_domain::configuration::WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
     )
     .expect("work executable bindings key");
-    let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
-        std::collections::BTreeMap::from([(
-            key.clone(),
-            tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
-                Vec::new(),
-            ),
-        )]),
-        std::collections::BTreeMap::from([(
-            key,
-            vec![tracedecay_domain::configuration::ConfigurationCandidateV1 {
-                layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
-                    project_id: scope.project_id.clone(),
-                },
-                revision_id: revision.clone(),
-                disposition: tracedecay_domain::configuration::CandidateDispositionV1::Winning,
-                safe_reason: None,
-            }],
-        )]),
+    // The runtime pin rejects a snapshot that omitted registry defaults
+    // such as `index.include.v1`. Resolve through the same core registry
+    // the daemon uses at project open, then overlay empty Work bindings.
+    let snapshot = crate::config::resolver::resolve_configuration(
+        &crate::config::registry::ConfigurationRegistry::core()
+            .expect("configuration registry defaults"),
+        &[crate::config::resolver::ConfigurationLayerV1 {
+            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: scope.project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: std::collections::BTreeMap::from([(
+                key,
+                tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
+                    Vec::new(),
+                ),
+            )]),
+        }],
     )
-    .expect("empty Work routing snapshot");
+    .expect("empty Work routing resolved through production defaults")
+    .snapshot;
     let digest = snapshot.effective_behavior_digest.clone();
     let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
         tracedecay_configuration::config::RuntimeConfigurationTarget {

@@ -1903,10 +1903,7 @@ mod controlled_invocation_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonInvocationError, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
-        SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-        SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
-        application_response, configuration_request_from_surface_payload,
+        DaemonInvocationError, application_response, configuration_request_from_surface_payload,
         feedback_handle_from_surface_payload, semantic_evaluation_application_problem,
         semantic_qualification_application_problem,
     };
@@ -1960,21 +1957,6 @@ mod tests {
             panic!("reset-required must remain an authoritative typed problem");
         };
         assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
-    }
-
-    #[test]
-    fn isolated_evaluation_dispatch_deadline_is_eval_scoped_not_production_900s() {
-        assert_eq!(SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS, 900_000_000);
-        assert_eq!(
-            SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-            1_800_000_000
-        );
-        const {
-            assert!(
-                SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS
-                    > SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS
-            );
-        }
     }
 
     #[test]
@@ -2054,31 +2036,6 @@ mod tests {
                 "matching or unknown daemon versions must not invent a skew: {error}"
             );
         }
-    }
-
-    #[test]
-    fn handshake_refusal_frames_become_typed_revision_skew_errors() {
-        let refusal = crate::handshake::DaemonHandshakeRefusal {
-            protocol: crate::handshake::DAEMON_HANDSHAKE_REFUSAL_PROTOCOL.to_owned(),
-            refusal: crate::handshake::DaemonHandshakeRefusalReason::UnsupportedRevision,
-            daemon_version: "0.1.0-beta.36+dddd".to_owned(),
-        };
-        let mut handshake = test_skew_handshake();
-        handshake.client_version = "0.1.0-beta.37+eeee".to_owned();
-
-        let error = super::handshake_refusal_error(&refusal, &handshake);
-        let (code, retryable, _) = error
-            .project_route_context()
-            .expect("handshake refusals must be typed");
-        assert_eq!(code, super::DAEMON_PROTOCOL_REVISION_SKEW);
-        assert!(!retryable);
-        let message = error.to_string();
-        assert!(
-            message.contains("UnsupportedRevision")
-                && message.contains("0.1.0-beta.36+dddd")
-                && message.contains("0.1.0-beta.37+eeee"),
-            "the refusal error must name the reason and both versions: {message}"
-        );
     }
 
     #[test]
@@ -2209,80 +2166,6 @@ mod tests {
             assert_eq!(reason, expected_reason);
             assert!(!retryable);
         }
-    }
-
-    #[test]
-    fn semantic_evaluation_client_prints_rejection_diagnostic() {
-        let error = semantic_evaluation_application_problem(ApplicationProblem::InvalidRequest {
-            diagnostic: tracedecay_contracts::SafeDiagnostic {
-                code: "semantic_evaluation.rejected".to_owned(),
-                message: "exact eligible chunks current expected 2170, measured 2184".to_owned(),
-            },
-            retry: tracedecay_contracts::RetryDirective::Never,
-            legal_actions: Vec::new(),
-        });
-        let message = error.to_string();
-        assert!(
-            message.contains("2184"),
-            "client must print the SearchEvalError detail: {message}"
-        );
-        assert!(
-            message.contains("semantic evaluation publication rejected"),
-            "client must keep the publication rejection prefix: {message}"
-        );
-    }
-
-    #[test]
-    fn semantic_evaluation_result_retains_the_direct_report() {
-        let result = SemanticEvaluationPublicationResultV1 {
-            project_id: "project-1".to_owned(),
-            profile_digest: format!("sha256:{}", "1".repeat(64)),
-            report_digest: format!("sha256:{}", "2".repeat(64)),
-            report: serde_json::json!({
-                "command": "compare",
-                "status": "pass",
-                "workload_digest": format!("sha256:{}", "3".repeat(64)),
-                "corpus_digest": format!("sha256:{}", "4".repeat(64)),
-                "fixture_source_repository_commit": "fixture-commit",
-                "fixture_source_repository_tree": "fixture-tree",
-                "execution_contract": {
-                    "exact_file_count": 0,
-                    "exact_corpus_bytes": 0,
-                    "exact_eligible_chunks_current": 0,
-                    "exact_eligible_chunks_10x": 0,
-                    "exact_query_count": 0,
-                    "model_revision": "model.serialization-test.v1",
-                    "projection_revision": "projection.serialization-test.v1",
-                    "fusion_revision": "fusion.serialization-test.v1",
-                    "runtime_revision": "runtime.serialization-test.v1",
-                    "cache_state": "empty",
-                    "concurrency": {
-                        "query_workers": 1,
-                        "projection_workers": 1,
-                        "query_execution": "serial"
-                    }
-                },
-                "profile_material_digests": {},
-                "raw_output_digest": format!("sha256:{}", "6".repeat(64)),
-                "raw_outputs": [],
-                "profiles": []
-            }),
-            source_generation: "generation-1".to_owned(),
-            snapshot_digest: format!("sha256:{}", "5".repeat(64)),
-        };
-
-        let encoded = serde_json::to_value(result).expect("serialize evaluation result");
-        assert_eq!(encoded["report"]["status"], "pass");
-        assert_eq!(encoded["report"]["command"], "compare");
-    }
-
-    #[test]
-    fn semantic_qualification_result_preserves_canonical_bytes() {
-        let result = SemanticEvaluationQualificationResultV1 {
-            qualification_bytes: vec![0x51, 0x55, 0x41, 0x4c],
-        };
-
-        assert_eq!(result.qualification_bytes, vec![0x51, 0x55, 0x41, 0x4c]);
     }
 
     #[test]

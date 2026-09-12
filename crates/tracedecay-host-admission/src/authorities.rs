@@ -193,7 +193,10 @@ impl<'a> HostAdmissionAuthorities<'a> {
         }
     }
 
-    pub(crate) fn validate_scope(&self, scope: &ObservationScopeV1) -> Result<(), HostAdmissionOutcome> {
+    pub(crate) fn validate_scope(
+        &self,
+        scope: &ObservationScopeV1,
+    ) -> Result<(), HostAdmissionOutcome> {
         let ObservationScopeV1::Project { project_id } = scope else {
             return Ok(());
         };

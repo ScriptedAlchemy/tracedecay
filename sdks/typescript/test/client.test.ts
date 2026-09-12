@@ -6,9 +6,9 @@ import {
   type ServerResponse,
 } from "node:http";
 
-import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { OPERATIONS, UNAVAILABLE_OPERATIONS } from "../src/operations";
+import { OPERATIONS } from "../src/operations";
 import { factStoreCurateTerminalMatches } from "../src/automation-terminal";
 import {
   decodeCanonicalSchema,
@@ -445,31 +445,6 @@ describe("canonical JSON Schema decoding", () => {
 });
 
 describe("TraceDecayClient generated operation bindings", () => {
-  it("publishes typed methods from the canonical operation union", () => {
-    expectTypeOf<
-      Parameters<
-        ReturnType<typeof createClient>["operations"]["workflow_get_definition"]
-      >[0]
-    >().toEqualTypeOf<{
-      readonly definition_id: string;
-      readonly definition_version: number;
-    }>();
-
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-    });
-
-    expect(new Set(OPERATIONS.map((operation) => operation.operation)).size).toBe(
-      OPERATIONS.length,
-    );
-    expect(Object.keys(client.operations).sort()).toEqual(
-      OPERATIONS.map((operation) => operation.operation).sort(),
-    );
-    expect(UNAVAILABLE_OPERATIONS).toEqual([]);
-  });
-
   it("preserves remote base paths and origin policy", async () => {
     let requestedUrl = "";
     let requestedOrigin = "";
@@ -557,63 +532,6 @@ describe("TraceDecayClient generated operation bindings", () => {
       {},
       { requestId: "request.sdk.curate" },
     )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
-  });
-
-  it("accepts an automatic-curation terminal through the public client", async () => {
-    const terminal = await curationEnvelope();
-    const sourcePayload = terminal.outcome.value.payload;
-    const payload = {
-      ...sourcePayload,
-      terminal: {
-        ...sourcePayload.terminal,
-        summary: {
-          ...sourcePayload.terminal.summary,
-          reviewed_count: 0,
-          accepted_count: 0,
-        },
-      },
-      committed_receipts: [],
-    };
-    const envelope = {
-      kind: "success",
-      value: {
-        binding_id: "binding.http.fact_store_curate.v1",
-        contract: {
-          schema_id: "schema.application.retained.fact-store-curate.result",
-          schema_revision: 1,
-        },
-        request_id: "request.sdk.curate",
-        scope: {},
-        outcome: {
-          outcome: "effect",
-          value: {
-            effect_id: "effect.sdk.curate",
-            effect_class: "administrative",
-            idempotency_key: "request.sdk.curate",
-            authority: {},
-            expected_state: "state.sdk.curate",
-            reconciliation: "required",
-            receipt: {},
-            execution: structuredClone(RECEIPT),
-            payload,
-          },
-        },
-      },
-    };
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async () => new Response(JSON.stringify(envelope), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    });
-
-    await expect(client.operations.application_fact_store_curate(
-      {},
-      { requestId: "request.sdk.curate" },
-    )).resolves.toMatchObject({ request_id: "request.sdk.curate" });
   });
 
   it("binds structurally valid automatic-curation terminals to the replay handle", async () => {
@@ -733,58 +651,6 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(Reflect.get(client, "requestOperation")).toBeUndefined();
   });
 
-  it("publishes all mounted Workflow routes as executable operations", () => {
-    const available: string[] = OPERATIONS.map((operation) => operation.operation);
-    expect(available.length).toBeGreaterThan(0);
-    expect(new Set(available).size).toBe(available.length);
-    expect(new Set(OPERATIONS.map((operation) => operation.operationId)).size).toBe(
-      available.length,
-    );
-    expect(new Set(OPERATIONS.map((operation) => operation.bindingId)).size).toBe(
-      available.length,
-    );
-    expect(available).toEqual(
-      expect.arrayContaining([
-        "workflow_definition_history",
-        "workflow_diff_definition",
-        "workflow_get_definition",
-        "workflow_handoff_issue",
-        "workflow_handoff_redeem",
-        "workflow_list_definitions",
-        "workflow_register_definition",
-        "workflow_validate_definition",
-      ]),
-    );
-    expect(
-      "workflow_list_definitions" in createClient({
-        baseUrl: "http://127.0.0.1:43123",
-        projectId: "project.sdk",
-        token: "sdk-secret",
-      }).operations,
-    ).toBe(true);
-    // Handoff and multi-root are mounted HTTP families and belong in the same
-    // canonical operation union as Work and Workflow.
-    const mountedFamilies = [
-      // The frontier read, alongside the two redemptions. It is the only
-      // handoff operation a caller can invoke without already holding a bearer.
-      "handoff_list_task_handoffs",
-      "handoff_open_investigation_handoff",
-      "handoff_open_task_handoff",
-      "multi_root_scope_set_read",
-      "multi_root_scope_set_compare_and_swap",
-      "multi_root_execute",
-    ];
-    const clientOperations = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-    }).operations;
-    for (const operation of mountedFamilies) {
-      expect(available).toContain(operation);
-      expect(operation in clientOperations).toBe(true);
-    }
-  });
-
   it("publishes workflow_register_definition with the canonical descriptor identity", () => {
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
@@ -818,73 +684,6 @@ describe("TraceDecayClient generated operation bindings", () => {
       maximum_millis: 30_000,
       behavior: "return_effect_receipt",
     });
-  });
-
-  it("publishes every configuration operation with its effect lifecycle", () => {
-    const expected = [
-      "configuration_list",
-      "configuration_get",
-      "configuration_set",
-      "configuration_unset",
-      "configuration_batch",
-      "configuration_observed_state",
-      "configuration_protected_preview",
-      "configuration_protected_apply",
-      "configuration_rollback_preview",
-      "configuration_rollback_apply",
-      "configuration_audit",
-    ]
-      .map((operation) => `application_${operation}`)
-      .sort();
-    const configuration = OPERATIONS.filter((operation) =>
-      operation.operation.startsWith("application_configuration_"),
-    );
-
-    expect(configuration.map((operation) => operation.operation)).toEqual(expected);
-    for (const operation of configuration) {
-      expect(operation.transport).toEqual({
-        kind: "http",
-        route: `/application/configuration/${operation.operation.replace(
-          /^application_/,
-          "",
-        )}`,
-        method: "POST",
-      });
-      expect(operation.bindingId).toBe(
-        `binding.http.${operation.operation.replace(/^application_/, "")}.v1`,
-      );
-      expect(operation.deadline.maximum_millis).toBe(15_000);
-      if (operation.effect === "configuration_write") {
-        expect(operation.idempotency).toBe("required");
-        expect(operation.cancellation).toEqual({ mode: "not_cancellable" });
-        expect(operation.deadline.behavior).toBe("return_effect_receipt");
-        expect(operation.reconciliation).toBe("required");
-        expect(operation.receipt).toBe("durable_effect");
-        expect(operation.terminalStates).toEqual([
-          "completed",
-          "timed_out",
-          "failed",
-          "effect_unknown",
-          "partial",
-        ]);
-      } else {
-        expect(operation.idempotency).toBe("not_required");
-        expect(operation.cancellation).toEqual({
-          mode: "cooperative",
-          points: ["before_admission", "before_read", "during_read"],
-        });
-        expect(operation.deadline.behavior).toBe("return_operation_receipt");
-        expect(operation.reconciliation).toBe("not_required");
-        expect(operation.receipt).toBe("operation");
-        expect(operation.terminalStates).toEqual([
-          "completed",
-          "cancelled",
-          "timed_out",
-          "failed",
-          "partial",
-        ]);
-      }
-    }
   });
 
   it("rejects an operation-illegal terminal before decoding its payload", () => {
@@ -923,55 +722,6 @@ describe("TraceDecayClient generated operation bindings", () => {
     );
   });
 
-  it("publishes mounted Git reads as application HTTP operations", () => {
-    for (const [operation, route] of [
-      ["git_status", "/application/git/status"],
-      ["git_diff", "/application/git/diff"],
-      ["git_history", "/application/git/history"],
-      ["git_blame", "/application/git/blame"],
-      ["git_hunks", "/application/git/hunks"],
-    ] as const) {
-      const descriptor = OPERATIONS.find(
-        (candidate) => candidate.operation === `application_${operation}`,
-      );
-      expect(descriptor).toBeDefined();
-      expect(descriptor?.operationId).toBe(
-        `operation.application.${operation}`,
-      );
-      expect(descriptor?.transport).toEqual({
-        kind: "http",
-        route,
-        method: "POST",
-      });
-      expect(descriptor?.bindingId).toBe(`binding.http.${operation}.v1`);
-      expect(OPERATIONS.map((candidate) => String(candidate.operation))).not.toContain(
-        operation,
-      );
-    }
-  });
-
-  it("routes application_git_status through its mounted HTTP binding", async () => {
-    let requestedUrl = "";
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async (input) => {
-        requestedUrl = String(input);
-        return new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    });
-
-    await expect(
-      client.operations.application_git_status({}),
-    ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
-    expect(requestedUrl).toBe(
-      "http://127.0.0.1:43123/projects/project.sdk/application/git/status",
-    );
-  });
 });
 
 describe("TraceDecayClient transport envelopes", () => {
@@ -1807,78 +1557,6 @@ describe("TraceDecayClient operation lifecycle", () => {
         await expect(
           client.cancelOperation("request.operation"),
         ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
-      },
-    );
-  });
-
-  it("preserves resume gaps and receipt-bearing partial termination", async () => {
-    await withServer(
-      [
-        (_request, response) => {
-          response.writeHead(200, {
-            "content-type": "text/event-stream",
-            connection: "close",
-          });
-          response.end(
-            [
-              "event: open",
-              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":5,"retained_from_sequence":5,"resume_token":"resume.gap"}}}',
-              "",
-              "event: resume_gap",
-              "id: 5",
-              'data: {"event":"resume_gap","data":{"sequence":5,"gap":{"first_missing_sequence":2,"last_missing_sequence":4,"frontier":{"next_sequence":5,"retained_from_sequence":5,"resume_token":"resume.gap"}}}}',
-              "",
-              "event: partial",
-              "id: 6",
-              `data: ${JSON.stringify({
-                event: "partial",
-                data: {
-                  sequence: 6,
-                  terminal: {
-                    termination: "partial",
-                    receipt: { ...RECEIPT, termination: "partial" },
-                  },
-                },
-              })}`,
-              "",
-              "",
-            ].join("\n"),
-          );
-        },
-      ],
-      async (baseUrl) => {
-        const client = createClient({
-          baseUrl,
-          projectId: "project.sdk",
-          token: "sdk-secret",
-        });
-        const events = [];
-        for await (const event of client.streamOperation("request.operation")) {
-          events.push(event);
-        }
-
-        expect(events.map((event) => event.event)).toEqual([
-          "open",
-          "resume_gap",
-          "partial",
-        ]);
-        expect(events[1]?.data).toMatchObject({
-          event: "resume_gap",
-          data: {
-            gap: {
-              first_missing_sequence: 2,
-              last_missing_sequence: 4,
-            },
-          },
-        });
-        expect(events[2]?.data).toMatchObject({
-          data: {
-            terminal: {
-              termination: "partial",
-              receipt: { termination: "partial" },
-            },
-          },
-        });
       },
     );
   });

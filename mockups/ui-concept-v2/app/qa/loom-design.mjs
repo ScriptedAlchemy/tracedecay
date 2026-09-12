@@ -13,7 +13,7 @@ try {
   assert.deepEqual(evidenceKey.map(row => row.label), ['EXACT','EXPLICIT','INFERRED','AMBIGUOUS','STALE','UNAVAILABLE']);
   assert.equal(new Set(evidenceKey.map(row => `${row.stroke}/${row.dash}`)).size, 6, 'Each evidence class has a distinct visual key');
 
-  assert.match(await page.locator('.loom-head').innerText(), /103 ILLUSTRATIVE AGENTS.*19 INCLUDED SUBAGENTS/);
+  assert.match(await page.locator('.loom-head').innerText(), /103 UNIQUE AGENTS.*123 WORKSTREAM PARTICIPATIONS/);
   assert.equal((await page.locator('.journey-group small').allTextContents()).reduce((sum,text)=>sum+Number(text.split(' ')[0]),0),123,'group participations may exceed unique agents');
   assert.match(await page.locator('.journey-nav-list').innerText(), /[1-9]\d* high-risk records/);
   assert.match(await page.locator('.journey-nav-list').innerText(), /Relations:.*exact/);
@@ -30,7 +30,7 @@ try {
   await page.goto(`${base}/?surface=loom&loom_source=design&state=04`); await page.locator('.journey-group').first().waitFor();
   await page.getByRole('searchbox', {name:'Search branches'}).fill('TimelineCanvas.tsx');
   await page.waitForFunction(() => new URLSearchParams(location.search).get('loom_query') === 'TimelineCanvas.tsx');
-  assert.match(await page.locator('.loom-head').innerText(), /2 ILLUSTRATIVE AGENTS/);
+  assert.match(await page.locator('.loom-head').innerText(), /2 UNIQUE AGENTS.*4 WORKSTREAM PARTICIPATIONS/);
   assert.equal(await page.locator('.journey-group').count(), 2, 'two matching identities retain their overlapping workstream participation');
   const filteredDensity = await page.locator('.journey-density').getAttribute('aria-label');
   assert.ok(Number(filteredDensity.match(/(\d+) revealed/)[1])<100,'Density respects the active source search');
@@ -52,7 +52,7 @@ try {
   await page.getByRole('button', {name:'WORKSTREAM', exact:true}).click();
   await page.getByRole('button', {name:'▽ EVENT FILTERS',exact:true}).click();
   await page.getByLabel('INFERRED',{exact:true}).check();
-  assert.match(await page.locator('.loom-head').innerText(), /1 ILLUSTRATIVE AGENTS/);
+  assert.match(await page.locator('.loom-head').innerText(), /1 UNIQUE AGENTS.*2 WORKSTREAM PARTICIPATIONS/);
   assert.ok(await page.locator('.loom-fallback').first().locator('tbody tr').count() > 0, 'inferred relations retain source endpoints');
   assert.ok((await page.locator('.loom-fallback').first().locator('tbody tr td:last-child').allTextContents()).every(grade => grade === 'EXACT'), 'recording an event does not upgrade its inferred relationship');
   await page.getByRole('button',{name:'CLEAR FILTERS',exact:true}).click();

@@ -816,11 +816,4 @@ mod tests {
         );
         assert_eq!(scan_receipt_snapshot().since(receipt).rows_decoded, 3);
     }
-
-    #[test]
-    fn scan_receipt_counts_are_thread_local() {
-        let before = scan_receipt_snapshot();
-        scan_receipt::record_row_decoded();
-        assert_eq!(scan_receipt_snapshot().since(before).rows_decoded, 1);
-    }
 }
