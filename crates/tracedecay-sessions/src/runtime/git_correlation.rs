@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::{
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
+};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::SessionMessageRecord;
@@ -761,6 +764,108 @@ pub fn transcript_git_evidence(
         }
     }
     (records.into_values().collect(), spans)
+}
+
+/// Derives Git evidence from one privacy-approved canonical observation.
+///
+/// The envelope contributes only typed Git facts and native identity/time.
+/// Worktree identity comes exclusively from the daemon-admitted repository
+/// root. Commit facts become relations only when the referenced object resolves
+/// independently to a commit in that admitted repository.
+#[hotpath::measure(label = "sessions.git_correlation.canonical_observation_evidence")]
+pub fn canonical_observation_git_evidence(
+    sanitized_payload: &serde_json::Value,
+    admitted_project_root: &std::path::Path,
+) -> Result<(Vec<CommitSessionRecord>, Vec<SpanObservation>), GitCorrelationError> {
+    let envelope: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(sanitized_payload.clone()).map_err(|error| {
+            GitCorrelationError::Contract(format!(
+                "sanitized canonical observation is invalid: {error}"
+            ))
+        })?;
+    let mut branch = None;
+    let mut commit_references = BTreeSet::new();
+    for fact in envelope.facts() {
+        let CanonicalObservationFactV1::Git {
+            evidence_kind,
+            reference: Some(reference),
+            ..
+        } = fact
+        else {
+            continue;
+        };
+        match evidence_kind {
+            CanonicalGitEvidenceKindV1::Branch if !reference.trim().is_empty() => {
+                branch.get_or_insert_with(|| reference.clone());
+            }
+            CanonicalGitEvidenceKindV1::Commit if !reference.trim().is_empty() => {
+                commit_references.insert(reference.clone());
+            }
+            _ => {}
+        }
+    }
+    if branch.is_none() && commit_references.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let provider = envelope.provider().as_str().to_owned();
+    let session_id = envelope.relations().session_id().as_str().to_owned();
+    let timestamp = envelope.evidence().native_timestamp();
+    let worktree = normalize_worktree(&admitted_project_root.to_string_lossy());
+    let spans = timestamp
+        .map(|ts| {
+            vec![SpanObservation {
+                provider: provider.clone(),
+                session_id: session_id.clone(),
+                thread_id: envelope
+                    .relations()
+                    .thread_id()
+                    .map(|thread_id| thread_id.as_str().to_owned()),
+                branch: branch.clone(),
+                worktree: worktree.clone(),
+                ts,
+                source: SpanSource::Ingest,
+            }]
+        })
+        .unwrap_or_default();
+
+    let Ok(repo) = gix::discover(admitted_project_root) else {
+        return Ok((Vec::new(), spans));
+    };
+    let mut commits = Vec::new();
+    for reference in commit_references {
+        let Ok(spec) = repo.rev_parse_single(reference.as_str()) else {
+            continue;
+        };
+        let Ok(object) = spec.object() else {
+            continue;
+        };
+        let Ok(commit) = object.try_into_commit() else {
+            continue;
+        };
+        let Ok(commit_time) = commit.time() else {
+            continue;
+        };
+        let commit_sha = commit.id.to_string();
+        commits.push(CommitSessionRecord {
+            commit_sha,
+            provider: provider.clone(),
+            session_id: session_id.clone(),
+            branch: branch.clone(),
+            worktree: Some(worktree.clone()),
+            committed_at: commit_time.seconds,
+            span_overlap_kind: SpanOverlapKind::Direct,
+            span_id: None,
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::HeadObservation,
+            confidence: 60,
+            evidence_message_id: envelope
+                .relations()
+                .message_id()
+                .map(|message_id| message_id.as_str().to_owned()),
+        });
+    }
+    Ok((commits, spans))
 }
 
 fn parsed_message_metadata(message: &SessionMessageRecord) -> Option<serde_json::Value> {
