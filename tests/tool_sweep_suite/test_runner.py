@@ -1562,33 +1562,75 @@ class FixturePrimingRetryTests(unittest.TestCase):
         )
         self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
 
-    def test_non_retryable_graph_failure_remains_immediately_fatal(self) -> None:
-        """The warming reason code alone cannot authorize another attempt."""
+    def test_code_node_failure_does_not_block_git_work_or_workflow_groups(self) -> None:
+        runner = load_runner()
+        runner.CODE_INDEX_READY_TIMEOUT_S = 0
+        client = self.client([self.response('{"node_id":"function:fixture"}')])
+        original_call = client.call_tool
+
+        def missing_code_node(name, arguments, deadline_ms):
+            if name == "tracedecay_code_symbol_search":
+                return self.response('{"nodes":[]}'), 3
+            return original_call(name, arguments, deadline_ms)
+
+        client.call_tool = missing_code_node
+        fixture = {
+            "symbol": "sweep_anchor",
+            "qualified_name": "src/lib.rs::sweep_anchor",
+            "session_id": "session.fixture",
+            "lcm_message": "catalog sweep captured LCM message",
+            "root": "/fixture/root",
+            "commit": "a" * 40,
+        }
+        policies = self.policies(runner)
+        policies["tracedecay_workflow_validate_definition"] = runner.ToolPolicy(
+            "tracedecay_workflow_validate_definition", "available", "read", 1_000
+        )
+        original_workflow = runner.prime_workflow_lifecycle
+
+        def mark_workflow_group(*args, **kwargs):
+            fixture["workflow_group_reached"] = True
+
+        runner.prime_workflow_lifecycle = mark_workflow_group
+        try:
+            runner.prime_fixture_values(client, fixture, policies)
+        finally:
+            runner.prime_workflow_lifecycle = original_workflow
+
+        self.assertIn("complete generation identity", fixture["priming_errors"]["code_node"]["message"])
+        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
+        self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
+        self.assertTrue(fixture["workflow_group_reached"])
+
+    def test_non_retryable_graph_failure_does_not_block_independent_groups(self) -> None:
+        """A terminal graph failure only withholds graph-dependent identities."""
         runner = load_runner()
         terminal = self.project_route_error(
             "code-graph-unavailable", retryable=False
         )
-        client = self.client([terminal, self.response('{"node_id":"function:fixture"}')])
+        client = self.client([terminal])
+        fixture = {
+            "symbol": "sweep_anchor",
+            "qualified_name": "src/lib.rs::sweep_anchor",
+            "session_id": "session.fixture",
+            "lcm_message": "catalog sweep captured LCM message",
+            "root": "/fixture/root",
+            "commit": "a" * 40,
+        }
 
-        with self.assertRaisesRegex(runner.SweepError, "code-graph-unavailable"):
-            runner.prime_fixture_values(
-                client,
-                {
-                    "symbol": "sweep_anchor",
-                    "qualified_name": "src/lib.rs::sweep_anchor",
-                    "session_id": "session.fixture",
-                    "lcm_message": "catalog sweep captured LCM message",
-                    "root": "/fixture/root",
-                    "commit": "a" * 40,
-                },
-                self.policies(runner),
-            )
+        runner.prime_fixture_values(client, fixture, self.policies(runner))
 
         qualified_name_calls = [
             name for name, _arguments in client.calls
             if name == "tracedecay_by_qualified_name"
         ]
         self.assertEqual(len(qualified_name_calls), 1)
+        self.assertIn("code-graph-unavailable", fixture["priming_errors"]["graph"]["message"])
+        self.assertNotIn("node_id", fixture)
+        self.assertEqual(fixture["handle"], "rh_fixture")
+        self.assertEqual(fixture["code_node_id"], "sym:code")
+        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
+        self.assertTrue(fixture["work_attempt_id"].startswith("attempt.tool-sweep."))
 
 
 class WorkflowLifecycleTests(unittest.TestCase):
@@ -1831,29 +1873,9 @@ class MountRetryTests(unittest.TestCase):
         self.assertTrue(row["expected_denial"])
         self.assertEqual(len(client.calls), 1)
 
-    def test_expected_denial_is_reached_through_its_mounting_window(self) -> None:
-        """Foreign retryable unavailability retries into the exact cataloged denial."""
+    def test_branch_search_no_longer_claims_the_superseded_denial(self) -> None:
         runner = load_runner()
-        runner.MOUNT_RETRY_DELAY_S = 0.001
-        name = "tracedecay_branch_search"
-        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
-        self.assertEqual((kind, code), ("unavailable", "search_failed"))
-        mounting = self.text_response(
-            '{"status":"unavailable","reason":"search_capacity_unavailable","retryable":true}',
-            is_error=True,
-        )
-        terminal = self.text_response(
-            '{"status":"unavailable","reason":"search_failed","retryable":false}',
-            is_error=True,
-        )
-        client = self.scripted_client({name: [mounting, terminal]})
-
-        row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
-
-        self.assertEqual(row["verdict"], "PASS")
-        self.assertTrue(row["expected_denial"])
-        self.assertEqual(row["problem_code"], code)
-        self.assertEqual(len(client.calls), 2)
+        self.assertNotIn("tracedecay_branch_search", runner.EXPECTED_HERMETIC_DENIALS)
 
     def test_multi_root_probes_reach_the_exact_daemon_denial(self) -> None:
         """Materialized multi-root bodies parse, so the typed owner denial is exact."""
