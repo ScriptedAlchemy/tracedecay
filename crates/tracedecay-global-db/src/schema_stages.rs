@@ -624,8 +624,6 @@ where
         temporal_admission,
         workflow_admission,
         force_exhaustive,
-        commit_operation,
-        rollback_operation,
     )
     .await;
     match admission {
