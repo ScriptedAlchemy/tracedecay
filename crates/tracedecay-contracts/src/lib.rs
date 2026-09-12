@@ -23,7 +23,6 @@ pub mod branch_snapshots;
 pub mod catalog_composition;
 pub mod clock;
 pub mod configuration;
-mod configuration_wire;
 pub mod context;
 pub mod context_scout;
 pub mod diagnostics;
@@ -137,7 +136,6 @@ pub use configuration::{
     configuration_surface_operation, configuration_surface_request_schema,
     configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
 };
-pub use configuration_wire::{ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1};
 pub use context::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationRequestControlV1, CancellationContext,
     CancellationSignal, CancellationState, CancellationTokenId, CapabilityGrantId,
