@@ -109,6 +109,13 @@ impl EmbeddingSession for ProductionEmbeddingSession {
             Self::Model2Vec(session) => session.embed_batch(batch, authority),
         }
     }
+
+    fn encoded_token_lengths(&mut self, texts: &[String]) -> Result<Vec<usize>, EmbedError> {
+        match self {
+            Self::FastEmbed(session) => session.encoded_token_lengths(texts),
+            Self::Model2Vec(session) => session.encoded_token_lengths(texts),
+        }
+    }
 }
 
 impl EmbeddingRuntime for ProductionEmbeddingRuntime {

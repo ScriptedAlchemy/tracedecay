@@ -108,6 +108,10 @@ impl EmbeddingSession for UnavailableModel2VecSession {
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
         match *self {}
     }
+
+    fn encoded_token_lengths(&mut self, _texts: &[String]) -> Result<Vec<usize>, EmbedError> {
+        match *self {}
+    }
 }
 
 #[cfg(not(feature = "semantic-model2vec"))]
@@ -611,6 +615,18 @@ impl EmbeddingSession for Model2VecEmbeddingSession {
         }
         hotpath::gauge!("semantic_embed_truncated_texts").set(truncated_texts);
         Ok(vectors)
+    }
+
+    fn encoded_token_lengths(&mut self, texts: &[String]) -> Result<Vec<usize>, EmbedError> {
+        // Static embedding pools per text, so no padded tensor exists and the
+        // attention budget cannot bind here. The count is still the honest
+        // length the projector orders and buckets by.
+        hotpath::measure_block!("semantic.embed.tokenize", {
+            texts
+                .iter()
+                .map(|text| self.model.tokenize(text).map(|tokens| tokens.ids.len()))
+                .collect()
+        })
     }
 }
 

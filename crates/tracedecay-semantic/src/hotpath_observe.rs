@@ -75,6 +75,7 @@ pub(crate) fn embed_error_class(error: &EmbedError) -> &'static str {
         EmbedError::EmptyBatch => "empty_batch",
         EmbedError::TooManyTexts { .. } => "too_many_texts",
         EmbedError::BatchBytesExceeded { .. } => "batch_bytes_exceeded",
+        EmbedError::AttentionBudgetExceeded { .. } => "attention_budget_exceeded",
         EmbedError::DimensionMismatch { .. } => "dimension_mismatch",
         EmbedError::NonFiniteVectorValue => "non_finite_vector",
         EmbedError::Runtime(failure) => runtime_failure_class(failure.kind),

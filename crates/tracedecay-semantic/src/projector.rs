@@ -30,8 +30,25 @@ use tracedecay_code_index::projection::{
 /// session is busy; they only raise peak RSS.
 const ENCODING_WINDOW_GROUPS_PER_WORKER: usize = 4;
 
+/// How long each composed document actually tokenizes.
+///
+/// Grouping needs this and cannot guess it. A group's padded length is the
+/// `max` over its members and attention cost is quadratic in that length, so
+/// a bytes-per-token estimate is wrong by the square of its error: dense or
+/// non-ASCII source tokenizes at far fewer bytes per token than prose, and
+/// the resulting tensor is correspondingly larger than the budget allows.
+/// The authority is therefore the encoder's own tokenizer, under the admitted
+/// projection's truncation.
+pub trait CanonicalChunkTokenLengthsV1 {
+    fn document_token_lengths(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String>;
+}
+
 /// The only projector dependency that may produce vector values.
-pub trait CanonicalChunkVectorEncoderV1 {
+pub trait CanonicalChunkVectorEncoderV1: CanonicalChunkTokenLengthsV1 {
     fn encode(
         &mut self,
         key: &EmbeddingProjectionKeyV1,
@@ -92,6 +109,12 @@ pub enum SemanticProjectionErrorV1 {
         actual_bytes: usize,
         inference_batch_bytes: usize,
     },
+    #[error("vector encoder could not measure canonical token lengths: {0}")]
+    TokenLengths(String),
+    #[error(
+        "the token-length authority returned {returned} lengths for {expected} canonical chunks"
+    )]
+    TokenLengthCardinality { expected: usize, returned: usize },
     #[error("vector encoder rejected chunk {chunk_id}: {reason}")]
     Encoder {
         chunk_id: CodeSearchChunkId,
@@ -395,11 +418,20 @@ struct CanonicalEncoderGroupV1<'a> {
     changes: Vec<&'a ChangedCodeChunkV1>,
 }
 
-/// Quadratic attention-score budget equal to the previous worst-case batch:
-/// 32 rows padded to 512 tokens. A single longer row is always admitted so
-/// the configured sequence ceiling remains reachable.
-const ATTENTION_BUDGET_BASELINE_SEQUENCE: usize = 512;
-const ESTIMATED_BYTES_PER_TOKEN: usize = 4;
+/// Where a group's token lengths come from.
+///
+/// The two variants are the two things `split_projection_request` is asked to
+/// do, and they are not the same job. Only one of them will build a tensor.
+enum CanonicalGroupLengthsV1<'a> {
+    /// The changes are about to be embedded. Group boundaries decide tensor
+    /// shapes and therefore vector bytes, so the session tokenizer is the
+    /// only admissible authority and the attention budget binds.
+    Tokenized(&'a mut dyn CanonicalChunkTokenLengthsV1),
+    /// The vectors already exist and these pages only bound durable commits.
+    /// No forward pass will run, so there is no padded length to respect and
+    /// no reason to pay for tokenization.
+    AlreadyEmbedded,
+}
 
 /// Split one whole-corpus projection request into batches that commit
 /// independently.
@@ -433,8 +465,48 @@ pub fn split_projection_request(
     request: &ProjectionBatchRequestV1,
     canonical_chunks: &[Arc<CodeSearchChunkV1>],
     max_embeds_per_batch: usize,
-    inference_batch_size: usize,
-    inference_batch_bytes: usize,
+    key: &EmbeddingProjectionKeyV1,
+    lengths: &mut dyn CanonicalChunkTokenLengthsV1,
+) -> Result<Vec<ProjectionRequestBatchV1>, SemanticProjectionErrorV1> {
+    split_request(
+        request,
+        canonical_chunks,
+        max_embeds_per_batch,
+        key,
+        Some(lengths),
+    )
+}
+
+/// Page an already-embedded request for durable commit.
+///
+/// The vectors exist; these boundaries only bound how much is staged per
+/// transaction. No forward pass will run over them, so they carry no
+/// tensor-shape identity and no tokenizer is consulted.
+pub fn split_committed_projection_request(
+    request: &ProjectionBatchRequestV1,
+    canonical_chunks: &[Arc<CodeSearchChunkV1>],
+    max_embeds_per_batch: usize,
+    key: &EmbeddingProjectionKeyV1,
+) -> Result<Vec<ProjectionRequestBatchV1>, SemanticProjectionErrorV1> {
+    split_request(request, canonical_chunks, max_embeds_per_batch, key, None)
+}
+
+/// Reborrow the caller's length authority for one grouping pass.
+fn group_lengths<'a>(
+    lengths: &'a mut Option<&mut dyn CanonicalChunkTokenLengthsV1>,
+) -> CanonicalGroupLengthsV1<'a> {
+    match lengths {
+        Some(authority) => CanonicalGroupLengthsV1::Tokenized(&mut **authority),
+        None => CanonicalGroupLengthsV1::AlreadyEmbedded,
+    }
+}
+
+fn split_request(
+    request: &ProjectionBatchRequestV1,
+    canonical_chunks: &[Arc<CodeSearchChunkV1>],
+    max_embeds_per_batch: usize,
+    key: &EmbeddingProjectionKeyV1,
+    mut lengths: Option<&mut dyn CanonicalChunkTokenLengthsV1>,
 ) -> Result<Vec<ProjectionRequestBatchV1>, SemanticProjectionErrorV1> {
     let unsplit = || {
         hotpath::gauge!("semantic_projection_batch_count").set(1_usize);
@@ -450,30 +522,7 @@ pub fn split_projection_request(
     if projection_changed && !request.changes.reused.is_empty() && !reembed_reused {
         return unsplit();
     }
-    if inference_batch_size == 0 {
-        return Err(SemanticProjectionErrorV1::Contract(
-            "semantic projection inference batch size is zero".to_owned(),
-        ));
-    }
-    if inference_batch_bytes == 0 {
-        return Err(SemanticProjectionErrorV1::Contract(
-            "semantic projection inference batch byte ceiling is zero".to_owned(),
-        ));
-    }
-    let inference_sequence_length = inference_batch_bytes
-        .checked_div(inference_batch_size.saturating_mul(ESTIMATED_BYTES_PER_TOKEN))
-        .unwrap_or(0)
-        .max(1);
-    for chunk in canonical_chunks {
-        record_token_length_histogram(
-            chunk
-                .sanitized_text
-                .as_str()
-                .len()
-                .div_ceil(ESTIMATED_BYTES_PER_TOKEN)
-                .max(1),
-        );
-    }
+    let inference_batch_size = admitted_usize(key.inference_batch_size, "inference batch size")?;
     // Round down to whole encoder groups; never below one group.
     let window = max_embeds_per_batch
         .saturating_sub(max_embeds_per_batch % inference_batch_size)
@@ -495,9 +544,8 @@ pub fn split_projection_request(
     let added_groups = match canonical_encoder_groups(
         &request.changes.added_or_changed,
         &chunks_by_id,
-        inference_batch_size,
-        inference_batch_bytes,
-        inference_sequence_length,
+        key,
+        group_lengths(&mut lengths),
         |chunk_id| SemanticProjectionErrorV1::CanonicalChunkSetMismatch(chunk_id.clone()),
     ) {
         Ok(group_lengths) => group_lengths,
@@ -507,9 +555,8 @@ pub fn split_projection_request(
         match canonical_encoder_groups(
             &request.changes.reused,
             &chunks_by_id,
-            inference_batch_size,
-            inference_batch_bytes,
-            inference_sequence_length,
+            key,
+            group_lengths(&mut lengths),
             |_chunk_id| SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds,
         ) {
             Ok(group_lengths) => group_lengths,
@@ -628,55 +675,73 @@ fn take_full_encoder_groups<'a>(
 fn canonical_encoder_groups<'a, Missing>(
     changes: &'a [ChangedCodeChunkV1],
     chunks: &BTreeMap<CodeSearchChunkId, &'a Arc<CodeSearchChunkV1>>,
-    inference_batch_size: usize,
-    inference_batch_bytes: usize,
-    inference_sequence_length: usize,
+    key: &EmbeddingProjectionKeyV1,
+    lengths: CanonicalGroupLengthsV1<'_>,
     missing: Missing,
 ) -> Result<Vec<CanonicalEncoderGroupV1<'a>>, SemanticProjectionErrorV1>
 where
     Missing: Fn(&CodeSearchChunkId) -> SemanticProjectionErrorV1,
 {
-    if inference_batch_size == 0 {
-        return Err(SemanticProjectionErrorV1::Contract(
-            "semantic projection inference batch size is zero".to_owned(),
-        ));
-    }
-    if inference_batch_bytes == 0 {
-        return Err(SemanticProjectionErrorV1::Contract(
-            "semantic projection inference batch byte ceiling is zero".to_owned(),
-        ));
-    }
-    if inference_sequence_length == 0 {
-        return Err(SemanticProjectionErrorV1::Contract(
-            "semantic projection sequence length is zero".to_owned(),
-        ));
+    let inference_batch_size = admitted_usize(key.inference_batch_size, "inference batch size")?;
+    let inference_batch_bytes =
+        admitted_usize(key.inference_batch_bytes, "inference batch byte ceiling")?;
+    let truncation_length = admitted_usize(key.truncation_length, "truncation length")?;
+
+    let mut resolved = Vec::with_capacity(changes.len());
+    for change in changes {
+        let chunk = chunks
+            .get(&change.chunk_id)
+            .copied()
+            .ok_or_else(|| missing(&change.chunk_id))?;
+        let chunk_bytes = chunk.sanitized_text.as_str().len();
+        if chunk_bytes > inference_batch_bytes {
+            return Err(
+                SemanticProjectionErrorV1::InferenceBatchByteCeilingExceeded {
+                    chunk_id: chunk.id.clone(),
+                    actual_bytes: chunk_bytes,
+                    inference_batch_bytes,
+                },
+            );
+        }
+        resolved.push((change, chunk));
     }
 
-    let mut ordered_changes = changes
-        .iter()
-        .map(|change| {
-            let chunk = chunks
-                .get(&change.chunk_id)
-                .copied()
-                .ok_or_else(|| missing(&change.chunk_id))?;
-            let chunk_bytes = chunk.sanitized_text.as_str().len();
-            if chunk_bytes > inference_batch_bytes {
-                return Err(
-                    SemanticProjectionErrorV1::InferenceBatchByteCeilingExceeded {
-                        chunk_id: chunk.id.clone(),
-                        actual_bytes: chunk_bytes,
-                        inference_batch_bytes,
-                    },
-                );
+    // One tokenizer pass for the whole lane. Ordering and packing both need
+    // every length before either can start, and the authority batches far
+    // better than per-chunk calls would.
+    let token_lengths = match lengths {
+        CanonicalGroupLengthsV1::Tokenized(authority) => {
+            let documents = resolved
+                .iter()
+                .map(|(_, chunk)| chunk.as_ref())
+                .collect::<Vec<_>>();
+            let measured = hotpath::measure_block!(
+                "semantic.projector.tokenize",
+                authority.document_token_lengths(key, &documents)
+            )
+            .map_err(SemanticProjectionErrorV1::TokenLengths)?;
+            if measured.len() != resolved.len() {
+                return Err(SemanticProjectionErrorV1::TokenLengthCardinality {
+                    expected: resolved.len(),
+                    returned: measured.len(),
+                });
             }
-            let estimated_tokens = chunk_bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN).max(1);
-            Ok((
-                change,
-                chunk,
-                estimated_tokens.min(inference_sequence_length),
-            ))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+            for tokens in &measured {
+                record_token_length_histogram(*tokens);
+            }
+            measured
+        }
+        // Length is irrelevant to a page that will never be embedded; a
+        // constant keeps every change in one bucket so the packing below
+        // reduces to the count and byte bounds it also enforces.
+        CanonicalGroupLengthsV1::AlreadyEmbedded => vec![1; resolved.len()],
+    };
+
+    let mut ordered_changes = resolved
+        .into_iter()
+        .zip(token_lengths)
+        .map(|((change, chunk), tokens)| (change, chunk, tokens.max(1).min(truncation_length)))
+        .collect::<Vec<_>>();
     ordered_changes.sort_unstable_by(|(_, left, left_tokens), (_, right, right_tokens)| {
         left_tokens
             .cmp(right_tokens)
@@ -702,9 +767,12 @@ where
     });
 
     let mut groups = Vec::new();
-    let attention_token_square_budget = inference_batch_size
-        .saturating_mul(ATTENTION_BUDGET_BASELINE_SEQUENCE)
-        .saturating_mul(ATTENTION_BUDGET_BASELINE_SEQUENCE);
+    let attention_budget =
+        usize::try_from(crate::fastembed_adapter::attention_token_square_budget(
+            inference_batch_size as u64,
+            truncation_length as u64,
+        ))
+        .unwrap_or(usize::MAX);
     let mut group = Vec::new();
     let mut group_bytes = 0;
     let mut padded_tokens = 0usize;
@@ -718,7 +786,7 @@ where
         if !group.is_empty()
             && (next_len > inference_batch_size
                 || chunk_bytes > inference_batch_bytes.saturating_sub(group_bytes)
-                || attention_cost > attention_token_square_budget)
+                || attention_cost > attention_budget)
         {
             groups.push(CanonicalEncoderGroupV1 { changes: group });
             group = Vec::new();
@@ -733,6 +801,24 @@ where
         groups.push(CanonicalEncoderGroupV1 { changes: group });
     }
     Ok(groups)
+}
+
+/// Read one admitted projection-key bound as a host `usize`.
+///
+/// Zero is a contract violation rather than a clamp: every one of these bounds
+/// divides or caps a group, so a zero would silently mean "no bound".
+fn admitted_usize(value: u32, field: &str) -> Result<usize, SemanticProjectionErrorV1> {
+    let value = usize::try_from(value).map_err(|_| {
+        SemanticProjectionErrorV1::Contract(format!(
+            "semantic projection {field} exceeds this platform"
+        ))
+    })?;
+    if value == 0 {
+        return Err(SemanticProjectionErrorV1::Contract(format!(
+            "semantic projection {field} is zero"
+        )));
+    }
+    Ok(value)
 }
 
 fn record_token_length_histogram(estimated_tokens: usize) {
@@ -768,7 +854,7 @@ fn encode_changes_windowed<E, Missing, Sink>(
     mut sink: Sink,
 ) -> Result<(), SemanticProjectionErrorV1>
 where
-    E: CanonicalChunkVectorEncoderV1 + ?Sized,
+    E: CanonicalChunkVectorEncoderV1,
     Missing: Fn(&CodeSearchChunkId) -> SemanticProjectionErrorV1,
     Sink: FnMut(
         &ChangedCodeChunkV1,
@@ -779,24 +865,11 @@ where
     if changes.is_empty() {
         return Ok(());
     }
-    let inference_batch_size =
-        usize::try_from(embedding_key.inference_batch_size).map_err(|_| {
-            SemanticProjectionErrorV1::Contract(
-                "semantic projection inference batch size exceeds this platform".to_owned(),
-            )
-        })?;
-    let inference_batch_bytes =
-        usize::try_from(embedding_key.inference_batch_bytes).map_err(|_| {
-            SemanticProjectionErrorV1::Contract(
-                "semantic projection inference batch byte ceiling exceeds this platform".to_owned(),
-            )
-        })?;
     let canonical_groups = canonical_encoder_groups(
         changes,
         chunks,
-        inference_batch_size,
-        inference_batch_bytes,
-        embedding_key.truncation_length as usize,
+        embedding_key,
+        CanonicalGroupLengthsV1::Tokenized(encoder),
         missing,
     )?;
     let window_groups = ENCODING_WINDOW_GROUPS_PER_WORKER
@@ -954,12 +1027,82 @@ mod encoder_group_tests {
     use super::*;
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-        FileOccurrenceId, LanguageDescriptorRevision, PolicyRevisionId, SanitizerRevision,
-        SensitivityDecision, SensitivityLevelV1, SourceSpan,
+        EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1, EmbeddingExecutionProviderV1,
+        EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingTruncationSideV1, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
+        PolicyRevisionId, PrivacyDomainId, SanitizerRevision, SensitivityDecision,
+        SensitivityLevelV1, SourceSpan,
     };
 
-    const BATCH_SIZE: usize = 32;
-    const BATCH_BYTES: usize = 32 * 4096 * 4;
+    const BATCH_SIZE: u32 = 32;
+    const TRUNCATION_LENGTH: u32 = 4096;
+    const BATCH_BYTES: u32 = BATCH_SIZE * TRUNCATION_LENGTH * 4;
+
+    /// Fixture tokenizer: one token per whitespace-separated word.
+    ///
+    /// The fixtures below therefore state their intended token counts
+    /// literally — `token_text(1024)` is a document of 1024 tokens — instead
+    /// of encoding a bytes-per-token guess into the expected group shapes.
+    struct WordTokenLengthsV1;
+
+    impl CanonicalChunkTokenLengthsV1 for WordTokenLengthsV1 {
+        fn document_token_lengths(
+            &mut self,
+            key: &EmbeddingProjectionKeyV1,
+            chunks: &[&CodeSearchChunkV1],
+        ) -> Result<Vec<usize>, String> {
+            let truncation_length = key.truncation_length as usize;
+            Ok(chunks
+                .iter()
+                .map(|chunk| {
+                    chunk
+                        .sanitized_text
+                        .as_str()
+                        .split_whitespace()
+                        .count()
+                        .clamp(1, truncation_length)
+                })
+                .collect())
+        }
+    }
+
+    fn digest(seed: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
+            .expect("digest fixture")
+    }
+
+    fn embedding_key() -> EmbeddingProjectionKeyV1 {
+        EmbeddingProjectionKeyV1 {
+            model_artifact_digest: digest('a'),
+            tokenizer_digest: digest('b'),
+            config_digest: digest('c'),
+            query_instruction_digest: None,
+            document_instruction_digest: None,
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
+            pooling: EmbeddingPoolingV1::Mean,
+            truncation_side: EmbeddingTruncationSideV1::Right,
+            truncation_length: TRUNCATION_LENGTH,
+            inference_batch_size: BATCH_SIZE,
+            inference_batch_bytes: BATCH_BYTES,
+            runtime_backend: "fastembed-ort".to_owned(),
+            runtime_build_revision: "ort-fixture".to_owned(),
+            device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider: EmbeddingExecutionProviderV1::Cpu,
+            dimensions: 8,
+            metric: EmbeddingMetricV1::Cosine,
+            normalization: EmbeddingNormalizationV1::L2,
+            precision: EmbeddingPrecisionV1::Fp32,
+            chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+            chunker_revision: ChunkerRevision::new("chunker.v1").expect("chunker fixture"),
+            privacy_domain: PrivacyDomainId::new("privacy.fixture").expect("privacy fixture"),
+            privacy_key_epoch: 1,
+        }
+    }
+
+    /// A document of exactly `tokens` whitespace-separated words.
+    fn token_text(tokens: usize) -> String {
+        vec!["x"; tokens].join(" ")
+    }
 
     fn chunk_with_text(file: &str, ordinal: u32, text: &str) -> Arc<CodeSearchChunkV1> {
         let start_byte = u64::from(ordinal).saturating_mul(1024);
@@ -1021,9 +1164,8 @@ mod encoder_group_tests {
         canonical_encoder_groups(
             &changes,
             &by_id,
-            BATCH_SIZE,
-            BATCH_BYTES,
-            4096,
+            &embedding_key(),
+            CanonicalGroupLengthsV1::Tokenized(&mut WordTokenLengthsV1),
             |chunk_id| SemanticProjectionErrorV1::CanonicalChunkSetMismatch(chunk_id.clone()),
         )
         .expect("fixture groups")
@@ -1046,17 +1188,15 @@ mod encoder_group_tests {
     fn quadratic_token_budget_buckets_long_chunks_into_smaller_batches() {
         let chunks = [
             (0..32)
-                .map(|ordinal| chunk_with_text(&format!("short{ordinal}"), 0, &"x".repeat(128 * 4)))
+                .map(|ordinal| chunk_with_text(&format!("short{ordinal}"), 0, &token_text(128)))
                 .collect::<Vec<_>>(),
             (0..8)
-                .map(|ordinal| {
-                    chunk_with_text(&format!("medium{ordinal}"), 0, &"x".repeat(1024 * 4))
-                })
+                .map(|ordinal| chunk_with_text(&format!("medium{ordinal}"), 0, &token_text(1024)))
                 .collect::<Vec<_>>(),
             (0..2)
-                .map(|ordinal| chunk_with_text(&format!("long{ordinal}"), 0, &"x".repeat(2048 * 4)))
+                .map(|ordinal| chunk_with_text(&format!("long{ordinal}"), 0, &token_text(2048)))
                 .collect::<Vec<_>>(),
-            vec![chunk_with_text("maximum", 0, &"x".repeat(4096 * 4))],
+            vec![chunk_with_text("maximum", 0, &token_text(4096))],
         ]
         .concat();
 
@@ -1077,7 +1217,7 @@ mod encoder_group_tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            chunks.len() < BATCH_SIZE,
+            chunks.len() < BATCH_SIZE as usize,
             "the whole corpus must fit one admitted batch for this test to bite"
         );
 

@@ -5,10 +5,10 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tracedecay::code_index::projection::{expected_request_digest, verify_batch_receipt};
 use tracedecay::vector_generation_test_support::{
-    CanonicalChunkVectorEncoderV1, ProjectionRequestBatchV1, SemanticProjectionErrorV1,
-    VectorGenerationIdV1, VectorGenerationPlanV1, VectorGenerationStateMachineV1,
-    VectorGenerationStoreErrorV1, prepare_vector_generation, prepare_vector_generation_async,
-    split_projection_request,
+    CanonicalChunkTokenLengthsV1, CanonicalChunkVectorEncoderV1, ProjectionRequestBatchV1,
+    SemanticProjectionErrorV1, VectorGenerationIdV1, VectorGenerationPlanV1,
+    VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1, prepare_vector_generation,
+    prepare_vector_generation_async, split_projection_request,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
@@ -201,6 +201,30 @@ struct FakeEncoder {
     non_finite: bool,
 }
 
+/// Fixture tokenizer: one token per whitespace-separated word, capped at the
+/// admitted truncation length. The double has no model; grouping only needs a
+/// length that varies with the document and can be predicted from a fixture.
+impl CanonicalChunkTokenLengthsV1 for FakeEncoder {
+    fn document_token_lengths(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        let truncation_length = key.truncation_length as usize;
+        Ok(chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .sanitized_text
+                    .as_str()
+                    .split_whitespace()
+                    .count()
+                    .clamp(1, truncation_length)
+            })
+            .collect())
+    }
+}
+
 impl CanonicalChunkVectorEncoderV1 for FakeEncoder {
     fn encode(
         &mut self,
@@ -249,6 +273,30 @@ impl CanonicalChunkVectorEncoderV1 for FakeEncoder {
 struct BlockingEncoder {
     started: mpsc::Sender<()>,
     release: mpsc::Receiver<()>,
+}
+
+/// Fixture tokenizer: one token per whitespace-separated word, capped at the
+/// admitted truncation length. The double has no model; grouping only needs a
+/// length that varies with the document and can be predicted from a fixture.
+impl CanonicalChunkTokenLengthsV1 for BlockingEncoder {
+    fn document_token_lengths(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        let truncation_length = key.truncation_length as usize;
+        Ok(chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .sanitized_text
+                    .as_str()
+                    .split_whitespace()
+                    .count()
+                    .clamp(1, truncation_length)
+            })
+            .collect())
+    }
 }
 
 impl CanonicalChunkVectorEncoderV1 for BlockingEncoder {
@@ -1085,14 +1133,9 @@ fn splitting_a_run_into_commits_preserves_every_generation_digest() {
         base_generation: None,
     };
 
-    let unsplit = split_projection_request(
-        &whole,
-        &corpus,
-        4_096,
-        8,
-        key.inference_batch_bytes as usize,
-    )
-    .expect("unsplit request");
+    let unsplit =
+        split_projection_request(&whole, &corpus, 4_096, &key, &mut FakeEncoder::default())
+            .expect("unsplit request");
     assert_eq!(
         unsplit.len(),
         1,
@@ -1101,9 +1144,8 @@ fn splitting_a_run_into_commits_preserves_every_generation_digest() {
     let (single_store, single) = publish_in_batches(&admitted, plan.clone(), unsplit);
 
     // 16 embeds per batch is two encoder groups, so boundaries stay aligned.
-    let split =
-        split_projection_request(&whole, &corpus, 16, 8, key.inference_batch_bytes as usize)
-            .expect("split request");
+    let split = split_projection_request(&whole, &corpus, 16, &key, &mut FakeEncoder::default())
+        .expect("split request");
     assert_eq!(split.len(), 3, "40 changes split into windows of 16");
     assert!(
         split
@@ -1212,8 +1254,8 @@ fn profile_change_paging_preserves_reembedded_reuse_encoder_groups_and_vectors()
         &reprofile,
         &canonical_chunks,
         4_096,
-        8,
-        replacement_key.inference_batch_bytes as usize,
+        &replacement_key,
+        &mut FakeEncoder::default(),
     )
     .expect("whole profile change");
     assert_eq!(unsplit.len(), 1);
@@ -1230,8 +1272,8 @@ fn profile_change_paging_preserves_reembedded_reuse_encoder_groups_and_vectors()
         &reprofile,
         &canonical_chunks,
         16,
-        8,
-        replacement_key.inference_batch_bytes as usize,
+        &replacement_key,
+        &mut FakeEncoder::default(),
     )
     .expect("split profile change");
     assert_eq!(
@@ -1376,8 +1418,8 @@ fn profile_change_paging_preserves_count_and_byte_canonical_encoder_groups() {
         &reprofile,
         &canonical_chunks,
         4_096,
-        8,
-        INFERENCE_BATCH_BYTES as usize,
+        &replacement_key,
+        &mut FakeEncoder::default(),
     )
     .expect("whole byte-bounded profile change");
     assert_eq!(unsplit.len(), 1);
@@ -1395,8 +1437,8 @@ fn profile_change_paging_preserves_count_and_byte_canonical_encoder_groups() {
         &reprofile,
         &canonical_chunks,
         8,
-        8,
-        INFERENCE_BATCH_BYTES as usize,
+        &replacement_key,
+        &mut FakeEncoder::default(),
     )
     .expect("split byte-bounded profile change");
     assert_eq!(split.len(), 4);
@@ -1461,14 +1503,9 @@ fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
             .collect::<Vec<_>>(),
     ];
 
-    let unsplit = split_projection_request(
-        &whole,
-        &corpus,
-        4_096,
-        key.inference_batch_size as usize,
-        key.inference_batch_bytes as usize,
-    )
-    .expect("unsplit request");
+    let unsplit =
+        split_projection_request(&whole, &corpus, 4_096, &key, &mut FakeEncoder::default())
+            .expect("unsplit request");
     let mut unsplit_encoder = FakeEncoder::default();
     let unsplit_prepared = prepare_vector_generation(
         &admitted,
@@ -1478,14 +1515,8 @@ fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
     )
     .expect("unsplit file-bucket projection");
 
-    let split = split_projection_request(
-        &whole,
-        &corpus,
-        8,
-        key.inference_batch_size as usize,
-        key.inference_batch_bytes as usize,
-    )
-    .expect("split request");
+    let split = split_projection_request(&whole, &corpus, 8, &key, &mut FakeEncoder::default())
+        .expect("split request");
     assert_eq!(split.len(), 2);
     assert_eq!(
         split
@@ -1681,8 +1712,8 @@ fn incremental_reused_chunks_are_paged_with_the_embed_window() {
         &incremental,
         &[added_chunk],
         16,
-        8,
-        key.inference_batch_bytes as usize,
+        &key,
+        &mut FakeEncoder::default(),
     )
     .expect("split reused");
     assert_eq!(pages.len(), 3, "1 added + 40 reused must page at window 16");
@@ -1726,9 +1757,8 @@ fn a_partial_incremental_run_resumes_from_its_checkpoint() {
         expected_chunk_ids: expected_chunk_ids.into(),
         base_generation: None,
     };
-    let batches =
-        split_projection_request(&whole, &corpus, 16, 8, key.inference_batch_bytes as usize)
-            .expect("split request");
+    let batches = split_projection_request(&whole, &corpus, 16, &key, &mut FakeEncoder::default())
+        .expect("split request");
     let reference = publish_in_batches(&admitted, plan.clone(), batches.clone()).1;
 
     let mut store = VectorGenerationStateMachineV1::new();
@@ -1961,6 +1991,30 @@ impl WidthEncoder {
         let mut groups = self.groups.lock().expect("group log").clone();
         groups.sort();
         groups
+    }
+}
+
+/// Fixture tokenizer: one token per whitespace-separated word, capped at the
+/// admitted truncation length. The double has no model; grouping only needs a
+/// length that varies with the document and can be predicted from a fixture.
+impl CanonicalChunkTokenLengthsV1 for WidthEncoder {
+    fn document_token_lengths(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        let truncation_length = key.truncation_length as usize;
+        Ok(chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .sanitized_text
+                    .as_str()
+                    .split_whitespace()
+                    .count()
+                    .clamp(1, truncation_length)
+            })
+            .collect())
     }
 }
 

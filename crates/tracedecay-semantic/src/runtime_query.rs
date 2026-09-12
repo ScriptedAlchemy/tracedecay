@@ -255,7 +255,9 @@ fn map_embed_error(error: EmbedError) -> RetrievalPortError {
         EmbedError::DimensionMismatch { .. } | EmbedError::NonFiniteVectorValue => {
             RetrievalPortError::IncompatibleProjection
         }
-        EmbedError::BatchBytesExceeded { .. } => RetrievalPortError::BudgetExceeded,
+        EmbedError::BatchBytesExceeded { .. } | EmbedError::AttentionBudgetExceeded { .. } => {
+            RetrievalPortError::BudgetExceeded
+        }
         EmbedError::EmptyBatch | EmbedError::TooManyTexts { .. } => {
             RetrievalPortError::Contract("bounded query embedding was rejected".to_owned())
         }
