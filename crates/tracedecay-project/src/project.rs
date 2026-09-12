@@ -212,6 +212,22 @@ impl TraceDecay {
         }
     }
 
+    /// Resolves the authority mounted by completed producer work for an exact
+    /// hook replay. Public Scout operations still authorize the returned
+    /// address against the durable registry; this avoids repeating that store
+    /// read inside the bounded hook acknowledgement path.
+    pub(crate) async fn resolve_mounted_context_scout_claim_authority(
+        &self,
+        lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
+    ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
+        let owner = self.context_scout_owner()?;
+        let pin = owner.mounted_claim_pin(lifecycle).await?;
+        if !self.context_scout_configuration_is_current(&pin).await {
+            return None;
+        }
+        owner.resolve_admitted_claim(lifecycle).await
+    }
+
     /// Resolves a unique mounted producer from an earlier event in the same
     /// routed session. The owner reuses and revalidates that producer's exact
     /// lifecycle authority; the later event supplies no replacement identity.
