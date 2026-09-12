@@ -77,3 +77,7 @@ Closing #855 needs that journey run and cited against the tip.
   The bound is unchanged; the miss is load sensitivity of a tip test, not a
   lane defect (this lane's tree is the tip's).
 - `cc-16624` `cargo check --workspace --all-targets` — ok
+- The remote advanced 6 commits (`8df152a7b..d8ee8f468`, graph/workflows/
+  semantic/sessions) while those ran; merged again as `37e350c97`
+  (conflict-free, tree == tip + this file) and re-checked:
+  `cc-16749` `cargo check --workspace --all-targets` — ok.
