@@ -1073,6 +1073,101 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn affected_follows_public_wrapper_to_nested_unit_test_file() {
+    let isolation = TempDir::new().unwrap();
+    let project = isolation.path().join("project");
+    for directory in ["src/edits", "tests"] {
+        fs::create_dir_all(project.join(directory)).unwrap();
+    }
+    for (path, source) in [
+        (
+            "Cargo.toml",
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ),
+        (
+            "src/lib.rs",
+            "mod execute;\n#[cfg(test)] mod edits;\nuse execute::execute_inner;\npub struct Request;\npub fn execute() { execute_inner(); }\n",
+        ),
+        ("src/execute.rs", "pub(super) fn execute_inner() {}\n"),
+        ("src/edits/mod.rs", "mod execute_tests;\n"),
+        (
+            "src/edits/execute_tests.rs",
+            "use crate::{Request, execute};\n#[tokio::test]\nasync fn executes() { let _request = Request; execute(); }\n",
+        ),
+        (
+            "tests/unrelated.rs",
+            "#[test]\nfn unrelated() { assert!(true); }\n",
+        ),
+    ] {
+        fs::write(project.join(path), source).unwrap();
+    }
+    for args in [
+        &["init", "--quiet"][..],
+        &["add", "."][..],
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .unwrap();
+    let server = harness.server(&project).expect("production project server");
+    warm_code_index_search(&server, "execute_inner").await;
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_affected",
+            json!({"files": ["src/execute.rs"], "depth": 3, "format": "json"}),
+        )
+        .await;
+    let result = response
+        .expect("production invocation succeeds")
+        .result
+        .unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).expect("affected JSON payload");
+
+    assert_eq!(
+        payload["affected_tests"],
+        json!(["src/edits/execute_tests.rs"]),
+        "the inner implementation must reach tests through its public wrapper: {payload}"
+    );
+
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_test_risk",
+            json!({"path": "src/execute.rs", "limit": 10, "include_tested": true}),
+        )
+        .await;
+    let result = response
+        .expect("production invocation succeeds")
+        .result
+        .unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).expect("test-risk JSON payload");
+    assert_eq!(payload["summary"]["tested"], 1, "{payload}");
+    assert_eq!(payload["risks"][0]["has_test"], true, "{payload}");
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn test_module_api() {
     let fixture = production_composition_fixture().await;
     let server = fixture
