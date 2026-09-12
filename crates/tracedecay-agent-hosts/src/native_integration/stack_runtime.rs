@@ -40,6 +40,7 @@ use tracedecay_global_db::{
     GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
     MAX_GITHUB_STACK_DELIVERY_BATCH_V1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::registry::DaemonProjectNativeIntegrationService;
 use super::store::SharedDaemonNativeIntegrationStore;
@@ -780,7 +781,7 @@ pub struct DaemonGitHubStackRuntimeV1 {
     scope: ResolvedScope,
     coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
     ports: StackRuntimePortsV1,
-    cancellation: tokio_util::sync::CancellationToken,
+    cancellation: CancellationToken,
     tick_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -821,7 +822,7 @@ impl DaemonGitHubStackRuntimeV1 {
             authorizations: Arc::new(Mutex::new(BTreeMap::new())),
             preflight_outcomes: Arc::new(Mutex::new(BTreeMap::new())),
         };
-        let cancellation = tokio_util::sync::CancellationToken::new();
+        let cancellation = CancellationToken::new();
         let runtime = Arc::new(Self {
             scope,
             coordinator,

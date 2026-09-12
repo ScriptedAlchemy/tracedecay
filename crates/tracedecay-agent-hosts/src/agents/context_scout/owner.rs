@@ -28,14 +28,13 @@ use super::ports::{
 use super::{
     ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1, ContextScoutControlV1,
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableRuntimeV1,
-    ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1,
-    ContextScoutDurableStoreV1, ContextScoutErrorV1, ContextScoutExplanationV1,
-    ContextScoutModelAssistantV1, ContextScoutModelErrorV1, ContextScoutModelExecutionV1,
-    ContextScoutModelFuture, ContextScoutModelRequestV1, ContextScoutMutationBindingV1,
-    ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
-    ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1,
-    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
-    ProjectContextScoutDurableStoreV1,
+    ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
+    ContextScoutExplanationV1, ContextScoutModelAssistantV1, ContextScoutModelErrorV1,
+    ContextScoutModelExecutionV1, ContextScoutModelFuture, ContextScoutModelRequestV1,
+    ContextScoutMutationBindingV1, ContextScoutMutationSettlementOutcomeV1,
+    ContextScoutPublicMutationV1, ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1,
+    ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
+    ContextScoutStatusV1, ProjectContextScoutDurableStoreV1,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -66,10 +65,8 @@ struct MountedContextScoutClaimV1 {
     input_watermark: [u8; 32],
 }
 
-pub(crate) type ProjectScoutRuntime = ContextScoutDurableRuntimeV1<
-    Arc<ProjectContextScoutDurableStoreV1>,
-    Arc<dyn ContextScoutModelAssistantV1>,
->;
+pub(crate) type ProjectScoutRuntime =
+    ContextScoutDurableRuntimeV1<Arc<dyn ContextScoutModelAssistantV1>>;
 
 type ProjectContextScoutOwnerRegistry = BTreeMap<[u8; 16], Arc<ProjectContextScoutOwnerV1>>;
 
@@ -227,9 +224,7 @@ impl ProjectContextScoutOwnerV1 {
             || registry
                 .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
                 .await
-                != super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                    address,
-                )
+                != super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(address)
         {
             return ContextScoutClaimAdmissionV1::Rejected;
         }
@@ -280,11 +275,8 @@ impl ProjectContextScoutOwnerV1 {
             .registry
             .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
             .await;
-        (resolved
-            == super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                mounted.address,
-            ))
-        .then_some((mounted.address, mounted.input_watermark))
+        (resolved == super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(mounted.address))
+            .then_some((mounted.address, mounted.input_watermark))
     }
 
     pub async fn mounted_claim_pin(
