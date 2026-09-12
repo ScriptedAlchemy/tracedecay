@@ -571,6 +571,13 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("generation A page"),
         other => panic!("generation A callers unavailable: {other:?}"),
     };
+    let first_caller = first
+        .items
+        .first()
+        .expect("generation A page 1 caller")
+        .symbol
+        .node_id
+        .clone();
     let cursor_a = first.next_cursor.expect("generation A cursor");
     assert_eq!(first.generation, generation_a);
 
@@ -615,6 +622,15 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
     };
     assert_eq!(continuation.generation, generation_a);
     assert_eq!(continuation.total, Some(2));
+    assert_ne!(
+        continuation
+            .items
+            .first()
+            .expect("generation A page 2 caller")
+            .symbol
+            .node_id,
+        first_caller,
+    );
 
     let current = registry
         .callers(
@@ -637,6 +653,13 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
     };
     assert_eq!(current.generation, generation_b);
     assert_eq!(current.total, Some(3));
+    assert!(current.items.iter().any(|item| {
+        item.symbol
+            .qualified_name
+            .rsplit("::")
+            .next()
+            .is_some_and(|name| name == "caller_c")
+    }));
 
     registry.shutdown().await;
     graph_runtime
