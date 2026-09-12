@@ -1,37 +1,31 @@
 //! In-process owner for the daemon's production project composition.
 //!
 //! Test and `test-transport` builds use this to drive the same composition the
-//! daemon runs, against one isolated profile-and-projects root.
+//! daemon runs, against one isolated profile-and-projects root. The parent
+//! module mounts it behind that gate, so a default or `production` build
+//! compiles none of it.
 
-#[cfg(any(test, feature = "test-transport"))]
 use std::future::Future;
-#[cfg(any(test, feature = "test-transport"))]
 use std::pin::Pin;
-#[cfg(any(test, feature = "test-transport"))]
 use std::sync::{
     OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 
-#[cfg(all(unix, any(test, feature = "test-transport")))]
+#[cfg(unix)]
 use super::bootstrap::set_owner_only_permissions;
 // The parent `daemon` module imports this under `cfg(test)` only, so
-// `use super::*` cannot carry it into a `test-transport` build. Import it
-// directly under the same gate the harness itself is compiled behind.
-#[cfg(any(test, feature = "test-transport"))]
+// `use super::*` cannot carry it into a `test-transport` build.
 use super::project_composition::daemon_transcript_source_home;
-#[cfg(any(test, feature = "test-transport"))]
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
-#[cfg(any(test, feature = "test-transport"))]
 use super::*;
-#[cfg(all(unix, any(test, feature = "test-transport")))]
+#[cfg(unix)]
 use tracedecay_application::pr_tracking::try_acquire_manual_branch_lifecycle;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
-#[cfg(any(test, feature = "test-transport"))]
 use tracedecay_daemon_identity::profile_identity;
 
-#[cfg(all(unix, any(test, feature = "test-transport")))]
+#[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Captures the daemon's exact native Git transaction precondition for
@@ -55,7 +49,6 @@ pub fn capture_exact_git_snapshot_for_test(
     )
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 struct ProductionProjectHarnessResourcesV1 {
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
@@ -72,7 +65,6 @@ struct ProductionProjectHarnessResourcesV1 {
 /// In-process owner for the same production project composition used by the
 /// daemon. The caller supplies one isolated root containing both the profile
 /// and every project; live profile paths are rejected before any store opens.
-#[cfg(any(test, feature = "test-transport"))]
 #[doc(hidden)]
 pub struct ProductionProjectCompositionHarnessV1 {
     isolation_root: PathBuf,
@@ -84,7 +76,6 @@ pub struct ProductionProjectCompositionHarnessV1 {
 /// The isolated profile the composition owns inside one isolation root.
 ///
 /// Resolvable before `open` so a caller can predict the composed layout.
-#[cfg(any(test, feature = "test-transport"))]
 fn composed_profile_root(isolation_root: &Path) -> PathBuf {
     isolation_root.join("profile")
 }
@@ -93,7 +84,6 @@ fn composed_profile_root(isolation_root: &Path) -> PathBuf {
 ///
 /// A generic `async fn` open inlined the whole composition into every test
 /// future; rustc then overflowed the layout-query depth budget.
-#[cfg(any(test, feature = "test-transport"))]
 type ProductionHarnessOpenFuture =
     Pin<Box<dyn Future<Output = Result<ProductionProjectCompositionHarnessV1>> + Send>>;
 
@@ -104,10 +94,8 @@ type ProductionHarnessOpenFuture =
 /// available or installed worker width by 24 therefore admits only the
 /// measured four-wide load before worker-plan installation and preserves more
 /// than 2x headroom under the unchanged 20 s per-composition wait.
-#[cfg(any(test, feature = "test-transport"))]
 const PRODUCTION_COMPOSITION_CPU_DIVISOR: usize = 24;
 
-#[cfg(any(test, feature = "test-transport"))]
 struct ProductionCompositionAdmissionGateV1 {
     semaphore: tokio::sync::Semaphore,
     capacity: usize,
@@ -117,7 +105,6 @@ struct ProductionCompositionAdmissionGateV1 {
     high_water_mark: AtomicUsize,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl ProductionCompositionAdmissionGateV1 {
     fn new(capacity: usize) -> Self {
         Self {
@@ -168,12 +155,10 @@ impl ProductionCompositionAdmissionGateV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 struct ProductionCompositionWaitingV1 {
     gate: &'static ProductionCompositionAdmissionGateV1,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl ProductionCompositionWaitingV1 {
     fn new(gate: &'static ProductionCompositionAdmissionGateV1) -> Self {
         gate.waiting.fetch_add(1, Ordering::AcqRel);
@@ -181,19 +166,16 @@ impl ProductionCompositionWaitingV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl Drop for ProductionCompositionWaitingV1 {
     fn drop(&mut self) {
         self.gate.waiting.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 struct ProductionCompositionAdmittedV1 {
     gate: &'static ProductionCompositionAdmissionGateV1,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl ProductionCompositionAdmittedV1 {
     fn new(gate: &'static ProductionCompositionAdmissionGateV1) -> Self {
         let admitted = gate.admitted.fetch_add(1, Ordering::AcqRel) + 1;
@@ -205,7 +187,6 @@ impl ProductionCompositionAdmittedV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl Drop for ProductionCompositionAdmittedV1 {
     fn drop(&mut self) {
         self.gate.admitted.fetch_sub(1, Ordering::AcqRel);
@@ -216,13 +197,11 @@ impl Drop for ProductionCompositionAdmittedV1 {
 /// the semaphore permit is returned, or a waiter can be admitted while the
 /// previous composition is still counted and the high-water mark overshoots
 /// the capacity by one.
-#[cfg(any(test, feature = "test-transport"))]
 struct ProductionCompositionAdmissionPermitV1 {
     _admitted: ProductionCompositionAdmittedV1,
     _semaphore: tokio::sync::SemaphorePermit<'static>,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 #[derive(Clone, Copy)]
 struct ProductionCompositionAdmissionSnapshotV1 {
     capacity: usize,
@@ -230,7 +209,6 @@ struct ProductionCompositionAdmissionSnapshotV1 {
     waiting: usize,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 fn production_composition_admission_capacity() -> usize {
     let worker_width = tracedecay_code_index::parallelism::installed_worker_status().map_or_else(
         || std::thread::available_parallelism().map_or(1, usize::from),
@@ -239,7 +217,6 @@ fn production_composition_admission_capacity() -> usize {
     (worker_width / PRODUCTION_COMPOSITION_CPU_DIVISOR).max(1)
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 fn production_composition_admission_gate() -> &'static ProductionCompositionAdmissionGateV1 {
     static GATE: OnceLock<ProductionCompositionAdmissionGateV1> = OnceLock::new();
     GATE.get_or_init(|| {
@@ -247,14 +224,12 @@ fn production_composition_admission_gate() -> &'static ProductionCompositionAdmi
     })
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 struct IsolatedProductionCompositionRoots {
     isolation_root: PathBuf,
     profile_root: PathBuf,
     project_roots: Vec<PathBuf>,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 struct ProductionCompositionStoreHandles {
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
@@ -262,7 +237,6 @@ struct ProductionCompositionStoreHandles {
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 fn isolate_production_composition_roots(
     isolation_root: PathBuf,
     project_roots: Vec<PathBuf>,
@@ -345,7 +319,6 @@ fn isolate_production_composition_roots(
     })
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 fn acquire_production_composition_identity(
     profile_root: &Path,
 ) -> Result<(
@@ -368,7 +341,6 @@ fn acquire_production_composition_identity(
     })
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn install_production_composition_stores(
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
     long_lived_session_maintenance_for_test: bool,
@@ -402,7 +374,6 @@ async fn install_production_composition_stores(
     })
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn install_production_composition_profile_workers(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
@@ -446,7 +417,6 @@ async fn install_production_composition_profile_workers(
     .await
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn mount_production_composition_projects(
     stores: &ProductionCompositionStoreHandles,
     project_roots: Vec<PathBuf>,
@@ -477,7 +447,6 @@ async fn mount_production_composition_projects(
     Ok((servers, semantic_auto_download_enabled))
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn mount_one_production_composition_project(
     stores: &ProductionCompositionStoreHandles,
     project_root: PathBuf,
@@ -563,7 +532,6 @@ async fn mount_one_production_composition_project(
     ))
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl ProductionProjectCompositionHarnessV1 {
     /// Where the composed daemon reads host transcripts from, resolvable
     /// before `open`.
@@ -1009,7 +977,6 @@ impl ProductionProjectCompositionHarnessV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 #[hotpath::measure(label = "daemon.harness.wait_code_index", future = true)]
 async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
@@ -1128,7 +1095,6 @@ async fn wait_for_production_composition_code_index(
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl Drop for ProductionProjectCompositionHarnessV1 {
     fn drop(&mut self) {
         let Some(resources) = self.resources.take() else {
@@ -1143,7 +1109,6 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
     #[cfg(unix)]
     if let Err(reason) = resources
