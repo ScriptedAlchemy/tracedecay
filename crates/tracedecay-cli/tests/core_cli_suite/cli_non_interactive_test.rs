@@ -2757,6 +2757,92 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn branch_search_serves_a_committed_generation_behind_dirty_worktree_state() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    git(&project_root, &["init", "-b", "main"]);
+    std::fs::write(
+        project_root.join("lib.rs"),
+        "pub fn committed_anchor() -> usize { 1 }\n",
+    )
+    .unwrap();
+    commit_all(&project_root, "initial commit");
+    std::fs::write(
+        project_root.join("lib.rs"),
+        concat!(
+            "pub fn committed_anchor() -> usize { 1 }\n",
+            "pub fn dirty_anchor() -> usize { 2 }\n",
+        ),
+    )
+    .unwrap();
+    init_project_fixture(home.path(), &project_root);
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let ready_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut ready = tracedecay_command_without_daemon(home.path(), &project_root);
+        ready.args([
+            "tool",
+            "search",
+            "--args",
+            r#"{"query":"dirty_anchor","limit":5,"format":"json"}"#,
+            "--json",
+        ]);
+        let ready = run_with_timeout(ready, cli_timeout());
+        let dirty_generation_ready = ready.status.success()
+            && serde_json::from_slice::<serde_json::Value>(&ready.stdout)
+                .ok()
+                .and_then(|envelope| envelope["content"][0]["text"].as_str().map(str::to_owned))
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|payload| payload["results"].as_array().cloned())
+                .is_some_and(|results| !results.is_empty());
+        if dirty_generation_ready {
+            break;
+        }
+        assert!(
+            Instant::now() < ready_deadline,
+            "dirty worktree generation did not become queryable\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&ready.stdout),
+            String::from_utf8_lossy(&ready.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let mut search = tracedecay_command_without_daemon(home.path(), &project_root);
+    search.args([
+        "tool",
+        "branch_search",
+        "--args",
+        r#"{"branch":"main","query":"committed_anchor","limit":5,"format":"json"}"#,
+        "--json",
+    ]);
+    let search = run_with_timeout(search, cli_timeout());
+    assert!(
+        search.status.success(),
+        "branch search must derive a queryable text owner for the exact committed generation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&search.stdout),
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&search.stdout).expect("branch search MCP envelope");
+    let payload: serde_json::Value = serde_json::from_str(
+        envelope["content"][0]["text"]
+            .as_str()
+            .expect("branch search JSON content"),
+    )
+    .expect("branch search payload");
+    assert_eq!(payload["status"], "complete", "{payload:#}");
+    assert!(
+        payload["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty()),
+        "branch search must return the committed symbol: {payload:#}"
+    );
+}
+
 #[tokio::test]
 async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
     let home = TempDir::new().unwrap();
