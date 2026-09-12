@@ -96,10 +96,26 @@ fn problem_finding(
     detail: &str,
     coverage_statement: &str,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
+    problem_finding_with_evidence(
+        state,
+        completeness,
+        vec![evidence(kind, store, detail)?],
+        coverage_statement,
+    )
+}
+
+/// [`problem_finding`] over several evidence references: one per storage
+/// class the finding reports, each bounded to the reference budget on its own.
+fn problem_finding_with_evidence(
+    state: DoctorEvidenceStateV1,
+    completeness: DoctorCoverageCompletenessV1,
+    evidence: Vec<DoctorEvidenceRefV1>,
+    coverage_statement: &str,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
     DoctorFindingV1::new(
         DoctorFindingFamilyV1::Storage,
         state,
-        vec![evidence(kind, store, detail)?],
+        evidence,
         coverage(completeness, coverage_statement)?,
     )
 }
@@ -130,6 +146,18 @@ fn clean_finding(
     detail: &str,
     coverage_statement: &str,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
+    clean_finding_with_evidence(
+        completeness,
+        vec![evidence(kind, store, detail)?],
+        coverage_statement,
+    )
+}
+
+fn clean_finding_with_evidence(
+    completeness: DoctorCoverageCompletenessV1,
+    evidence: Vec<DoctorEvidenceRefV1>,
+    coverage_statement: &str,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
     let state = match completeness {
         DoctorCoverageCompletenessV1::Complete => DoctorEvidenceStateV1::HealthyCompleteCoverage,
         DoctorCoverageCompletenessV1::Partial | DoctorCoverageCompletenessV1::Unknown => {
@@ -139,7 +167,7 @@ fn clean_finding(
     DoctorFindingV1::new(
         DoctorFindingFamilyV1::Storage,
         state,
-        vec![evidence(kind, store, detail)?],
+        evidence,
         coverage(completeness, coverage_statement)?,
     )
 }
@@ -518,32 +546,46 @@ pub fn code_generation_retention_finding(
         record.stranded_scope_count,
         record.stranded_scope_bytes.get(),
     );
+    // The sealed graph census is its own reference so each class stays inside
+    // the reference budget instead of truncating the other's figures.
+    let sealed_detail = format!(
+        "superseded-sealed-{}.superseded-sealed-bytes-{}b.abandoned-staging-{}.abandoned-staging-bytes-{}b",
+        record.superseded_sealed_generation_count,
+        record.superseded_sealed_generation_bytes.get(),
+        record.abandoned_sealed_staging_count,
+        record.abandoned_sealed_staging_bytes.get(),
+    );
+    let references = vec![
+        evidence(kind, &record.store, &detail)?,
+        evidence(kind, &record.store, &sealed_detail)?,
+    ];
     let finding = match (
         record.has_collectable_generations(),
         record.has_stranded_scopes(),
+        record.has_dead_sealed_artifacts(),
     ) {
-        (_, true) => problem_finding(
-            kind,
-            &record.store,
+        (_, true, _) => problem_finding_with_evidence(
             DoctorEvidenceStateV1::Stale,
             completeness,
-            &detail,
+            references,
             "code-index scope roots whose project root no longer exists hold bytes no scope-local retention pass can reach",
         )?,
-        (true, false) => problem_finding(
-            kind,
-            &record.store,
+        (true, false, _) => problem_finding_with_evidence(
             DoctorEvidenceStateV1::Stale,
             completeness,
-            &detail,
+            references,
             "superseded code generations outside active, vector-readable, and rollback-floor liveness await collection",
         )?,
-        (false, false) => clean_finding(
-            kind,
-            &record.store,
+        (false, false, true) => problem_finding_with_evidence(
+            DoctorEvidenceStateV1::Stale,
             completeness,
-            &detail,
-            "superseded code generations are bounded by exact liveness and rollback floor; every scope root resolves to a live project root",
+            references,
+            "the graph store holds sealed generation artifacts no verified head serves: superseded generations awaiting retirement or staging an interrupted seal left behind",
+        )?,
+        (false, false, false) => clean_finding_with_evidence(
+            completeness,
+            references,
+            "superseded code generations are bounded by exact liveness and rollback floor; every scope root resolves to a live project root; every sealed graph artifact is a verified head",
         )?,
     };
     DoctorStorageFindingV1::new(kind, finding)
@@ -580,6 +622,12 @@ mod tests {
 
     fn only_evidence(finding: &DoctorStorageFindingV1) -> &str {
         finding.finding().evidence()[0].reference().as_str()
+    }
+
+    /// The code-index retention finding's second reference: the sealed graph
+    /// artifact census.
+    fn sealed_evidence(finding: &DoctorStorageFindingV1) -> &str {
+        finding.finding().evidence()[1].reference().as_str()
     }
 
     #[test]
@@ -845,6 +893,10 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(20_600_000_000),
             stranded_scope_count: 0,
             stranded_scope_bytes: StorageByteSizeV1(0),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
         };
 
         let finding =
@@ -871,6 +923,10 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(0),
             stranded_scope_count: 2,
             stranded_scope_bytes: StorageByteSizeV1(7_730_941_132),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
         };
 
         let finding =
@@ -892,6 +948,10 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(0),
             stranded_scope_count: 0,
             stranded_scope_bytes: StorageByteSizeV1(0),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
         };
 
         let finding =
@@ -900,6 +960,51 @@ mod tests {
 
         assert!(finding.finding().state().is_healthy_complete());
         assert!(only_evidence(&finding).contains("stranded-scopes-0"));
+        assert!(sealed_evidence(&finding).contains("superseded-sealed-0"));
+    }
+
+    /// Sealed graph artifacts nothing serves are a storage problem even when
+    /// the code-index census is clean, and bytes are never reported without
+    /// the artifacts holding them.
+    #[test]
+    fn dead_sealed_graph_artifacts_make_a_clean_code_index_census_stale() {
+        let clean_index = |superseded_sealed: u64, staging: u64| {
+            super::super::inventory::CodeGenerationRetentionRecordV1 {
+                store: StoreKeyV1::new("code-index-v1").expect("valid"),
+                superseded_generation_count: 0,
+                superseded_generation_bytes: StorageByteSizeV1::ZERO,
+                collectable_generation_count: 0,
+                collectable_generation_bytes: StorageByteSizeV1::ZERO,
+                stranded_scope_count: 0,
+                stranded_scope_bytes: StorageByteSizeV1::ZERO,
+                superseded_sealed_generation_count: superseded_sealed,
+                superseded_sealed_generation_bytes: StorageByteSizeV1(superseded_sealed * 1_500_000_000),
+                abandoned_sealed_staging_count: staging,
+                abandoned_sealed_staging_bytes: StorageByteSizeV1(staging * 2_400_000_000),
+            }
+        };
+
+        let superseded =
+            code_generation_retention_finding(&clean_index(7, 0), DoctorCoverageCompletenessV1::Complete)
+                .expect("finding");
+        assert_eq!(superseded.kind(), DoctorStorageFindingKindV1::RetentionBacklog);
+        assert_eq!(superseded.finding().state(), DoctorEvidenceStateV1::Stale);
+        assert!(sealed_evidence(&superseded).contains("superseded-sealed-7"));
+        assert!(sealed_evidence(&superseded).contains("superseded-sealed-bytes-10500000000b"));
+
+        let staging =
+            code_generation_retention_finding(&clean_index(0, 3), DoctorCoverageCompletenessV1::Complete)
+                .expect("finding");
+        assert_eq!(staging.finding().state(), DoctorEvidenceStateV1::Stale);
+        assert!(sealed_evidence(&staging).contains("abandoned-staging-3"));
+        assert!(sealed_evidence(&staging).contains("abandoned-staging-bytes-7200000000b"));
+
+        let mut orphan_bytes = clean_index(0, 0);
+        orphan_bytes.superseded_sealed_generation_bytes = StorageByteSizeV1(1);
+        assert!(
+            orphan_bytes.validate().is_err(),
+            "sealed bytes without a sealed artifact count are inconsistent"
+        );
     }
 
     #[test]

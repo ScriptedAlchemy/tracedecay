@@ -1022,6 +1022,90 @@ fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
 
+/// The sealed census splits the sealed root into what serves and what does
+/// not: the head's artifact, a superseded generation's artifact, and staging
+/// an interrupted seal left behind are each counted where they belong, and a
+/// directory without a readable receipt is reported rather than classed.
+#[test]
+fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:census", "code");
+
+    let g1 = rich_manifest(identity.clone(), "census-g1", "one");
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:census-g1",
+        None,
+        '1',
+    );
+    let g1_commit = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &g1_record.publication.key,
+    );
+    let g1_head = g1_commit.head.clone();
+    drop(g1_commit);
+    let g2 = rich_manifest(identity.clone(), "census-g2", "two");
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:census-g2",
+        Some(g1_head),
+        '2',
+    );
+    let g2_commit = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &g2_record.publication.key,
+    );
+    drop(g2_commit);
+    let root = sealed_store_root(temp.path());
+    let staging = root.join(format!(".staging-{}", "d".repeat(64)));
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("generation.grafeo"), vec![0u8; 4096]).unwrap();
+    let unreadable = root.join("e".repeat(64));
+    std::fs::create_dir_all(&unreadable).unwrap();
+    std::fs::write(unreadable.join("generation.grafeo"), b"no receipt").unwrap();
+
+    let heads = std::collections::BTreeSet::from(["census-g2".to_owned()]);
+    let census = tracedecay_graph_db::census_sealed_store(
+        &support::graph_path(temp.path()),
+        &heads,
+    )
+    .unwrap();
+    assert_eq!(census.head_count, 1);
+    assert_eq!(census.superseded_count, 1, "g1 is sealed but no longer the head");
+    assert_eq!(census.abandoned_staging_count, 1);
+    assert_eq!(census.abandoned_staging_bytes, 4096);
+    assert_eq!(census.unrecognized_count, 1);
+    assert!(census.head_bytes > 0 && census.superseded_bytes > 0);
+
+    // With no heads journaled every sealed artifact reads as superseded, and
+    // a store with no sealed root at all is an empty census, not an error.
+    let none = tracedecay_graph_db::census_sealed_store(
+        &support::graph_path(temp.path()),
+        &std::collections::BTreeSet::new(),
+    )
+    .unwrap();
+    assert_eq!(none.superseded_count, 2);
+    assert_eq!(none.head_count, 0);
+    assert_eq!(
+        tracedecay_graph_db::census_sealed_store(
+            &temp.path().join("absent").join("graph.grafeo"),
+            &heads,
+        )
+        .unwrap(),
+        tracedecay_graph_db::SealedStoreCensusV1::default()
+    );
+}
+
 /// Replaying an already-linearized publication is activation, not a new seal:
 /// if an older installation has no derived sealed artifact, seating its
 /// verified staging rows must not copy and compact the whole generation before

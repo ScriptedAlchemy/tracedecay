@@ -536,6 +536,7 @@ pub(super) async fn collect_code_generation_retention_findings(
     >,
     code_index_store_root: &Path,
     project_root: &Path,
+    graph: &tracedecay_runtime_core::db::Database,
 ) -> DoctorStorageFamilyReadV1 {
     use tracedecay_code_index_retention::code_index_generations::{
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
@@ -582,7 +583,16 @@ pub(super) async fn collect_code_generation_retention_findings(
     let scope_store_root = code_index_store_root.parent().map(Path::to_path_buf);
     let project_root = project_root.to_path_buf();
     let now = now_secs();
+    // The graph store's sealed artifacts are the third dead-bytes class: a
+    // superseded generation whose retirement has not run, or staging an
+    // interrupted seal left behind. Liveness comes from the journal, so an
+    // unreadable journal leaves the census unknown rather than zero.
+    let head_generations = live_sealed_generations(graph).await;
+    let graph_container = graph.database_path().with_extension("grafeo");
     let Ok(census) = tokio::task::spawn_blocking(move || {
+        let sealed = head_generations.and_then(|heads| {
+            tracedecay_graph_db::census_sealed_store(&graph_container, &heads).ok()
+        });
         let plan = plan_code_generation_retention_with_verification(
             &root,
             &vector_readable_sources,
@@ -605,24 +615,25 @@ pub(super) async fn collect_code_generation_retention_findings(
             )
             .ok()
         });
-        (plan, scopes)
+        (plan, scopes, sealed)
     })
     .await
     else {
         return semantic_only_unknown();
     };
-    let (plan, scopes) = census;
+    let (plan, scopes, sealed) = census;
     let Ok(plan) = plan else {
         return semantic_only_unknown();
     };
     let Ok(store) = StoreKeyV1::new("code-index-v1") else {
         return semantic_only_unknown();
     };
-    let completeness = if scopes.is_some() && !vector_liveness_incomplete {
+    let completeness = if scopes.is_some() && sealed.is_some() && !vector_liveness_incomplete {
         DoctorCoverageCompletenessV1::Complete
     } else {
         DoctorCoverageCompletenessV1::Partial
     };
+    let sealed = sealed.unwrap_or_default();
     let record = CodeGenerationRetentionRecordV1 {
         store,
         superseded_generation_count: plan.superseded_generations.len() as u64,
@@ -653,6 +664,21 @@ pub(super) async fn collect_code_generation_retention_findings(
                     .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_bytes),
             )
         },
+        // Same rule as the collectable figures: while the vector pin set is
+        // unknown, dead sealed bytes are published as zero under `Partial`
+        // rather than as a staleness claim the census cannot yet stand behind.
+        superseded_sealed_generation_count: if vector_liveness_incomplete {
+            0
+        } else {
+            sealed.superseded_count
+        },
+        superseded_sealed_generation_bytes: if vector_liveness_incomplete {
+            StorageByteSizeV1::ZERO
+        } else {
+            StorageByteSizeV1(sealed.superseded_bytes)
+        },
+        abandoned_sealed_staging_count: sealed.abandoned_staging_count,
+        abandoned_sealed_staging_bytes: StorageByteSizeV1(sealed.abandoned_staging_bytes),
     };
     let Ok(finding) = code_generation_retention_finding(&record, completeness) else {
         return semantic_only_unknown();
@@ -666,6 +692,39 @@ pub(super) async fn collect_code_generation_retention_findings(
     } else {
         storage_family_read(findings)
     }
+}
+
+/// The journaled generation ids whose sealed artifacts are still live in the
+/// project graph store: each projection's verified head, every publication
+/// newer than its head (pending), and every generation an active replay
+/// depends on. A sealed directory outside this set is one the ordinary
+/// retirement pass reclaims; `None` when the journal cannot be read (an
+/// absent table on a store that never published, a lock, a corrupt row).
+async fn live_sealed_generations(
+    graph: &tracedecay_runtime_core::db::Database,
+) -> Option<BTreeSet<String>> {
+    let mut rows = graph
+        .read_connection()
+        .query(
+            "SELECT replay.generation
+             FROM graph_publication_replay_v1 AS replay
+             LEFT JOIN graph_verified_heads_v1 AS head
+               ON head.shard_id = replay.shard_id
+              AND head.namespace = replay.namespace
+              AND head.projection = replay.projection
+             WHERE head.replay_sequence IS NULL
+                OR replay.sequence >= head.replay_sequence
+             UNION
+             SELECT generation FROM graph_publication_replay_dependencies_v1",
+            (),
+        )
+        .await
+        .ok()?;
+    let mut heads = BTreeSet::new();
+    while let Some(row) = rows.next().await.ok()? {
+        heads.insert(row.get::<String>(0).ok()?);
+    }
+    Some(heads)
 }
 
 /// Resolved kernel reads wired into the Doctor composer for one report.
@@ -1004,6 +1063,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                         semantic_configuration_inventory.as_ref(),
                         &code_index_store_root,
                         &project_root,
+                        &graph,
                     ),
                     language_server_read_from_broker(&diagnostic_broker),
                     tracedecay_application::feedback::concrete::feedback_observation_read_model(
