@@ -663,10 +663,8 @@ impl DaemonSessionRetrievalService {
                     store_scope: self.root.store_scope,
                 }
             }
-            SessionTemporalExecutionError::BudgetExhausted => {
-                SessionRetrievalServiceOutcome::BudgetExhausted {
-                    stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
-                }
+            SessionTemporalExecutionError::BudgetExhausted { stage } => {
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage }
             }
             SessionTemporalExecutionError::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
             SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {

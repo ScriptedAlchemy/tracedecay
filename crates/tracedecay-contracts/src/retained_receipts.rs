@@ -526,7 +526,9 @@ fn map_evidence_terminal(
         }
         RetainedSurfaceEvidenceTerminalV1::Busy => RetainedSurfaceExecutionErrorV1::Saturated,
         RetainedSurfaceEvidenceTerminalV1::CursorManifestLimitExceeded => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(
+                crate::retrieval::SessionRetrievalBudgetStageV1::CursorManifestLimit,
+            )
         }
         RetainedSurfaceEvidenceTerminalV1::Cancelled => {
             RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)

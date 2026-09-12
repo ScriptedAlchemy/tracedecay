@@ -563,9 +563,7 @@ fn map_execution_error(
         SessionTemporalExecutionError::Empty { freshness } => {
             SessionRetrievalOutcome::CompleteZero { freshness }
         }
-        SessionTemporalExecutionError::BudgetExhausted => {
-            budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
-        }
+        SessionTemporalExecutionError::BudgetExhausted { stage } => budget_exhausted(stage),
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
     }
@@ -584,9 +582,9 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         TemporalKernelError::Port(error) => match error {
             TemporalPortError::Cancelled => SessionRetrievalOutcome::Cancelled,
             TemporalPortError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
-            TemporalPortError::BudgetExceeded { .. } => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
-            }
+            TemporalPortError::BudgetExceeded { resource } => budget_exhausted(
+                SessionRetrievalBudgetStageV1::for_port_budget_resource(resource),
+            ),
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
                 crate::session::hotpath_observe::session_retrieval_budget_stage(
                     SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,

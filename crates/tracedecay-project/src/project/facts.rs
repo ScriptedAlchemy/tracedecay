@@ -11,14 +11,14 @@ use super::TraceDecay;
 
 impl TraceDecay {
     /// Returns the only project-memory owner accepted by core routes.
-    pub(crate) fn project_memory_owner(&self) -> Result<FactOwnerV1> {
+    pub fn project_memory_owner(&self) -> Result<FactOwnerV1> {
         project_memory_owner_from_layout_id(self.store_layout.identity.project_id.as_deref())
     }
 
     /// Opens the sole project fact authority selected by the retained project
     /// layout. Code-index routing never changes this database identity.
     #[hotpath::skip]
-    pub(crate) fn project_memory_db(&self) -> Result<ProjectMemoryDbHandle<'_>> {
+    pub fn project_memory_db(&self) -> Result<ProjectMemoryDbHandle<'_>> {
         if tracedecay_runtime_core::path_safety::same_canonical_path(
             &self.db_path(),
             &self.store_layout.graph_db_path,
@@ -38,9 +38,7 @@ impl TraceDecay {
     /// application over a fact store that owns its resolved handle. Every
     /// project-memory route builds its application through this accessor.
     #[hotpath::skip]
-    pub(crate) fn project_memory_application(
-        &self,
-    ) -> Result<MemoryApplication<ProjectFactStore<'_>>> {
+    pub fn project_memory_application(&self) -> Result<MemoryApplication<ProjectFactStore<'_>>> {
         let owner = self.project_memory_owner()?;
         let store = self.project_memory_db()?.into_fact_store();
         MemoryApplication::new(owner, store).map_err(memory_application_error)

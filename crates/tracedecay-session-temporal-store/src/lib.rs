@@ -50,6 +50,7 @@ pub mod store;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
 
@@ -453,7 +454,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             match result {
                 Err(
                     error @ (SessionTemporalExecutionError::Cancelled
-                    | SessionTemporalExecutionError::BudgetExhausted
+                    | SessionTemporalExecutionError::BudgetExhausted { .. }
                     | SessionTemporalExecutionError::ResetRequired),
                 ) => return Err(error),
                 result => reconstructed.push(result),
@@ -653,7 +654,9 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             }
         };
         if descriptor.byte_count > max_bytes {
-            return Err(SessionTemporalExecutionError::BudgetExhausted);
+            return Err(SessionTemporalExecutionError::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::HydrationBytes,
+            });
         }
         let hydration::PayloadSource::External {
             provider: descriptor_provider,
@@ -753,8 +756,8 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
                 Err(SessionTemporalExecutionError::Locked) => {
                     resolutions.push(Err(HydrationStateV1::Locked));
                 }
-                Err(SessionTemporalExecutionError::BudgetExhausted) => {
-                    return Err(SessionTemporalExecutionError::BudgetExhausted);
+                Err(error @ SessionTemporalExecutionError::BudgetExhausted { .. }) => {
+                    return Err(error);
                 }
                 Err(SessionTemporalExecutionError::Cancelled) => {
                     return Err(SessionTemporalExecutionError::Cancelled);
@@ -1145,7 +1148,9 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
             if selection.selected_anchors().len()
                 > request.retrieval().budget.max_hydrated_results as usize
             {
-                return Err(SessionTemporalExecutionError::BudgetExhausted);
+                return Err(SessionTemporalExecutionError::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::RequestHydrationLimit,
+                });
             }
             if let Some(omission) = task_session_reauthorize(
                 selector,
@@ -1252,7 +1257,9 @@ fn map_hydration_error(
             SessionTemporalExecutionError::ResetRequired
         }
         tracedecay_temporal_query::hydration::HydrationError::BudgetExceeded { .. } => {
-            SessionTemporalExecutionError::BudgetExhausted
+            SessionTemporalExecutionError::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::HydrationBytes,
+            }
         }
         tracedecay_temporal_query::hydration::HydrationError::Interrupted(error) => {
             map_control_error(error)
@@ -1317,8 +1324,10 @@ fn map_control_error(
         | tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
             SessionTemporalExecutionError::Cancelled
         }
-        tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { .. } => {
-            SessionTemporalExecutionError::BudgetExhausted
+        tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { resource } => {
+            SessionTemporalExecutionError::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::for_port_budget_resource(resource),
+            }
         }
         tracedecay_temporal_query::ports::TemporalPortError::ResetRequired { .. } => {
             SessionTemporalExecutionError::ResetRequired
@@ -1352,7 +1361,9 @@ fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
         LcmError::Cancelled | LcmError::DeadlineExceeded => {
             SessionTemporalExecutionError::Cancelled
         }
-        LcmError::BudgetExhausted => SessionTemporalExecutionError::BudgetExhausted,
+        LcmError::BudgetExhausted => SessionTemporalExecutionError::BudgetExhausted {
+            stage: SessionRetrievalBudgetStageV1::HydrationBytes,
+        },
         _ => SessionTemporalExecutionError::Unavailable,
     }
 }

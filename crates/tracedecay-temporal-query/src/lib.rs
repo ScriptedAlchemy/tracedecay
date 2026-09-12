@@ -688,8 +688,11 @@ fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
     match error {
         TemporalPortError::Cancelled => TemporalKernelError::Cancelled,
         TemporalPortError::DeadlineExceeded => TemporalKernelError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { .. } => TemporalKernelError::BudgetExceeded,
-        TemporalPortError::ParticipantLimitExceeded { .. }
+        // The port names the resource it exhausted. Collapsing it into the
+        // bare kernel budget error left every caller unable to tell a candidate
+        // read cap from a record read cap from a work-unit ceiling.
+        TemporalPortError::BudgetExceeded { .. }
+        | TemporalPortError::ParticipantLimitExceeded { .. }
         | TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
             TemporalKernelError::Port(error)
         }

@@ -150,6 +150,20 @@ where
     canonical_framed_sha256(SCHEMA_SHAPE_FINGERPRINT_DOMAIN, &parts)
 }
 
+/// The DDL this binary creates for one schema object, or `None` when the
+/// object is not part of the final shape.
+///
+/// This is the single expected-shape authority, so a convergence step can ask
+/// it whether a store's stored DDL is the current one instead of carrying its
+/// own copy of either shape.
+pub(super) fn expected_object_sql(name: &str) -> Result<Option<&'static str>> {
+    Ok(EXPECTED_FINAL_SHAPE
+        .as_ref()
+        .map_err(|error| database_error(error.clone()))?
+        .get(name)
+        .map(|object| object.sql.as_str()))
+}
+
 /// Fingerprint of the exact final shape this binary creates and admits.
 pub fn expected_final_schema_fingerprint() -> Result<String> {
     let inventory = EXPECTED_FINAL_SHAPE
