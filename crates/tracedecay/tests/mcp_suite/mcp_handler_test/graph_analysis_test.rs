@@ -1041,6 +1041,39 @@ async fn test_port_order() {
 }
 
 #[tokio::test]
+async fn port_order_sorts_a_tied_level_before_applying_the_limit() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn zeta() {}\npub fn alpha() {}\npub fn middle() {}\n",
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_port_order",
+        json!({"source_dir": "src", "kinds": ["function"], "limit": 2}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let names = output["levels"][0]["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["zeta", "alpha"]);
+    assert_eq!(output["returned"], json!(2));
+}
+
+#[tokio::test]
 async fn test_rename_preview_not_found() {
     let (cg, _env, _dir) = setup_empty_analysis_project().await;
     let result = handle_tool_call(
