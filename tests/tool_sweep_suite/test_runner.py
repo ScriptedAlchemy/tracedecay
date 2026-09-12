@@ -1525,6 +1525,161 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(len(qualified_name_calls), 1)
 
 
+class WorkflowLifecycleTests(unittest.TestCase):
+    SHA_A = "sha256:" + "a" * 64
+    SHA_B = "sha256:" + "b" * 64
+    SHA_C = "sha256:" + "c" * 64
+
+    class Runtime:
+        def __init__(self, owner):
+            self.owner = owner
+            self.definitions = {}
+            self.dispositions = {}
+            self.runs = {}
+            self.calls = []
+
+        def response(self, payload):
+            return {"payload": payload}
+
+        def call(self, name, arguments, _deadline_ms):
+            self.calls.append((name, arguments))
+            if name == "tracedecay_configuration_get":
+                return {
+                    "authority": {"policy": {"digest": self.owner.SHA_A}},
+                    "payload": {"effective_behavior_digest": self.owner.SHA_B},
+                }
+            if name == "tracedecay_workflow_validate_definition":
+                return self.response({"definition": arguments["definition"]})
+            if name == "tracedecay_workflow_register_definition":
+                definition = arguments["definition"]
+                key = (definition["definition_id"], definition["definition_version"])
+                self.definitions[key] = definition
+                self.dispositions.setdefault(key, {"state": "candidate", "revision": 1})
+                return self.response(definition)
+            if name == "tracedecay_workflow_get_definition":
+                return self.response(self.definitions[(arguments["definition_id"], arguments["definition_version"])])
+            if name == "tracedecay_workflow_list_definitions":
+                return self.response(list(self.definitions.values()))
+            if name == "tracedecay_workflow_definition_history":
+                return self.response([
+                    definition for (identity, _version), definition in self.definitions.items()
+                    if identity == arguments["definition_id"]
+                ])
+            if name == "tracedecay_workflow_diff_definition":
+                return self.response({
+                    "definition_id": arguments["definition_id"],
+                    "from_version": arguments["from_version"],
+                    "to_version": arguments["to_version"],
+                    "changed_steps": ["step.tool-sweep.inspect"],
+                })
+            if name in {
+                "tracedecay_workflow_activate_definition",
+                "tracedecay_workflow_retire_definition",
+                "tracedecay_workflow_reject_definition",
+            }:
+                state, revision = {
+                    "tracedecay_workflow_activate_definition": ("active", 3),
+                    "tracedecay_workflow_retire_definition": ("retired", 4),
+                    "tracedecay_workflow_reject_definition": ("rejected", 2),
+                }[name]
+                key = (arguments["definition_id"], arguments["definition_version"])
+                self.dispositions[key] = {"state": state, "revision": revision}
+                return self.response({
+                    "definition_id": key[0], "definition_version": key[1],
+                    "state": state, "revision": revision,
+                })
+            if name == "tracedecay_workflow_start_run":
+                run = {"run_id": arguments["run_id"], "status": "running", "sequence": 1}
+                self.runs[arguments["run_id"]] = run
+                return self.response(run)
+            if name == "tracedecay_workflow_get_run":
+                return self.response(self.runs[arguments["run_id"]])
+            if name in {
+                "tracedecay_workflow_pause_run",
+                "tracedecay_workflow_resume_run",
+                "tracedecay_workflow_cancel_run",
+            }:
+                state, increment = {
+                    "tracedecay_workflow_pause_run": ("paused", 1),
+                    "tracedecay_workflow_resume_run": ("running", 1),
+                    "tracedecay_workflow_cancel_run": ("cancelled", 2),
+                }[name]
+                run = self.runs[arguments["run_id"]]
+                self.assert_sequence(run, arguments["expected_sequence"])
+                run = {**run, "status": state, "sequence": run["sequence"] + increment}
+                self.runs[arguments["run_id"]] = run
+                return self.response(run)
+            raise AssertionError(name)
+
+        @staticmethod
+        def assert_sequence(run, expected):
+            if run["sequence"] != expected:
+                raise AssertionError((run, expected))
+
+        def probe(self, name, arguments, _deadline_ms):
+            self.calls.append((name, arguments))
+            return {
+                "diagnostic": {
+                    "code": "workflow.catalog.pin_mismatch",
+                    "message": (
+                        f"pinned_catalog_digest expected {self.owner.SHA_C}, "
+                        f"observed {arguments['definition']['pinned_catalog_digest']}"
+                    ),
+                }
+            }
+
+    @staticmethod
+    def fixture():
+        return {
+            "project_id": "project.fixture",
+            "configuration_key": "work.topology_policy.v1",
+            "work_execution_snapshot": {
+                "route": {"provider_id": "provider.fixture", "route_id": "route.fixture"},
+                "backend": "codex_cli",
+                "model": "fixture-model",
+            },
+        }
+
+    def test_shared_lifecycle_consumes_public_pins_and_reaches_terminal_states(self) -> None:
+        runner = load_runner()
+        runtime = self.Runtime(self)
+        fixture = self.fixture()
+
+        runner.prime_workflow_lifecycle(fixture, runtime.call, runtime.probe, lambda _name: 1_000)
+
+        run = runtime.runs[fixture["workflow_run_id"]]
+        self.assertEqual(run["status"], "cancelled")
+        self.assertEqual(
+            runtime.dispositions[(fixture["workflow_definition_id"], 1)]["state"],
+            "retired",
+        )
+        self.assertEqual(
+            runtime.dispositions[(fixture["workflow_definition_id"], 2)]["state"],
+            "rejected",
+        )
+        self.assertEqual(
+            fixture["workflow_definition_v1"]["pinned_catalog_digest"], self.SHA_C
+        )
+
+    def test_pause_effect_is_contained_through_resume_cancel_and_retire(self) -> None:
+        runner = load_runner()
+        runtime = self.Runtime(self)
+        fixture = self.fixture()
+        name = "tracedecay_workflow_pause_run"
+        runner.prime_workflow_lifecycle(
+            fixture, runtime.call, runtime.probe, lambda _name: 1_000, name
+        )
+        prepared = fixture["workflow_effect_journey"]
+
+        response = runtime.call(name, prepared.arguments, 1_000)
+        note = prepared.cleanup(response)
+
+        effect_run = runtime.runs[prepared.arguments["run_id"]]
+        self.assertEqual(prepared.settlement, "contained")
+        self.assertEqual(effect_run["status"], "cancelled")
+        self.assertIn("retired", note)
+
+
 class MountRetryTests(unittest.TestCase):
     """Reads honor typed retryable-unavailable states within one bounded budget."""
 

@@ -27,6 +27,7 @@ from journeys import (
     api_migration_plan_arguments,
     prepare as prepare_journey,
     prime_work_lifecycle,
+    prime_workflow_lifecycle,
     profile_refresh_selectors,
 )
 from outcomes import (
@@ -531,8 +532,19 @@ def _producer_call(client: McpClient, tool: str, arguments: dict[str, Any], dead
     return response
 
 
+def _probe_call(client: McpClient, tool: str, arguments: dict[str, Any], deadline_ms: int) -> dict[str, Any]:
+    """Call a typed diagnostic producer without rewriting its deliberate refusal."""
+    response, _elapsed_ms = client.call_tool(tool, arguments, deadline_ms)
+    if duration_us(response) is None:
+        raise SweepError(f"{tool} diagnostic producer omitted the enabled _meta.duration_us receipt")
+    return response
+
+
 def prime_fixture_values(
-    client: McpClient, fixture: dict[str, Any], policies: dict[str, ToolPolicy]
+    client: McpClient,
+    fixture: dict[str, Any],
+    policies: dict[str, ToolPolicy],
+    effect_target: str | None = None,
 ) -> None:
     """Mint graph, retrieval, configuration, and git identities from real producers."""
     def deadline(tool: str) -> int:
@@ -820,6 +832,18 @@ def prime_fixture_values(
         ),
         deadline,
     )
+    if "tracedecay_workflow_validate_definition" in policies:
+        prime_workflow_lifecycle(
+            fixture,
+            lambda tool, arguments, deadline_ms: _producer_call(
+                client, tool, arguments, deadline_ms
+            ),
+            lambda tool, arguments, deadline_ms: _probe_call(
+                client, tool, arguments, deadline_ms
+            ),
+            deadline,
+            effect_target,
+        )
 
 
 def mint_preview_input(client: McpClient, fixture: dict[str, str], deadline_ms: int) -> None:
@@ -1008,6 +1032,8 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
     name = definition.get("name")
     if name == "tracedecay_api_migration_plan":
         return api_migration_plan_arguments(fixture)
+    if isinstance(name, str) and name in fixture.get("workflow_read_arguments", {}):
+        return dict(fixture["workflow_read_arguments"][name])
     if name == "tracedecay_git_preview":
         return git_preview_arguments(fixture)
     if name == "tracedecay_branch_diff":
@@ -1473,7 +1499,7 @@ def execute_effect(
         except Exception as error:
             row.update({"verdict": "FAIL", "problem_code": "tool_sweep.rollback_failed", "note": f"{row['note']}; rollback failed: {error}"})
         else:
-            row["rollback"] = "verified"
+            row["rollback"] = prepared.settlement
             row["rollback_note"] = rollback_note
         return row
     except Exception as error:
@@ -1635,7 +1661,12 @@ def run_phase(args: argparse.Namespace) -> int:
                 name = definition.get("name") if isinstance(definition.get("name"), str) else "<invalid>"
                 report["entries"].append(_failure_row("tool", name, 0, "tool_sweep.dispatch_metadata_invalid", str(error)))
         policy_index = {policy.name: policy for _, policy in policies}
-        prime_fixture_values(client, fixture, policy_index)
+        prime_fixture_values(
+            client,
+            fixture,
+            policy_index,
+            args.effect if args.phase == "effect" else None,
+        )
         if args.phase == "reads":
             for definition, policy in policies:
                 if policy.availability == "unavailable":
