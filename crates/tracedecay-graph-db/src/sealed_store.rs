@@ -326,6 +326,62 @@ fn sealed_generation_directory(root: &Path, physical_namespace: &GraphNamespace)
     root.join(name)
 }
 
+/// Removes every `.staging-*` directory a seal left behind under the store's
+/// sealed root.
+///
+/// A seal builds into `.staging-<digest>` and installs by rename, so a staging
+/// directory that survives to the next open of the same store belongs to a
+/// build the process never finished — a crash, a kill, or an OOM between
+/// container write and rename. Nothing reads it and the next seal of that
+/// generation starts over, so on the live profile these accumulated to 7.4 GB
+/// under one store. Run at open: the exclusive store lock means no seal of
+/// this store is in flight.
+pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
+    let root = sealed_store_root(database_path);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(
+                event = "sealed_staging_sweep_unreadable",
+                root = %root.display(),
+                error = %error,
+                "sealed store root could not be enumerated; abandoned staging stays"
+            );
+            return;
+        }
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(".staging-") {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                event = "sealed_staging_sweep_failed",
+                path = %path.display(),
+                error = %error,
+                "abandoned sealed staging directory could not be removed"
+            ),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            event = "sealed_staging_swept",
+            root = %root.display(),
+            removed,
+            "removed abandoned sealed staging directories left by interrupted seals"
+        );
+    }
+}
+
 fn remove_sealed_directory(directory: &Path) {
     match std::fs::remove_dir_all(directory) {
         Ok(()) => {}
