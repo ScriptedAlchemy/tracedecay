@@ -5,7 +5,7 @@ use super::*;
 
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
-    ContextScoutDurableStoreV1, ContextScoutEvidenceEnvelopeExt, context_scout_delivery_receipt_id,
+    ContextScoutEvidenceEnvelopeExt, context_scout_delivery_receipt_id,
 };
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
