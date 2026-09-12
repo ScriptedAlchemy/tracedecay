@@ -928,3 +928,48 @@ Record p50/p95/p99 latency, peak RSS, store bytes, write amplification, and reop
 Review the complete behavior and diff against the active final-V2 authority.
 Accept only coherent, directly verified graph journeys with no duplicate
 storage authority.
+
+## Dated amendment (2026-09-12, recorded decision): live container reclaim
+
+**Measured.** The live `tracedecay.grafeo` for one project reached 11.1 GB
+while the newest sealed head it served was 0.75 GB (~250k entities). Every
+publication stages a new physical namespace into the live container; the
+superseded namespaces were never deleted because sealed-generation retirement
+was reachable only from code-index generation deletion (fixed 2026-09-12:
+`retire_superseded_projection_replays` runs on head install), and deleted
+rows do not shrink the container because nothing rewrites it. Grafeo `0.5.42`
+has no namespace drop and no vacuum; the only rewrite is `GrafeoDB::compact()`.
+
+**Standing.** `docs/graph-at-rest/README.md` records that the schema blocker
+for `compact()` is gone (entity, relation, publication, and projection
+identity resolve through indexed properties, not per-entity labels) and that
+the pinned fork's compact-store property hash index removes the point-read
+regression. What still blocks whole-store compaction is the defect observed
+at generation scale: a real ~45k-entity generation fails its post-reopen
+recovered-digest proof in compact form with "relation scalar endpoints do not
+match native topology" while the same rows seal and serve in replay form.
+Toy-scale contracts pass, so the defect is scale- or ordering-dependent.
+
+**Decision.** Live-container reclaim is `compact()` under the maintenance
+lease, not a bespoke re-seal or a quarantine-and-rebuild:
+
+1. Reproduce the endpoint mismatch in the fork with a generation-scale
+   fixture (the sealed-store contract's `rich_manifest` grown to the failing
+   size), fix it there, and gate `COMPACT_ROUND_TRIPS_BYTES` on the recovered
+   digest proving equal in compact and replay form for that fixture.
+2. Add a maintenance-cadence step beside `run_branch_compaction`: when a
+   project's live container exceeds twice the summed bytes of its verified
+   heads' sealed artifacts (both figures are already censused — see the
+   `RetentionBacklog` finding's sealed evidence), take the project store
+   maintenance lease, quiesce the graph owner, `compact()`, close, and reopen.
+   The reopen reconstructs the layered store from the `CompactStore` section;
+   later writes land in the overlay, so the store stays mutable.
+3. Prove the swap with the existing recovered-digest verification before the
+   compacted container replaces the live file; a mismatch keeps the original
+   and reports a typed degradation. Vector generations, whose only durable
+   home is the live container, are covered by the same proof and never
+   re-embedded.
+
+**Non-goals.** No re-projection from canonical replay authorities as a
+compaction path (that is corruption recovery and would re-embed vectors), and
+no quarantine of a healthy container.
