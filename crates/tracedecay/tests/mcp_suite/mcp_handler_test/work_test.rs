@@ -290,7 +290,11 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
                 .find(|attempt| attempt["identity"] == started["identity"])
         })
         .expect("started attempt must be listed");
-    assert_eq!(listed_attempt["state"], started["state"], "{attempts}");
+    assert_eq!(listed_attempt["state"], "failed", "{attempts}");
+    assert_eq!(
+        listed_attempt["terminal"]["outcome"], "failed",
+        "{attempts}"
+    );
 
     let history = call(
         &server,
@@ -382,7 +386,10 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         duplicate.clone(),
     )
     .await;
-    assert_eq!(adjudicated["command"], duplicate, "{adjudicated}");
+    assert_eq!(
+        adjudicated["receipt"]["command"], duplicate,
+        "{adjudicated}"
+    );
 
     let experience = call(
         &server,

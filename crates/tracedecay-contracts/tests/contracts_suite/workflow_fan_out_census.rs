@@ -293,9 +293,12 @@ fn work_product_snapshot(
     )
     .unwrap();
     for child in children {
+        let mut proposal = serde_json::to_value(&child.proposal).unwrap();
+        proposal["based_on_version"] = serde_json::to_value(graph.version()).unwrap();
+        let proposal = serde_json::from_value(proposal).unwrap();
         graph = graph
             .apply(WorkGraphChangeV1::ProposalAccepted {
-                proposal: child.proposal.clone(),
+                proposal,
                 accepted_at: UtcMicros(11),
             })
             .unwrap();
@@ -348,7 +351,7 @@ fn work_attempt(
 ) -> tracedecay_domain::WorkAttemptV1 {
     work_attempt_with_progress(
         child,
-        product_attempt_binding(child, false),
+        product_attempt_binding(child),
         Some(WorkAttemptProgressV1::new(completed, 10).unwrap()),
         snapshot,
     )
@@ -358,25 +361,11 @@ fn work_attempt_without_progress(
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
     snapshot: &WorkExecutionSnapshot,
 ) -> tracedecay_domain::WorkAttemptV1 {
-    work_attempt_with_progress(child, product_attempt_binding(child, false), None, snapshot)
-}
-
-fn work_attempt_after_accepted_link(
-    child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
-    completed: u64,
-    snapshot: &WorkExecutionSnapshot,
-) -> tracedecay_domain::WorkAttemptV1 {
-    work_attempt_with_progress(
-        child,
-        product_attempt_binding(child, true),
-        Some(WorkAttemptProgressV1::new(completed, 10).unwrap()),
-        snapshot,
-    )
+    work_attempt_with_progress(child, product_attempt_binding(child), None, snapshot)
 }
 
 fn product_attempt_binding(
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
-    accepted_attempt_linked: bool,
 ) -> WorkAttemptProjectionBindingV1 {
     let graph = WorkProductGraphV1::new(
         WorkGraphVersionV1::initial(),
@@ -397,19 +386,6 @@ fn product_attempt_binding(
         admitted_at: UtcMicros(12),
     })
     .unwrap();
-    let graph = if accepted_attempt_linked {
-        let based_on_version = graph.version();
-        graph
-            .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
-                task_id: child.task_id.clone(),
-                based_on_version,
-                identity: child.attempt_identity.clone(),
-                linked_at: UtcMicros(13),
-            })
-            .unwrap()
-    } else {
-        graph
-    };
     WorkAttemptProjectionBindingV1::new(
         graph.version(),
         WorkProductEventSequenceV1::new(graph.version().get()).unwrap(),
@@ -638,23 +614,9 @@ fn partial_or_unavailable_evidence_never_flattens_to_a_sample() {
 }
 
 #[test]
-fn work_generation_mismatch_is_typed_and_does_not_claim_exact_activity() {
+fn prior_work_generation_mismatch_keeps_useful_activity_unavailable() {
     let fixture = fixture();
     let other_generation = ProjectionGenerationId::new("generation.workflow.census.other").unwrap();
-    let mismatched = fixture
-        .attempts
-        .iter()
-        .map(|attempt| {
-            let child = fixture
-                .projection
-                .fan_out_plans()
-                .values()
-                .flat_map(|plan| &plan.children)
-                .find(|child| child.attempt_identity == attempt.identity().clone())
-                .unwrap();
-            work_attempt_after_accepted_link(child, 2, &plan_snapshot(&fixture))
-        })
-        .collect::<Vec<_>>();
     let first = census_evidence(
         &fixture,
         Some(&fixture.snapshot),
@@ -671,20 +633,17 @@ fn work_generation_mismatch_is_typed_and_does_not_claim_exact_activity() {
     let current = census_evidence(
         &fixture,
         Some(&fixture.snapshot),
-        &mismatched,
+        &fixture.attempts,
         Some(&previous),
         Some(&fixture.non_duplicates),
         200,
     );
     let census = derive_workflow_fan_out_census(&fixture.projection, &current).unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         census.active_width,
-        WorkflowCensusCountV1::Partial {
-            reason: WorkflowCensusEvidenceReasonV1::WorkGenerationMismatch,
-            ..
-        }
-    ));
+        WorkflowCensusCountV1::Known { value: 2 }
+    );
     assert!(matches!(
         census.useful_width,
         WorkflowCensusCountV1::Unavailable {
