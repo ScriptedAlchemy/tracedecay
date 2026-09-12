@@ -26,6 +26,7 @@ from journeys import (
     JourneyError,
     api_migration_plan_arguments,
     prepare as prepare_journey,
+    prime_work_lifecycle,
     profile_refresh_selectors,
 )
 from outcomes import (
@@ -452,6 +453,9 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     _run_checked(["git", "config", "user.email", "catalog-sweep@example.invalid"], root, "fixture git config")
     _run_checked(["git", "add", "."], root, "fixture git add")
     _run_checked(["git", "commit", "--quiet", "-m", "test: seed catalog sweep fixture"], root, "fixture git commit")
+    commit = _run_checked(
+        ["git", "rev-parse", "HEAD"], root, "fixture git revision"
+    ).stdout.strip()
     # One uncommitted modification on top of the committed baseline: the
     # git_hunks producer mints its expiring preview input from real
     # working-tree hunks, and a clean tree would leave nothing to stage.
@@ -513,6 +517,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         "from_ref": "HEAD",
         "to_ref": "HEAD",
         "branch": "main",
+        "commit": commit,
     }
 
 
@@ -808,6 +813,13 @@ def prime_fixture_values(
     fixture["code_node_id"] = code_node_id
 
     mint_preview_input(client, fixture, deadline("tracedecay_git_hunks"))
+    prime_work_lifecycle(
+        fixture,
+        lambda tool, arguments, deadline_ms: _producer_call(
+            client, tool, arguments, deadline_ms
+        ),
+        deadline,
+    )
 
 
 def mint_preview_input(client: McpClient, fixture: dict[str, str], deadline_ms: int) -> None:
@@ -1052,6 +1064,73 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return {
             "horizon": {"since_micros": 0, "until_micros": int(time.time() * 1_000_000)},
             "max_events": 100,
+            "format": "json",
+        }
+    if name == "tracedecay_work_generate_proposal":
+        return dict(fixture["work_generate_arguments"])
+    if name == "tracedecay_work_attempt_status":
+        return dict(fixture["work_status_arguments"])
+    if name in {
+        "tracedecay_work_list_attempts",
+        "tracedecay_work_execution_history",
+        "tracedecay_work_hydrate_artifacts",
+        "tracedecay_work_topology",
+    }:
+        return {"page_size": 50, "format": "json"}
+    if name == "tracedecay_work_views":
+        return {
+            "selection": fixture["work_selection"],
+            "mode": {"mode": "current"},
+            "continuation": None,
+            "observed_at": int(time.time() * 1_000_000),
+            "format": "json",
+        }
+    if name == "tracedecay_work_retrieve_evidence":
+        return {
+            "selection": fixture["work_selection"],
+            "task_id": fixture["work_task_id"],
+            "verified_version": fixture["work_admitted_version"],
+            "temporal": {"kind": "current"},
+            "page_size": 50,
+            "expansion": None,
+            "continuation": None,
+            "observed_at": int(time.time() * 1_000_000),
+            "format": "json",
+        }
+    if name == "tracedecay_work_compare_proposal":
+        return {
+            "selection": fixture["work_selection"],
+            "task_id": fixture["work_task_id"],
+            "old_version": fixture["work_initial_version"],
+            "new_version": fixture["work_admitted_version"],
+            "observed_at": int(time.time() * 1_000_000),
+            "format": "json",
+        }
+    if name == "tracedecay_work_experience":
+        return {
+            "selection": fixture["work_selection"],
+            "task_id": fixture["work_task_id"],
+            "verified_version": fixture["work_admitted_version"],
+            "evidence_not_before": 0,
+            "expertise_categories": ["testing"],
+            "limit": 10,
+            "observed_at": int(time.time() * 1_000_000),
+            "format": "json",
+        }
+    if name == "tracedecay_work_prepare_graph_mutation":
+        return dict(fixture["work_prepare_create_arguments"])
+    if name == "tracedecay_work_run_control":
+        return {
+            "task_id": fixture["work_task_id"],
+            "run_id": fixture["work_run_id"],
+            "format": "json",
+        }
+    if name == "tracedecay_work_placement_preflight":
+        return dict(fixture["work_placement_arguments"])
+    if name == "tracedecay_work_placement_status":
+        return {
+            "task_id": fixture["work_task_id"],
+            "run_id": fixture["work_run_id"],
             "format": "json",
         }
     if name == "tracedecay_multi_root_scope_set_read":

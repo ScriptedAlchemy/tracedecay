@@ -76,6 +76,246 @@ def _remove_seeded_fact(call: Call, deadline: Deadline, fact_id: str | int) -> N
         raise JourneyError("fact rollback did not confirm removal")
 
 
+def _object_field(response: dict[str, Any], name: str) -> dict[str, Any]:
+    for value in objects(response):
+        candidate = value.get(name)
+        if isinstance(candidate, dict):
+            return candidate
+    raise JourneyError(f"producer omitted its structured {name}")
+
+
+def prime_work_lifecycle(
+    fixture: dict[str, Any], call: Call, deadline: Deadline,
+) -> None:
+    """Create, admit, start, inspect, and contain one real disposable Work task."""
+    suffix = f"{time.monotonic_ns()}"
+    occurred_at = int(time.time() * 1_000_000)
+    selection = {"selection": "profile_owned_no_git"}
+    initiative_id = f"initiative.tool-sweep.{suffix}"
+    plan_id = f"plan.tool-sweep.{suffix}"
+    milestone_id = f"milestone.tool-sweep.{suffix}"
+    task_id = f"task.tool-sweep.{suffix}"
+    proposal_id = f"proposal.tool-sweep.{suffix}"
+    run_id = f"run.tool-sweep.{suffix}"
+    attempt_id = f"attempt.tool-sweep.{suffix}"
+    prepare_create = {
+        "selection": selection,
+        "change": {
+            "change": "create_task",
+            "initiative": {
+                "id": initiative_id,
+                "title": "Tool sweep initiative",
+                "created_at": occurred_at,
+            },
+            "plan": {
+                "id": plan_id,
+                "initiative_id": initiative_id,
+                "title": "Tool sweep plan",
+                "created_at": occurred_at,
+            },
+            "milestone": {
+                "id": milestone_id,
+                "plan_id": plan_id,
+                "title": "Tool sweep milestone",
+                "created_at": occurred_at,
+            },
+            "item": {
+                "input": {
+                    "task_id": task_id,
+                    "hierarchy": {
+                        "initiative_id": initiative_id,
+                        "plan_id": plan_id,
+                        "milestone_id": milestone_id,
+                    },
+                    "title": "Prove the public Work lifecycle",
+                    "dependencies": [],
+                    "informational_relations": [],
+                    "causal_candidates": [],
+                    "acceptance_criteria": [],
+                    "effort": 1,
+                    "scheduled_at": None,
+                    "deadline": None,
+                    "created_at": occurred_at,
+                    "updated_at": occurred_at,
+                },
+                "accepted_proposal": None,
+                "accepted_route": None,
+                "execution_admitted_at": None,
+                "accepted_attempts": [],
+                "accepted_criteria": {},
+                "accepted_at": None,
+                "archived_at": None,
+                "evidence_links": [],
+                "handoffs": [],
+            },
+        },
+        "evidence": [],
+        "format": "json",
+    }
+    prepared_create = call(
+        "tracedecay_work_prepare_graph_mutation",
+        prepare_create,
+        deadline("tracedecay_work_prepare_graph_mutation"),
+    )
+    create_request = _object_field(prepared_create, "request")
+    created = call(
+        "tracedecay_work_create", create_request, deadline("tracedecay_work_create")
+    )
+    if has_true(created, "replayed"):
+        raise JourneyError("fresh Work create unexpectedly replayed")
+
+    generate_arguments = {
+        "selection": selection,
+        "task_id": task_id,
+        "proposal_id": proposal_id,
+        "occurred_at": occurred_at + 1,
+        "format": "json",
+    }
+    generated = call(
+        "tracedecay_work_generate_proposal",
+        generate_arguments,
+        deadline("tracedecay_work_generate_proposal"),
+    )
+    proposal = _object_field(generated, "proposal")
+    initial_version = _object_field(generated, "verified_graph_version")
+    prepared_accept = call(
+        "tracedecay_work_prepare_graph_mutation",
+        {
+            "selection": selection,
+            "change": {
+                "change": "decide_proposal",
+                "proposal": proposal,
+                "disposition": "accepted",
+            },
+            "evidence": [],
+            "format": "json",
+        },
+        deadline("tracedecay_work_prepare_graph_mutation"),
+    )
+    accept_request = _object_field(prepared_accept, "request")
+    accepted = call(
+        "tracedecay_work_accept_proposal",
+        accept_request,
+        deadline("tracedecay_work_accept_proposal"),
+    )
+    accepted_version = _object_field(accepted, "verified_graph_version")
+    prepared_admit = call(
+        "tracedecay_work_prepare_graph_mutation",
+        {
+            "selection": selection,
+            "change": {
+                "change": "admit_execution",
+                "task_id": task_id,
+                "based_on_version": accepted_version["graph_version"],
+            },
+            "evidence": [],
+            "format": "json",
+        },
+        deadline("tracedecay_work_prepare_graph_mutation"),
+    )
+    admit_request = _object_field(prepared_admit, "request")
+    admitted = call(
+        "tracedecay_work_admit_execution",
+        admit_request,
+        deadline("tracedecay_work_admit_execution"),
+    )
+    execution_snapshot = _object_field(admitted, "execution_snapshot")
+    admitted_mutation = _object_field(admitted, "mutation")
+    admitted_version = _object_field(admitted_mutation, "verified_graph_version")
+
+    placement_arguments = {
+        "task_id": task_id,
+        "run_id": run_id,
+        "target": {
+            "kind": "clean_in_place",
+            "root": None,
+            "network_free": True,
+            "in_place_acknowledged": True,
+        },
+        "occurred_at": occurred_at + 2,
+        "format": "json",
+    }
+    call(
+        "tracedecay_work_placement_preflight",
+        placement_arguments,
+        deadline("tracedecay_work_placement_preflight"),
+    )
+    call(
+        "tracedecay_work_admit_placement",
+        placement_arguments,
+        deadline("tracedecay_work_admit_placement"),
+    )
+    start_arguments = {
+        "task_id": task_id,
+        "run_id": run_id,
+        "attempt_id": attempt_id,
+        "operation": "operation.work.start_attempt",
+        "execution_snapshot": execution_snapshot,
+        "worktree_root": fixture["root"],
+        "reference": None,
+        "commit": fixture["commit"],
+        "instructions": "Inspect the disposable fixture only.",
+        "effect_state": "observational",
+        "occurred_at": occurred_at + 3,
+        "format": "json",
+    }
+    started = call(
+        "tracedecay_work_start_attempt",
+        start_arguments,
+        deadline("tracedecay_work_start_attempt"),
+    )
+    started_identity = _object_field(started, "identity")
+    if started_identity.get("attempt_id") != attempt_id:
+        raise JourneyError("Work start returned a different attempt identity")
+    status_arguments = {
+        "task_id": task_id,
+        "run_id": run_id,
+        "attempt_id": attempt_id,
+        "format": "json",
+    }
+    status = call(
+        "tracedecay_work_attempt_status",
+        status_arguments,
+        deadline("tracedecay_work_attempt_status"),
+    )
+    if _object_field(status, "identity").get("attempt_id") != attempt_id:
+        raise JourneyError("Work status did not consume the started attempt identity")
+    cancel_arguments = {
+        **status_arguments,
+        "request_id": f"cancel.tool-sweep.{suffix}",
+        "occurred_at": occurred_at + 4,
+    }
+    cancelled = call(
+        "tracedecay_work_cancel_attempt",
+        cancel_arguments,
+        deadline("tracedecay_work_cancel_attempt"),
+    )
+    if _object_field(cancelled, "identity").get("attempt_id") != attempt_id:
+        raise JourneyError("Work cancellation did not retain the attempt identity")
+
+    fixture.update(
+        {
+            "work_selection": selection,
+            "work_task_id": task_id,
+            "work_run_id": run_id,
+            "work_attempt_id": attempt_id,
+            "work_initial_version": initial_version,
+            "work_admitted_version": admitted_version,
+            "work_prepare_create_arguments": prepare_create,
+            "work_generate_arguments": generate_arguments,
+            "work_placement_arguments": placement_arguments,
+            "work_status_arguments": status_arguments,
+            "work_effect_arguments": {
+                "tracedecay_work_create": create_request,
+                "tracedecay_work_accept_proposal": accept_request,
+                "tracedecay_work_admit_execution": admit_request,
+                "tracedecay_work_start_attempt": start_arguments,
+                "tracedecay_work_cancel_attempt": cancel_arguments,
+            },
+        }
+    )
+
+
 def _git_hunk_input(response: dict[str, Any]) -> tuple[str, list[str]]:
     preview_input_id = first_value(response, {"preview_input_id"})
     digests = sorted(
@@ -809,6 +1049,37 @@ def _begun_refresh(response: dict[str, Any]) -> tuple[str, str]:
     return handle, operation_id
 
 
+def _work_replay(
+    name: str, fixture: dict[str, Any], call: Call, deadline: Deadline,
+) -> PreparedJourney:
+    arguments = fixture.get("work_effect_arguments", {}).get(name)
+    if not isinstance(arguments, dict):
+        raise JourneyError(f"shared Work lifecycle omitted replay arguments for {name}")
+
+    def cleanup(response: dict[str, Any]) -> str:
+        if name in {
+            "tracedecay_work_create",
+            "tracedecay_work_accept_proposal",
+            "tracedecay_work_admit_execution",
+        }:
+            if not has_true(response, "replayed"):
+                raise JourneyError(f"{name} did not replay its retained mutation")
+        else:
+            identity = _object_field(response, "identity")
+            if identity.get("attempt_id") != fixture["work_attempt_id"]:
+                raise JourneyError(f"{name} replay changed the attempt identity")
+        status = call(
+            "tracedecay_work_attempt_status",
+            fixture["work_status_arguments"],
+            deadline("tracedecay_work_attempt_status"),
+        )
+        if _object_field(status, "identity").get("attempt_id") != fixture["work_attempt_id"]:
+            raise JourneyError(f"{name} replay lost the contained attempt")
+        return "shared Work producer/effect/replay/status verified in disposable store"
+
+    return PreparedJourney(dict(arguments), cleanup)
+
+
 def prepare(
     name: str, client: Any, fixture: dict[str, str], deadline: Deadline, call: Call,
 ) -> PreparedJourney | None:
@@ -828,6 +1099,14 @@ def prepare(
         )
     if name == "tracedecay_git_apply":
         return _git_apply(call, deadline)
+    if name in {
+        "tracedecay_work_create",
+        "tracedecay_work_accept_proposal",
+        "tracedecay_work_admit_execution",
+        "tracedecay_work_start_attempt",
+        "tracedecay_work_cancel_attempt",
+    }:
+        return _work_replay(name, fixture, call, deadline)
     if name in {
         "tracedecay_configuration_set",
         "tracedecay_configuration_unset",
