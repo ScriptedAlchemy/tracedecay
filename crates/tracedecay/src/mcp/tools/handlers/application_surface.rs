@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline,
@@ -180,12 +179,6 @@ pub(super) async fn handle_application_surface(
     Ok(rendered)
 }
 
-#[derive(Deserialize)]
-struct CodeGraphFreshnessMarker {
-    generation: tracedecay_domain::CodeGenerationId,
-    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
-}
-
 fn served_stale_code_graph_read(
     result: &ApplicationSurfaceInvocationResult,
 ) -> Result<Option<super::ServedStaleCodeGraphReadV1>> {
@@ -206,22 +199,40 @@ fn served_stale_code_graph_read(
     let ApplicationOutcome::Evidence(evidence) = &envelope.outcome else {
         return Ok(None);
     };
-    let Some(payload) = evidence.payload.as_ref() else {
-        return Ok(None);
-    };
-    let marker: CodeGraphFreshnessMarker = serde_json::from_value(payload.clone())?;
-    let tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+    Ok(served_stale_code_graph_temporal(
+        result.operation,
+        &evidence.temporal,
+    ))
+}
+
+fn served_stale_code_graph_temporal(
+    operation: ApplicationSurfaceOperation,
+    temporal: &tracedecay_contracts::TemporalState,
+) -> Option<super::ServedStaleCodeGraphReadV1> {
+    if !matches!(
+        operation,
+        ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers
+            | ApplicationSurfaceOperation::CodeCallees
+    ) {
+        return None;
+    }
+    let generation = temporal.source_generation.as_ref()?;
+    let Some(tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
         sealed_at,
         rebuild_in_flight,
-    } = marker.freshness
+    }) = temporal.code_graph_freshness
     else {
-        return Ok(None);
+        return None;
     };
-    Ok(Some(super::ServedStaleCodeGraphReadV1 {
-        generation: marker.generation.as_str().to_owned(),
+    Some(super::ServedStaleCodeGraphReadV1 {
+        generation: generation.as_str().to_owned(),
         sealed_at,
         rebuild_in_flight,
-    }))
+    })
 }
 
 /// Map surface-resolution failures to typed reason codes so MCP clients see
@@ -362,10 +373,11 @@ fn render_canonical_markdown(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
-    use tracedecay_domain::UtcMicros;
+    use serde_json::Value;
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId, TemporalState};
+    use tracedecay_domain::{CodeGenerationId, UtcMicros};
 
-    use super::complete_protocol_controls;
+    use super::{complete_protocol_controls, served_stale_code_graph_temporal};
     use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
     #[test]
@@ -429,6 +441,36 @@ mod tests {
             deadline.expires_at.0 >= before.0.saturating_add(15_000_000)
                 && deadline.expires_at.0 <= after.0.saturating_add(15_000_000),
             "configuration_set must inherit its exact 15-second catalog ceiling"
+        );
+    }
+
+    #[test]
+    fn stale_page_freshness_drives_the_legacy_trailer() {
+        let mut temporal = TemporalState::current(UtcMicros(20));
+        temporal.source_generation =
+            Some(CodeGenerationId::new("generation.symbol-page.stale.1").unwrap());
+        temporal.code_graph_freshness = Some(
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                sealed_at: UtcMicros(10),
+                rebuild_in_flight: true,
+            },
+        );
+        let served = served_stale_code_graph_temporal(
+            ApplicationSurfaceOperation::CodeSymbolSearch,
+            &temporal,
+        )
+        .expect("stale page metadata");
+        let mut rendered = super::super::text_tool_result("{}");
+        super::super::append_code_graph_freshness(&mut rendered, &served);
+        let trailer = rendered
+            .value
+            .pointer("/content/1/text")
+            .and_then(Value::as_str)
+            .expect("legacy freshness trailer");
+        assert!(trailer.contains("code_graph_freshness: stale"), "{trailer}");
+        assert!(
+            trailer.contains("generation.symbol-page.stale.1"),
+            "{trailer}"
         );
     }
 }
