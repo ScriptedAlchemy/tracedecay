@@ -164,6 +164,15 @@ impl KimiSource {
                     {
                         continue;
                     }
+                    let agents_dir = session_dir.join("agents");
+                    if !validate_real_directory(
+                        &agents_dir,
+                        KimiDiscoveryFailureKind::InvalidAgentPartition,
+                        &mut discovery,
+                        &mut budget,
+                    ) {
+                        continue;
+                    }
                     for (agent_id, agent) in state.agents {
                         if !matches!(agent.kind.as_str(), "main" | "sub")
                             || !safe_component(&agent_id)
@@ -181,8 +190,16 @@ impl KimiSource {
                             }
                             continue;
                         }
-                        let candidate =
-                            session_dir.join("agents").join(agent_id).join("wire.jsonl");
+                        let agent_dir = agents_dir.join(agent_id);
+                        if !validate_real_directory(
+                            &agent_dir,
+                            KimiDiscoveryFailureKind::InvalidAgentPartition,
+                            &mut discovery,
+                            &mut budget,
+                        ) {
+                            continue;
+                        }
+                        let candidate = agent_dir.join("wire.jsonl");
                         match std::fs::symlink_metadata(&candidate) {
                             Ok(metadata)
                                 if metadata.is_file() && !metadata.file_type().is_symlink() => {}
@@ -247,6 +264,33 @@ fn safe_component(value: &str) -> bool {
     let mut components = Path::new(value).components();
     matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none()
+}
+
+fn validate_real_directory(
+    path: &Path,
+    failure_kind: KimiDiscoveryFailureKind,
+    discovery: &mut KimiDiscoveryReport,
+    budget: &mut HostScanBudget,
+) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
+        Ok(_) => {
+            discovery.record_failure(
+                failure_kind,
+                path,
+                &io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Kimi session directory must be a real directory, not a link",
+                ),
+                budget,
+            );
+            false
+        }
+        Err(error) => {
+            discovery.record_failure(failure_kind, path, &error, budget);
+            false
+        }
+    }
 }
 
 fn read_real_directories(
@@ -937,5 +981,43 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linked_agents_directory_cannot_escape_the_kimi_session() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, project, path, source) = fixture();
+        let session_dir = path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .unwrap();
+        let outside = temp.path().join("outside-agents");
+        std::fs::create_dir_all(outside.join("main")).unwrap();
+        std::fs::write(
+            outside.join("main/wire.jsonl"),
+            wire_message("user", "outside provider root", 1),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(session_dir.join("agents")).unwrap();
+        symlink(&outside, session_dir.join("agents")).unwrap();
+        let admission = MemoryHostAdmission::default();
+
+        let outcome = capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.deferred);
+        assert_eq!(outcome.discovery_failures, 1);
+        assert!(admission.observations().is_empty());
     }
 }
