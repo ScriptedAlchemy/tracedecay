@@ -24,6 +24,7 @@ if str(SUITE_DIR) not in sys.path:
 from dispatch_policy import READ_EFFECTS, ToolPolicy, decode_tool_policy
 from journeys import (
     JourneyError,
+    WORKFLOW_LIFECYCLE_EFFECTS,
     api_migration_plan_arguments,
     prepare as prepare_journey,
     prime_work_lifecycle,
@@ -1801,6 +1802,7 @@ def run_phase(args: argparse.Namespace) -> int:
             )
         except Exception as error:
             fixture["priming_error"] = str(error)
+            report["priming_error"] = str(error)
         if args.phase == "reads":
             for definition, policy in policies:
                 if policy.availability == "unavailable":
