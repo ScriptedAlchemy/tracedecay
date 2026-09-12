@@ -108,7 +108,7 @@ fn application_surface_branch_sensitivity(
     operation: ApplicationSurfaceOperation,
 ) -> BranchSensitivity {
     use ApplicationSurfaceOperation::{
-        AffectedTests, CallChain, CodeCallees, CodeCallers, CodeDeclaration, CodeDefinition,
+        AffectedTests, CallChain, CodeCallees, CodeCallers, CodeDeclaration,
         CodeExactOccurrence, CodeFacets, CodeImplementations, CodePhraseSearch, CodeReferences,
         CodeSignatureSearch, CodeSymbolSearch, CodeTimeline, CodeTypeDefinition, CodeTypeHierarchy,
         ConfigurationAudit, ConfigurationBatch, ConfigurationGet, ConfigurationList,
@@ -197,7 +197,6 @@ fn application_surface_branch_sensitivity(
         | CodeFacets
         | CodeTimeline
         | CodeDeclaration
-        | CodeDefinition
         | CodeTypeDefinition
         | CodeReferences
         | QualifiedName

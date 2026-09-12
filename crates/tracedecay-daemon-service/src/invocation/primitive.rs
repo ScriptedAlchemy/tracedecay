@@ -202,10 +202,6 @@ pub(super) async fn execute_callable_code(
             ApplicationSurfaceOperation::CodeDeclaration,
         ) => CallableCodeOperationKind::Declaration,
         (
-            CallableCodeSurfaceRequest::Definition(_),
-            ApplicationSurfaceOperation::CodeDefinition,
-        ) => CallableCodeOperationKind::Definition,
-        (
             CallableCodeSurfaceRequest::TypeDefinition(_),
             ApplicationSurfaceOperation::CodeTypeDefinition,
         ) => CallableCodeOperationKind::TypeDefinition,
@@ -302,14 +298,6 @@ pub(super) async fn execute_callable_code(
                 wire_request_id,
                 &registered.scope,
                 query.declaration(&context, request, observed_at).await,
-            )
-        }
-        CallableCodeSurfaceRequest::Definition(request) => {
-            let request = request.into_application_request(page);
-            callable_code_response(
-                wire_request_id,
-                &registered.scope,
-                query.definition(&context, request, observed_at).await,
             )
         }
         CallableCodeSurfaceRequest::TypeDefinition(request) => {

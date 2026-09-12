@@ -48,7 +48,7 @@ const PARITY_FIXTURE: &str = include_str!(
 /// `tracedecay-daemon-service/src/application_surface.rs`; the
 /// drift guard below fails as soon as one of them stops being pinned, stops
 /// binding a surface, or stops advertising its cursor over MCP.
-const CURSOR_CARRYING_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
+const CURSOR_CARRYING_CODE_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
     ApplicationSurfaceOperation::CodeExactOccurrence,
     ApplicationSurfaceOperation::CodePhraseSearch,
     ApplicationSurfaceOperation::CodeSymbolSearch,
@@ -60,7 +60,6 @@ const CURSOR_CARRYING_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
     ApplicationSurfaceOperation::CodeFacets,
     ApplicationSurfaceOperation::CodeTimeline,
     ApplicationSurfaceOperation::CodeDeclaration,
-    ApplicationSurfaceOperation::CodeDefinition,
     ApplicationSurfaceOperation::CodeTypeDefinition,
     ApplicationSurfaceOperation::CodeReferences,
 ];

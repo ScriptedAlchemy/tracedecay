@@ -157,7 +157,6 @@ application_surface_operations! {
     CodeFacets => "code_facets";
     CodeTimeline => "code_timeline";
     CodeDeclaration => "code_declaration";
-    CodeDefinition => "code_definition";
     CodeTypeDefinition => "code_type_definition";
     CodeReferences => "code_references";
     SessionLookup => "session_lookup";

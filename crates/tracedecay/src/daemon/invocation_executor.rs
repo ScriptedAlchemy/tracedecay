@@ -189,7 +189,6 @@ pub(super) fn multi_root_family_allows(
                 | ApplicationSurfaceOperation::CodeFacets
                 | ApplicationSurfaceOperation::CodeTimeline
                 | ApplicationSurfaceOperation::CodeDeclaration
-                | ApplicationSurfaceOperation::CodeDefinition
                 | ApplicationSurfaceOperation::CodeTypeDefinition
                 | ApplicationSurfaceOperation::CodeReferences
         ),
