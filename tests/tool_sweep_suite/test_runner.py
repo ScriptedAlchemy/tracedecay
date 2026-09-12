@@ -487,6 +487,11 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
                 "run_id": "run.fixture",
                 "target": {"kind": "clean_in_place"},
             },
+            "work_duplicate_arguments": {
+                "first_attempt": {"attempt_id": "attempt.fixture"},
+                "second_attempt": {"attempt_id": "attempt.fixture.second"},
+                "verdict": "not_duplicate",
+            },
         }
         placeholder = {"type": "object", "properties": {}, "required": []}
 
@@ -502,6 +507,13 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         placement = runner.materialize_tool_arguments(
             {"name": "tracedecay_work_placement_status", "inputSchema": placeholder}, fixture
         )
+        duplicate = runner.materialize_tool_arguments(
+            {
+                "name": "tracedecay_work_prepare_duplicate_adjudication",
+                "inputSchema": placeholder,
+            },
+            fixture,
+        )
 
         self.assertEqual(status["attempt_id"], "attempt.fixture")
         self.assertEqual(compared["old_version"], {"graph_version": 1})
@@ -513,6 +525,9 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             "run_id": "run.fixture",
             "format": "json",
         })
+        self.assertEqual(
+            duplicate["second_attempt"]["attempt_id"], "attempt.fixture.second"
+        )
 
 
 class NegotiatedSurfaceTests(unittest.TestCase):
@@ -654,6 +669,91 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertEqual(prepared.arguments, {"mutation_id": "mutation.fixture"})
         note = prepared.cleanup(self.response('{"replayed":true}'))
         self.assertIn("producer/effect/replay/status", note)
+
+    def test_target_specific_work_journey_precedes_the_shared_replay(self) -> None:
+        runner = load_runner()
+        shared = runner.prepare_journey(
+            "tracedecay_work_create",
+            object(),
+            {
+                "work_attempt_id": "attempt.fixture",
+                "work_status_arguments": {},
+                "work_effect_arguments": {
+                    "tracedecay_work_create": {"mutation_id": "mutation.fixture"},
+                },
+            },
+            lambda _tool: 1_000,
+            lambda *_args: self.response('{"identity":{"attempt_id":"attempt.fixture"}}'),
+        )
+        fixture = {
+            "work_effect_journey": shared,
+            "work_effect_arguments": {
+                "tracedecay_work_create": {"mutation_id": "stale.fallback"},
+            },
+        }
+
+        selected = runner.prepare_journey(
+            "tracedecay_work_pause_run",
+            object(),
+            fixture,
+            lambda _tool: 1_000,
+            lambda *_args: {},
+        )
+
+        self.assertIs(selected, shared)
+        self.assertEqual(selected.arguments["mutation_id"], "mutation.fixture")
+
+    def test_attempt_recovery_journey_requires_typed_sets_and_rechecks(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        calls = []
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            return self.response('{"recovery_required":[],"cancelled":[]}')
+
+        prepared = journeys._prepare_work_effect_journey(
+            "tracedecay_work_resume_attempts",
+            {},
+            call,
+            lambda _tool: 1_000,
+            {},
+            {},
+        )
+        note = prepared.cleanup(self.response('{"recovery_required":[],"cancelled":[]}'))
+
+        self.assertEqual(prepared.settlement, "contained")
+        self.assertEqual(calls[0][0], "tracedecay_work_resume_attempts")
+        self.assertIn("idempotent rescan", note)
+
+    def test_pause_journey_resumes_and_reads_the_durable_control(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        calls = []
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_work_resume_run":
+                return self.response('{"state":"running","authority":2}')
+            if tool == "tracedecay_work_run_control":
+                return self.response('{"state":"controlled","control":{"state":"running"}}')
+            raise AssertionError(tool)
+
+        prepared = journeys._prepare_work_effect_journey(
+            "tracedecay_work_pause_run",
+            {"work_task_id": "task.fixture", "work_run_id": "run.fixture"},
+            call,
+            lambda _tool: 1_000,
+            {},
+            {},
+        )
+        note = prepared.cleanup(self.response('{"state":"paused","authority":1}'))
+
+        self.assertEqual([tool for tool, _ in calls], [
+            "tracedecay_work_resume_run", "tracedecay_work_run_control"
+        ])
+        self.assertEqual(calls[0][1]["expected_authority_version"], 1)
+        self.assertIn("durable run-control", note)
 
     def test_git_apply_consumes_preview_and_verifies_its_inverse(self) -> None:
         runner = load_runner()
@@ -1412,6 +1512,11 @@ class FixturePrimingRetryTests(unittest.TestCase):
                     return cls.response(json.dumps({
                         "request": {"fixture_mutation": change},
                     })), 3
+                if name == "tracedecay_work_prepare_duplicate_adjudication":
+                    return cls.response(json.dumps({
+                        **arguments,
+                        "command_id": "command.duplicate.fixture",
+                    })), 3
                 if name in {
                     "tracedecay_work_admit_placement",
                     "tracedecay_work_start_attempt",
@@ -1470,6 +1575,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_work_start_attempt",
             "tracedecay_work_attempt_status",
             "tracedecay_work_cancel_attempt",
+            "tracedecay_work_prepare_duplicate_adjudication",
         )
         return {
             name: runner.ToolPolicy(name, "available", "read", 1_000)
