@@ -364,7 +364,7 @@ pub(crate) async fn insert_at(
 
     let insert_idx = if before { anchor_line } else { anchor_line + 1 };
     let mut new_lines: Vec<&str> = lines[..insert_idx].to_vec();
-    new_lines.push(content);
+    new_lines.push(content.strip_suffix('\n').unwrap_or(content));
     new_lines.extend_from_slice(&lines[insert_idx..]);
     let modified = splice_lines(&new_lines, source.ends_with('\n'));
 

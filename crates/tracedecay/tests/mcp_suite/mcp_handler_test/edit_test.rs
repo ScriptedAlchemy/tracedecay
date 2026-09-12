@@ -1039,13 +1039,30 @@ async fn test_insert_at_string_anchor_before() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
-    fs::write(
-        project.join("src/main.rs"),
-        "line one\nline two\nline three\n",
-    )
-    .unwrap();
+    let initial = b"line one\nline two\nline three\n";
+    let applied = b"line one\nfirst inserted\nsecond inserted\nline two\nline three\n";
+    fs::write(project.join("src/main.rs"), initial).unwrap();
 
     let (cg, _env) = init_test_project(project).await;
+
+    let preview = handle_tool_call(
+        &cg,
+        "tracedecay_insert_at",
+        json!({
+            "path": "src/main.rs",
+            "anchor": "line two",
+            "content": "first inserted\nsecond inserted\n",
+            "before": true,
+            "dry_run": true
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preview: Value = serde_json::from_str(extract_text(&preview.value)).unwrap();
+    let expected_state = preview["expected_state"].as_str().unwrap();
+    assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), initial);
 
     let result = handle_tool_call(
         &cg,
@@ -1053,29 +1070,19 @@ async fn test_insert_at_string_anchor_before() {
         json!({
             "path": "src/main.rs",
             "anchor": "line two",
-            "content": "inserted line",
-            "before": true
+            "content": "first inserted\nsecond inserted\n",
+            "before": true,
+            "idempotency_key": "mcp-test.insert-at.trailing-newline",
+            "expected_state": expected_state
         }),
         None,
         None,
     )
     .await
     .unwrap();
-
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(parsed["success"], true);
-
-    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
-    assert!(
-        content.ends_with('\n'),
-        "trailing newline must be preserved"
-    );
-    let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(lines[0], "line one");
-    assert_eq!(lines[1], "inserted line");
-    assert_eq!(lines[2], "line two");
-    assert_eq!(lines[3], "line three");
+    assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), applied);
 }
 
 #[tokio::test]
