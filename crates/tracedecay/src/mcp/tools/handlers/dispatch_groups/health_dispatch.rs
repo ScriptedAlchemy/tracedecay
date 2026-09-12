@@ -7,11 +7,10 @@ use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::super::ToolCallRegistryOptions;
-use super::admitted_graph_query;
+use super::verified_graph_open;
 use super::{admitted_project_authorities, admitted_runtime_snapshots, admitted_tool_context};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::health as portable_health;
-use tracedecay_mcp::handlers::redundancy as portable_redundancy;
 
 /// Dispatch code-health and session-baseline tools (`tracedecay_health`,
 /// `tracedecay_test_risk`, `tracedecay_runtime`, ...).
@@ -25,26 +24,8 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
-        "tracedecay_test_map" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            portable_health::handle_test_map(&graph, args, scope_prefix).await
-        }
-        "tracedecay_gini" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            portable_health::handle_gini(&graph, args, scope_prefix).await
-        }
-        "tracedecay_dependency_depth" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            portable_health::handle_dependency_depth(&graph, args, scope_prefix).await
-        }
-        "tracedecay_health" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            portable_health::handle_health(&graph, args, scope_prefix).await
-        }
-        "tracedecay_redundancy" => {
-            let graph = admitted_graph_query(cg, &options, "redundancy").await?;
-            portable_redundancy::handle_redundancy(&graph, args, scope_prefix).await
-        }
+        // Runtime telemetry snapshots the daemon census and doctor report the
+        // root holds, and stamps the build the root was compiled as.
         "tracedecay_runtime" => {
             let project = admitted_project_authorities(cg, &options)?;
             let include_doctor = args
@@ -61,14 +42,14 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
             )
             .await
         }
-        "tracedecay_dsm" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            portable_health::handle_dsm(&graph, args, scope_prefix).await
+        _ => {
+            portable_health::dispatch_tool(
+                &verified_graph_open(&options),
+                tool_name,
+                args,
+                scope_prefix,
+            )
+            .await
         }
-        "tracedecay_test_risk" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            portable_health::handle_test_risk(&graph, args, scope_prefix).await
-        }
-        _ => Err(super::super::unknown_tool_error(tool_name)),
     }
 }

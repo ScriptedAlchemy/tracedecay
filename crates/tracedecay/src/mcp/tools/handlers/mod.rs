@@ -190,6 +190,7 @@ use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::unknown_tool_error;
 use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
 use tracedecay_runtime_core::storage::registered_project_id;
 
@@ -903,13 +904,6 @@ async fn invoke_admitted_workflow_operation(
             format!("The Workflow application response was not valid JSON: {error}"),
         )
     })
-}
-
-/// The single rejection every dispatch group returns for a name it does not own.
-fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("unknown tool: {tool_name}"),
-    }
 }
 
 #[cfg(any(feature = "hotpath", test))]

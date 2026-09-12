@@ -14,6 +14,7 @@
 mod affected;
 mod branch;
 mod context;
+mod dispatch;
 mod pr_context_cursor;
 mod shell;
 #[cfg(test)]
@@ -25,6 +26,7 @@ pub use branch::{handle_branch_diff, handle_branch_list, handle_branch_search};
 pub use context::{
     handle_changelog, handle_commit_context, handle_diff_context, handle_pr_context,
 };
+pub use dispatch::dispatch_tool;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

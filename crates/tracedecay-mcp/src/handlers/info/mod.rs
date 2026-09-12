@@ -6,6 +6,7 @@
 
 mod body;
 mod config;
+mod dispatch;
 mod files;
 mod outline;
 mod port_order;
@@ -21,6 +22,7 @@ mod verified;
 
 pub use body::{extract_lines, handle_body};
 pub use config::handle_config;
+pub use dispatch::dispatch_tool;
 pub use files::handle_files;
 pub use outline::handle_outline;
 pub use port_order::handle_port_order;
