@@ -8,6 +8,8 @@
 //! remediation instead of mutating the current registration. Project-local `--local`
 //! installs write
 //! `<project>/.kimi-code/mcp.json` plus prompt rules in `<project>/AGENTS.md`.
+//! Global installs register MCP in Kimi's user-level `mcp.json`; unlike plugin
+//! MCP declarations, Kimi launches those entries from the session workspace.
 //!
 //! Kimi Code owns the plugin registry; TraceDecay owns only its staged source.
 //!
@@ -227,9 +229,7 @@ impl AgentIntegration for KimiIntegration {
         if manifest.get("name").and_then(serde_json::Value::as_str) != Some(KIMI_PLUGIN_ID) {
             return State::Corrupt;
         }
-        let mcp_current = manifest
-            .pointer("/mcpServers/tracedecay")
-            .is_some_and(serde_json::Value::is_object);
+        let mcp_current = kimi_user_mcp_is_current(&code_home);
         if matches!(
             component,
             HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
@@ -258,10 +258,18 @@ impl AgentIntegration for KimiIntegration {
         Some(kimi_installed_json_path(&kimi_code_home(home)))
     }
 
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        let code_home = kimi_code_home(home);
+        vec![
+            kimi_installed_json_path(&code_home),
+            kimi_user_mcp_path(&code_home),
+        ]
+    }
+
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         let code_home = kimi_code_home(&ctx.home);
         if kimi_plugin_is_natively_active(&ctx.home, &code_home, &ctx.tracedecay_bin)? {
-            Ok(())
+            install_kimi_user_mcp(&code_home, &ctx.tracedecay_bin)
         } else {
             Err(deferred_user_action_error(
                 kimi_official_lifecycle_unavailable("install", None),
@@ -276,7 +284,7 @@ impl AgentIntegration for KimiIntegration {
                 kimi_official_lifecycle_unavailable("remove", None),
             ))
         } else {
-            Ok(())
+            uninstall_kimi_user_mcp(&code_home)
         }
     }
 
@@ -328,6 +336,51 @@ pub(crate) fn kimi_staged_plugin_dir(home: &Path) -> PathBuf {
 /// Kimi Code CLI's plugin registry: `<kimi-code-home>/plugins/installed.json`.
 fn kimi_installed_json_path(kimi_code_home: &Path) -> PathBuf {
     kimi_code_home.join("plugins/installed.json")
+}
+
+fn kimi_user_mcp_path(kimi_code_home: &Path) -> PathBuf {
+    kimi_code_home.join("mcp.json")
+}
+
+fn install_kimi_user_mcp(kimi_code_home: &Path, tracedecay_bin: &str) -> Result<()> {
+    install_mcp_server_entry(
+        &kimi_user_mcp_path(kimi_code_home),
+        "mcpServers",
+        json!({
+            "command": tracedecay_bin,
+            "args": ["serve"]
+        }),
+        "Kimi",
+        JsonConfigDialect::Json,
+    )
+}
+
+fn uninstall_kimi_user_mcp(kimi_code_home: &Path) -> Result<()> {
+    uninstall_mcp_server_entry(
+        &kimi_user_mcp_path(kimi_code_home),
+        "mcpServers",
+        JsonConfigDialect::Json,
+        McpUninstallPolicy {
+            prune_empty_root: true,
+            remove_empty_file: true,
+        },
+    )
+}
+
+fn kimi_user_mcp_is_current(kimi_code_home: &Path) -> bool {
+    let entry = super::mcp_registration_entry(
+        &kimi_user_mcp_path(kimi_code_home),
+        "mcpServers",
+        load_json_file,
+    );
+    entry.is_some_and(|entry| {
+        entry
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|command| !command.is_empty())
+            && entry.get("args") == Some(&json!(["serve"]))
+            && entry.get("cwd").is_none()
+    })
 }
 
 fn kimi_managed_plugin_dir(kimi_code_home: &Path) -> PathBuf {
@@ -433,9 +486,8 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
         .map(|(relative, contents)| {
             let rendered = if relative == KIMI_PLUGIN_MANIFEST_RELATIVE {
                 let stamped = super::plugin_bundle::stamp_manifest_version(contents)?;
-                // Kimi resolves plugin MCP executables from PATH and rejects
-                // absolute commands. Keep the template's `tracedecay` command;
-                // hooks are shell commands and may use the resolved path.
+                // Hooks are shell commands and may use the resolved path. MCP
+                // lives in Kimi's user config so Kimi preserves session cwd.
                 render_kimi_hook_commands(&stamped, tracedecay_bin)?
             } else {
                 contents.to_string()
@@ -671,6 +723,9 @@ mod tests {
                 .unwrap(),
             NonInteractiveInstallOutcome::Ready
         );
+        KimiIntegration
+            .activate_deployed_host_registration(&ctx)
+            .unwrap();
         assert_eq!(
             KimiIntegration.host_component_registration(
                 super::super::host_bundle::HostBundleComponentV1::Core,
@@ -735,7 +790,21 @@ mod tests {
     }
 
     #[test]
-    fn rendered_plugin_uses_kimi_supported_mcp_command() {
+    fn global_mcp_config_omits_cwd_and_preserves_foreign_servers() {
+        let home = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        std::fs::create_dir_all(&code_home).unwrap();
+        std::fs::write(
+            kimi_user_mcp_path(&code_home),
+            serde_json::to_vec(&json!({
+                "mcpServers": {
+                    "foreign": {"command": "foreign-server"}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
         let manifest = rendered_plugin_files("/opt/tracedecay/bin/tracedecay")
             .unwrap()
             .into_iter()
@@ -743,15 +812,26 @@ mod tests {
             .map(|(_, contents)| serde_json::from_str::<serde_json::Value>(&contents).unwrap())
             .unwrap();
 
-        assert_eq!(
-            manifest["mcpServers"]["tracedecay"]["command"],
-            "tracedecay"
-        );
+        assert!(manifest.get("mcpServers").is_none());
         assert!(
             manifest["hooks"][0]["command"]
                 .as_str()
                 .unwrap()
                 .contains("/opt/tracedecay/bin/tracedecay")
         );
+
+        install_kimi_user_mcp(&code_home, "/opt/tracedecay/bin/tracedecay").unwrap();
+        let config = load_json_file(&kimi_user_mcp_path(&code_home));
+        let entry = &config["mcpServers"]["tracedecay"];
+        assert_eq!(entry["command"], "/opt/tracedecay/bin/tracedecay");
+        assert_eq!(entry["args"], json!(["serve"]));
+        assert!(entry.get("cwd").is_none());
+        assert_eq!(config["mcpServers"]["foreign"]["command"], "foreign-server");
+        assert!(kimi_user_mcp_is_current(&code_home));
+
+        uninstall_kimi_user_mcp(&code_home).unwrap();
+        let config = load_json_file(&kimi_user_mcp_path(&code_home));
+        assert!(config["mcpServers"].get("tracedecay").is_none());
+        assert_eq!(config["mcpServers"]["foreign"]["command"], "foreign-server");
     }
 }

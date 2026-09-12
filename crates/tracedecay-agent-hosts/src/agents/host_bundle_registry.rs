@@ -147,7 +147,7 @@ pub fn unsupported_host_component_set_reason(
 }
 
 /// Canonical default install set. Each native MCP registration has one
-/// component owner. Kimi's plugin manifest carries its MCP route inside Core;
+/// component owner. Kimi's Core registration projects MCP into its user config;
 /// hosts with a separable route use Context MCP. The match is exhaustive so a
 /// newly admitted host cannot fall through to a silently empty set.
 pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
@@ -508,9 +508,9 @@ fn component_assets(
             .collect());
     }
 
-    // Kimi's Core bundle owns its manifest-declared hooks and MCP route as one
-    // native plugin. Render the complete managed inventory with the installed
-    // binary path; companion MCP components would duplicate that ownership.
+    // Kimi's Core bundle owns its plugin hooks and the user-config MCP route as
+    // one lifecycle component. Render the complete managed plugin inventory;
+    // companion MCP components would duplicate that registration ownership.
     if (host, component) == (HostKindV1::KimiCode, HostBundleComponentV1::Core) {
         let files = super::kimi::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
