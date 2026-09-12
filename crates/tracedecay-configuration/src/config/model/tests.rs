@@ -358,7 +358,9 @@ fn semantic_resource_ceilings_reject_zero_or_incoherent_limits() {
     assert!(semantic.validate().is_err());
 
     semantic = SemanticConfig::default();
-    semantic.resources.max_model_bytes = semantic.resources.max_resident_bytes + 1;
+    semantic.resources.max_resident_bytes = Some(semantic.resources.max_model_bytes);
+    assert!(semantic.validate().is_ok());
+    semantic.resources.max_model_bytes += 1;
     assert!(semantic.validate().is_err());
 }
 

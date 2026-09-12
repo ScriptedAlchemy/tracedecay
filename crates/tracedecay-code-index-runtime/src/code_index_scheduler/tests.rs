@@ -12337,7 +12337,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         SemanticResourceCeilings {
             max_model_bytes: 1024 * 1024 * 1024,
             max_tokenizer_bytes: 64 * 1024 * 1024,
-            max_resident_bytes: 2 * 1024 * 1024 * 1024,
+            max_resident_bytes: Some(2 * 1024 * 1024 * 1024),
             max_threads: 1,
             max_concurrent_sessions: 1,
             max_batch_size: 4,
@@ -12379,7 +12379,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         SemanticResourceCeilings {
             max_model_bytes: 1024 * 1024 * 1024,
             max_tokenizer_bytes: 64 * 1024 * 1024,
-            max_resident_bytes: 2 * 1024 * 1024 * 1024,
+            max_resident_bytes: Some(2 * 1024 * 1024 * 1024),
             max_threads: 1,
             max_concurrent_sessions: 1,
             max_batch_size: 4,

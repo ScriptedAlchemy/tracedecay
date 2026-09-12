@@ -18,6 +18,20 @@
         EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
         EmbeddingTruncationSideV1 as TruncationSideV1,
     };
+
+    /// Ceilings with the resident bound pinned to the shipped default.
+    ///
+    /// Composition resolves an unpinned ceiling against the host before any
+    /// artifact is built; these lifecycle tests are about installation and
+    /// verification, so they pin the value rather than model the host.
+    fn pinned_ceilings() -> SemanticResourceCeilings {
+        SemanticResourceCeilings {
+            max_resident_bytes: Some(
+                tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES,
+            ),
+            ..SemanticResourceCeilings::default()
+        }
+    }
     use tracedecay_semantic_contracts::{
         ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
         DEFAULT_FASTEMBED_MODEL_ID, MODEL_ARTIFACT_MANIFEST_SCHEMA_V1,

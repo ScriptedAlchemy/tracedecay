@@ -145,7 +145,9 @@ fn catalog_artifact_manifest(
             resource_ceiling: ResourceCeilingV1 {
                 max_model_bytes: resources.max_model_bytes,
                 max_tokenizer_bytes: resources.max_tokenizer_bytes,
-                max_resident_bytes: resources.max_resident_bytes,
+                max_resident_bytes: resources
+                    .resolved_max_resident_bytes()
+                    .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?,
                 max_threads: resources.max_threads,
                 max_batch_size: resources.max_batch_size,
                 max_sequence_length: resources.max_sequence_length,
