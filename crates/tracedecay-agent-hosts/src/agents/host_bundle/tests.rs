@@ -11,7 +11,6 @@ use super::control::{
 };
 use super::doctor::{corrupt_component_result, doctor_artifact_state, repair_action};
 use super::planner::plan_artifact_action;
-use super::writer::remove_if_digest_matches;
 use super::*;
 
 #[test]
