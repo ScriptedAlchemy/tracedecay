@@ -8,9 +8,8 @@
 use std::fs;
 
 use sha2::{Digest, Sha256};
-use tracedecay_search_eval::{
-    compute_workload_digest, load_candidate_workload, validate_direct_workload,
-};
+use tracedecay_query::search_quality::{compute_workload_digest, load_candidate_workload};
+use tracedecay_search_eval::validate_direct_workload;
 
 #[test]
 fn semantic_workload_and_incremental_fixture_are_byte_exact() {
