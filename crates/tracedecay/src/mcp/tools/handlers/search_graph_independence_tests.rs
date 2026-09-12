@@ -14,6 +14,9 @@ use super::dispatch_test_support::{SelectorEnv, verified_graph_options};
 use super::*;
 use crate::config::lock_user_data_dir_test_env;
 
+const LEXICAL_SYMBOL_ID: &str =
+    "symbol.v1.sha256:4ddd636456fccc2962006c7803bd94b2d7d732c6830993a429535e0b0ff0b688";
+
 struct PendingVerifiedGraphQueryPort;
 
 impl tracedecay_graph_query::VerifiedGraphQueryPort for PendingVerifiedGraphQueryPort {
@@ -46,7 +49,7 @@ impl tracedecay_graph_query::VerifiedGraphQueryPort for YieldingUnavailableVerif
 fn lexical_candidate() -> RankedCandidate {
     RankedCandidate {
         candidate: FusedCandidate {
-            anchor_id: RetrievalAnchorId::new("code-symbol:lexical-widget")
+            anchor_id: RetrievalAnchorId::new(format!("code-symbol:{LEXICAL_SYMBOL_ID}"))
                 .expect("lexical candidate anchor"),
             logical_evidence_id: LogicalEvidenceId::new("logical.lexical-widget")
                 .expect("lexical candidate logical evidence"),
@@ -167,7 +170,7 @@ async fn tracedecay_search_preserves_lexical_results_when_graph_admission_is_mis
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["results"][0]["display"]["name"], "LexicalWidget");
     assert_eq!(payload["results"][0]["display"]["path"], "src/lib.rs");
-    assert!(payload["results"][0]["node_id"].is_null());
+    assert_eq!(payload["results"][0]["node_id"], LEXICAL_SYMBOL_ID);
     assert_eq!(
         payload["code_generation"],
         "generation.search-degradation.1"
@@ -229,7 +232,13 @@ async fn tracedecay_search_refuses_foreign_generation_graph_evidence_without_era
 
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["results"][0]["display"]["name"], "LexicalWidget");
-    assert!(payload["results"][0]["node_id"].is_null());
+    // This ID comes from the generation-bound lexical anchor. The foreign
+    // graph remains refused below and contributes no replacement identity.
+    assert_eq!(payload["results"][0]["node_id"], LEXICAL_SYMBOL_ID);
+    assert_eq!(
+        payload["results"][0]["candidate"]["anchor_id"],
+        format!("code-symbol:{LEXICAL_SYMBOL_ID}")
+    );
     assert_eq!(
         payload["verified_graph_evidence"]["reason_code"],
         "verified-code-graph-generation-mismatch"
