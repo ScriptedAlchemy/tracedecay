@@ -219,6 +219,15 @@ async fn aborted_flight_owner_wakes_follower_and_allows_a_fresh_owner() {
         follower_error,
         CodeIndexIgnoredDependencyRefusalV1::Cancelled,
     );
+    assert_eq!(
+        latest(&registry, fixture.path())
+            .await
+            .generation()
+            .manifest()
+            .generation_id,
+        baseline.generation().manifest().generation_id,
+        "a pre-publication owner abort must not schedule a superseding generation"
+    );
 
     index_dependency(&registry, fixture.path(), request, StaticControl::active())
         .await

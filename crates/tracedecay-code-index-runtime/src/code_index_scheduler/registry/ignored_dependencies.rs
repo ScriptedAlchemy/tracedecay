@@ -188,22 +188,47 @@ fn clone_production_error(error: &CodeIndexProductionErrorV1) -> CodeIndexProduc
 }
 
 pub struct AdmissionFlightV1 {
-    completion: Mutex<Option<AdmissionFlightCompletionV1>>,
+    state: Mutex<AdmissionFlightStateV1>,
     completed: tokio::sync::Notify,
+    hints: Arc<Mutex<PendingHintsV1>>,
+    wake: Arc<tokio::sync::Notify>,
+    epoch: Arc<AtomicU64>,
+    pending_wake: Arc<PendingWakeV1>,
+}
+
+#[derive(Default)]
+struct AdmissionFlightStateV1 {
+    completion: Option<AdmissionFlightCompletionV1>,
+    // The async owner and detached blocking build can finish in either order.
+    // Keeping both facts under the completion lock makes the recovery decision
+    // linearizable and preserves exactly one authoritative wake after commit.
+    owner_abandoned: bool,
+    publication_committed: bool,
+    reconcile_requested: bool,
 }
 
 impl AdmissionFlightV1 {
-    fn new() -> Self {
+    fn new(
+        hints: Arc<Mutex<PendingHintsV1>>,
+        wake: Arc<tokio::sync::Notify>,
+        epoch: Arc<AtomicU64>,
+        pending_wake: Arc<PendingWakeV1>,
+    ) -> Self {
         Self {
-            completion: Mutex::new(None),
+            state: Mutex::new(AdmissionFlightStateV1::default()),
             completed: tokio::sync::Notify::new(),
+            hints,
+            wake,
+            epoch,
+            pending_wake,
         }
     }
 
     fn completion(&self) -> Option<AdmissionFlightCompletionV1> {
-        self.completion
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completion
             .clone()
     }
 
@@ -211,12 +236,60 @@ impl AdmissionFlightV1 {
         &self,
         result: &Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1>,
     ) {
-        *self
-            .completion
+        self.state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(AdmissionFlightCompletionV1::from_result(result));
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completion = Some(AdmissionFlightCompletionV1::from_result(result));
         self.completed.notify_waiters();
+    }
+
+    fn owner_abandoned(&self) {
+        self.record_recovery_state(|state| state.owner_abandoned = true);
+    }
+
+    fn publication_committed(&self) {
+        self.record_recovery_state(|state| state.publication_committed = true);
+    }
+
+    fn record_recovery_state(&self, update: impl FnOnce(&mut AdmissionFlightStateV1)) {
+        let request_reconcile = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            update(&mut state);
+            let request =
+                state.owner_abandoned && state.publication_committed && !state.reconcile_requested;
+            state.reconcile_requested |= request;
+            request
+        };
+        if !request_reconcile {
+            return;
+        }
+        self.perform_authoritative_reconcile();
+    }
+
+    fn claim_reconcile_request(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let request = !state.reconcile_requested;
+        state.reconcile_requested = true;
+        request
+    }
+
+    fn perform_authoritative_reconcile(&self) {
+        self.hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .overflow();
+        DaemonCodeIndexControlV1::advance(&self.epoch);
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &self.pending_wake,
+            &self.wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
     }
 }
 
@@ -225,10 +298,6 @@ struct AdmissionFlightOwnerV1 {
     flight: Arc<AdmissionFlightV1>,
     flights: Arc<Mutex<BTreeMap<AdmissionFlightKeyV1, Arc<AdmissionFlightV1>>>>,
     bridge: Arc<AdmissionControlBridgeV1>,
-    hints: Arc<Mutex<PendingHintsV1>>,
-    wake: Arc<tokio::sync::Notify>,
-    epoch: Arc<AtomicU64>,
-    pending_wake: Arc<PendingWakeV1>,
     finished: bool,
 }
 
@@ -237,6 +306,9 @@ impl AdmissionFlightOwnerV1 {
         mut self,
         result: Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1>,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
+        if result.is_err() {
+            self.flight.owner_abandoned();
+        }
         match &result {
             Ok(_) => {
                 hotpath::gauge!("daemon.code_index.ignored_dependency.admitted_total").inc(1_u64);
@@ -263,19 +335,6 @@ impl AdmissionFlightOwnerV1 {
             flights.remove(&self.key);
         }
     }
-
-    fn request_authoritative_reconcile(&self) {
-        self.hints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .overflow();
-        DaemonCodeIndexControlV1::advance(&self.epoch);
-        CodeIndexSchedulerRegistryV1::note_wake(
-            &self.pending_wake,
-            &self.wake,
-            CodeIndexCadenceTriggerV1::QueryAdmission,
-        );
-    }
 }
 
 impl Drop for AdmissionFlightOwnerV1 {
@@ -288,10 +347,10 @@ impl Drop for AdmissionFlightOwnerV1 {
         }
         hotpath::gauge!("daemon.code_index.ignored_dependency.cancelled_total").inc(1_u64);
         self.bridge.cancel();
+        self.flight.owner_abandoned();
         let cancellation = Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
         self.flight.finish(&cancellation);
         self.remove_flight();
-        self.request_authoritative_reconcile();
     }
 }
 
@@ -391,7 +450,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     &worktree_id,
                     &serving_generation,
                 )?;
-                let flight = Arc::new(AdmissionFlightV1::new());
+                let flight = Arc::new(AdmissionFlightV1::new(
+                    Arc::clone(&hints),
+                    Arc::clone(&wake),
+                    Arc::clone(&epoch),
+                    Arc::clone(&pending_wake),
+                ));
                 active.insert(flight_key.clone(), Arc::clone(&flight));
                 (flight, true)
             }
@@ -405,17 +469,19 @@ impl CodeIndexSchedulerRegistryV1 {
         hotpath::gauge!("daemon.code_index.ignored_dependency.in_flight").inc(1_u64);
         let owner = AdmissionFlightOwnerV1 {
             key: flight_key,
-            flight,
+            flight: Arc::clone(&flight),
             flights,
             bridge: Arc::clone(&bridge),
-            hints,
-            wake,
-            epoch,
-            pending_wake,
             finished: false,
         };
         let result = self
-            .run_ignored_dependency_admission(&project_root, request, control.as_ref(), &bridge)
+            .run_ignored_dependency_admission(
+                &project_root,
+                request,
+                control.as_ref(),
+                &bridge,
+                flight,
+            )
             .await;
         owner.finish(result)
     }
@@ -433,6 +499,7 @@ impl CodeIndexSchedulerRegistryV1 {
         request: CodeIndexIgnoredDependencyRequestV1,
         control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
         bridge: &Arc<AdmissionControlBridgeV1>,
+        flight: Arc<AdmissionFlightV1>,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
         let (
             repository_id,
@@ -496,6 +563,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let build_scheduler = Arc::clone(&scheduler);
         let build_bridge = Arc::clone(bridge);
         let build_serving = serving.clone();
+        let publication_flight = Arc::clone(&flight);
         let mut build_task = tokio::task::spawn_blocking(move || {
             let mut scheduler = build_scheduler
                 .lock()
@@ -505,6 +573,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 request,
                 build_bridge.as_ref(),
             )?;
+            publication_flight.publication_committed();
             let replay_binding =
                 scheduler.code_graph_replay_binding(&build.outcome.generation_id)?;
             Ok::<_, CodeIndexSchedulerErrorV1>((build, replay_binding))
@@ -526,15 +595,17 @@ impl CodeIndexSchedulerRegistryV1 {
         // must finish graph activation and the serving CAS instead of reporting
         // a refusal for a generation that a restart will restore.
         let request_reactivation = || {
-            scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .request_background_reconcile();
-            Self::note_wake(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
+            if flight.claim_reconcile_request() {
+                scheduler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .request_background_reconcile();
+                Self::note_wake(
+                    &pending_wake,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+            }
         };
         if build
             .latest
@@ -777,6 +848,38 @@ async fn acquire_daemon_admission(
                 refuse_if_interrupted(control, shutting_down)?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod flight_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn publication_after_owner_abandonment_requests_one_reconcile() {
+        let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
+        let pending_wake = Arc::new(PendingWakeV1::default());
+        let epoch = Arc::new(AtomicU64::new(0));
+        let flight = AdmissionFlightV1::new(
+            Arc::clone(&hints),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::clone(&epoch),
+            Arc::clone(&pending_wake),
+        );
+
+        flight.owner_abandoned();
+        assert_eq!(epoch.load(Ordering::Acquire), 0);
+        assert!(!hints.lock().unwrap().overflow);
+        assert!(!pending_wake.has_pending_arrival());
+
+        flight.publication_committed();
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
+        assert!(hints.lock().unwrap().overflow);
+        assert!(pending_wake.has_pending_arrival());
+
+        flight.owner_abandoned();
+        flight.publication_committed();
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
     }
 }
 
