@@ -45,6 +45,7 @@ use super::search_evidence::{
 use super::search_freshness::{
     ServedGenerationV1, freshness_lines, search_freshness, worktree_freshness_from_payload,
 };
+use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{
     graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
     line_for_byte_offset, node_not_found as node_not_found_result, required_graph_file_path,
@@ -354,6 +355,10 @@ where
             hotpath::measure_block!("mcp.graph.search.graph", {
                 for ranked in &complete.ordered_candidates {
                     let mut result = json!(ranked);
+                    let anchor = ranked.candidate.anchor_id.as_str();
+                    if anchor.starts_with(CODE_SYMBOL_EVIDENCE_PREFIX) {
+                        result["node_id"] = json!(graph_occurrence_id(anchor)?);
+                    }
                     if let Some(display) =
                         complete.display_by_anchor.get(&ranked.candidate.anchor_id)
                     {
@@ -363,7 +368,7 @@ where
                             "kind": display.kind,
                             "path": display.path,
                         });
-                        if include_graph_node_ids {
+                        if include_graph_node_ids && result.get("node_id").is_none() {
                             graph_evidence.enrich_node_id(&mut result, display);
                         }
                     }
@@ -542,11 +547,16 @@ fn render_search_md(value: &Value) -> String {
                             "**{name}** ({kind}, {exact_class}) — rank {} · utility {utility}{via}",
                             ordinal.saturating_add(1)
                         ));
-                        md.line(&format!("  `{anchor}`"));
+                        md.line(&format!("  anchor_id: `{anchor}`"));
                     } else {
                         md.bullet(&format!(
                             "**{anchor}** ({exact_class}) — rank {} · utility {utility}{via}",
                             ordinal.saturating_add(1)
+                        ));
+                    }
+                    if let Some(node_id) = it.get("node_id").and_then(Value::as_str) {
+                        md.line(&format!(
+                            "  Read source: `tracedecay_source_body` with `node_id: {node_id}`"
                         ));
                     }
                     continue;
@@ -1576,6 +1586,35 @@ mod tests {
             render_search_md(&without),
             "warm coverage must be additive metadata, never rendered output"
         );
+    }
+
+    #[test]
+    fn search_renders_symbol_id_for_source_body_without_graph_enrichment() {
+        let node_id =
+            "symbol.v1.sha256:4ddd636456fccc2962006c7803bd94b2d7d732c6830993a429535e0b0ff0b688";
+        let anchor = format!("{CODE_SYMBOL_EVIDENCE_PREFIX}{node_id}");
+        let symbol = graph_occurrence_id(&anchor).expect("search symbol anchor");
+        for display in [
+            Value::Null,
+            json!({"name": "load_current_mutations", "kind": "function"}),
+        ] {
+            let mut result = json!({
+                "candidate": {"anchor_id": anchor, "exact_class": "approximate"},
+                "node_id": symbol,
+            });
+            if !display.is_null() {
+                result["display"] = display;
+            }
+            let rendered = render_search_md(&json!({"results": [result]}));
+            assert!(rendered.contains(&format!(
+                "Read source: `tracedecay_source_body` with `node_id: {node_id}`"
+            )));
+            assert!(!rendered.contains("node_id: code-symbol:"));
+        }
+        let chunk = render_search_md(&json!({"results": [{
+            "candidate": {"anchor_id": "code-chunk:chunk.fixture"}
+        }]}));
+        assert!(!chunk.contains("tracedecay_source_body"));
     }
 
     #[tokio::test]

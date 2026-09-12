@@ -20,14 +20,6 @@
       "timeout": 5
     }
   ],
-  "mcpServers": {
-    "tracedecay": {
-      "command": "tracedecay",
-      "args": [
-        "serve"
-      ]
-    }
-  },
   "interface": {
     "displayName": "TraceDecay",
     "shortDescription": "Semantic code intelligence and memory for Kimi Code.",
