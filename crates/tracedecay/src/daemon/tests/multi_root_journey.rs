@@ -124,6 +124,215 @@ fn authenticated_multi_root_journey_reaches_scope_set_storage() {
 }
 
 #[test]
+fn scope_set_cas_opens_registered_cold_roots_before_persisting() {
+    const STACK_SIZE: usize = 16 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("multi-root-cold-roots".to_owned())
+        .stack_size(STACK_SIZE)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("multi-root cold-root runtime")
+                .block_on(run_scope_set_cas_with_registered_cold_root());
+        })
+        .expect("multi-root cold-root thread")
+        .join()
+        .expect("multi-root cold-root thread must not panic");
+}
+
+async fn run_scope_set_cas_with_registered_cold_root() {
+    let home = TempDir::new().expect("home");
+    let profile_root = home.path().join("profile");
+    let active = repository();
+    let cold = repository();
+    let handshake = DaemonHandshake {
+        project_path: Some(active.path().to_path_buf()),
+        allow_init: true,
+        client_identity: test_client_identity_for(profile_root.clone()),
+        ..test_handshake_defaults()
+    };
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "multi-root-cold-roots");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    engine
+        .open_project_server(&handshake)
+        .await
+        .expect("register active project");
+    let cold_handshake = DaemonHandshake {
+        project_path: Some(cold.path().to_path_buf()),
+        ..handshake.clone()
+    };
+    let (cold_key, _, _, _) = engine
+        .open_project_server(&cold_handshake)
+        .await
+        .expect("register cold project");
+
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("registered profile database");
+    let projects = registry
+        .list_code_projects(usize::MAX)
+        .await
+        .expect("list registered projects");
+    let registered_project = |root: &Path| {
+        let canonical = root.canonicalize().expect("canonical registered root");
+        projects
+            .iter()
+            .find(|project| Path::new(&project.canonical_root) == canonical)
+            .unwrap_or_else(|| panic!("registered project missing for {}", canonical.display()))
+    };
+    let active_project =
+        tracedecay_domain::ProjectId::new(registered_project(active.path()).project_id.clone())
+            .expect("active project id");
+    let cold_project =
+        tracedecay_domain::ProjectId::new(registered_project(cold.path()).project_id.clone())
+            .expect("cold project id");
+    let cold_roots = std::collections::BTreeSet::from([cold
+        .path()
+        .canonicalize()
+        .expect("canonical cold root")]);
+    let profile_id = engine
+        .store_administration
+        .profile_identity()
+        .expect("profile identity")
+        .profile_id()
+        .clone();
+    let cold_quiescence = engine
+        .invocation
+        .quiesce_project_runtime_owners(&profile_id, &cold_project, &cold_roots)
+        .await
+        .expect("quiesce cold project runtime");
+    let cold_servers = engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .remove_owner(&cold_key.owner);
+    crate::daemon::project_server_lifecycle::retire_evicted_project_owner(
+        &engine.store_administration,
+        cold_key.owner,
+        cold_servers,
+        None,
+    )
+    .await;
+    engine
+        .store_administration
+        .join_project_server_retirements()
+        .await;
+    drop(cold_quiescence);
+    assert!(
+        engine
+            .invocation
+            .service
+            .admit_project_request(active.path())
+            .is_some(),
+        "the active project runtime must remain mounted"
+    );
+    assert!(
+        engine
+            .invocation
+            .service
+            .admit_project_request(cold.path())
+            .is_none(),
+        "registry discovery must not pretend the cold project runtime is mounted"
+    );
+
+    let scope_set_id = ScopeSetId::new("scope-set.cold-roots").expect("scope set id");
+    let roots = vec![
+        RegisteredRootSelectorV1::new(
+            active_project,
+            active.path().canonicalize().expect("canonical active root"),
+        )
+        .expect("active selector"),
+        RegisteredRootSelectorV1::new(
+            cold_project,
+            cold.path().canonicalize().expect("canonical cold root"),
+        )
+        .expect("cold selector"),
+    ];
+    let observed_at = now();
+    let (deadline, cancellation) = controls("cold-roots-cas", observed_at);
+    let cas = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+            "request.multi-root.cold-roots-cas",
+            MultiRootScopeSetCasRequestV1::new(scope_set_id.clone(), None, roots.clone())
+                .expect("CAS request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { outcome, .. } = cas.outcome
+    else {
+        panic!("cold-root CAS must reach storage: {:?}", cas.outcome);
+    };
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
+        panic!("cold-root CAS must return evidence");
+    };
+    let applied = packet
+        .payload
+        .expect("CAS evidence payload")
+        .scope_set
+        .expect("applied scope set");
+
+    let observed_at = now();
+    let (deadline, cancellation) = controls("cold-roots-read", observed_at);
+    let read = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        DaemonInvocationRequest::multi_root_scope_set_read(
+            "request.multi-root.cold-roots-read",
+            MultiRootScopeSetReadRequestV1::new(scope_set_id.clone()).expect("read request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootScopeSetRead { outcome, .. } = read.outcome else {
+        panic!("scope-set read must reach storage: {:?}", read.outcome);
+    };
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
+        panic!("scope-set read must return evidence");
+    };
+    assert_eq!(packet.payload.flatten(), Some(applied.clone()));
+
+    let observed_at = now();
+    let (deadline, cancellation) = controls("cold-roots-stale-cas", observed_at);
+    let stale = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+            "request.multi-root.cold-roots-stale-cas",
+            MultiRootScopeSetCasRequestV1::new(scope_set_id, None, roots)
+                .expect("stale CAS request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { outcome, .. } = stale.outcome
+    else {
+        panic!("stale CAS must reach storage: {:?}", stale.outcome);
+    };
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
+        panic!("stale CAS must return evidence");
+    };
+    let conflict = packet.payload.expect("stale CAS evidence payload");
+    assert_eq!(conflict.status, MultiRootScopeSetCasStatusV1::Conflict);
+    assert_eq!(conflict.scope_set.as_ref(), Some(&applied));
+}
+
+#[test]
 fn multi_root_direct_routes_refuse_a_quiesced_project() {
     const STACK_SIZE: usize = 16 * 1024 * 1024;
 
