@@ -19,12 +19,13 @@ use super::DashboardState;
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
 use super::read_model::DashboardEnvelopeV1;
 
-const STORAGE_KINDS: [DoctorStorageFindingKindV1; 5] = [
+const STORAGE_KINDS: [DoctorStorageFindingKindV1; 6] = [
     DoctorStorageFindingKindV1::OverBudgetStore,
     DoctorStorageFindingKindV1::OrphanStore,
     DoctorStorageFindingKindV1::IncidentDebrisPresent,
     DoctorStorageFindingKindV1::RetentionBacklog,
     DoctorStorageFindingKindV1::TableGrowth,
+    DoctorStorageFindingKindV1::PendingSchemaMigration,
 ];
 
 /// Whether one storage finding producer had enough source evidence to report

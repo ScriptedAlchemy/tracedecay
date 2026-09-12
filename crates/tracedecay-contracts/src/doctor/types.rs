@@ -76,6 +76,11 @@ pub enum DoctorStorageFindingKindV1 {
     /// Per-table SQLite payload growth observed between two retained
     /// watermarks, including baseline and unavailable measurement states.
     TableGrowth,
+    /// A store whose historical schema convergence has not completed: the
+    /// migrations whose cost scales with store size are still pending, still
+    /// running, or stopped on a failure. The daemon serves while they run, so
+    /// this is the surface that says which store is still migrating and why.
+    PendingSchemaMigration,
 }
 
 /// Exact Doctor evidence states.
