@@ -6268,11 +6268,9 @@ name = "tracedecay-configuration"
 version = "0.1.0"
 dependencies = [
  "glob",
- "hex",
  "hotpath",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -6428,6 +6426,7 @@ name = "tracedecay-dashboard-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clru",
  "hotpath",
  "schemars",
  "semver",
