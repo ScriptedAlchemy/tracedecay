@@ -33,18 +33,18 @@ use tracedecay_runtime_core::storage::{
 
 use crate::common::GLOBAL_DB_ENV;
 
-/// Bump when the template layout or fixture sources change, so stale
-/// templates from previous revisions in a cached target dir are ignored.
-const TEMPLATE_DIR_REVISION: &str = "mcp-suite-store-template-v6";
-
-/// The template directory is also keyed on the runtime-core schema version:
-/// a template seeded by a binary one schema step behind would otherwise be
-/// copied into every fixture and refused (or stepped) on admission.
-fn template_dir_name() -> String {
-    format!(
-        "{TEMPLATE_DIR_REVISION}-schema{}",
-        tracedecay_runtime_core::db::migrations::SCHEMA_VERSION
-    )
+/// Shared on-disk template identity. Keyed on the admitted final-shape
+/// fingerprint, not `SCHEMA_VERSION` or a hand-maintained revision: a required
+/// table can land in the final shape without a version bump, and a warm
+/// target must not reuse the previous template.
+fn template_dir_name() -> Option<String> {
+    match tracedecay_runtime_core::db::migrations::expected_final_schema_fingerprint() {
+        Ok(fingerprint) => Some(format!("mcp-suite-store-template-{fingerprint}")),
+        Err(error) => {
+            eprintln!("[mcp_suite::fixture] schema fingerprint unavailable: {error}");
+            None
+        }
+    }
 }
 
 const EMPTY_FLAVOR: &str = "empty";
@@ -216,7 +216,7 @@ async fn template_root() -> Option<&'static Path> {
 /// every concurrent process blocks briefly and then finds READY.
 async fn ensure_template() -> Option<PathBuf> {
     let tmp_root = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let template_dir_name = template_dir_name();
+    let template_dir_name = template_dir_name()?;
     let shared = tmp_root.join(&template_dir_name);
     if shared.join("READY").is_file() {
         return Some(shared);
@@ -291,11 +291,21 @@ async fn build_template(dest: &Path) -> io::Result<()> {
         .await
         .map_err(io_other)?;
     let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    let graph_db_path = cg.store_layout().graph_db_path.clone();
     cg.checkpoint().await.map_err(io_other)?;
     cg.close();
 
     purge_configuration(&sessions_db_path)?;
     purge_global_registry(&global_db_path).await?;
+    let built_fingerprint = sqlite_master_shape_fingerprint(&graph_db_path)?;
+    let expected_fingerprint =
+        tracedecay_runtime_core::db::migrations::expected_final_schema_fingerprint()
+            .map_err(io_other)?;
+    if built_fingerprint != expected_fingerprint {
+        return Err(io::Error::other(format!(
+            "built template schema fingerprint {built_fingerprint} does not match expected {expected_fingerprint}"
+        )));
+    }
     copy_tree(&root, &dest.join(EMPTY_FLAVOR))?;
 
     fs::write(dest.join("READY"), b"ok")?;
@@ -450,4 +460,34 @@ fn rewrite_json(path: &Path, edit: impl FnOnce(&mut Value)) -> io::Result<()> {
 
 fn io_other(err: impl std::fmt::Display) -> io::Error {
     io::Error::other(err.to_string())
+}
+
+/// Reads `sqlite_master` (`name` + `sql`, sorted) from a freshly built
+/// template graph database and returns the same fingerprint the cache key
+/// uses. A stale template whose objects drifted without a version bump
+/// cannot match.
+fn sqlite_master_shape_fingerprint(database_path: &Path) -> io::Result<String> {
+    let conn = Connection::open(database_path).map_err(io_other)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT name, COALESCE(sql, '') FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'",
+        )
+        .map_err(io_other)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(io_other)?;
+    let objects = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(io_other)?;
+    Ok(
+        tracedecay_runtime_core::db::migrations::fingerprint_schema_objects(
+            objects
+                .iter()
+                .map(|(name, sql)| (name.as_str(), sql.as_str())),
+        ),
+    )
 }
