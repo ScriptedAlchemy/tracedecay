@@ -1917,7 +1917,7 @@ struct ProjectCodeIndexAuthorities {
     graph_projection_read_port: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ignored_dependency_admission:
         Arc<dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
-    generation_census_reader: tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+    generation_census_reader: tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader,
     graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort,
     search_authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
     search_executor: crate::mcp::server::CodeIndexSearchExecutor,

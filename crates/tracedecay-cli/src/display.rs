@@ -6,11 +6,11 @@
 use std::fmt::Write as _;
 
 use tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1;
+use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::text::{
     format_bytes, format_number, format_relative_time, format_token_count,
 };
 use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
-use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
 
 /// Formats a single table cell with left-aligned label and right-aligned value.
 fn format_cell(label: &str, value: &str, width: usize) -> String {

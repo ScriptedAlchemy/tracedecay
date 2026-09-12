@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
+use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
-use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
 
 use crate::tools::render::Md;
 use crate::{
@@ -156,7 +156,7 @@ fn attach_full_branch_status(
 
 /// Serialize the generation census exactly as the CLI decoder reads it back.
 ///
-/// [`tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
+/// [`tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
 /// authority for the `graph_statistics` field: this route serializes it and
 /// `tracedecay status` deserializes the same Rust type, so the two sides
 /// cannot drift.
@@ -164,7 +164,7 @@ pub fn graph_statistics_value(census: Option<&GenerationCensusSnapshot>) -> Resu
     let census = census.cloned().unwrap_or(
         GenerationCensusSnapshot::Unavailable {
             reason:
-                tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+                tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
         },
     );
     Ok(serde_json::to_value(&census)?)
@@ -672,7 +672,7 @@ mod tests {
     use tracedecay_global_db::{
         SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     };
-    use tracedecay_session_memory::runtime_telemetry::{
+    use tracedecay_runtime_core::runtime_telemetry::{
         GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusStatistics,
         GenerationCensusUnavailableReason,
     };

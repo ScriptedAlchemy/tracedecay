@@ -28,7 +28,7 @@ use tracedecay_mcp::{
     McpRequestAuthoritiesV1, McpSemanticOwnerV1, McpToolBinding, McpToolContext, RequestControls,
     ToolResult,
 };
-use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
+use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 
 use super::ToolCallRegistryOptions;
 use super::support::effective_path;

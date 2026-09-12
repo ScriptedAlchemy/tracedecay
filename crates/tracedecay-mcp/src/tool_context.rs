@@ -44,8 +44,8 @@ use tracedecay_query::code_search::{
     CodeIndexBranchDiffExecutor, CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor,
 };
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::StoreLayout;
-use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_store::StoreShardScopeV1;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
@@ -1336,12 +1336,12 @@ pub(crate) mod tests {
             "session-store absence must stay None"
         );
         assert_eq!(
-            tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-                reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+            tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                reason: tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
             },
             bound.generation_census().cloned().unwrap_or(
-                tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-                    reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+                tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                    reason: tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
                 }
             ),
             "the typed unavailable census is what a handler must emit, not an empty success"
