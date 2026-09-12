@@ -906,7 +906,13 @@ async fn retired_external_source_rows(connection: &(impl QueryExecutor + ?Sized)
     if !present {
         return None;
     }
-    Some(scalar_i64(connection, "SELECT COUNT(*) FROM external_source_objects_v1").await)
+    Some(
+        scalar_i64(
+            connection,
+            "SELECT COUNT(*) FROM external_source_objects_v1",
+        )
+        .await,
+    )
 }
 
 async fn migrating_session_row_count(connection: &(impl QueryExecutor + ?Sized)) -> i64 {

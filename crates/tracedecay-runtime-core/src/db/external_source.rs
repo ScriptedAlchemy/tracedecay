@@ -2,8 +2,8 @@
 //! and the store-sized rewrite that retires its payload-copying predecessors.
 
 use crate::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_rusqlite_runtime::repository::RETIRED_MUTATION_COPY_TABLES;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_rusqlite_runtime::repository::RETIRED_MUTATION_COPY_TABLES;
 
 /// Rows moved per migration write.
 ///
@@ -110,7 +110,10 @@ fn migration_failure(message: String, error: impl std::fmt::Display) -> TraceDec
 
 /// The inclusive `rowid` of the last row in the next chunk, or `None` once the
 /// retired table is empty.
-async fn retired_chunk_ceiling(connection: &impl QueryExecutor, table: &str) -> Result<Option<i64>> {
+async fn retired_chunk_ceiling(
+    connection: &impl QueryExecutor,
+    table: &str,
+) -> Result<Option<i64>> {
     let mut rows = connection
         .query(
             &format!(
@@ -364,7 +367,10 @@ mod tests {
         )
         .await;
 
-        let writer = db.begin_write_transaction("reinstall schema").await.unwrap();
+        let writer = db
+            .begin_write_transaction("reinstall schema")
+            .await
+            .unwrap();
         install_external_source_schema(&writer, "install test")
             .await
             .unwrap();
@@ -465,5 +471,4 @@ mod tests {
             "the retired table is dropped only once it is empty"
         );
     }
-
 }
