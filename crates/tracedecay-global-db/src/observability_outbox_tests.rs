@@ -71,6 +71,45 @@ async fn observability_append_is_idempotent_and_rejects_changed_input() {
 }
 
 #[tokio::test]
+async fn observability_batch_appends_every_event() {
+    const APPENDS: usize = 8;
+
+    let harness = RegisteredGlobalDbHarness::open("observability-append-batch").await;
+    let events = (0..APPENDS)
+        .map(|index| AnalyticsEventInsert {
+            provider: "tracedecay-observability".to_owned(),
+            project_id: "scope:batch".to_owned(),
+            session_id: None,
+            timestamp: 1,
+            event_kind: "retrieval.query.completed.v1".to_owned(),
+            hook_name: None,
+            tool_name: None,
+            tool_category: None,
+            skill_name: None,
+            hint_category: None,
+            hint_id: Some(format!("batch:{index}")),
+            outcome: Some("succeeded".to_owned()),
+            metadata_json: Some(format!("{{\"index\":{index}}}")),
+        })
+        .collect::<Vec<_>>();
+    let ids = harness
+        .registered
+        .append_observability_events(&events)
+        .await
+        .expect("append observability batch");
+
+    assert_eq!(ids.len(), APPENDS);
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some("scope:batch"), 0)
+            .await
+            .expect("count appended events"),
+        i64::try_from(APPENDS).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn observability_outbox_replay_reuses_exact_delivery_and_settles_atomically() {
     let harness = RegisteredGlobalDbHarness::open("observability-outbox-replay").await;
     let project = "scope:outbox";

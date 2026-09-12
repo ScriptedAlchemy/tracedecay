@@ -5,7 +5,7 @@
 //! and descriptions from the handler/catalog/executable authorities.
 //!
 //! The `def_*` functions live in domain submodules (graph, analysis, git,
-//! testing, edit, lcm, memory, skills, admin); this root keeps the shared
+//! testing, edit, lcm, memory, skills, admin); this module keeps the shared
 //! schema helpers, the registry assembly (`get_tool_definitions`), and the
 //! post-processing passes (project selectors, LCM storage scope, format).
 
@@ -42,7 +42,6 @@ use application::*;
 pub use application_schema::mcp_input_schema;
 use application_schema::{canonical_application_request_schema, project_input_schema};
 use ast_grep::ast_grep_available;
-pub use ast_grep::ast_grep_diagnostics;
 use edit::*;
 use git::*;
 use graph::*;
