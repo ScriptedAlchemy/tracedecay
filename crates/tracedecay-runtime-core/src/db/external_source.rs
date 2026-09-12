@@ -157,12 +157,15 @@ pub async fn install_external_source_schema(
         {
             continue;
         }
-        connection.execute_batch(migration).await.map_err(|error| {
-            failure(format!(
-                "{operation}: failed to migrate {retired_table} to its digest-referencing \
-                 successor: {error}"
-            ))
-        })?;
+        connection
+            .execute_bulk_migration_batch(migration)
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "{operation}: failed to migrate {retired_table} to its digest-referencing \
+                     successor: {error}"
+                ))
+            })?;
     }
     Ok(())
 }
@@ -203,7 +206,7 @@ mod tests {
                 .await
                 .unwrap();
         let writer = db
-            .begin_write_transaction("seed retired shape")
+            .begin_bulk_write_transaction("seed retired shape")
             .await
             .unwrap();
         // The fixture runtime already installed the current schema; recreate
