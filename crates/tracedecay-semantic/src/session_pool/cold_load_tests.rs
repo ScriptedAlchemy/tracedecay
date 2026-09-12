@@ -633,3 +633,90 @@ fn cold_opens_across_pools_take_turns() {
     assert_eq!(first.stats().sessions_opened, 1);
     assert_eq!(second.stats().sessions_opened, 1);
 }
+
+/// The published FastEmbed constructor cannot be interrupted mid-load, so a
+/// caller's typed deadline returns while ORT is still building the graph.
+/// The process-wide cold-load turn must stay with that native load until it
+/// exits: a second cold open that started beside it would double the
+/// transient peak the turn exists to cap.
+#[test]
+fn abandoned_native_load_keeps_the_cold_load_turn_until_it_exits() {
+    let (entered_tx, entered_rx) = channel();
+    let (release_first, first_gate) = channel();
+    let (release_second, second_gate) = channel();
+    let pool = |label, gate| {
+        SessionPool::with_resident_sampler(
+            ReportingGatedOpenRuntime {
+                inner: FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
+                entered: entered_tx.clone(),
+                label,
+                gate: Mutex::new(gate),
+            },
+            SystemMonotonicClock::default(),
+            config(1, Duration::from_mins(1), 1 << 30),
+            Arc::new(|| Some(1 << 30)),
+        )
+        .expect("valid config")
+    };
+    let first = pool("first", first_gate);
+    let second = pool("second", second_gate);
+    let abandoned_authority = authority_with_resident_ceiling(1 << 30, 50);
+    let authority = authority_with_resident_ceiling(1 << 30, 30_000);
+
+    thread::scope(|scope| {
+        // The first open blocks inside its "constructor" past its 50 ms
+        // deadline; the caller gets the typed deadline while the load runs.
+        let error = first
+            .acquire(&abandoned_authority)
+            .err()
+            .expect("the first cold open exceeds its load deadline");
+        assert!(
+            matches!(error, SessionAcquireError::LoadDeadlineExceeded { .. }),
+            "expected LoadDeadlineExceeded, got {error:?}"
+        );
+        assert_eq!(
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the first cold open started"),
+            "first"
+        );
+        let held = first.stats();
+        assert_eq!(held.active, 1, "abandoned load keeps its slot: {held:?}");
+        assert_eq!(held.resident_bytes, 1024);
+
+        // A second cold open must wait for the abandoned native load to exit,
+        // not run beside it because the caller's deadline already returned.
+        let second_open = scope.spawn(|| second.acquire(&authority));
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "a second cold open began while an abandoned native load was still running"
+        );
+
+        release_first
+            .send(())
+            .expect("release the abandoned first open");
+        // Another test's cold open may take the freed turn first; the second
+        // open follows once the abandoned loader has genuinely exited.
+        assert_eq!(
+            entered_rx
+                .recv_timeout(Duration::from_secs(90))
+                .expect("the second cold open starts once the abandoned load exited"),
+            "second"
+        );
+        let released = first.stats();
+        assert_eq!(
+            released.active, 0,
+            "abandoned load released its slot before the next turn: {released:?}"
+        );
+        assert_eq!(released.resident_bytes, 0);
+        assert_eq!(released.sessions_opened, 1);
+        assert_eq!(released.sessions_closed, 1);
+
+        release_second.send(()).expect("release the second open");
+        second_open
+            .join()
+            .expect("second acquisition thread")
+            .expect("second cold session");
+    });
+    assert_eq!(second.stats().sessions_opened, 1);
+}
