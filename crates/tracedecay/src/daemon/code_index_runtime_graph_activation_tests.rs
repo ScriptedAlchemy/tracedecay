@@ -515,7 +515,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
     let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         if registry
-            .retained_text_owner_for_root(fixture.path())
+            .latest_text_fresh_for_scope(&scope)
             .await
             .is_some_and(|latest| latest.interactive_graph_store().is_ok())
         {
@@ -586,13 +586,26 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\npub fn caller_c() { hub(); }\n",
     );
     git(fixture.path(), &["commit", "-qam", "publish generation B"]);
-    let generation_b = loop {
-        let _ = registry.latest_text_fresh_for_scope(&scope).await;
-        if let Some(latest) = registry.retained_text_owner_for_root(fixture.path()).await
+    let (generation_b, hub_b) = loop {
+        if let Some(latest) = registry.latest_text_fresh_for_scope(&scope).await
             && latest.metadata().manifest().generation_id != generation_a
-            && latest.interactive_graph_store().is_ok()
+            && let Ok(store) = latest.interactive_graph_store()
+            && let Ok(reader) = store.interactive_reader_with_cancellation(
+                &latest.metadata().manifest().generation_id,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
+            && let Ok(hubs) = reader.resolve_simple_name(
+                "hub",
+                None,
+                2,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
+            && hubs.len() == 1
         {
-            break latest.metadata().manifest().generation_id.clone();
+            break (
+                latest.metadata().manifest().generation_id.clone(),
+                hubs[0].occurrence.as_str().to_owned(),
+            );
         }
         assert!(
             std::time::Instant::now() <= ready_deadline + Duration::from_secs(20),
@@ -639,7 +652,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
                 operation: &operation,
             },
             &CodeRelationRequest {
-                node_id: hub,
+                node_id: hub_b,
                 maximum_depth: 1,
                 resolve_trait_dispatch: false,
                 scope: query_scope,
