@@ -804,13 +804,14 @@ pipe it via `--args -` (a quoted heredoc) when it contains quotes or newlines"
 /// back to the `tracedecay tool` CLI instead of abandoning tracedecay or
 /// poking at `.tracedecay` databases directly.
 pub const CLI_FALLBACK_PROMPT_RULES: &str = concat!(
-    "If a tracedecay MCP call errors, times out, \
-or the server is disconnected, every tool is also available as a shell command: ",
+    "If the MCP transport fails while the TraceDecay daemon remains available, use the \
+equivalent shell command: ",
     cli_fallback_args_invocation_lit!(),
     " \
 (`tracedecay tool` lists all tools, `tracedecay tool <name> --help` shows parameters). \
-Pass schema fields inside the JSON object; never invent per-key flags or enum values from memory. \
-Fall back to that CLI instead of querying `.tracedecay` databases directly or abandoning tracedecay."
+Pass the schema's arguments as the exact JSON object; do not invent per-key flags or enum values. \
+Do not query private databases as a fallback. If the daemon is unavailable or intentionally held, \
+report that state rather than starting or replacing it."
 );
 
 /// True when a `SKILL.md` carries a TraceDecay authorship marker. Retired
