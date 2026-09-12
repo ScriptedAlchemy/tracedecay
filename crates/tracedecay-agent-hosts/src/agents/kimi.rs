@@ -94,10 +94,6 @@ impl AgentIntegration for KimiIntegration {
         }
     }
 
-    fn interactive_activation_guidance(&self) -> Option<String> {
-        Some(kimi_official_lifecycle_unavailable("install", None).remediation)
-    }
-
     fn interactive_removal_guidance(&self) -> Option<String> {
         Some(kimi_official_lifecycle_unavailable("remove", None).remediation)
     }
@@ -787,6 +783,141 @@ mod tests {
             home.path(),
             &code_home
         ));
+    }
+
+    #[test]
+    fn catalog_install_activates_user_mcp_after_native_plugin_is_ready() {
+        use crate::agents::host_bundle::{
+            HostBundleComponentV1, HostBundleLifecycleOpV1, HostComponentSetExecutionRequestV1,
+            HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1, HostKindV1,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let staged_source = kimi_staged_plugin_dir(home.path());
+        let managed_root = kimi_managed_plugin_dir(&code_home);
+        let tracedecay_bin = "/opt/tracedecay/bin/tracedecay";
+        deploy_kimi_plugin_to(&staged_source, tracedecay_bin).unwrap();
+        deploy_kimi_plugin_to(&managed_root, tracedecay_bin).unwrap();
+        std::fs::create_dir_all(code_home.join("plugins")).unwrap();
+        std::fs::write(
+            kimi_installed_json_path(&code_home),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "plugins": [{
+                    "id": "tracedecay",
+                    "root": managed_root,
+                    "source": "local-path",
+                    "originalSource": staged_source,
+                    "enabled": true
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            kimi_user_mcp_path(&code_home),
+            serde_json::to_vec(&json!({
+                "mcpServers": {"foreign": {"command": "foreign-server"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let original_config = std::fs::read(kimi_user_mcp_path(&code_home)).unwrap();
+        let install = InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: tracedecay_bin.to_string(),
+            tool_permissions: Vec::new(),
+            project_root: None,
+            dashboard: false,
+        };
+        assert_eq!(
+            KimiIntegration
+                .preflight_non_interactive_install(&install)
+                .unwrap(),
+            NonInteractiveInstallOutcome::Ready
+        );
+
+        let component_set =
+            crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
+                HostKindV1::KimiCode,
+                &[HostBundleComponentV1::Core],
+                0,
+                tracedecay_bin,
+                crate::agents::TEST_GENERATOR_COMMIT,
+            )
+            .unwrap();
+        let request = HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation: HostBundleLifecycleOpV1::Install,
+                expected_host: HostKindV1::KimiCode,
+                expected_components: vec![HostBundleComponentV1::Core],
+                explicit_confirmation: true,
+                hermes_profile_bindings: 0,
+                explicit_adoption: false,
+            },
+            operation_id: [41; 16],
+        };
+        let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            "kimi",
+            home.path(),
+            lifecycle.path(),
+            HostBundleLifecycleOpV1::Install,
+            tracedecay_bin.to_string(),
+        )
+        .unwrap();
+
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .verify(&component_set.component_set, &request)
+            .unwrap();
+        let config = load_json_file(&kimi_user_mcp_path(&code_home));
+        assert_eq!(
+            config["mcpServers"]["tracedecay"],
+            json!({"command": tracedecay_bin, "args": ["serve"]})
+        );
+        assert_eq!(config["mcpServers"]["foreign"]["command"], "foreign-server");
+
+        registration
+            .rollback(&component_set.component_set, &request)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(kimi_user_mcp_path(&code_home)).unwrap(),
+            original_config
+        );
+
+        let uninstall_request = HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation: HostBundleLifecycleOpV1::Uninstall,
+                expected_host: HostKindV1::KimiCode,
+                expected_components: vec![HostBundleComponentV1::Core],
+                explicit_confirmation: true,
+                hermes_profile_bindings: 0,
+                explicit_adoption: false,
+            },
+            operation_id: [42; 16],
+        };
+        let mut uninstall = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            "kimi",
+            home.path(),
+            lifecycle.path(),
+            HostBundleLifecycleOpV1::Uninstall,
+            tracedecay_bin.to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            uninstall.preflight(&component_set.component_set, &uninstall_request),
+            Err(crate::agents::host_bundle::HostBundleError::NativeRemovalRequired)
+        );
     }
 
     #[test]

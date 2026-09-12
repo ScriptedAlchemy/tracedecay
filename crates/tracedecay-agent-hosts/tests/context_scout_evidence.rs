@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
+use tracedecay_agent_hosts::agents::context_scout::ports::context_scout_candidates_from_publication;
 use tracedecay_agent_hosts::agents::context_scout::{
-    ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
-    ContextScoutSelectionInputV1, ContextScoutSuppressionV1, select_deterministic_context_scout,
+    ContextScoutControlV1, ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt,
+    ContextScoutLimitsV1, ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1,
+    ContextScoutServiceStateV1, ContextScoutSuppressionV1, select_deterministic_context_scout,
 };
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
@@ -10,15 +12,24 @@ use tracedecay_contracts::context_scout::{
     ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
 };
+use tracedecay_contracts::feedback::{FeedbackPublicationV1, FeedbackRuntimeStateV1};
 use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
     TemporalState,
 };
-use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
+use tracedecay_domain::feedback::{
+    FeedbackActorContextV1, FeedbackAuthoritativeRuntimeStateV1, FeedbackBaselineStateV1,
+    FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
+    FeedbackCycleResultV1, FeedbackCycleRuntimeSnapshotV1, FeedbackCycleTerminationV1,
+    FeedbackDiagnosticClassificationV1, FeedbackDiagnosticProducerV1,
+    FeedbackDiagnosticProjectionV1, FeedbackEvaluationInputV1, FeedbackFindingLifecycleV1,
+    FeedbackFindingV1, FeedbackScopeV1, FeedbackTargetV1, FeedbackTriggerV1,
+    ProviderEvaluationStateV1,
+};
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ComponentVersion, ManifestDigest, ProjectId, RefId, RepositoryId,
-    RetrievalAnchorId, TemporalModeV1, UtcMicros, WorktreeId,
+    RetrievalAnchorId, SourceSpan, TemporalModeV1, UtcMicros, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -167,6 +178,87 @@ fn candidate(evidence: ContextScoutEvidenceEnvelopeV1) -> ContextScoutCandidateV
     }
 }
 
+fn saved_diagnostic_publication() -> FeedbackPublicationV1 {
+    let scope = resolved_scope();
+    let request = FeedbackCycleRequestV1::new(
+        id::<FeedbackCycleId>("cycle.scout.saved-diagnostic"),
+        feedback_scope(),
+        FeedbackContentIdentityV1::SavedContent {
+            generation_digest: digest('c'),
+            file_digest: digest('d'),
+        },
+        FeedbackTriggerV1::PostEditHook,
+        digest('b'),
+        digest('f'),
+        FeedbackBudgetV1::bounded(100, 100, 1_000, 1_000),
+    )
+    .unwrap();
+    let input = FeedbackEvaluationInputV1 {
+        target: FeedbackTargetV1 {
+            file: id("file.scout.saved-diagnostic"),
+            span: Some(SourceSpan {
+                start_byte: 10,
+                end_byte: 20,
+            }),
+            symbol: Some(id("symbol.scout.saved-diagnostic")),
+            generation_id: Some(id("generation.scout.1")),
+        },
+        request,
+        actor: FeedbackActorContextV1::default(),
+        observed_at: UtcMicros(100),
+    };
+    let finding = FeedbackFindingV1 {
+        finding_id: id("feedback.finding.scout.saved-diagnostic"),
+        classification: FeedbackDiagnosticClassificationV1::New,
+        lifecycle: FeedbackFindingLifecycleV1::Active,
+        retrieval_anchor_id: Some(id("anchor.scout.saved-diagnostic")),
+        provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
+        safe_bounded_preview: Some("missing function".to_owned()),
+        diagnostic_projection: Some(FeedbackDiagnosticProjectionV1 {
+            file: input.target.file.clone(),
+            span: input.target.span.unwrap(),
+            symbol: input.target.symbol.clone(),
+            code: "E0425".to_owned(),
+            severity: tracedecay_domain::DiagnosticSeverityV1::Error,
+            safe_bounded_message: "cannot find function in this scope".to_owned(),
+            producer: FeedbackDiagnosticProducerV1::CodeDiagnostic,
+            code_description_uri: None,
+        }),
+    };
+    let result = FeedbackCycleResultV1::new(
+        &input.request,
+        FeedbackCycleTerminationV1::Blocked,
+        vec![ProviderEvaluationStateV1::SupportedCompletedComplete],
+        vec![FeedbackBaselineStateV1::NoPriorBaseline],
+        None,
+        None,
+        None,
+        vec![finding],
+        1,
+        1,
+        0,
+    )
+    .unwrap();
+    let runtime = FeedbackRuntimeStateV1::new(
+        FeedbackAuthoritativeRuntimeStateV1 {
+            snapshot: FeedbackCycleRuntimeSnapshotV1::from_request(&input.request),
+            baseline_horizon: None,
+            runtime_watermark: digest('e'),
+        },
+        input.target.generation_id.clone(),
+    )
+    .unwrap();
+    FeedbackPublicationV1::new(
+        input.clone(),
+        input.dedupe_key(&digest('a')).unwrap(),
+        result,
+        runtime,
+        scope.clone(),
+        authority(&scope),
+    )
+    .unwrap()
+}
+
 fn selection(
     evidence: ContextScoutEvidenceEnvelopeV1,
     delivery_window: ContextScoutDeliveryWindowV1,
@@ -181,6 +273,36 @@ fn selection(
         delivered_dedupe_keys: BTreeSet::new(),
         candidates: vec![candidate(evidence)],
     }
+}
+
+#[test]
+fn saved_code_diagnostic_publication_produces_anchored_scout_candidate() {
+    let candidates = context_scout_candidates_from_publication(
+        &saved_diagnostic_publication(),
+        ContextScoutControlV1 {
+            configuration_revision: [1; 32],
+            state: ContextScoutServiceStateV1::Active,
+            mode: ContextScoutRuntimeModeV1::Deterministic,
+            model_path: None,
+            limits: ContextScoutLimitsV1::bounded_defaults(),
+        },
+        UtcMicros(110),
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].category, ContextScoutCategoryV1::Diagnostic);
+    assert_eq!(
+        candidates[0].evidence.sources[0].source,
+        ContextScoutEvidenceSourceKindV1::Code
+    );
+    assert_eq!(
+        candidates[0].evidence.sources[0].anchors,
+        vec![id::<RetrievalAnchorId>("anchor.scout.saved-diagnostic")]
+    );
+    assert_eq!(
+        candidates[0].suggestion_text,
+        "cannot find function in this scope"
+    );
 }
 
 #[test]
