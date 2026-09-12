@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tokio::sync::Mutex;
 use tracedecay_contracts::{
@@ -13,17 +13,18 @@ use tracedecay_contracts::{
 };
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, InitiativeId,
-    MilestoneId, ObservationSourceIdentityV1, PrivacyDomainId, ProposalId, ProviderId, RefId,
-    RepositoryId, RunId, SessionId, TaskId, TemporalModeV1, WorkApprovalPolicy,
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
-    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
-    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFilesystemPolicy, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
-    WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProposalDispositionV1, WorkProposalV1,
-    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRouteDecisionV1, WorkSandboxPolicy, WorkScoreKindV1,
-    WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1, WorkflowOperationRef, WorktreeId,
+    ActorId, AttemptId, CommitId, InitiativeId, ManifestDigestHasher, MilestoneId,
+    ObservationSourceIdentityV1, PrivacyDomainId, ProposalId, ProviderId, RefId, RepositoryId,
+    RunId, SessionId, TaskId, TemporalModeV1, WorkApprovalPolicy, WorkAttemptIdentityV1,
+    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationStateV1,
+    WorkContentLocationClassV1, WorkEffectStateV1, WorkEffortClassV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionLimits, WorkFallbackTopology, WorkFilesystemPolicy,
+    WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1,
+    WorkOrdinalBandV1, WorkPlanId, WorkPlanV1, WorkProposalDispositionV1, WorkProposalV1,
+    WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
+    WorkRouteCandidateV1, WorkRouteDecisionV1, WorkRouteExecutionProfileV1, WorkSandboxPolicy,
+    WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1,
+    WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
@@ -93,35 +94,114 @@ fn provider_route() -> WorkProviderRouteV1 {
     .expect("provider route")
 }
 
-fn execution_snapshot() -> WorkExecutionSnapshot {
-    WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
-        configuration_revision_id: id::<ConfigurationRevisionId>(
-            "configuration-revision.work.evidence",
-        ),
-        configuration_snapshot_id: id::<ConfigurationSnapshotId>(
-            "configuration-snapshot.work.evidence",
-        ),
-        effective_behavior_digest: digest('1'),
-        resolution_provenance_digest: digest('2'),
-        route: provider_route(),
-        backend: WorkProviderBackendV1::CodexCli,
-        protocol: WorkProviderProtocol::CodexExecJson,
-        model: "gpt-5.6".to_owned(),
-        executable: WorkExecutableReference::new("executable.codex".to_owned(), digest('3'))
-            .expect("executable"),
-        sandbox: WorkSandboxPolicy::Required,
-        approval: WorkApprovalPolicy::Never,
-        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
-        egress: WorkEgressPolicy::Deny,
-        environment_allowlist: BTreeSet::new(),
-        credential_references: BTreeSet::new(),
-        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1)
-            .expect("execution limits"),
-        deadline: UtcMicros(1_000_000),
-        fallback: WorkFallbackTopology::Disabled,
-        topology: tracedecay_domain::safe_work_topology_policy_v1(),
-    })
-    .expect("execution snapshot")
+fn configured_work_proposal_routing(
+    project: &std::path::Path,
+    scope: ResolvedScope,
+    grant: &CapabilityGrantSnapshot,
+) -> (DaemonWorkProposalRoutingAuthorityV1, ManifestDigest) {
+    use tracedecay_domain::configuration::{
+        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
+        WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
+    };
+
+    let executable_bytes = b"#!/bin/sh\nexit 0\n";
+    let executable_path = project.join("work-evidence-provider");
+    std::fs::write(&executable_path, executable_bytes).expect("write provider executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(&executable_path)
+            .expect("provider executable metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable_path, permissions)
+            .expect("provider executable permissions");
+    }
+    let executable_path = executable_path
+        .canonicalize()
+        .expect("canonical provider executable");
+    let mut hasher = ManifestDigestHasher::new();
+    hasher.update(executable_bytes);
+    let executable = WorkExecutableReference::new(
+        "executable.work.evidence-provider".to_owned(),
+        hasher.finalize().expect("provider executable digest"),
+    )
+    .expect("provider executable reference");
+    let route = WorkRouteCandidateV1 {
+        route_id: provider_route().route_id().as_str().to_owned(),
+        provider_capability_id: WorkProviderBackendV1::CodexCli
+            .provider_id()
+            .as_str()
+            .to_owned(),
+        model_id: "gpt-5.6".to_owned(),
+        effort: WorkEffortClassV1::Standard,
+        declared_budget_ceiling: 1,
+        content_location: WorkContentLocationClassV1::Local,
+        correctness: WorkOrdinalBandV1::High,
+        sensitive_data_fitness: WorkOrdinalBandV1::High,
+        latency: WorkOrdinalBandV1::Moderate,
+        cost: WorkOrdinalBandV1::Moderate,
+        autonomy: WorkOrdinalBandV1::High,
+        evidence_quality: WorkOrdinalBandV1::High,
+        execution: WorkRouteExecutionProfileV1 {
+            sandbox: WorkSandboxPolicy::Required,
+            approval: WorkApprovalPolicy::Never,
+            filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+            egress: WorkEgressPolicy::Deny,
+            environment_allowlist: BTreeSet::new(),
+            credential_references: BTreeSet::new(),
+            limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1)
+                .expect("execution limits"),
+            maximum_duration_micros: 60_000_000,
+            fallback: WorkFallbackTopology::Disabled,
+        },
+    };
+    let binding = WorkExecutableBindingV1::new(
+        executable,
+        executable_path,
+        vec![WorkExecutableCapabilityV1::CodexCliExecJson],
+        vec![route],
+    )
+    .expect("configured provider binding");
+    let revision = ConfigurationRevisionId::new("configuration.revision.work-evidence-routing")
+        .expect("configuration revision");
+    let key = SettingKey::new(WORK_EXECUTABLE_BINDINGS_SETTING_KEY)
+        .expect("work executable bindings key");
+    let snapshot = crate::config::resolver::resolve_configuration(
+        &crate::config::registry::ConfigurationRegistry::core()
+            .expect("configuration registry defaults"),
+        &[crate::config::resolver::ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: scope.project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: BTreeMap::from([(
+                key,
+                ConfigurationValueV1::WorkExecutableBindings(vec![binding]),
+            )]),
+        }],
+    )
+    .expect("configured Work routing")
+    .snapshot;
+    let configuration_digest = snapshot.effective_behavior_digest.clone();
+    let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            project_id: scope.project_id.clone(),
+            project_root: project.to_path_buf(),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("pinned Work routing configuration");
+    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(
+        scope,
+        &configuration,
+        &configuration_digest,
+        grant,
+    )
+    .expect("configured Work proposal routing");
+    (routing, configuration_digest)
 }
 
 fn seal_attempt(
@@ -374,7 +454,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     .expect("Work authority");
     let service = DaemonInvocationService::default();
     let (proposal_routing, configuration_digest) =
-        empty_work_proposal_routing(scope.clone(), &grant);
+        configured_work_proposal_routing(&project, scope.clone(), &grant);
     let policy_digest = mount_test_work_observability(
         &service,
         &project,
@@ -554,13 +634,17 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         WorkApplicationInvocationV1::AdmitExecution(admission),
     )
     .await;
-    assert!(matches!(
-        admitted,
-        DaemonInvocationOutcome::WorkApplication {
-            outcome: WorkApplicationOutcomeV1::AdmitExecution(ApplicationOutcome::Effect(_)),
-            ..
-        }
-    ));
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::AdmitExecution(ApplicationOutcome::Effect(effect)),
+        ..
+    } = admitted
+    else {
+        panic!("execution admission must commit: {admitted:?}");
+    };
+    let execution_snapshot = effect
+        .payload
+        .expect("admitted Work execution")
+        .execution_snapshot;
 
     let started = invoke_work_without_attempt_spawn(
         &service,
@@ -571,7 +655,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
             run_id: attempt.run_id().clone(),
             attempt_id: attempt.attempt_id().clone(),
             operation: id::<WorkflowOperationRef>("operation.work.evidence-provider"),
-            execution_snapshot: execution_snapshot(),
+            execution_snapshot,
             worktree_root: project.display().to_string(),
             reference: Some(id::<RefId>("refs/heads/work-evidence-journey")),
             commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
