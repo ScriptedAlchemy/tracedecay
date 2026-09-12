@@ -179,7 +179,7 @@ fn render_circular_md(
 mod circular_render_tests {
     use super::{CIRCULAR_DEFAULT_MEMBER_LIMIT, bound_cycles, circular_output, render_circular_md};
 
-    /// Mirrors [`crate::tools::MAX_RESPONSE_CHARS`], the point at which a
+    /// Mirrors [`tracedecay_mcp_catalog::MAX_RESPONSE_CHARS`], the point at which a
     /// response is replaced by a preview envelope plus a retrieval handle.
     const RESPONSE_BUDGET: usize = 15_000;
 

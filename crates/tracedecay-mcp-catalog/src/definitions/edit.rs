@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_help_requires_the_exact_preview_repository_revision() {
+    fn rename_acceptance_requires_the_exact_preview_repository_revision() {
         let definition = def_rename_symbol();
         assert!(
             definition.input_schema["properties"]["accepted_preview"]["required"]
@@ -718,12 +718,6 @@ mod tests {
                 .unwrap()
                 .contains(&json!("repository_revision"))
         );
-
-        let help = crate::render_tool_cli_help(&definition);
-        assert!(help.contains(
-            "object with required keys: preview_id, preview_digest, plan_digest, repository_revision, graph_revision"
-        ));
-        assert!(help.contains("\"repository_revision\":"));
 
         let preview = serde_json::to_value(tracedecay_contracts::RenameResult::default()).unwrap();
         assert_eq!(

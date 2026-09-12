@@ -2,11 +2,13 @@
 //! protocol helpers.
 //!
 //! This crate owns the MCP surface itself: JSON-RPC contracts, concrete
-//! stdio/channel/replay transports, tool definitions, response truncation,
-//! canonical application-result presentation, request-deadline decoding,
-//! tool-error classification, hook-event plan decoding, connection scheduling,
-//! typed RMCP adaptation, request lifecycle state, and tool handlers that
-//! translate transport requests into business-owner calls.
+//! stdio/channel/replay transports, response truncation, canonical
+//! application-result presentation, request-deadline decoding, tool-error
+//! classification, hook-event plan decoding, connection scheduling, typed RMCP
+//! adaptation, request lifecycle state, and tool handlers that translate
+//! transport requests into business-owner calls. The advertised tool catalog
+//! it serves is `tracedecay-mcp-catalog`, re-exported here for the server and
+//! CLI consumers that read the catalog and the surface together.
 //!
 //! Handlers reach daemon state through [`McpToolContext`], filled by the
 //! composition root with the authorities admitted for the call. Product
@@ -43,7 +45,6 @@
 pub mod analysis;
 pub mod application_output;
 mod broker_stream_transport;
-mod catalog_error;
 pub mod context_headings;
 pub mod handlers;
 pub mod hook_events;
@@ -51,7 +52,6 @@ pub mod hook_runtime;
 pub mod jsonrpc;
 pub mod lifecycle;
 pub mod path_tree;
-pub mod project_access;
 pub mod response_handles;
 pub mod server;
 pub mod tool_call_deadline;
@@ -66,7 +66,6 @@ pub use broker_stream_transport::{
     BrokerResponseLifecycle, BrokerSelectedResponseAuthority, BrokerSelectedResponseLease,
     BrokerStreamTransport, BrokerWorkDeliverySettlement,
 };
-pub use catalog_error::McpCatalogError;
 pub use context_headings::{
     CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
     CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
@@ -88,7 +87,6 @@ pub use jsonrpc::{
     ErrorCode, JsonRpcDecodeError, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
 };
 pub use lifecycle::{McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity};
-pub use project_access::registered_project_reader_tool_names;
 pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, caller_tool_call_deadline_from_meta,
     tool_call_deadline_meta,
@@ -104,15 +102,19 @@ pub use tool_errors::{
 };
 pub use tools::render::format_relative_time;
 pub use tools::{
-    MAX_RESPONSE_CHARS, RESERVED_FLAGS_FOOTER, ToolDefinition, ToolRegistryMode, ToolResult,
+    RESERVED_FLAGS_FOOTER, ToolResult, render_tool_cli_help, resolve_property_schema,
+    short_tool_name,
+};
+pub use tracedecay_mcp_catalog::{
+    MAX_RESPONSE_CHARS, McpCatalogError, ToolDefinition, ToolRegistryMode,
     apply_context_warming_budget, ast_grep_available, ast_grep_diagnostics_json,
     ast_grep_outline_available, context_description, context_warming_description,
     explore_call_budget, format_capable_tool_names, get_maximal_tool_definitions,
     get_maximal_tool_definitions_with_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, mcp_input_schema, project_catalog_discovery_scope,
-    render_tool_cli_help, resolve_property_schema, retain_host_available_tool_definitions,
-    short_tool_name, tool_defaults_to_markdown,
+    registered_project_reader_tool_names, retain_host_available_tool_definitions,
+    tool_defaults_to_markdown,
 };
 pub use workflow::{
     MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,
