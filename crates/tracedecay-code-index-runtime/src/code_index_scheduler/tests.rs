@@ -14542,7 +14542,11 @@ async fn freshness_failure_does_not_serve_a_stale_complete_generation() {
         )
         .await
         .expect("mount scheduler");
-    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
+    // A busy owner pass serves the seated generation without re-proving
+    // source (serve-old-first); the fail-closed assertion below is about the
+    // freshness ladder, so the probe must reach it.
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
 
     let git_dir = fixture.path().join(".git");
     let unavailable_git_dir = fixture.path().join(".git-unavailable");
@@ -19243,13 +19247,13 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, true, false, true),
         GraphSeatGateV1::Prepare,
-        "a publication seats once its own text owner has reopened and finished, however busy \
-         the checkout is"
+        "a publication prepares once its own text owner has reopened, however busy the \
+         checkout is; the owner's projection runs alongside and the seat joins it"
     );
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, true, false, false),
         GraphSeatGateV1::PublishedTextOwnerUnavailable,
-        "a publication whose replacement text owner is not serving must not start graph work"
+        "a publication whose replacement text owner did not reopen must not start graph work"
     );
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, false, true, false),
