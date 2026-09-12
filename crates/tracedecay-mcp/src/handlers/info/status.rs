@@ -100,7 +100,7 @@ fn age_seconds(recorded_at_micros: Option<i64>) -> Option<i64> {
 #[derive(Clone, Copy)]
 struct ReadyServingSourceV1<'a> {
     reference: &'a str,
-    revision: &'a str,
+    revision: Option<&'a str>,
     current_source_verified: bool,
 }
 
@@ -122,7 +122,7 @@ fn ready_serving_source(
     }
     Some(ReadyServingSourceV1 {
         reference: freshness.source_reference.as_deref()?,
-        revision: freshness.source_revision.as_deref()?,
+        revision: freshness.source_revision.as_deref(),
         current_source_verified: freshness.coverage == "complete"
             && freshness.staleness_state.as_deref() == Some("fresh"),
     })
@@ -314,7 +314,7 @@ pub async fn handle_status(
     let ready_serving_source = ready_serving_source(freshness_payload.as_ref());
     let branch_diagnostics = ctx.branch_diagnostics_for_serving_source(
         ready_serving_source.map(|source| source.reference),
-        ready_serving_source.map(|source| source.revision),
+        ready_serving_source.and_then(|source| source.revision),
         ready_serving_source.is_some_and(|source| source.current_source_verified),
     );
     output["code_index_freshness"] = code_index_freshness;
@@ -680,7 +680,7 @@ pub async fn handle_active_project(
     let ready_serving_source = ready_serving_source(freshness_payload.as_ref());
     let branch = ctx.branch_diagnostics_for_serving_source(
         ready_serving_source.map(|source| source.reference),
-        ready_serving_source.map(|source| source.revision),
+        ready_serving_source.and_then(|source| source.revision),
         ready_serving_source.is_some_and(|source| source.current_source_verified),
     );
     let output = active_project_context(ctx, &branch, server_stats, scope_prefix);

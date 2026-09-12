@@ -746,13 +746,13 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     // same branch is not enough to replace the startup fallback.
     run_git_in(&project, &["checkout", "-b", "public-feature"]);
     let public_revision = git_stdout_in(&project, &["rev-parse", "HEAD"]);
-    let public_reader = |revision: String, staleness: &'static str| {
+    let public_freshness_reader = |revision: Option<String>, staleness: &'static str| {
         let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
                 let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                     worktree_root: worktree_root.display().to_string(),
                     source_reference: Some("refs/heads/public-feature".to_owned()),
-                    source_revision: Some(revision.clone()),
+                    source_revision: revision.clone(),
                     latest_generation_id: Some(
                         "generation.status-serving-truth.public-feature".to_owned(),
                     ),
@@ -778,7 +778,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         None,
         None,
         ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(public_reader("0".repeat(40), "verifying")),
+            code_index_freshness_reader: Some(public_freshness_reader(
+                Some("0".repeat(40)),
+                "verifying",
+            )),
             ..Default::default()
         }
         .admit_opened_project(&cg)
@@ -790,7 +793,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     assert_eq!(stale_public["serving_branch"], json!("main"));
     assert_ne!(stale_public["branch_resolution"], json!("exact"));
 
-    let public_reader = public_reader(public_revision, "fresh");
+    let committed_public_reader = public_freshness_reader(Some(public_revision), "fresh");
     let current_public = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
@@ -798,7 +801,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         None,
         None,
         ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(public_reader.clone()),
+            code_index_freshness_reader: Some(committed_public_reader),
             ..Default::default()
         }
         .admit_opened_project(&cg)
@@ -821,6 +824,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     );
     assert!(current_public.get("branch_warnings").is_none());
 
+    // A dirty worktree snapshot has an exact content identity but no Git OID.
+    // Its complete, fresh, ready source witness still identifies the current
+    // public branch without inventing a revision.
     let active_public = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_active_project",
@@ -828,7 +834,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         None,
         None,
         ToolCallRegistryOptions {
-            code_index_freshness_reader: Some(public_reader),
+            code_index_freshness_reader: Some(public_freshness_reader(None, "fresh")),
             ..Default::default()
         }
         .admit_opened_project(&cg)

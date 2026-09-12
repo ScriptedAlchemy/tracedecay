@@ -140,28 +140,30 @@ pub fn build_branch_diagnostics(
     serving_branch: Option<String>,
     fallback_warning: Option<String>,
     serving_db_path: PathBuf,
-    serving_source: Option<(&str, &str)>,
+    serving_source: Option<(&str, Option<&str>)>,
     serving_source_is_current: bool,
 ) -> BranchDiagnostics {
     let meta = branch_meta::load_branch_meta(data_root);
     let current_branch = branch::current_branch(project_root);
     let published_serving_branch = serving_source.and_then(|(reference, revision)| {
-        meta.as_ref().and_then(|meta| {
-            meta.branches.iter().find_map(|(name, entry)| {
-                entry
-                    .graph_source
-                    .as_ref()
-                    .filter(|source| {
-                        source.reference == reference
-                            && source.source_oid == revision
-                            && meta.is_query_eligible(name)
-                    })
-                    .map(|_| name.clone())
+        revision.and_then(|revision| {
+            meta.as_ref().and_then(|meta| {
+                meta.branches.iter().find_map(|(name, entry)| {
+                    entry
+                        .graph_source
+                        .as_ref()
+                        .filter(|source| {
+                            source.reference == reference
+                                && source.source_oid == revision
+                                && meta.is_query_eligible(name)
+                        })
+                        .map(|_| name.clone())
+                })
             })
         })
     });
     let current_source_branch = serving_source
-        .filter(|(_, revision)| serving_source_is_current && !revision.is_empty())
+        .filter(|_| serving_source_is_current)
         .and_then(|(reference, _)| reference.strip_prefix("refs/heads/"))
         .filter(|name| current_branch.as_deref() == Some(*name))
         .map(str::to_owned);
