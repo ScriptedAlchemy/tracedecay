@@ -933,6 +933,72 @@ def prepare(
             return "fact remove/absence verified"
 
         return PreparedJourney({"fact_id": fact_id, "format": "json"}, cleanup)
+    if name == "tracedecay_fact_store_supersede":
+        retired_content = "catalog sweep fact before supersession"
+        successor_content = "catalog sweep fact after supersession"
+        retired_id = _seeded_fact(call, deadline, retired_content)
+        successor_id = _seeded_fact(call, deadline, successor_content)
+        arguments = {
+            "fact_id": retired_id,
+            "superseded_by": successor_id,
+            "format": "json",
+        }
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if (
+                first_value(response, {"outcome"}) != "superseded"
+                or first_value(response, {"fact_id"}) != retired_id
+                or first_value(response, {"superseded_by"}) != successor_id
+            ):
+                raise JourneyError("fact supersede omitted its exact retirement receipt")
+            last_event_id = first_value(response, {"last_event_id"})
+            if not isinstance(last_event_id, str) or not last_event_id:
+                raise JourneyError("fact supersede omitted its retained event identity")
+
+            listed = call(
+                "tracedecay_fact_store_list",
+                {"limit": 200, "format": "json"},
+                deadline("tracedecay_fact_store_list"),
+            )
+            if fact_id_with_content(listed, retired_content) == retired_id:
+                raise JourneyError("superseded fact remained on the default retrieval surface")
+            if fact_id_with_content(listed, successor_content) != successor_id:
+                raise JourneyError("supersession removed its current successor")
+
+            retired = call(
+                "tracedecay_fact_store_get",
+                {"fact_id": retired_id, "format": "json"},
+                deadline("tracedecay_fact_store_get"),
+            )
+            projection = next(
+                (
+                    value
+                    for value in objects(retired)
+                    if value.get("kind") == "superseded"
+                    and value.get("superseded_by") == successor_id
+                ),
+                None,
+            )
+            if projection is None or not any(
+                value.get("fact_id") == retired_id
+                and value.get("content") == retired_content
+                for value in objects(projection)
+            ):
+                raise JourneyError("exact fact retrieval omitted the retired projection")
+
+            replayed = call(
+                "tracedecay_fact_store_supersede",
+                arguments,
+                deadline("tracedecay_fact_store_supersede"),
+            )
+            if (
+                first_value(replayed, {"last_event_id"}) != last_event_id
+                or first_value(replayed, {"disposition"}) != "idempotent_replay"
+            ):
+                raise JourneyError("fact supersede retry appended a second retirement event")
+            return "fact add/supersede/list/exact-get/replay verified in disposable store"
+
+        return PreparedJourney(arguments, cleanup)
     if name == "tracedecay_fact_feedback":
         content = "catalog sweep temporary feedback fact"
         fact_id = _seeded_fact(call, deadline, content)
