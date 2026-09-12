@@ -475,8 +475,8 @@ mod tests {
     use super::*;
     use tempfile::{TempDir, tempdir};
     use tracedecay_domain::{RetrievalGrainV1, TemporalModeV1};
-    use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
     use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
+    use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
     use tracedecay_temporal_query::candidates::CandidateChannel;

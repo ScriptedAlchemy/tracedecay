@@ -107,7 +107,6 @@ impl SessionRetrievalBudgetStageV1 {
             Self::ExecutionWorkExhausted
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
