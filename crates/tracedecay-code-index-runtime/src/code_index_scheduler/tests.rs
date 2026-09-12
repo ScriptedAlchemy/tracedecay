@@ -2200,7 +2200,7 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
 fn code_generation_retention_emits_durable_reclaim_receipt() {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        observe_code_generation_retention, run_code_generation_retention,
+        run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2235,10 +2235,18 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
             .join(format!("receipt-{}.json", receipt.receipt_digest))
             .is_file()
     );
-    let observed =
-        observe_code_generation_retention(store.path()).expect("observe retained generations");
-    assert_eq!(observed.superseded_generation_count, 0);
-    assert_eq!(observed.superseded_generation_bytes, 0);
+    let remaining_generation_files = std::fs::read_dir(store.path().join("code-generations-v1"))
+        .expect("generation directory")
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .is_ok_and(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        })
+        .count();
+    assert_eq!(
+        remaining_generation_files, 1,
+        "only the active generation survives the reclaim"
+    );
 }
 
 // --- Code-index scope-root reconciliation ----------------------------------
