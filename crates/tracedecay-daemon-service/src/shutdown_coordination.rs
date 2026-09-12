@@ -45,14 +45,12 @@ impl ShutdownCoordinatorV1 {
     {
         let mut work = Some(work);
         loop {
-            self.join_finished_coordinator().await;
+            self.reap_completed_coordinator().await;
             if !self.state.running.load(Ordering::Acquire) {
-                self.wait_for_finished_coordinator().await;
-                self.join_finished_coordinator().await;
+                self.join_coordinator().await;
             }
             if let Some(status) = self.terminal_status() {
-                self.wait_for_finished_coordinator().await;
-                self.join_finished_coordinator().await;
+                self.join_coordinator().await;
                 return status;
             }
 
@@ -63,8 +61,7 @@ impl ShutdownCoordinatorV1 {
                 if running {
                     return self.wait_for_terminal_status_until(deadline).await;
                 }
-                self.wait_for_finished_coordinator().await;
-                self.join_finished_coordinator().await;
+                self.join_coordinator().await;
                 continue;
             }
             if self
@@ -79,8 +76,7 @@ impl ShutdownCoordinatorV1 {
             if let Some(status) = self.terminal_status() {
                 self.state.running.store(false, Ordering::Release);
                 drop(coordinator_task);
-                self.wait_for_finished_coordinator().await;
-                self.join_finished_coordinator().await;
+                self.join_coordinator().await;
                 return status;
             }
 
@@ -109,8 +105,13 @@ impl ShutdownCoordinatorV1 {
         }
     }
 
+    /// Reaps a coordinator task that has already completed, without waiting for
+    /// one that has not.
+    ///
+    /// Callers reach this while still inside their own deadline and fall through
+    /// to a bounded wait, so a running coordinator must not block them.
     #[hotpath::skip]
-    async fn join_finished_coordinator(&self) {
+    async fn reap_completed_coordinator(&self) {
         let result = {
             let mut coordinator_task = self.state.coordinator_task.lock().await;
             let Some(task) = coordinator_task.as_mut() else {
@@ -123,29 +124,41 @@ impl ShutdownCoordinatorV1 {
             coordinator_task.take();
             result
         };
+        self.observe_coordinator_result(result);
+    }
+
+    /// Waits for the coordinator task to finish, then reaps it.
+    ///
+    /// This awaits the `JoinHandle` rather than re-checking `is_finished()`
+    /// behind `changed`, because no notification ever follows the task becoming
+    /// finished. Both notifications a coordinator sends — `finish` and
+    /// `ShutdownCoordinatorCompletion::drop` — run while its future is still
+    /// being polled, and tokio marks the task complete only after that poll
+    /// returns. A waiter that registered on `changed` after the last
+    /// notification and observed `is_finished() == false` therefore had nothing
+    /// left to wake it, and this wait has no deadline of its own to escape on.
+    ///
+    /// Every caller reaches this only once the coordinator has published a
+    /// terminal receipt or cleared `running`, so the work is already complete
+    /// and holding the handle's lock across the join costs only task teardown.
+    #[hotpath::skip]
+    async fn join_coordinator(&self) {
+        let result = {
+            let mut coordinator_task = self.state.coordinator_task.lock().await;
+            let Some(task) = coordinator_task.as_mut() else {
+                return;
+            };
+            let result = task.await;
+            coordinator_task.take();
+            result
+        };
+        self.observe_coordinator_result(result);
+    }
+
+    fn observe_coordinator_result(&self, result: Result<(), tokio::task::JoinError>) {
         if let Err(error) = result {
             tracing::error!(%error, "MCP shutdown coordinator task failed after receipt");
             self.state.finish(ShutdownStatus::Failed(error.to_string()));
-        }
-    }
-
-    #[hotpath::skip]
-    async fn wait_for_finished_coordinator(&self) {
-        loop {
-            let notified = self.state.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            let finished = self
-                .state
-                .coordinator_task
-                .lock()
-                .await
-                .as_ref()
-                .is_none_or(tokio::task::JoinHandle::is_finished);
-            if finished {
-                return;
-            }
-            notified.as_mut().await;
         }
     }
 
@@ -164,26 +177,22 @@ impl ShutdownCoordinatorV1 {
     ) -> ShutdownStatus {
         loop {
             if let Some(status) = self.terminal_status() {
-                self.wait_for_finished_coordinator().await;
-                self.join_finished_coordinator().await;
+                self.join_coordinator().await;
                 return status;
             }
             if !self.state.running.load(Ordering::Acquire) {
-                self.wait_for_finished_coordinator().await;
-                self.join_finished_coordinator().await;
+                self.join_coordinator().await;
                 return ShutdownStatus::TimedOut;
             }
             let notified = self.state.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if let Some(status) = self.terminal_status() {
-                self.wait_for_finished_coordinator().await;
-                self.join_finished_coordinator().await;
+                self.join_coordinator().await;
                 return status;
             }
             if !self.state.running.load(Ordering::Acquire) {
-                self.wait_for_finished_coordinator().await;
-                self.join_finished_coordinator().await;
+                self.join_coordinator().await;
                 return ShutdownStatus::TimedOut;
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -203,5 +212,48 @@ impl ShutdownCoordinatorState {
         }
         self.running.store(false, Ordering::Release);
         self.changed.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ordering that stalled the daemon's RMCP shutdown for a full test
+    /// bound: a waiter begins waiting for the coordinator task after the
+    /// coordinator's last notification has already fired, and the task is only
+    /// marked complete afterwards.
+    ///
+    /// A real coordinator always passes through this state, because both of its
+    /// notifications run while its future is still being polled and tokio marks
+    /// the task complete only once that poll returns. Installing the handle
+    /// directly makes the window a fact instead of a race: the task cannot
+    /// complete until `release` is sent, and `release` is sent from a task
+    /// queued behind the waiter on the runtime's only worker, so the waiter has
+    /// provably observed an unfinished handle first. Waiting on `changed` for a
+    /// finished handle sleeps forever here; awaiting the handle cannot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_coordinator_that_sends_no_further_notification_is_still_joined() {
+        let coordinator = Arc::new(ShutdownCoordinatorV1::default());
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        *coordinator.state.coordinator_task.lock().await = Some(tokio::spawn(async move {
+            let _ = released.await;
+        }));
+        coordinator.state.finish(ShutdownStatus::Clean);
+
+        let waiter = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            async move { coordinator.join_coordinator().await }
+        });
+        tokio::spawn(async move { release.send(()).expect("release the coordinator task") });
+
+        tokio::time::timeout(std::time::Duration::from_secs(30), waiter)
+            .await
+            .expect("a coordinator that sends no further notification must still be joined")
+            .expect("join the waiter");
+        assert!(
+            coordinator.state.coordinator_task.lock().await.is_none(),
+            "the joined coordinator handle must be reaped"
+        );
     }
 }
