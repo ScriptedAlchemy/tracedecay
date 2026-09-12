@@ -7,7 +7,7 @@ description: Review the current PR or diff for impact, risk, and quality via the
 
 Use `tracedecay:reviewing-changes`.
 
-- **Scope:** the current working-tree diff, or the base ref / PR named in `$ARGUMENTS` if one was given.
-- Read-only: no edits or test runs. To verify behavior, hand off to `tracedecay:assessing-impact`.
-
-Output: findings grouped Critical / Warning / Note, the impacted areas, and the test set to run.
+Review the current diff, or the base ref or PR named in `$ARGUMENTS`. This is
+read-only: report actionable defects with locations, concrete failure modes,
+evidence, and material coverage limits. Use `tracedecay:assessing-impact` when
+the user asks to select or execute verification.

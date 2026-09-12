@@ -7,7 +7,8 @@ description: Find and safely remove dead code, unused imports, and duplication w
 
 Use `tracedecay:reviewing-changes` to identify candidates, then `tracedecay:editing-safely` for removals.
 
-- **Scope:** the whole repo, or the directory named in `$ARGUMENTS` if one was given.
-- Confirm zero real callers before deleting anything; be conservative with `pub` items; respect Cursor approval/run-mode for edits and verification runs.
-
-Output: removed/consolidated items and the before/after health or test result.
+Clean the whole repository, or `$ARGUMENTS` when it names a directory. Confirm
+callers, references, runtime loaders, generated paths, and external consumers as
+applicable before removal; public symbols need more than an empty indexed caller
+set. Respect Cursor approval and run mode for edits and verification, then report
+what changed and the checks that exercised it.
