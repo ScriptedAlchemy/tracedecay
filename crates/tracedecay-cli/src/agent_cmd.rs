@@ -99,6 +99,15 @@ pub(crate) async fn handle_host_bundle_component_command(
         })?
         .as_secs();
     for agent_id in &agent_ids {
+        if !explicitly_scoped
+            && let Some(component) = options.component
+            && component_is_not_applicable(agent_id, component)
+        {
+            eprintln!(
+                "not applicable: agent {agent_id:?} does not support the requested {component:?} component; continuing sweep"
+            );
+            continue;
+        }
         let component_set = canonical_host_component_set(agent_id, options.component, now_unix)?;
         let Some(component_set) = component_set else {
             if explicitly_scoped {
@@ -175,6 +184,13 @@ fn canonical_host_component_set(
     let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
         .unwrap_or_else(|| "tracedecay".to_string());
     canonical_host_component_set_with_tracedecay_bin(agent, component, now_unix, &tracedecay_bin)
+}
+
+fn component_is_not_applicable(agent: &str, component: crate::cli::HostBundleComponentArg) -> bool {
+    host_kind_for_agent(agent).is_ok_and(|host| {
+        !tracedecay_agent_hosts::agents::host_bundle_registry::supported_components(host)
+            .contains(&host_bundle_component(component))
+    })
 }
 
 fn canonical_host_component_set_with_tracedecay_bin(
@@ -1741,7 +1757,8 @@ mod tests {
         HostBundleCliOperation, apply_canonical_component_set,
         apply_default_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
-        component_set_request, reinstall_agent_integrations_with_persisted_dashboard_policies,
+        component_is_not_applicable, component_set_request,
+        reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
     use tracedecay_agent_hosts::agents::host_bundle::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
@@ -1764,6 +1781,40 @@ mod tests {
     /// windows from overlapping each other or a profile pin.
     fn pinned_host_profile() -> tracedecay_runtime_core::config::PinnedUserDataDir {
         tracedecay_runtime_core::config::PinnedUserDataDir::new()
+    }
+
+    #[test]
+    fn unscoped_component_sweep_distinguishes_unsupported_from_optional() {
+        assert!(component_is_not_applicable(
+            "cline",
+            crate::cli::HostBundleComponentArg::Core
+        ));
+        assert!(!component_is_not_applicable(
+            "cline",
+            crate::cli::HostBundleComponentArg::ContextMcp
+        ));
+        assert!(!component_is_not_applicable(
+            "claude",
+            crate::cli::HostBundleComponentArg::OperatorMcp
+        ));
+        assert!(
+            canonical_host_component_set(
+                "claude",
+                Some(crate::cli::HostBundleComponentArg::OperatorMcp),
+                0,
+            )
+            .is_ok(),
+            "a supported optional component remains selectable"
+        );
+        assert!(
+            canonical_host_component_set(
+                "cline",
+                Some(crate::cli::HostBundleComponentArg::Core),
+                0,
+            )
+            .is_err(),
+            "an explicitly scoped incompatible component remains a typed refusal"
+        );
     }
 
     /// A `home` fixture for tests that drive a real host-native plugin CLI

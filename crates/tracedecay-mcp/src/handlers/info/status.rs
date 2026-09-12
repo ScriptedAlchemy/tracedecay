@@ -579,7 +579,11 @@ fn render_status_md(value: &Value) -> String {
                     md.field(k, &format!("{} item(s)", a.len()));
                 }
                 Value::Object(o) => {
-                    md.field(k, &format!("{{{} field(s)}}", o.len()));
+                    if let Some(status) = o.get("status").and_then(Value::as_str) {
+                        md.field(&format!("{k}.status"), status);
+                    } else {
+                        md.field(k, &format!("{{{} field(s)}}", o.len()));
+                    }
                 }
                 Value::Null => {}
             }
@@ -679,7 +683,20 @@ mod tests {
 
     use super::{
         code_index_freshness_projection, graph_statistics_value, historical_session_catch_up_state,
+        render_status_md,
     };
+
+    #[test]
+    fn status_markdown_exposes_nested_status_without_expanding_other_objects() {
+        let rendered = render_status_md(&serde_json::json!({
+            "code_index_freshness": {"status": "stale", "coverage": "partial"},
+            "branch": {"current_branch": "main", "tracked_branch_count": 1}
+        }));
+
+        assert!(rendered.contains("**code_index_freshness.status:** stale"));
+        assert!(rendered.contains("**branch:** {2 field(s)}"));
+        assert!(!rendered.contains("coverage"));
+    }
 
     /// The daemon serializes `graph_statistics` and `tracedecay status`
     /// deserializes it as the same Rust type. This round-trip is the wire
