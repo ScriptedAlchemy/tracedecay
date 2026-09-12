@@ -717,13 +717,27 @@ impl DaemonInvocationState {
                 DaemonInvocationProblem::InvalidRequest,
             );
         };
-        if let Some(continuation) = request.continuation.as_ref()
-            && (continuation.validate().is_err()
-                || continuation.scope_set_digest() != scope_set.digest()
-                || continuation.query_digest() != &query_digest
-                || continuation.order_digest() != &order_digest
-                || continuation.next_page() != request.page)
-        {
+        let continuation_valid = match request.continuation.as_ref() {
+            None => request.page == 0,
+            Some(continuation) => {
+                continuation.validate().is_ok()
+                    && continuation.scope_set_digest() == scope_set.digest()
+                    && continuation.query_digest() == &query_digest
+                    && continuation.order_digest() == &order_digest
+                    && continuation.next_page() == request.page
+                    && continuation.root_generations().len() == scope_set.roots().len()
+                    && continuation.root_cursors().len() == scope_set.roots().len()
+                    && scope_set.roots().iter().all(|root| {
+                        continuation
+                            .root_generation(&root.scope().scope_digest)
+                            .is_some()
+                            && continuation
+                                .root_cursor(&root.scope().scope_digest)
+                                .is_some()
+                    })
+            }
+        };
+        if !continuation_valid {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::InvalidRequest,
@@ -851,6 +865,10 @@ impl DaemonInvocationState {
                 generations.push(generation);
                 continue;
             };
+            let query_operation = matches!(
+                request.operation,
+                tracedecay_contracts::MultiRootOperationV1::Query { .. }
+            );
             let source_revision = match request.operation {
                 tracedecay_contracts::MultiRootOperationV1::Git { .. } => {
                     match explicit_git_state(&root) {
@@ -906,7 +924,7 @@ impl DaemonInvocationState {
             }
             let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
                 scope.scope_digest.clone(),
-                generation_outcome,
+                generation_outcome.clone(),
             ) else {
                 return DaemonInvocationResponse::problem(
                     request_id,
@@ -970,19 +988,75 @@ impl DaemonInvocationState {
                     tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                 );
             }
-            let outcome = match value {
-                Ok((value, next_cursor)) => tracedecay_domain::ScopeOutcome::Exact(
-                    tracedecay_contracts::MultiRootRootPageV1 {
-                        value: vec![value],
-                        next_cursor,
-                    },
-                ),
-                Err(DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
-                    tracedecay_domain::ScopeOutcome::Denied
+            let (outcome, served_revision) = match value {
+                Ok((value, next_cursor)) => {
+                    let served_revision = value
+                        .get("generation")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    if query_operation && served_revision.is_none() {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            DaemonInvocationProblem::Unavailable,
+                        );
+                    }
+                    (
+                        tracedecay_domain::ScopeOutcome::Exact(
+                            tracedecay_contracts::MultiRootRootPageV1 {
+                                value: vec![value],
+                                next_cursor,
+                            },
+                        ),
+                        served_revision,
+                    )
                 }
-                Err(_) => tracedecay_domain::ScopeOutcome::Unavailable {
-                    reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
-                },
+                Err(DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
+                    (tracedecay_domain::ScopeOutcome::Denied, None)
+                }
+                Err(_) => (
+                    tracedecay_domain::ScopeOutcome::Unavailable {
+                        reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+                    },
+                    None,
+                ),
+            };
+            let generation = if query_operation {
+                match served_revision.as_deref() {
+                    Some(served_revision) => {
+                        let Ok(served_generation) = frozen_root_generation(
+                            scope,
+                            scope_set.digest(),
+                            served_revision,
+                            &operation_value,
+                        ) else {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::InvalidRequest,
+                            );
+                        };
+                        let served_outcome =
+                            tracedecay_domain::ScopeOutcome::Exact(Some(served_generation));
+                        if served_outcome != generation_outcome {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::InvalidRequest,
+                            );
+                        }
+                        let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
+                            scope.scope_digest.clone(),
+                            served_outcome,
+                        ) else {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::InvalidRequest,
+                            );
+                        };
+                        generation
+                    }
+                    None => generation,
+                }
+            } else {
+                generation
             };
             contexts.push(context);
             generations.push(generation);
