@@ -141,9 +141,11 @@ pub fn build_branch_diagnostics(
     fallback_warning: Option<String>,
     serving_db_path: PathBuf,
     serving_source: Option<(&str, &str)>,
+    serving_source_is_current: bool,
 ) -> BranchDiagnostics {
     let meta = branch_meta::load_branch_meta(data_root);
-    let observed_serving_branch = serving_source.and_then(|(reference, revision)| {
+    let current_branch = branch::current_branch(project_root);
+    let published_serving_branch = serving_source.and_then(|(reference, revision)| {
         meta.as_ref().and_then(|meta| {
             meta.branches.iter().find_map(|(name, entry)| {
                 entry
@@ -158,13 +160,19 @@ pub fn build_branch_diagnostics(
             })
         })
     });
+    let current_source_branch = serving_source
+        .filter(|(_, revision)| serving_source_is_current && !revision.is_empty())
+        .and_then(|(reference, _)| reference.strip_prefix("refs/heads/"))
+        .filter(|name| current_branch.as_deref() == Some(*name))
+        .map(str::to_owned);
+    let observed_serving_branch = published_serving_branch.or(current_source_branch);
+    let observed_current_branch_is_ready = observed_serving_branch == current_branch;
     let (open_active_branch, serving_branch, fallback_warning) =
         if let Some(branch) = observed_serving_branch {
             (Some(branch.clone()), Some(branch), None)
         } else {
             (open_active_branch, serving_branch, fallback_warning)
         };
-    let current_branch = branch::current_branch(project_root);
     let tracking_enabled = meta.as_ref().is_some_and(|m| !m.branches.is_empty());
     let branch_drifted =
         tracking_enabled && current_branch.as_deref() != open_active_branch.as_deref();
@@ -186,7 +194,7 @@ pub fn build_branch_diagnostics(
         nearest_tracked_ancestor_db_exists,
     ) = if let (Some(meta), Some(current)) = (meta.as_ref(), current_branch.as_deref()) {
         let live_branch_tracked = meta.is_tracked(current);
-        let live_branch_ready = meta.is_query_eligible(current);
+        let live_branch_ready = meta.is_query_eligible(current) || observed_current_branch_is_ready;
         let live_branch_db_path = if live_branch_tracked {
             branch::resolve_branch_db_path(data_root, current, meta)
         } else {
