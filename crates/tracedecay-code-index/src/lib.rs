@@ -48,11 +48,14 @@ pub use self::intake::CodeIndexIntake;
 /// Callers combine this marker with the canonical `Annotates` edge instead of
 /// inferring runnable tests from names or enclosing modules.
 pub fn is_test_marker(record: &lineage::LineageSymbolRecordV1) -> bool {
-    record.kind == "annotation_usage"
-        && matches!(
-            record.simple_name.as_str(),
-            "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-        )
+    record.kind == "annotation_usage" && is_test_annotation_name(&record.simple_name)
+}
+
+fn is_test_annotation_name(name: &str) -> bool {
+    matches!(
+        name.rsplit("::").next().unwrap_or(name),
+        "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
+    )
 }
 
 /// Directory components (ASCII case-insensitive) that mark every file below
@@ -94,7 +97,17 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 
 #[cfg(test)]
 mod is_test_file_tests {
-    use super::is_test_file;
+    use super::{is_test_annotation_name, is_test_file};
+
+    #[test]
+    fn qualified_test_attributes_preserve_their_test_marker() {
+        for annotation in ["test", "tokio::test", "async_std::test"] {
+            assert!(is_test_annotation_name(annotation), "{annotation}");
+        }
+        for annotation in ["cfg", "tokio::main", "test_support"] {
+            assert!(!is_test_annotation_name(annotation), "{annotation}");
+        }
+    }
 
     #[test]
     fn recognized_directory_components_and_filename_markers_match() {
