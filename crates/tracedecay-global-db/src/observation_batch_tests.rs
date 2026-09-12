@@ -122,7 +122,7 @@ async fn writer_txn_census(runtime: &HostAdmissionTestRuntimeV1) -> WriterTxnCen
     let mut rows = snapshot
         .query(
             "SELECT COUNT(*), COUNT(DISTINCT transaction_scope_json)
-             FROM td_runtime_writer_idempotency_v1",
+             FROM td_runtime_writer_idempotency_v2",
             (),
         )
         .await
