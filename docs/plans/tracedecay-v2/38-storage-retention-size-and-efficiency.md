@@ -303,21 +303,37 @@ idempotency ledger, one `mutation_json` per mutation, slim receipts with
 frontiers stored once, and a Doctor census of dead sealed artifacts. On the
 measured 16 GB `sessions.db` those remove roughly 7 GB.
 
+**Also landed 2026-09-12:** `observation_repository_provenance` embedded the
+repository capture twice per row (`capture_json` and
+`availability_json.value`). Twenty-nine distinct captures stood behind
+187,002 rows — 495 MB, of which 396 MB was the repeated capture. The capture
+now lives once in `observation_repository_captures`; rows keep a reference
+and every reader hydrates through one shared SQL projection. Measured on a
+copy of the live table: 494.6 MB → 98.6 MB.
+
 Two residues remain, each blocked on a design decision outside retention:
 
-1. **`retrieval_anchors` (0.9 GB; 437k `exact_observation` anchors at
-   ~1.5 KB).** Each `anchor_json` is mostly constant structure: an empty
-   `CoverageReportV1`, a `ResolutionAuthorizationV1` whose four identity
-   fields never vary, `projection_watermark` with no components. The table
-   cannot be shadowed by a hydrating view because
+1. **`retrieval_anchors` (0.67 GB; 441k anchors at ~1.5 KB).** Measured on
+   the same store, the constant structure inside `anchor_json` is smaller
+   than it looks: `coverage` is one distinct value (154 B × 441k = 68 MB),
+   `projection_watermark` one (17 B, 7 MB), and `authorization` has 249,889
+   distinct values across 441k rows because it carries the per-observation
+   `canonical_request_digest` — interning it saves ~50 MB. A slim persisted
+   shape therefore reclaims ~20 % while touching 126 `anchor_json` read
+   sites across the temporal store and the foreign keys from
    `retrieval_anchor_aliases`, `retrieval_anchor_dispositions`, and the
-   derived-evidence tables hold foreign keys into
-   `retrieval_anchors(anchor_id, owner_json)`, and the record is read by SQL
-   in the temporal store, not through one loader. The fix is a
-   `RetrievalAnchorRecordV2`/`V3` persisted shape that omits default
-   coverage and interns the authorization block, with the dependent foreign
-   keys moving with it. `anchor_id` derives from owner and target only, so
-   the identity is unaffected.
+   derived-evidence tables into `retrieval_anchors(anchor_id, owner_json)`.
+   That trade is not worth taking. The cost is structural: 71-byte
+   identifiers repeated in `anchor_id`, `source_observations`, the target,
+   and the owner of every document. The real fix is a columnar anchor table
+   (identifier columns, a small `target_kind`, and only the variable part
+   as JSON) — a `RetrievalAnchorRecordV3` persisted shape with the
+   dependent foreign keys moving with it. `anchor_id` derives from owner and
+   target only, so the identity is unaffected. Cardinality is the other
+   lever: 187,002 `repository_capture` anchors name 29 captures because the
+   anchor target folds in the observation's sanitization receipt; whether a
+   capture anchor should be per observation or per capture is a retrieval
+   model decision, not a storage one.
 2. **`observations.observation_json` (1.3 GB) after projection.** Plan 38
    §4 asks for one content copy; the observation payload is the third beside
    `session_messages.text` and `lcm_raw_messages.content`. It cannot be
