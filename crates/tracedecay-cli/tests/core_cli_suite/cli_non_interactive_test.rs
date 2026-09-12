@@ -2582,7 +2582,9 @@ async fn automation_facts_list_reports_terminal_receipt_collection() {
 fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifacts() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    let caller = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
+    let caller_root = canonical_temp_path(caller.path());
     git(&project_root, &["init", "-b", "main"]);
     std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
     commit_all(&project_root, "initial commit");
@@ -2700,6 +2702,48 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
     assert!(
         !shard_root.join("branches").exists(),
         "branch add must not create a per-branch database"
+    );
+
+    git(
+        &project_root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "caller/linked",
+            caller_root.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let mut search = tracedecay_command_without_daemon(home.path(), &caller_root);
+    search.args([
+        "tool",
+        "branch_search",
+        "--args",
+        r#"{"branch":"feature/new","query":"indexed","limit":5,"format":"json"}"#,
+        "--json",
+    ]);
+    let search = run_with_timeout(search, cli_timeout());
+    assert!(
+        search.status.success(),
+        "a linked worktree must consume an explicitly published branch generation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&search.stdout),
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&search.stdout).expect("branch search MCP envelope");
+    let payload: serde_json::Value = serde_json::from_str(
+        envelope["content"][0]["text"]
+            .as_str()
+            .expect("branch search JSON content"),
+    )
+    .expect("branch search payload");
+    assert_eq!(payload["status"], "complete", "{payload:#}");
+    assert!(
+        payload["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty()),
+        "published branch search must return the indexed symbol: {payload:#}"
     );
 
     drop(daemon);
