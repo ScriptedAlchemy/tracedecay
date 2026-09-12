@@ -13,7 +13,7 @@ use crate::result::OpaqueCursor;
 
 use super::{ImplementationSelector, RetrievalRequestMeta};
 
-pub const CALLABLE_CODE_OPERATION_COUNT: usize = 18;
+pub const CALLABLE_CODE_OPERATION_COUNT: usize = 17;
 pub const MAX_CALLABLE_CODE_QUERY_BYTES: usize = 4_096;
 pub const MAX_CALLABLE_CODE_FILTERS: usize = 32;
 pub const MAX_CALLABLE_CODE_DEPTH: u32 = 10;
@@ -579,7 +579,6 @@ pub enum CallableCodeOperationKind {
     Facets,
     Timeline,
     Declaration,
-    Definition,
     TypeDefinition,
     References,
 }
@@ -601,7 +600,6 @@ impl CallableCodeOperationKind {
         Self::Facets,
         Self::Timeline,
         Self::Declaration,
-        Self::Definition,
         Self::TypeDefinition,
         Self::References,
     ];
@@ -624,7 +622,6 @@ impl CallableCodeOperationKind {
             Self::Facets => "facets",
             Self::Timeline => "timeline",
             Self::Declaration => "declaration",
-            Self::Definition => "definition",
             Self::TypeDefinition => "type_definition",
             Self::References => "references",
         }

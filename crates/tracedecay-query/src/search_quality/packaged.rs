@@ -7,7 +7,7 @@ use super::evaluate::SearchEvalError;
 
 const WORKLOAD_PATH: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
-const WORKLOAD_SHA256: &str = "cbcea0fc2d422f93ed9a37d330cdae34bc16295b4f9124353cbfb7f5d08f4e97";
+const WORKLOAD_SHA256: &str = "48a698b7b7598e0296b0d2786b5204f0aaf84ce65c50f357b70b95eafd9bcc7b";
 
 const FILES: &[(&str, &[u8])] = &[
     (
@@ -71,9 +71,21 @@ const FILES: &[(&str, &[u8])] = &[
         ),
     ),
     (
+        "tests/fixtures/context_eval_project/src/auth/session.rs",
+        include_bytes!(
+            "../../assets/runtime-root/tests/fixtures/context_eval_project/src/auth/session.rs"
+        ),
+    ),
+    (
         "tests/fixtures/context_eval_project/src/storage/config_store.rs",
         include_bytes!(
             "../../assets/runtime-root/tests/fixtures/context_eval_project/src/storage/config_store.rs"
+        ),
+    ),
+    (
+        "tests/fixtures/context_eval_project/src/net/retry.rs",
+        include_bytes!(
+            "../../assets/runtime-root/tests/fixtures/context_eval_project/src/net/retry.rs"
         ),
     ),
     (

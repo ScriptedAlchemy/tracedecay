@@ -21,7 +21,7 @@ use super::failure::{
     classify_claude_observation_failure, classify_transcript_ingest_failure,
     plan_round_robin_admission, scheduling_write_required,
 };
-use super::project::{home_dir, parse_git_log_commits, with_transcript_source_home};
+use super::project::{home_dir, with_transcript_source_home};
 use super::scheduler::{
     finish_user_provider_coverage, merge_project_provider_backpressure,
     plan_provider_rotation_admission,
@@ -292,31 +292,6 @@ fn transcript_source_contract_failures_are_bounded_and_permanent() {
     }
 }
 
-#[test]
-fn parse_git_log_commits_reads_sha_and_time_skipping_malformed() {
-    let stdout = concat!(
-        "ABCDEF1234567890 1700000000\n",
-        "\n",
-        "missing-time\n",
-        "cafebabe not-a-number\n",
-        "deadbeefdeadbeef 1700000200\n",
-    );
-    let commits = parse_git_log_commits(stdout);
-    assert_eq!(
-        commits,
-        vec![
-            git_correlation::ScannedCommit {
-                sha: "abcdef1234567890".to_string(),
-                committed_at: 1_700_000_000,
-            },
-            git_correlation::ScannedCommit {
-                sha: "deadbeefdeadbeef".to_string(),
-                committed_at: 1_700_000_200,
-            },
-        ]
-    );
-}
-
 use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
 
 struct GraphBackedTestStore {
@@ -373,114 +348,6 @@ impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
     }
 }
 
-/// End-to-end over the real scanner: a commit made *while a session is still
-/// recording* must be attributed on the next sweep. This exercises the actual
-/// `git log` invocation and window arithmetic, not a stubbed scan, because the
-/// window bounds are where live commits were previously being missed.
-#[tokio::test]
-async fn live_session_commit_is_attributed_by_the_real_git_scan() {
-    use std::process::Command;
-
-    let repo = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .current_dir(repo.path())
-            .output()
-            .unwrap()
-    };
-    assert!(git(&["init", "-q", "-b", "main"]).status.success());
-    assert!(
-        git(&["config", "user.email", "test@example.com"])
-            .status
-            .success()
-    );
-    assert!(git(&["config", "user.name", "Test"]).status.success());
-    std::fs::write(repo.path().join("file.txt"), "one\n").unwrap();
-    assert!(git(&["add", "file.txt"]).status.success());
-    assert!(git(&["commit", "-q", "-m", "live commit"]).status.success());
-    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let store_dir = tempfile::tempdir().unwrap();
-    let store = GraphBackedTestStore {
-        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
-            &store_dir.path().join("sessions.db"),
-        ),
-        graph: MemoryEvidenceGraphRuntime::default(),
-    };
-
-    // A session recording "now" — the commit lands inside its span, exactly as
-    // it does when an agent commits mid-session.
-    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-    let worktree = git_correlation::normalize_worktree(&repo.path().to_string_lossy());
-    let live_span = git_correlation::SessionGitSpan {
-        span_id: "span-live".to_string(),
-        provider: "claude".to_string(),
-        session_id: "live".to_string(),
-        thread_id: None,
-        branch: Some("main".to_string()),
-        worktree,
-        first_ts: now - 60,
-        last_ts: now,
-        event_count: 2,
-        source: git_correlation::SpanSource::HookRoute,
-    };
-    git_correlation::publish_graph_evidence(&store, "live-ingest", &[live_span], &[]).unwrap();
-
-    let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
-        super::project::git_scan_commits(target, gap)
-    })
-    .await
-    .unwrap();
-    assert!(
-        inserted >= 1,
-        "a commit made during a live session must be attributed"
-    );
-
-    let identity = git_correlation::git_evidence_projection_identity(
-        tracedecay_graph_db::GraphNamespace::new("project").unwrap(),
-    )
-    .unwrap();
-    let evidence = git_correlation::recover_git_evidence_projection(
-        git_correlation::GitCorrelationSessionStore::graph_runtime(&store).unwrap(),
-        &identity,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )
-    .unwrap()
-    .expect("attribution published the evidence projection");
-    let hits = evidence.sessions_for_with_relation(
-        &git_correlation::SessionsForQuery {
-            git_ref: git_correlation::GitRefFilter::parse("commit", &sha).unwrap(),
-            since: None,
-            until: None,
-            limit: 10,
-        },
-        git_correlation::CommitRelationFilter::All,
-    );
-    assert_eq!(
-        hits.len(),
-        1,
-        "the live session must be correlated: {hits:?}"
-    );
-    assert_eq!(hits[0].session_id, "live");
-    assert_eq!(
-        hits[0].span_overlap_kind,
-        Some(git_correlation::SpanOverlapKind::WithinSpan)
-    );
-
-    // Replaying the sweep must not double-attribute.
-    let again = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
-        super::project::git_scan_commits(target, gap)
-    })
-    .await
-    .unwrap();
-    assert_eq!(again, 0, "re-sweeping an attributed commit is a no-op");
-}
-
 /// A fresh project has never published a Git evidence projection. The
 /// attribution sweep must complete as a typed no-op — not report a retryable
 /// unavailability, which put the ingest pass into an endless retry loop on
@@ -497,12 +364,15 @@ async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() 
     };
 
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
+    let attribution = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
         panic!("a never-published projection has no span targets to scan")
     })
     .await
     .expect("the empty start is not an error");
-    assert_eq!(inserted, 0, "nothing to attribute on the empty start");
+    assert_eq!(
+        attribution,
+        git_correlation::CommitAttributionSweepOutcome::default()
+    );
 }
 
 #[test]

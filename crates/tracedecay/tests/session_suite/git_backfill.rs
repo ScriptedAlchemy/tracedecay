@@ -20,8 +20,8 @@ use tracedecay_domain::ProjectId;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::git_correlation::{
-    BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitRefFilter, GitReflogSource,
-    SessionsForQuery, normalize_worktree,
+    BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitCorrelationError, GitRefFilter,
+    GitReflogSource, SessionsForQuery, git_commit_reference_exists, normalize_worktree,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -148,6 +148,14 @@ impl GitReflogSource for FakeGit {
 
     fn current_branch(&self, _worktree: &Path) -> Option<String> {
         self.current.clone()
+    }
+
+    fn commit_reference_exists(
+        &self,
+        _worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        git_commit_reference_exists(&self.real_repo, reference)
     }
 
     fn commit_log(&self, _worktree: &Path, branch: &str, since: i64) -> Option<String> {

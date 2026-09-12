@@ -259,10 +259,6 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::CodeDeclaration
                 )
                 | (
-                    Self::CallableCode(CallableCodeSurfaceRequest::Definition(_)),
-                    ApplicationSurfaceOperation::CodeDefinition
-                )
-                | (
                     Self::CallableCode(CallableCodeSurfaceRequest::TypeDefinition(_)),
                     ApplicationSurfaceOperation::CodeTypeDefinition
                 )
@@ -601,12 +597,6 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::CodeDeclaration => {
             serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
                 .map(CallableCodeSurfaceRequest::Declaration)
-                .map(ApplicationSurfaceRequest::CallableCode)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
-        }
-        ApplicationSurfaceOperation::CodeDefinition => {
-            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
-                .map(CallableCodeSurfaceRequest::Definition)
                 .map(ApplicationSurfaceRequest::CallableCode)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }

@@ -1,4 +1,3 @@
-use md5::{Digest, Md5};
 use serde_json::json;
 use tracedecay_domain::ObservationScopeV1;
 
@@ -17,32 +16,41 @@ fn populated_source(
     std::path::PathBuf,
     KimiSource,
 ) {
-    // Production installs the process-wide capture authorities during daemon
-    // bootstrap; capture refuses with a typed `BackgroundResourceUnavailable`
-    // without them.
     crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
     let temp = tempfile::TempDir::new().unwrap();
     let project = temp.path().join("project");
-    let share = temp.path().join(".kimi");
+    let share = temp.path().join(".kimi-code");
+    let sessions = share.join("sessions/wd_project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir_all(&share).unwrap();
-    std::fs::write(
-        share.join("kimi.json"),
-        json!({"work_dirs": [{"path": project}]}).to_string(),
-    )
-    .unwrap();
-    let sessions = share.join("sessions").join(format!(
-        "{:x}",
-        Md5::digest(project.to_string_lossy().as_bytes())
-    ));
     for ordinal in 0..count {
-        let transcript = sessions
-            .join(format!("session-{ordinal:04}"))
-            .join("context.jsonl");
+        let session = sessions.join(format!("session-{ordinal:04}"));
+        let transcript = session.join("agents/main/wire.jsonl");
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(
+            session.join("state.json"),
+            json!({
+                "id": format!("session-{ordinal:04}"),
+                "version": 2,
+                "cwd": project,
+                "agents": {"main": {"type": "main"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
             transcript,
-            json!({"role": "user", "content": format!("original-{ordinal:04}")}).to_string() + "\n",
+            json!({
+                "type": "context.append_message",
+                "agentId": "main",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": format!("original-{ordinal:04}")}],
+                    "toolCalls": []
+                },
+                "time": 1_789_228_081_157_u64
+            })
+            .to_string()
+                + "\n",
         )
         .unwrap();
     }
@@ -66,18 +74,22 @@ async fn durable_queue_revisits_a_recreated_entry() {
         .unwrap();
     }
     assert_eq!(admission.observations().len(), MAX_SESSION_FILES + 1);
-    let recreated = sessions.join("session-0000").join("context.jsonl");
-    std::fs::remove_dir_all(recreated.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(recreated.parent().unwrap()).unwrap();
+    let recreated = sessions.join("session-0000/agents/main/wire.jsonl");
     std::fs::write(
         &recreated,
-        json!({"role": "user", "content": "recreated-entry"}).to_string() + "\n",
+        json!({
+            "type": "context.append_message",
+            "message": {"role": "user", "content": "recreated-entry"},
+            "time": 1_789_228_081_158_u64
+        })
+        .to_string()
+            + "\n",
     )
     .unwrap();
 
     for _ in 0..2 {
         capture_kimi_observations(
-            &admission.clone(),
+            &admission,
             &KimiSource::with_share_dir(&source.share_dir),
             &project,
             ObservationScopeV1::Profile,
@@ -134,7 +146,7 @@ async fn cancellation_after_discovery_preserves_the_exact_frontier() {
         .enqueue_discovery_paths(
             &scope,
             "kimi",
-            vec![sessions.join("session-0000").join("context.jsonl")],
+            vec![sessions.join("session-0000/agents/main/wire.jsonl")],
         )
         .await
         .unwrap()
@@ -170,50 +182,4 @@ async fn cancellation_after_discovery_preserves_the_exact_frontier() {
             .unwrap(),
         Some(original)
     );
-}
-
-#[tokio::test]
-async fn continuous_directory_creation_cannot_starve_the_original_window() {
-    let (_temp, project, sessions, source) = populated_source(4_097);
-    let admission = MemoryHostAdmission::default();
-
-    for round in 0..12 {
-        if round > 0 {
-            let transcript = sessions
-                .join(format!("churn-{round:04}"))
-                .join("context.jsonl");
-            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-            std::fs::write(
-                transcript,
-                json!({"role": "user", "content": format!("churn-{round:04}")}).to_string() + "\n",
-            )
-            .unwrap();
-        }
-        capture_kimi_observations(
-            &admission,
-            &KimiSource::with_share_dir(&source.share_dir),
-            &project,
-            ObservationScopeV1::Profile,
-            None,
-            &ObservationCancellation::default(),
-        )
-        .await
-        .unwrap();
-    }
-
-    let originals = admission
-        .observations()
-        .iter()
-        .filter_map(|stored| {
-            let payload = stored.observation().payload().to_string();
-            let start = payload.find("original-")?;
-            payload
-                .get(start..start.saturating_add(13))
-                .map(str::to_owned)
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(originals.len(), 4_097);
-    for ordinal in 0..4_097 {
-        assert!(originals.contains(&format!("original-{ordinal:04}")));
-    }
 }

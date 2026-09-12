@@ -130,7 +130,6 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
         Facets,
         Timeline,
         Declaration,
-        Definition,
         TypeDefinition,
         References,
     }
@@ -177,9 +176,6 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
         RequestCase::Declaration => {
             CallableCodeSurfaceRequest::Declaration(navigation("node.declaration"))
         }
-        RequestCase::Definition => {
-            CallableCodeSurfaceRequest::Definition(navigation("node.definition"))
-        }
         RequestCase::TypeDefinition => {
             CallableCodeSurfaceRequest::TypeDefinition(navigation("node.type-definition"))
         }
@@ -208,10 +204,6 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
         (
             ApplicationSurfaceOperation::CodeDeclaration,
             RequestCase::Declaration,
-        ),
-        (
-            ApplicationSurfaceOperation::CodeDefinition,
-            RequestCase::Definition,
         ),
         (
             ApplicationSurfaceOperation::CodeTypeDefinition,

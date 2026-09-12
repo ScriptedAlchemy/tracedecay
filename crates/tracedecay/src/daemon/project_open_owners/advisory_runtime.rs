@@ -1517,7 +1517,7 @@ async fn register_production_advisory_owner(
         move |request: HookOrchestrationRequestV1,
               work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken| {
             let cycle = Arc::clone(&work_cycle);
-            async move { run_production_hook_cycle(cycle, request, work_cancellation).await }
+            async move { Box::pin(run_production_hook_cycle(cycle, request, work_cancellation)).await }
         };
     let orchestrator =
         BoundedHookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {

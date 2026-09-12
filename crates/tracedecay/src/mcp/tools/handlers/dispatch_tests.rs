@@ -740,6 +740,121 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         "a serving census restores the branch claim: {serving}",
     );
 
+    // Unified generations can serve an ordinary checked-out branch without
+    // adding it to the legacy branch-store registry. Both status surfaces
+    // must prefer the scheduler's current source witness while keeping the
+    // registry count truthful. A stale witness for an earlier commit on the
+    // same branch is not enough to replace the startup fallback.
+    run_git_in(&project, &["checkout", "-b", "public-feature"]);
+    let public_revision = git_stdout_in(&project, &["rev-parse", "HEAD"]);
+    let public_freshness_reader = |revision: Option<String>, staleness: &'static str| {
+        let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
+            std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+                let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: worktree_root.display().to_string(),
+                    source_reference: Some("refs/heads/public-feature".to_owned()),
+                    source_revision: revision.clone(),
+                    latest_generation_id: Some(
+                        "generation.status-serving-truth.public-feature".to_owned(),
+                    ),
+                    code_graph_serving: Some(
+                        tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
+                    ),
+                    coverage: if staleness == "fresh" {
+                        "complete".to_owned()
+                    } else {
+                        "partial_source_verification".to_owned()
+                    },
+                    staleness_state: Some(staleness.to_owned()),
+                    ..Default::default()
+                };
+                Box::pin(async move { Some(freshness) })
+            });
+        reader
+    };
+    let stale_public = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(public_freshness_reader(
+                Some("0".repeat(40)),
+                "verifying",
+            )),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("status answers for stale public branch generation");
+    let stale_public = status_output(stale_public);
+    assert_eq!(stale_public["serving_branch"], json!("main"));
+    assert_ne!(stale_public["branch_resolution"], json!("exact"));
+
+    let committed_public_reader = public_freshness_reader(Some(public_revision), "fresh");
+    let current_public = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(committed_public_reader),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("status answers for current public branch generation");
+    let current_public = status_output(current_public);
+    assert_eq!(current_public["active_branch"], json!("public-feature"));
+    assert_eq!(current_public["serving_branch"], json!("public-feature"));
+    assert_eq!(current_public["branch_resolution"], json!("exact"));
+    assert_eq!(current_public["tracked_branch_count"], json!(1));
+    assert_eq!(
+        current_public["branch_diagnostics"]["live_branch_tracked"],
+        json!(false)
+    );
+    assert_eq!(
+        current_public["branch_diagnostics"]["live_branch_ready"],
+        json!(true)
+    );
+    assert!(current_public.get("branch_warnings").is_none());
+
+    // A dirty worktree snapshot has an exact content identity but no Git OID.
+    // Its complete, fresh, ready source witness still identifies the current
+    // public branch without inventing a revision.
+    let active_public = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_active_project",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(public_freshness_reader(None, "fresh")),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("active project answers for current public branch generation");
+    let active_public = status_output(active_public);
+    assert_eq!(
+        active_public["branch"]["current_branch"],
+        json!("public-feature")
+    );
+    assert_eq!(
+        active_public["branch"]["serving_branch"],
+        json!("public-feature")
+    );
+    assert_eq!(active_public["branch"]["branch_resolution"], json!("exact"));
+    assert_eq!(active_public["branch"]["tracked_branch_count"], json!(1));
+
     // A branch publication can finish after the drift-triggered graph reopen
     // already froze the startup fallback. The ready generation source is the
     // serving authority in that window, including when its ref is the private

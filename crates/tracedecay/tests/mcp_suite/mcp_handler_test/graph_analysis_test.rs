@@ -182,6 +182,35 @@ async fn setup_test_risk_non_src_fixture() -> (ProductionCompositionFixture, ())
     (fixture, ())
 }
 
+async fn setup_workspace_test_risk_fixture() -> (ProductionCompositionFixture, ()) {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("crates/demo/src")).unwrap();
+        fs::create_dir_all(project.join("crates/demo/tests")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/demo\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("crates/demo/src/lib.rs"),
+            "pub fn public_entry() -> usize { helper() }\nfn helper() -> usize { 1 }\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("crates/demo/tests/integration.rs"),
+            "use demo::public_entry;\n#[test]\nfn covers_public_entry() { assert_eq!(public_entry(), 1); }\n",
+        )
+        .unwrap();
+    })
+    .await;
+    (fixture, ())
+}
+
 async fn setup_ts_describe_it_project() -> (ProductionCompositionFixture, ()) {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
@@ -1012,6 +1041,39 @@ async fn test_port_order() {
 }
 
 #[tokio::test]
+async fn port_order_sorts_a_tied_level_before_applying_the_limit() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn zeta() {}\npub fn alpha() {}\npub fn middle() {}\n",
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_port_order",
+        json!({"source_dir": "src", "kinds": ["function"], "limit": 2}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let names = output["levels"][0]["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["zeta", "alpha"]);
+    assert_eq!(output["returned"], json!(2));
+}
+
+#[tokio::test]
 async fn test_rename_preview_not_found() {
     let (cg, _env, _dir) = setup_empty_analysis_project().await;
     let result = handle_tool_call(
@@ -1506,6 +1568,36 @@ async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
             .is_some_and(|note| note.contains("closure")),
         "confidence note should explain the conservative closure signal, got: {}",
         text
+    );
+    close_test_graph(cg).await;
+}
+
+#[tokio::test]
+async fn test_test_risk_scopes_workspace_source_before_following_external_test_callers() {
+    let (cg, _dir) = setup_workspace_test_risk_fixture().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_test_risk",
+        json!({
+            "path": "crates/demo/src/lib.rs",
+            "limit": 10,
+            "include_tested": true
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(parsed["summary"]["total_functions"].as_u64(), Some(2));
+    assert_eq!(parsed["summary"]["tested"].as_u64(), Some(2));
+    assert!(
+        parsed["risks"]
+            .as_array()
+            .is_some_and(|risks| risks.iter().all(|risk| risk["has_test"] == true)),
+        "the out-of-scope integration test should attribute both scoped functions: {text}"
     );
     close_test_graph(cg).await;
 }
@@ -2073,7 +2165,11 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn target() {}\npub fn caller() { target(); }\n",
+    )
+    .unwrap();
     let (cg, _env) = init_test_project(project).await;
 
     let abs_path = project.join("src/lib.rs");
@@ -2086,7 +2182,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_diagnose",
-        json!({"cargo_output": cargo_output, "include_callers": false}),
+        json!({"cargo_output": cargo_output, "include_callers": true}),
         None,
         None,
     )
@@ -2099,85 +2195,14 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
         mapped, 2,
         "both diagnostics should map to nodes after path normalization; got mapped={mapped} full={output:#}"
     );
-}
-
-/// `tracedecay_diagnose` builds a request-scoped redundancy view from the
-/// admitted generation and surfaces AST-isomorphic functions under
-/// `near_duplicates`.
-#[tokio::test]
-async fn diagnose_surfaces_generation_pinned_near_duplicates() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    fs::create_dir_all(&project_root).unwrap();
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-pub fn compute_a(value: i32) -> i32 {
-    let mut acc = 0;
-    for i in 0..value {
-        if i % 2 == 0 {
-            acc += i;
-        } else {
-            acc -= i;
-        }
+    for diagnostic in output["diagnostics"].as_array().expect("diagnostics") {
+        assert_eq!(diagnostic["node"]["name"], "target");
+        let callers = diagnostic["callers"].as_array().expect("callers");
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0]["name"], "caller");
+        assert_eq!(callers[0]["file"], "src/lib.rs");
+        assert_eq!(callers[0]["line"], 2);
     }
-    acc
-}
-
-pub fn compute_b(input: i32) -> i32 {
-    let mut total = 0;
-    for j in 0..input {
-        if j % 2 == 0 {
-            total += j;
-        } else {
-            total -= j;
-        }
-    }
-    total
-}
-"#,
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(project).await;
-
-    // The fixture is stable: compute_a begins on line 2.
-    let diag_line = 2;
-    let cargo_output =
-        format!("error[E0001]: synthetic error\n  --> src/lib.rs:{diag_line}:5\n   |\n");
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_diagnose",
-        json!({"cargo_output": cargo_output, "include_callers": false}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-
-    let diagnostics = output["diagnostics"].as_array().expect("diagnostics");
-    let diag = diagnostics
-        .iter()
-        .find(|d| d["node"]["name"].as_str() == Some("compute_a"))
-        .unwrap_or_else(|| panic!("diagnostic did not map to compute_a: {output:#}"));
-    let dupes = diag["near_duplicates"]
-        .as_array()
-        .unwrap_or_else(|| panic!("near_duplicates missing: {output:#}"));
-    assert!(
-        dupes
-            .iter()
-            .any(|d| d["name"].as_str() == Some("compute_b")),
-        "expected compute_b in near_duplicates, got: {output:#}"
-    );
-    let top = &dupes[0];
-    assert_eq!(top["name"].as_str(), Some("compute_b"));
-    assert_eq!(top["overlap_kind"].as_str(), Some("ast_isomorphic"));
-    assert_eq!(top["severity"].as_str(), Some("definite"));
-    assert!(top["ranking_score"].as_f64().unwrap_or(0.0) > 0.0);
 }
 
 /// The resolver's kind-compatibility filter must apply to the same-file

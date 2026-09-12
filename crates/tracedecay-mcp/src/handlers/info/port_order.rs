@@ -178,8 +178,13 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
             let mut emitted = 0usize;
 
             while !queue.is_empty() && emitted < limit {
-                let mut current_level: Vec<&str> = Vec::new();
+                queue.make_contiguous().sort_by_key(|id| {
+                    node_map
+                        .get(id)
+                        .map(|node| (node.file, node.start_line, node.kind, node.name, node.id))
+                });
                 let level_size = queue.len();
+                let mut current_level: Vec<&str> = Vec::new();
                 for _ in 0..level_size {
                     // Safety: we checked queue is non-empty above and iterate exactly level_size times
                     let Some(id) = queue.pop_front() else { break };

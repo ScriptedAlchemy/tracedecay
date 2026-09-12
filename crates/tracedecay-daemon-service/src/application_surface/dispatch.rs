@@ -892,7 +892,6 @@ pub(super) fn http_page_projection(operation: ApplicationSurfaceOperation) -> Ht
         | ApplicationSurfaceOperation::CodeFacets
         | ApplicationSurfaceOperation::CodeTimeline
         | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
         | ApplicationSurfaceOperation::CodeTypeDefinition
         | ApplicationSurfaceOperation::CodeReferences => HttpPageProjection::MetaCursor,
         ApplicationSurfaceOperation::DiagnosticsRead => HttpPageProjection::BodyPageControls,

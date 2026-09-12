@@ -1178,14 +1178,14 @@ async fn canonical_digest_binds_every_semantic_input_and_excludes_resume_ephemer
         let mut limits = ExecutionLimits::default();
         match index {
             0 => limits.candidate_limit += 1,
-            1 => limits.candidate_total_bytes += 1,
+            1 => limits.candidate_total_bytes -= 1,
             2 => limits.candidate_item_bytes += 1,
             3 => limits.candidate_key_bytes += 1,
             4 => limits.candidate_stable_id_bytes += 1,
             5 => limits.candidate_anchor_id_bytes += 1,
             6 => limits.candidate_metadata_field_bytes += 1,
             7 => limits.record_limit += 1,
-            8 => limits.record_total_bytes += 1,
+            8 => limits.record_total_bytes -= 1,
             9 => limits.record_item_bytes += 1,
             10 => limits.record_key_bytes += 1,
             11 => limits.hydration_limit += 1,

@@ -131,6 +131,14 @@ impl GitReflogSource for FailCommitLogCall {
         SystemGit.current_branch(worktree)
     }
 
+    fn commit_reference_exists(
+        &self,
+        worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        SystemGit.commit_reference_exists(worktree, reference)
+    }
+
     fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == self.fail_on {
             None
@@ -341,6 +349,51 @@ async fn unavailable_attribution_target_is_a_retryable_error() {
         .await
         .unwrap_err();
     assert!(matches!(error, GitCorrelationError::Unavailable(_)));
+}
+
+#[tokio::test]
+async fn archived_branch_is_limited_coverage_without_losing_observed_span() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = TestStore::open(&directory.path().join("sessions.db"));
+    let archived = crate::runtime::git_correlation::SessionGitSpan {
+        span_id: "span-archived".to_owned(),
+        provider: "codex".to_owned(),
+        session_id: "archived-session".to_owned(),
+        thread_id: None,
+        branch: Some("codex/archived".to_owned()),
+        worktree: normalize_worktree(&repository.path().to_string_lossy()),
+        first_ts: 1,
+        last_ts: 2,
+        event_count: 2,
+        source: crate::runtime::git_correlation::SpanSource::Ingest,
+    };
+    publish_graph_evidence(&store, "archived", &[archived], &[]).unwrap();
+
+    let attribution = run_commit_attribution_sweep(&store, DEFAULT_SPAN_MERGE_GAP_SECS, |target| {
+        scan_span_target(&SystemGit, target, DEFAULT_SPAN_MERGE_GAP_SECS, usize::MAX)
+    })
+    .await
+    .unwrap();
+    assert_eq!(attribution.commits_attributed, 0);
+    assert_eq!(attribution.unavailable_references, 1);
+
+    let identity = crate::runtime::git_correlation::git_evidence_projection_identity(
+        tracedecay_graph_db::GraphNamespace::new("project").unwrap(),
+    )
+    .unwrap();
+    let evidence = crate::runtime::git_correlation::recover_git_evidence_projection(
+        GitCorrelationSessionStore::graph_runtime(&store).unwrap(),
+        &identity,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(evidence.projection().spans().len(), 1);
+    assert_eq!(
+        evidence.projection().spans()[0].branch.as_deref(),
+        Some("codex/archived")
+    );
 }
 
 #[tokio::test]

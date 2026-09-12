@@ -1284,6 +1284,14 @@ mod tests {
             Some("main".to_owned())
         }
 
+        fn commit_reference_exists(
+            &self,
+            _worktree: &std::path::Path,
+            _reference: &str,
+        ) -> Result<bool, GitCorrelationError> {
+            Ok(true)
+        }
+
         fn commit_log(
             &self,
             _worktree: &std::path::Path,

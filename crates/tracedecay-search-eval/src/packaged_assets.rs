@@ -8,6 +8,7 @@ use tracedecay_query::search_quality::{CandidateWorkloadV1, SearchEvalError, pac
 
 const SOURCE_COMMIT: &str = "8312618fee8109b16be09e65f45118b4e550fa14";
 const PACK_ID: &str = "184f6ca1eafd40e7889d15a20b7a5c861e80a47b";
+const CONTEXT_PACK_ID: &str = "f3c7116c6c911657b2b0d933cbf89ae00dfdee64";
 
 pub(crate) struct PackagedEvaluatorAssets {
     _directory: TempDir,
@@ -105,22 +106,29 @@ pub(crate) fn write_checked_in_object_pack(git: &Path) -> Result<(), SearchEvalE
             SearchEvalError::Contract(format!("decode packaged evaluator Git {kind}: {error}"))
         })
     };
-    let pack = decode(
-        include_str!("../assets/git/evaluator.pack.hex"),
-        "object pack",
-    )?;
-    let index = decode(
-        include_str!("../assets/git/evaluator.idx.hex"),
-        "object index",
-    )?;
-    fs::write(pack_root.join(format!("pack-{PACK_ID}.pack")), pack).map_err(|error| {
-        SearchEvalError::Contract(format!("write packaged evaluator Git object pack: {error}"))
-    })?;
-    fs::write(pack_root.join(format!("pack-{PACK_ID}.idx")), index).map_err(|error| {
-        SearchEvalError::Contract(format!(
-            "write packaged evaluator Git object index: {error}"
-        ))
-    })?;
+    for (id, pack, index) in [
+        (
+            PACK_ID,
+            include_str!("../assets/git/evaluator.pack.hex"),
+            include_str!("../assets/git/evaluator.idx.hex"),
+        ),
+        (
+            CONTEXT_PACK_ID,
+            include_str!("../assets/git/evaluator-context.pack.hex"),
+            include_str!("../assets/git/evaluator-context.idx.hex"),
+        ),
+    ] {
+        let pack = decode(pack, "object pack")?;
+        let index = decode(index, "object index")?;
+        fs::write(pack_root.join(format!("pack-{id}.pack")), pack).map_err(|error| {
+            SearchEvalError::Contract(format!("write packaged evaluator Git object pack: {error}"))
+        })?;
+        fs::write(pack_root.join(format!("pack-{id}.idx")), index).map_err(|error| {
+            SearchEvalError::Contract(format!(
+                "write packaged evaluator Git object index: {error}"
+            ))
+        })?;
+    }
     Ok(())
 }
 

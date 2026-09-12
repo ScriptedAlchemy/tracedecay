@@ -940,6 +940,10 @@ pub fn context_scout_candidates_from_publication(
             let anchor = finding.retrieval_anchor_id.as_ref()?;
             let projection = finding.diagnostic_projection.as_ref()?;
             let (source, category) = match projection.producer {
+                FeedbackDiagnosticProducerV1::CodeDiagnostic => (
+                    ContextScoutEvidenceSourceKindV1::Code,
+                    ContextScoutCategoryV1::Diagnostic,
+                ),
                 FeedbackDiagnosticProducerV1::GitHubReview => (
                     ContextScoutEvidenceSourceKindV1::Git,
                     ContextScoutCategoryV1::Verification,

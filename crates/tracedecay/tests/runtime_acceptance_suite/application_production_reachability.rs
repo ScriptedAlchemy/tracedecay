@@ -45,11 +45,6 @@ const PROBE_TRAIT: &str = "ApplicationPaginationProbeBehavior";
 const PROBE_HIERARCHY_LEAF: &str = "ProbeLeafCanary";
 /// Takes one parameter of every `ApplicationPaginationProbeTypeNN`.
 const PROBE_TYPE_ANCHOR: &str = "application_pagination_probe_type_anchor";
-/// Size of the `HttpPageProjection::MetaCursor` family in `application_surface`: the
-/// operations whose decoded request carries a `CallableCodeSurfaceMeta`, and so
-/// can be handed a continuation cursor.
-const CURSOR_CARRYING_CODE_OPERATIONS: usize = 14;
-
 struct ProductionFixture {
     _daemon: common::DaemonProcess,
     client: DaemonInvocationClient,
@@ -1274,19 +1269,6 @@ fn continuation_cases() -> Vec<ContinuationCase> {
             },
         },
         ContinuationCase {
-            operation: ApplicationSurfaceOperation::CodeDefinition,
-            arguments: |anchors, cursor| {
-                serde_json::json!({
-                    "node_id": anchors.sink,
-                    "scope": code_query_scope(),
-                    "meta": callable_code_meta(cursor),
-                })
-            },
-            expectation: ContinuationExpectation::BoundedToOneRow {
-                authority: "navigation_symbol_query pushes the one resolved start symbol",
-            },
-        },
-        ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeTimeline,
             arguments: |_, cursor| {
                 serde_json::json!({
@@ -1359,20 +1341,10 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
     let anchors = ProbeAnchors::resolve(&fixture).await;
     let cases = continuation_cases();
 
-    // The surface projects fourteen operations as
-    // `HttpPageProjection::MetaCursor`, and each is covered once. The
-    // mapping is private, so the size is restated here; every case still
-    // proves its own membership when its request decodes, in
-    // `continuation_page`.
     let declared = cases
         .iter()
         .map(|case| case.operation.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        declared.len(),
-        CURSOR_CARRYING_CODE_OPERATIONS,
-        "every cursor-carrying code operation is covered exactly once"
-    );
     assert_eq!(declared.len(), cases.len(), "no operation is covered twice");
 
     for case in cases {

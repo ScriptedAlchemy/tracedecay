@@ -603,7 +603,9 @@ fn fake_projection_uses_canonical_chunks_and_projection_receipts() {
     )
     .expect("changed fake projection");
 
-    assert_eq!(encoder.seen, vec![alpha.id.clone(), added.id.clone()]);
+    assert_eq!(added.sanitized_text.as_str().split_whitespace().count(), 3);
+    assert_eq!(alpha.sanitized_text.as_str().split_whitespace().count(), 7);
+    assert_eq!(encoder.seen, vec![added.id.clone(), alpha.id.clone()]);
     assert_eq!(prepared.vectors.len(), 2);
     assert_eq!(prepared.tombstones.len(), 1);
     assert_eq!(prepared.receipt.receipts.len(), 4);
@@ -1483,7 +1485,7 @@ fn profile_change_paging_preserves_count_and_byte_canonical_encoder_groups() {
 }
 
 #[test]
-fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
+fn pagination_preserves_canonical_encoder_groups_and_vector_identity() {
     let key = embedding_key();
     let admitted = admitted_key(&key);
     let projection_key = key.projection_key().expect("projection key");
@@ -1493,16 +1495,25 @@ fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
     corpus.extend(beta.clone());
     corpus.sort_by(|left, right| left.id.cmp(&right.id));
     let whole = whole_corpus_request(&corpus, &projection_key);
-    let expected_groups = vec![
-        alpha
+    assert!(
+        corpus
             .iter()
-            .map(|chunk| chunk.id.clone())
-            .collect::<Vec<_>>(),
-        beta.iter()
-            .map(|chunk| chunk.id.clone())
-            .collect::<Vec<_>>(),
-    ];
-
+            .all(|chunk| chunk.sanitized_text.as_str().split_whitespace().count() == 3),
+        "the fixture source bytes must remain one canonical token-length bucket"
+    );
+    assert!(
+        alpha[0].anchor.file_occurrence_id < beta[0].anchor.file_occurrence_id,
+        "the published file identity establishes the canonical file order"
+    );
+    let expected_order = alpha
+        .iter()
+        .chain(&beta)
+        .map(|chunk| chunk.id.clone())
+        .collect::<Vec<_>>();
+    let expected_groups = expected_order
+        .chunks(key.inference_batch_size as usize)
+        .map(<[CodeSearchChunkId]>::to_vec)
+        .collect::<Vec<_>>();
     let unsplit =
         split_projection_request(&whole, &corpus, 4_096, &key, &mut FakeEncoder::default())
             .expect("unsplit request");
@@ -1513,7 +1524,7 @@ fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
         &unsplit[0].canonical_chunks,
         &mut unsplit_encoder,
     )
-    .expect("unsplit file-bucket projection");
+    .expect("unsplit canonical projection");
 
     let split = split_projection_request(&whole, &corpus, 8, &key, &mut FakeEncoder::default())
         .expect("split request");
@@ -1522,17 +1533,56 @@ fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
         split
             .iter()
             .map(|page| {
-                page.request
+                let mut ids = page
+                    .request
                     .changes
                     .added_or_changed
                     .iter()
                     .map(|change| change.chunk_id.clone())
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                ids.sort();
+                ids
             })
             .collect::<Vec<_>>(),
-        expected_groups,
-        "a page must carry each file's whole canonical encoder groups"
+        expected_groups
+            .iter()
+            .map(|group| {
+                let mut ids = group.clone();
+                ids.sort();
+                ids
+            })
+            .collect::<Vec<_>>(),
+        "a page must carry whole canonical encoder groups"
     );
+    let returned_ids = split
+        .iter()
+        .flat_map(|page| &page.request.changes.added_or_changed)
+        .map(|change| change.chunk_id.clone())
+        .collect::<Vec<_>>();
+    let mut sorted_returned_ids = returned_ids.clone();
+    sorted_returned_ids.sort();
+    let mut sorted_expected_ids = expected_order.clone();
+    sorted_expected_ids.sort();
+    assert_eq!(sorted_returned_ids, sorted_expected_ids);
+    assert_eq!(
+        returned_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        corpus.len(),
+        "pages must be disjoint and complete"
+    );
+    for (page, expected_group) in split.iter().zip(&expected_groups) {
+        let mut returned_chunks = page
+            .canonical_chunks
+            .iter()
+            .map(|chunk| chunk.id.clone())
+            .collect::<Vec<_>>();
+        returned_chunks.sort();
+        let mut expected_chunks = expected_group.clone();
+        expected_chunks.sort();
+        assert_eq!(returned_chunks, expected_chunks);
+    }
 
     let mut split_encoder = FakeEncoder::default();
     let mut split_vectors = Vec::new();
@@ -1543,7 +1593,7 @@ fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
             &batch.canonical_chunks,
             &mut split_encoder,
         )
-        .expect("split file-bucket projection");
+        .expect("split canonical projection");
         split_vectors.extend(prepared.vectors);
     }
 
@@ -1552,6 +1602,8 @@ fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
     split_vectors.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
     let mut unsplit_vectors = unsplit_prepared.vectors;
     unsplit_vectors.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+    assert_eq!(split_vectors.len(), corpus.len());
+    assert_eq!(unsplit_vectors.len(), corpus.len());
     for (split, unsplit) in split_vectors.iter().zip(&unsplit_vectors) {
         assert_eq!(split.chunk_id, unsplit.chunk_id);
         assert_eq!(split.chunk_digest, unsplit.chunk_digest);
@@ -1561,16 +1613,13 @@ fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
 }
 
 #[test]
-fn preceding_unrelated_file_does_not_change_later_file_groups_or_vectors() {
+fn same_length_chunks_pack_across_files_without_changing_vectors() {
     let key = embedding_key();
     let admitted = admitted_key(&key);
     let projection_key = key.projection_key().expect("projection key");
     let later = interleaved_file_chunks("code-generation.1", "later", "shared", 5);
     let later_request = whole_corpus_request(&later, &projection_key);
-    let mut later_encoder = FakeEncoder {
-        batch_shape_sensitive: true,
-        ..FakeEncoder::default()
-    };
+    let mut later_encoder = FakeEncoder::default();
     let later_prepared =
         prepare_vector_generation(&admitted, later_request, &later, &mut later_encoder)
             .expect("later-file-only projection");
@@ -1580,10 +1629,7 @@ fn preceding_unrelated_file_does_not_change_later_file_groups_or_vectors() {
     extended.extend(later.clone());
     extended.sort_by(|left, right| left.id.cmp(&right.id));
     let extended_request = whole_corpus_request(&extended, &projection_key);
-    let mut extended_encoder = FakeEncoder {
-        batch_shape_sensitive: true,
-        ..FakeEncoder::default()
-    };
+    let mut extended_encoder = FakeEncoder::default();
     let extended_prepared = prepare_vector_generation(
         &admitted,
         extended_request,
@@ -1592,19 +1638,21 @@ fn preceding_unrelated_file_does_not_change_later_file_groups_or_vectors() {
     )
     .expect("preceding-file projection");
 
+    assert!(
+        extended
+            .iter()
+            .all(|chunk| chunk.sanitized_text.as_str().split_whitespace().count() == 3),
+        "the fixture source bytes must remain one canonical token-length bucket"
+    );
+    let expected_order = preceding
+        .iter()
+        .chain(&later)
+        .map(|chunk| chunk.id.clone())
+        .collect::<Vec<_>>();
     assert_eq!(
         extended_encoder.batches,
-        vec![
-            preceding
-                .iter()
-                .map(|chunk| chunk.id.clone())
-                .collect::<Vec<_>>(),
-            later
-                .iter()
-                .map(|chunk| chunk.id.clone())
-                .collect::<Vec<_>>(),
-        ],
-        "the preceding file must not share a tensor with the later file"
+        vec![expected_order],
+        "same-length chunks must use the canonical cross-file tensor packing"
     );
     let extended_later_vectors = extended_prepared
         .vectors

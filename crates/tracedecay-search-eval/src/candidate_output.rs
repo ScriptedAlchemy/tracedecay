@@ -2835,10 +2835,11 @@ pub(crate) mod tests {
         let report =
             crate::evaluate_generated_outputs(fixture_root, &workload, &result).expect("evaluate");
 
+        let expected_status = crate::DirectEvaluationStatusV1::Fail;
         #[cfg(windows)]
-        let expected_status = crate::DirectEvaluationStatusV1::Pass;
+        let expected_resource_status = crate::DirectEvaluationStatusV1::Pass;
         #[cfg(not(windows))]
-        let expected_status = if peak_rss_bytes().is_measured() {
+        let expected_resource_status = if peak_rss_bytes().is_measured() {
             crate::DirectEvaluationStatusV1::Pass
         } else {
             crate::DirectEvaluationStatusV1::Pending
@@ -2856,7 +2857,7 @@ pub(crate) mod tests {
             report
                 .profiles
                 .iter()
-                .all(|profile| { profile.resource_status == expected_status })
+                .all(|profile| { profile.resource_status == expected_resource_status })
         );
 
         let mut quality_failure = result.clone();

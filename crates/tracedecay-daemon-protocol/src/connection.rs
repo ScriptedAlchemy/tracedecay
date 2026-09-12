@@ -13,9 +13,7 @@ use tokio::time::Instant;
 use crate::handshake::DaemonHandshake;
 use crate::transport::{BrokerStream, DaemonAuthPreface, DaemonEndpoint};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_framing::{
-    WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
-};
+use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
 pub const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub const DAEMON_TOOL_RESPONSE_GRACE: Duration = Duration::from_secs(30);
@@ -188,11 +186,10 @@ pub async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    let read = read_bounded_mcp_line(reader);
-    tokio::pin!(read);
+    let mut line_reader = BoundedLineReader::new(reader);
     loop {
         tokio::select! {
-            result = &mut read => {
+            result = line_reader.read_mcp_line() => {
                 return match result {
                     Ok(line) => Ok(line),
                     Err(error) if is_wire_oversized_io_error(&error) => {

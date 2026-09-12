@@ -312,7 +312,6 @@ pub enum CallableCodeSurfaceRequest {
     Facets(CodeFacetSurfaceRequest),
     Timeline(CodeTimelineSurfaceRequest),
     Declaration(CodeNavigationSurfaceRequest),
-    Definition(CodeNavigationSurfaceRequest),
     TypeDefinition(CodeNavigationSurfaceRequest),
     References(CodeNavigationSurfaceRequest),
 }

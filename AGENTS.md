@@ -26,7 +26,9 @@ unauthorized external action after completing independent, authorized work.
 - `crates/tracedecay/` — the composition-root library (daemon, MCP tools,
   global DB, sessions, code index, application services). Its integration
   suites are `crates/tracedecay/tests/`, and the ones that use the fixture
-  surface in `tests/common/` declare `required-features = ["test-helpers"]`.
+  surface in `tests/common/` require `test-helpers`. Check the selected test
+  target's `required-features` in `Cargo.toml`; `mcp_suite` also requires
+  `test-transport`.
 - `crates/tracedecay-cli/` — the package that produces the shipped
   `tracedecay` binary.
 - `crates/` — the remaining workspace member crates (`tracedecay-api`,
