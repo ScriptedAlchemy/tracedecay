@@ -73,7 +73,7 @@ fn restart_is_durable_and_replay_or_conflict_returns_the_original_receipt() {
 
     for table in [
         "td_runtime_writer_checkpoint_v1",
-        "td_runtime_writer_idempotency_v1",
+        "td_runtime_writer_idempotency_v2",
         "td_runtime_writer_outbox_v1",
     ] {
         assert_eq!(
