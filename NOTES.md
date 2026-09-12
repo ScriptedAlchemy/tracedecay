@@ -282,6 +282,72 @@ removes agent-hosts → mcp and lets `tracedecay-mcp` depend on agent-hosts and 
 + `project_store_runtime.rs` + `runtime_ports.rs` (test fixtures behind `test-helpers`), depending on
 agent-hosts for the scout owner. After that every (c) row below is movable.
 
+### `tracedecay-project` — done (fable/wave2-project-crate)
+
+`crates/tracedecay-project` (10,443 lines, all `git mv` from the root; workspace-versioned because it
+owns `version::PACKAGE_VERSION`):
+
+| module | lines | note |
+| --- | ---: | --- |
+| `project.rs` + `project/**` | 2,865 | `pub(crate)` → `pub` for the items the root reads (`configuration_runtime`, `profile_database`, `project_memory_*`, `context_scout_*`, `init/open*_with_registered_configuration`, `resolve_*_configuration_layout*`, …); `ContextScoutOwnerLookupV1` public |
+| `config.rs` + `config/tests.rs` | 2,023 | `PinnedUserDataDir`, `lock_user_data_dir_test_env`, `ensure_runtime_configuration_for_registered_database` regated `cfg(any(test, feature = "test-helpers"))` (root tests reach them through the feature, not `cfg(test)`) |
+| `runtime_ports.rs` | 339 | see the seam below |
+| `project_store_runtime.rs` | 35 | `join_standalone_session_registry` now *requires* registered ports (typed `Config` refusal) instead of registering them — the project crate cannot build the daemon client |
+| `product_runtime.rs` + `version.rs` | 511 | moved because `HostAdmissionTestRuntimeV1::open` registers the fixture product runtime; the root re-exports both at their old paths |
+| `test_support/host_admission.rs` + 7 submodules | 4,609 | the registered test runtime; root `test_support::host_admission` re-exports it explicitly (no glob) and keeps the MCP composition |
+
+Root re-exports: `pub use tracedecay_project::{config, product_runtime, project, version}` plus the item
+re-exports `lib.rs` already had, so `tracedecay::project::TraceDecay`, `tracedecay::config::…`,
+`tracedecay::hook_runtime()`, `tracedecay::register_runtime_ports()` are unchanged for the CLI, suites and
+benches. Root test inventory is byte-identical (983 = 946 root + 37 project; one test renamed).
+
+**The one production seam** (`runtime_ports`): `HookRuntimeV1` needs the daemon client (`daemon_tool`,
+`event_notifier` → `crate::daemon::{handshake_for_current_client, call_default_tool, tool_json_payload,
+notify_hook_event}`, i.e. `core_client.rs`/`core_hooks.rs`/`core_handshake.rs` → product runtime and the
+wire types), and project open publishes hook bindings through that handle. The project crate therefore
+owns `register_runtime_ports(DaemonClientPortsV1)` (sibling ports + one set-once slot for the client),
+a fallible `hook_runtime()` (typed refusal when no composition root registered) used only by
+`init/open*_with_registered_configuration`, and `hook_runtime_with(client)` for explicit handles. The root
+keeps `runtime_ports.rs` (127 lines): the two daemon-client adapters, the no-arg `register_runtime_ports()`
+wrapper, the infallible `hook_runtime()` the CLI passes to hook entry points, `session_review_port()`, and
+`compose_application_catalog_snapshot()`. The `test-helpers` fixture registers a fixture client (typed
+unavailable tool, no-delivery notifier) exactly as it registers the fixture product runtime; the only
+in-crate reader of the slot is `publish_hook_bindings`, which consults `scope_resolver` alone.
+
+**Test dispatch is now explicit for root unit tests.** `TraceDecay::init/open/open_read_only/open_branch
+(_with_options)` still route to the registered test runtime under the project crate's
+`cfg(any(test, feature = "test-transport"))`, which the root's `test-transport` forwards. Root `cfg(test)`
+no longer reaches that gate, and enabling the project crate's `test-transport` from the root's
+dev-dependency would flip every `test-helpers`-only suite (`runtime_acceptance_suite`'s "direct
+production init", `daemon_runtime_acceptance`) onto the fixture path silently. So the fixture path is also
+a named API — `TraceDecay::{init,open,open_read_only,open_branch}_with_options_for_test` under
+`test-helpers` — and the 25 root lib-test call sites use it. `test-helpers`-only suites take the production
+standalone path, which now needs the suite binary to register the composition root's ports:
+`tests/common::register_process_runtime_ports()` runs from `IsolatedEnv::build` (the same choke point as
+the product-runtime registration) and from the three fixtures that bypass it.
+
+**Residual root-only edges** (all composition, none inside the moved code):
+- root `runtime_ports.rs::{daemon_tool_json, notify_hook_event}` → `crate::daemon` client (4 fns).
+- root `test_support::host_admission::{mcp_session_authorities, call_mcp_tool_for_test,
+  mcp_server_context_for_test}` → `crate::mcp::tools::{SessionAuthorities, ToolCallRegistryOptions,
+  handle_tool_call_with_registry_options}`, `crate::mcp::server::McpServerConstructionContext`,
+  `tracedecay_daemon_service::DaemonProjectRegistryReadService` (11 call sites retargeted to these free
+  functions).
+- With #1251 (agent-hosts cycle break, `tracedecay-mcp-catalog`) merged, `cargo tree -p tracedecay-project
+  -e normal -i tracedecay-mcp` and `-i tracedecay-daemon-service` both resolve to nothing: the crate reaches
+  neither consumer. Its only catalog edge is `agent-hosts → tracedecay-mcp-catalog`.
+
+**Now movable** (`TraceDecay` is below both consumers and the agent-hosts cycle is broken): every (c) row in `src/mcp/` that was blocked only by `TraceDecay` —
+`dispatch_groups.rs` (27 `TraceDecay` reads), `handlers/edit.rs` (17), `handlers/hook_runtime/` (38),
+`handlers/mod.rs` (7), `construction.rs` (8), `dashboard.rs` (4) — plus the `src/daemon/` (c) rows that
+named only `TraceDecay` or root `config`: `scheduler/` (44 reads), `project_open_owners/`,
+`project_open_admission/`, `branch_admin/` (12, after its 11 `crate::mcp` uses move), `invocation_state.rs`
+and `doctor_kernel/` (root `config` ×2 each, now `tracedecay_project::config`). The two rows that build the
+root `McpServer` (`project_composition/`, `connection_serving.rs`) stay until P0-1. Next PR: the (b) rows
+of `src/mcp/` (`tools/binding.rs`, `dashboard_lcm.rs`, `catalog_discovery.rs`, `server/routing.rs`,
+`tool_analytics.rs`, `scope.rs`, `session_refresh.rs`, …, ≈6.5k lines) into `tracedecay-mcp`, one commit per
+target crate, with `TraceDecay` imported from `tracedecay_project`.
+
 ### Root `src/mcp/` — 42,256 lines, 12,390 in test files
 
 (a) duplicate of an extracted owner → delete: none remain (this lane removed `effective_path`, four
@@ -352,8 +418,10 @@ their two `crate::mcp` uses are typed.
 
 ### Order
 
-1. `tracedecay-agent-hosts/src/ports/mcp_tools.rs`: drop the two `tracedecay_mcp::` calls (cycle break).
-2. New `tracedecay-project` (root `project/`, `config.rs`, `project_store_runtime.rs`, `runtime_ports.rs`).
+1. ~~`tracedecay-agent-hosts/src/ports/mcp_tools.rs`: drop the two `tracedecay_mcp::` calls~~ — done in #1251
+   (`tracedecay-mcp-catalog`).
+2. ~~New `tracedecay-project`~~ — done, see above (also took `product_runtime.rs`, `version.rs`, and the
+   host-admission test runtime).
 3. `src/mcp` (b) rows, one commit per target crate; then (c) into tracedecay-mcp behind `McpToolContext`.
 4. `src/daemon` (b) rows into daemon-service; then (c) as `tracedecay-daemon-service::composition`.
 5. Delete `src/mcp/` and `src/daemon/`; the root keeps `lib.rs` re-exports, `product_runtime`, `doctor`,

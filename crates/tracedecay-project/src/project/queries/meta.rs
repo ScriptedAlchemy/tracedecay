@@ -62,7 +62,7 @@ impl TraceDecay {
 
     /// Run the quick integrity check and return the first problem row, if any.
     #[hotpath::measure(label = "daemon.store_meta.quick_check", future = true)]
-    pub(crate) async fn quick_check_report(&self) -> Result<Option<String>> {
+    pub async fn quick_check_report(&self) -> Result<Option<String>> {
         self.db.quick_check_report().await
     }
 

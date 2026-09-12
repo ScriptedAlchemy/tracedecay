@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::daemon::maintenance::project_store_maintenance_lease;
-use crate::project::TraceDecay;
+use crate::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurableGenerationIndexEntryV1,
@@ -56,9 +56,10 @@ struct UnseatedGraphFixture {
 async fn open_unseated_graph_fixture() -> UnseatedGraphFixture {
     let pinned_home = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = TempDir::new().expect("isolated project root");
-    let graph = TraceDecay::open(project.path())
-        .await
-        .expect("open isolated project graph");
+    let graph =
+        TraceDecay::open_with_options_for_test(project.path(), TraceDecayOpenOptions::default())
+            .await
+            .expect("open isolated project graph");
     assert!(
         graph
             .configuration_runtime()

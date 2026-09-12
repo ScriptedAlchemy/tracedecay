@@ -141,9 +141,9 @@ async fn registered_but_unmounted_project_still_reports_unavailable() {
         )
         .await
         .expect("phantom project registers");
-    let context = runtime
-        .mcp_server_context_for_test(cg, None)
-        .expect("registered MCP server context");
+    let context =
+        crate::test_support::host_admission::mcp_server_context_for_test(runtime, cg, None)
+            .expect("registered MCP server context");
     let server = McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server");
