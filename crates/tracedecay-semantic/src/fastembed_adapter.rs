@@ -37,7 +37,7 @@
 //!   ONNX Runtime execution providers to register. The default (CPU-only)
 //!   build and runtime configuration return an empty list — ORT's own
 //!   default CPU EP — so behavior is byte-identical to before GPU support
-//!   existed; see that module for the opt-in CoreML/CUDA switches.
+//!   existed; see that module for the opt-in CUDA/WebGPU switches.
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use fastembed::{
     InitOptionsUserDefined, Pooling as FastEmbedPooling, QuantizationMode, TextEmbedding,
@@ -49,13 +49,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
-use std::thread;
-#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
 use tracedecay_domain::EmbeddingPrecisionV1;
@@ -453,13 +447,6 @@ impl VerifiedEmbeddingArtifactV1 {
             )
         })?;
         lifecycle.read_member_bytes(role)
-    }
-
-    #[cfg(feature = "semantic-fastembed")]
-    pub(crate) fn coreml_cache_dir(&self) -> Option<PathBuf> {
-        self.lifecycle_install
-            .as_ref()
-            .map(LifecycleInstallArtifactV1::coreml_cache_dir)
     }
 }
 
@@ -929,15 +916,6 @@ impl LifecycleInstallArtifactV1 {
         Ok((path, pin))
     }
 
-    /// Directory where the CoreML execution provider may persist its compiled
-    /// model between session opens. Lives beside the verified members so it
-    /// is scoped to exactly this model revision; a store-admitted artifact
-    /// exposes no filesystem path, so it gets no cache.
-    #[cfg(feature = "semantic-fastembed")]
-    fn coreml_cache_dir(&self) -> PathBuf {
-        self.root.join("coreml-cache")
-    }
-
     // Byte reads exist only where a runtime consumes member bytes, matching
     // the [`VerifiedEmbeddingArtifactV1::required_member_bytes`] gate.
     #[cfg(any(test, feature = "semantic-fastembed", feature = "semantic-model2vec"))]
@@ -1100,31 +1078,6 @@ pub(crate) fn check_execution_authority(
         Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
             Err(EmbedError::DeadlineExceeded)
         }
-    }
-}
-
-#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
-const MODEL_LOAD_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(2);
-
-/// Bridge the request's typed interruption authority to ORT's in-progress
-/// session-load canceler. The monitor is active only while the constructor is
-/// executing and returns the exact interruption that fired.
-#[cfg(any(test, all(feature = "semantic-fastembed", not(windows))))]
-#[hotpath::measure(label = "semantic.model.load.cancel_monitor")]
-fn monitor_model_load(
-    load_finished: &AtomicBool,
-    authority: &dyn SemanticExecutionAuthority,
-    cancel: impl FnOnce() -> Result<(), EmbedError>,
-) -> Result<Option<SemanticExecutionInterruptionV1>, EmbedError> {
-    loop {
-        if load_finished.load(Ordering::Acquire) {
-            return Ok(None);
-        }
-        if let Some(interruption) = authority.interruption() {
-            cancel()?;
-            return Ok(Some(interruption));
-        }
-        thread::sleep(MODEL_LOAD_CANCELLATION_POLL_INTERVAL);
     }
 }
 
@@ -1434,65 +1387,32 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
             .with_intra_threads(intra_threads)
             .with_execution_providers(crate::execution_provider::execution_providers(
                 artifact.execution_provider(),
-                artifact.coreml_cache_dir().as_deref(),
             ));
         // Last boundary before the ORT constructor: an abandoned load drops
         // the buffered member bytes here instead of parsing and optimizing a
-        // graph nobody will use.
+        // graph nobody will use. The published FastEmbed constructor owns the
+        // ORT session build end to end and exposes no in-progress cancel
+        // handle, so the typed cancellation/deadline authority is honored at
+        // this boundary and again at the first stage after the load returns.
         check_execution_authority(interruption)?;
-        let load_finished = AtomicBool::new(false);
         let embedding = hotpath::measure_block!("semantic.model.load", {
-            thread::scope(|scope| {
-                let mut monitor = None;
-                let monitor_load_finished = &load_finished;
-                let monitor_interruption = interruption;
-                let embedding = TextEmbedding::try_new_from_user_defined_with_load_canceler(
-                    model,
-                    options,
-                    |canceler| {
-                        monitor = Some(scope.spawn(move || {
-                            monitor_model_load(monitor_load_finished, monitor_interruption, || {
-                                canceler.cancel().map_err(|error| {
-                                    fastembed_error(
-                                        RuntimeFailureKindV1::LoadFailed,
-                                        "ONNX Runtime refused model-load cancellation",
-                                        &error,
-                                    )
-                                })
-                            })
-                        }));
-                    },
+            TextEmbedding::try_new_from_user_defined(model, options).map_err(|error| {
+                let failure = fastembed_error(
+                    RuntimeFailureKindV1::LoadFailed,
+                    "FastEmbed could not initialize the verified artifact",
+                    &error,
                 );
-                load_finished.store(true, Ordering::Release);
-                let observed_interruption = match monitor {
-                    Some(monitor) => monitor.join().map_err(|_| {
-                        fastembed_failure(
-                            RuntimeFailureKindV1::LoadFailed,
-                            "the model-load cancellation monitor panicked",
-                        )
-                    })??,
-                    None => None,
-                };
-                match observed_interruption {
-                    Some(SemanticExecutionInterruptionV1::Cancelled) => {
-                        return Err(EmbedError::Cancelled);
-                    }
-                    Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
-                        return Err(EmbedError::DeadlineExceeded);
-                    }
-                    None => {}
-                }
-                embedding.map_err(|error| {
-                    let failure = fastembed_error(
-                        RuntimeFailureKindV1::LoadFailed,
-                        "FastEmbed could not initialize the verified artifact",
-                        &error,
-                    );
-                    crate::hotpath_observe::record_embed_error(&failure);
-                    failure
-                })
+                crate::hotpath_observe::record_embed_error(&failure);
+                failure
             })
         })?;
+        // The caller's deadline or cancellation may have fired while ORT was
+        // building the graph. Report the typed interruption and drop the
+        // session nobody is waiting for instead of handing it back.
+        if let Err(interrupted) = check_execution_authority(interruption) {
+            drop(embedding);
+            return Err(interrupted);
+        }
         crate::hotpath_observe::record_model_state("ready");
         Ok(FastEmbedEmbeddingSession {
             authority: authority.clone(),
@@ -1618,15 +1538,16 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
         // this tokenizer from the admitted `truncation_length`.
         hotpath::measure_block!("semantic.embed.tokenize", {
             let inputs = texts.iter().map(String::as_str).collect::<Vec<_>>();
+            // This is the tokenizer's own error, not a `fastembed::Error`:
+            // an input-side tokenization failure for the presented batch.
             let encodings = self
                 .embedding
                 .tokenizer
                 .encode_batch(inputs, true)
-                .map_err(|error| {
-                    fastembed_error(
+                .map_err(|_| {
+                    fastembed_failure(
                         RuntimeFailureKindV1::EmbedFailed,
                         "FastEmbed tokenization failed for the verified artifact",
-                        &error,
                     )
                 })?;
             Ok(encodings
@@ -1699,19 +1620,52 @@ fn fastembed_failure(kind: RuntimeFailureKindV1, detail: &str) -> EmbedError {
     })
 }
 
+/// Map FastEmbed's typed error onto the runtime failure vocabulary. Only the
+/// kind is derived from the error: the operator-facing detail stays the
+/// caller's fixed stage description so no raw runtime text (which may quote
+/// paths or input) crosses the privacy boundary.
+///
+/// `fastembed::Error` is `#[non_exhaustive]`; unlisted variants keep the
+/// stage's fallback kind (`LoadFailed` while opening, `EmbedFailed` while
+/// embedding) rather than being rewrapped or guessed at.
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn fastembed_error(
     fallback_kind: RuntimeFailureKindV1,
     detail: &str,
-    error: &impl fmt::Display,
+    error: &fastembed::Error,
 ) -> EmbedError {
-    let message = error.to_string().to_ascii_lowercase();
-    let kind = if message.contains("out of memory") || message.contains("allocation") {
-        RuntimeFailureKindV1::OutOfMemory
-    } else {
-        fallback_kind
+    let kind = match error {
+        // ONNX Runtime itself failed (environment/session builder, session
+        // creation, or a run). Memory exhaustion is the one ORT failure the
+        // pool treats differently, so it is separated by message; every
+        // other ORT failure is the stage's own failure kind.
+        fastembed::Error::Ort(_)
+        | fastembed::Error::OrtBuilder(_)
+        | fastembed::Error::OrtSession(_) => {
+            if ort_reports_out_of_memory(&error.to_string()) {
+                RuntimeFailureKindV1::OutOfMemory
+            } else {
+                fallback_kind
+            }
+        }
+        // The tokenizer members were digest-verified against the catalog
+        // before reaching FastEmbed, so a configuration the linked runtime
+        // rejects is a pin/runtime incompatibility, not corruption.
+        fastembed::Error::TokenizerConfig(_) => RuntimeFailureKindV1::IncompatibleRuntime,
+        // Input-side tokenizer failures are embedding failures for the
+        // presented batch, whichever stage reported them.
+        fastembed::Error::Tokenization(_) | fastembed::Error::EmptyTokenizations => {
+            RuntimeFailureKindV1::EmbedFailed
+        }
+        _ => fallback_kind,
     };
     fastembed_failure(kind, detail)
+}
+
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
+fn ort_reports_out_of_memory(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("out of memory") || message.contains("allocation")
 }
 
 /// Test-observable counters for the deterministic fake runtime.

@@ -64,8 +64,10 @@ pub use evidence_assembly::tests::write_fixture_for_project;
 pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
 pub use fact::FactExecutor;
 pub use graph_publication::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
-pub use observation::ObservationExecutor;
 pub use observation::cursor_authority as observation_cursor_authority;
+pub use observation::{
+    ObservationExecutor, REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,
+};
 pub use project::ProjectExecutor;
 pub use retained_exact_sql::RetainedExactSqlCapability;
 pub use retrieval_anchor::RetrievalAnchorExecutor;

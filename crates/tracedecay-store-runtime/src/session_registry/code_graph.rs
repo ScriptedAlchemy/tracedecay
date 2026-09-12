@@ -1448,9 +1448,16 @@ impl RetainedCodeGraphRuntimeV1 {
             request_cancelled,
         };
         let mut staging_release = None;
-        let published = self
-            .publish_prepared_sealed_generation(&prepared, &probe, &context, &mut staging_release)
-            .map_err(refuse_if_resident_memory);
+        let published = tracedecay_code_index::parallelism::install(|| {
+            self.publish_prepared_sealed_generation(
+                &prepared,
+                &probe,
+                &context,
+                &mut staging_release,
+            )
+        })
+        .map_err(|error| GraphDbError::unavailable(error.to_string()))?
+        .map_err(refuse_if_resident_memory);
         // Everything corpus-sized this publication built — the projection
         // manifest, the staged relational rows, the sealed copy buffers — is
         // dead by here. Free it, release the duplicate staging rows the seal
@@ -2977,21 +2984,24 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ))),
                 deadline: deadline_at,
             };
-            let outcome = graph_registry.release_sealed_generation_staging_rows(
+            // Retirement first: it deletes the superseded generations' rows,
+            // so when the release below opens a hibernated engine it opens the
+            // container those rows no longer inflate.
+            retire_superseded_replays(
+                "sweep",
+                &graph_registry,
                 registration.clone(),
+                &mut storage,
+                &context,
+                &projection,
+            );
+            let outcome = graph_registry.release_sealed_generation_staging_rows(
+                registration,
                 &mut storage,
                 &context,
                 &projection,
             )?;
             observe_sealed_staging_release("sweep", &projection, outcome);
-            retire_superseded_replays(
-                "sweep",
-                &graph_registry,
-                registration,
-                &mut storage,
-                &context,
-                &projection,
-            );
             Ok(Some(projection))
         })
         .await

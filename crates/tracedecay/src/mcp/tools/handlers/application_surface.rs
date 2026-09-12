@@ -171,7 +171,7 @@ pub(super) async fn handle_application_surface(
     }
     .map_err(application_surface_dispatch_error)?;
 
-    let served_stale = served_stale_code_graph_read(&result)?;
+    let served_stale = served_stale_code_graph_read(&result);
     let mut rendered = render_result(cg, result)?;
     if let Some(served) = served_stale.as_ref() {
         super::append_code_graph_freshness(&mut rendered, served);
@@ -181,28 +181,14 @@ pub(super) async fn handle_application_surface(
 
 fn served_stale_code_graph_read(
     result: &ApplicationSurfaceInvocationResult,
-) -> Result<Option<super::ServedStaleCodeGraphReadV1>> {
-    if !matches!(
-        result.operation,
-        ApplicationSurfaceOperation::CodeSymbolSearch
-            | ApplicationSurfaceOperation::CodeSignatureSearch
-            | ApplicationSurfaceOperation::CodeImplementations
-            | ApplicationSurfaceOperation::CodeTypeHierarchy
-            | ApplicationSurfaceOperation::CodeCallers
-            | ApplicationSurfaceOperation::CodeCallees
-    ) {
-        return Ok(None);
-    }
+) -> Option<super::ServedStaleCodeGraphReadV1> {
     let Ok(envelope) = &result.result else {
-        return Ok(None);
+        return None;
     };
     let ApplicationOutcome::Evidence(evidence) = &envelope.outcome else {
-        return Ok(None);
+        return None;
     };
-    Ok(served_stale_code_graph_temporal(
-        result.operation,
-        &evidence.temporal,
-    ))
+    served_stale_code_graph_temporal(result.operation, &evidence.temporal)
 }
 
 fn served_stale_code_graph_temporal(

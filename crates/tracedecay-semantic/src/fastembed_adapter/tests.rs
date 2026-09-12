@@ -53,8 +53,8 @@ fn resident_estimate_admits_more_than_one_session_under_the_process_ceiling() {
     assert!(
         HOST_DERIVED_CEILING / estimate >= 2,
         "the host-derived ceiling must admit at least the two concurrent \
-         sessions the host width arithmetic derives, but only \
-         {} fit at {estimate} bytes each",
+             sessions the host width arithmetic derives, but only \
+             {} fit at {estimate} bytes each",
         HOST_DERIVED_CEILING / estimate
     );
 }
@@ -118,8 +118,8 @@ fn production_scale_artifact_admits_the_derived_session_width() {
     assert!(
         admitted >= 2,
         "the host-derived ceiling must admit at least the two concurrent \
-         sessions the host width arithmetic derives, but only \
-         {admitted} fit at {reserved} bytes each"
+             sessions the host width arithmetic derives, but only \
+             {admitted} fit at {reserved} bytes each"
     );
 }
 
@@ -319,37 +319,83 @@ fn open_session_honors_interruption_before_member_bytes() {
     );
 }
 
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 #[test]
-fn model_load_monitor_cancels_promptly_when_authority_fires() {
-    let cancellation = ManualCancellation::new();
-    let load_finished = AtomicBool::new(false);
-    let cancel_called = AtomicBool::new(false);
-    let started = std::time::Instant::now();
+fn fastembed_errors_classify_by_typed_variant_with_a_fixed_detail() {
+    use RuntimeFailureKindV1::{EmbedFailed, IncompatibleRuntime, LoadFailed, OutOfMemory};
 
-    let interruption = std::thread::scope(|scope| {
-        let monitor = scope.spawn(|| {
-            monitor_model_load(&load_finished, &cancellation, || {
-                cancel_called.store(true, Ordering::SeqCst);
-                Ok(())
-            })
-        });
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        cancellation.cancel();
-        monitor.join().expect("model-load monitor must not panic")
-    })
-    .expect("the cancellation handle succeeds");
+    let classify = |fallback, error: fastembed::Error| match super::fastembed_error(
+        fallback,
+        "stage detail",
+        &error,
+    ) {
+        EmbedError::Runtime(failure) => {
+            assert_eq!(
+                failure.detail, "stage detail",
+                "raw runtime text must never replace the stage detail"
+            );
+            failure.kind
+        }
+        other => panic!("expected a runtime failure, got {other:?}"),
+    };
 
+    // ORT failures keep the stage's own kind unless memory ran out.
     assert_eq!(
-        interruption,
-        Some(SemanticExecutionInterruptionV1::Cancelled)
+        classify(
+            LoadFailed,
+            fastembed::Error::OrtBuilder("bad option".into())
+        ),
+        LoadFailed
     );
-    assert!(
-        cancel_called.load(Ordering::SeqCst),
-        "token fire must reach the runtime load canceler"
+    assert_eq!(
+        classify(
+            EmbedFailed,
+            fastembed::Error::OrtSession("shape mismatch".into())
+        ),
+        EmbedFailed
     );
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
-        "load cancellation must not wait for the constructor to finish"
+    assert_eq!(
+        classify(
+            LoadFailed,
+            fastembed::Error::OrtSession("Failed to allocate memory: out of memory".into())
+        ),
+        OutOfMemory
+    );
+    assert_eq!(
+        classify(
+            EmbedFailed,
+            fastembed::Error::OrtSession("bad allocation".into())
+        ),
+        OutOfMemory
+    );
+    // Digest-verified tokenizer members the linked runtime rejects.
+    assert_eq!(
+        classify(
+            LoadFailed,
+            fastembed::Error::TokenizerConfig("missing pad_token".into())
+        ),
+        IncompatibleRuntime
+    );
+    // Input-side tokenizer failures are embedding failures.
+    assert_eq!(
+        classify(LoadFailed, fastembed::Error::Tokenization("encode".into())),
+        EmbedFailed
+    );
+    assert_eq!(
+        classify(EmbedFailed, fastembed::Error::EmptyTokenizations),
+        EmbedFailed
+    );
+    // Everything else (including variants added later) keeps the fallback.
+    assert_eq!(
+        classify(LoadFailed, fastembed::Error::Other("unknown".into())),
+        LoadFailed
+    );
+    assert_eq!(
+        classify(
+            EmbedFailed,
+            fastembed::Error::InvalidArgument("batch".into())
+        ),
+        EmbedFailed
     );
 }
 
@@ -470,7 +516,7 @@ fn lifecycle_authority_construction_is_cheaper_than_member_byte_verification() {
                 }))
             ),
             "the byte-verification pass cannot succeed without reading, so the revocation \
-             that construction tolerates provably blocks the read path"
+                 that construction tolerates provably blocks the read path"
         );
     }
 }

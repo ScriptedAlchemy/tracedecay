@@ -85,7 +85,6 @@ semantic-model2vec = ["tracedecay/semantic-model2vec"]
 # Opt-in GPU execution providers for the embedded FastEmbed/ORT runtime.
 # A compiled provider is selected automatically on its supported platform;
 # `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu` opts out.
-semantic-gpu-coreml = ["tracedecay/semantic-gpu-coreml"]
 semantic-gpu-cuda = ["tracedecay/semantic-gpu-cuda"]
 semantic-gpu-webgpu = ["tracedecay/semantic-gpu-webgpu"]
 test-transport = ["tracedecay/test-transport"]

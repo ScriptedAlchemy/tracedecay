@@ -814,9 +814,9 @@ where
     let memory_options = context_memory_options(&args);
     let memory_read_control =
         context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
-    // Search, graph enrichment, and memory are independent. Search is the
-    // primary code lane: once it answers, a still-pending graph must not hold
-    // lexical/exact results or memory hostage.
+    // Graph enrichment is optional unless the caller asks for source bodies.
+    // That request waits for graph admission under the same deadline and
+    // cancellation as search; ordinary lexical/exact retrieval stays independent.
     let search = execute_code_index_search(
         search_executor,
         tracedecay_query::code_search::CodeIndexSearchRequestV1 {
@@ -835,7 +835,7 @@ where
         },
     );
     let memory = context_memory_outcome(ctx, task, &memory_options, memory_read_control.as_ref());
-    let search_and_graph = race_primary_search_with_graph(search, graph, false, None, false);
+    let search_and_graph = race_primary_search_with_graph(search, graph, false, None, include_code);
     let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
     // Read after the search settles: the verdict must describe the scheduler
     // state at serve time, not a snapshot taken before the lanes ran.

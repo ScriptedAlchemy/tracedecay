@@ -16,7 +16,7 @@ use tracedecay_store::{
     ObservationCursorAdvance, RepositoryProvenanceAttachmentV1, RetrievalAnchorDispositionRecordV1,
 };
 
-use super::super::support::{decode, encode, invalid};
+use super::super::support::{decode, encode, invalid, same_json};
 use super::cursor_authority::{
     READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL, cursor_advance_ledger_row_matches,
 };
@@ -286,6 +286,77 @@ fn cline_alias_transition_is_valid(
         && disposition.superseded_by() == Some(current.anchor_id()))
 }
 
+/// Hydrating projection of one provenance row: the shared repository capture
+/// is spliced back into both JSON columns from
+/// `observation_repository_captures`, so every reader decodes the same
+/// documents the writer was handed. A released row carries a marker with no
+/// capture id and passes through untouched.
+pub const REPOSITORY_PROVENANCE_HYDRATED_COLUMNS: &str = "
+    CASE WHEN captures.capture_json IS NULL THEN repository.availability_json
+         ELSE json_set(repository.availability_json, '$.value.capture', json(captures.capture_json))
+    END,
+    CASE WHEN repository.capture_json IS NULL THEN NULL
+         WHEN captures.capture_json IS NULL THEN repository.capture_json
+         ELSE json_set(repository.capture_json, '$.capture', json(captures.capture_json))
+    END";
+
+/// The join that pairs a provenance row with its shared capture.
+pub const REPOSITORY_PROVENANCE_CAPTURE_JOIN: &str = "
+    LEFT JOIN observation_repository_captures AS captures
+      ON captures.capture_id = json_extract(repository.capture_json, '$.capture_id')";
+
+/// One provenance attachment split into its shared capture and the two slim
+/// per-observation documents that reference it.
+struct SlimRepositoryProvenance {
+    availability_json: String,
+    capture_json: Option<String>,
+    /// `(capture_id, capture_json)` when the attachment carries a capture.
+    capture: Option<(String, String)>,
+}
+
+/// The repository capture is identical for every observation taken under one
+/// checkout state — 29 distinct captures stood behind 187k provenance rows on
+/// one store, and each row held the ~1.2 KB capture twice (in `capture_json`
+/// and again inside `availability_json.value`). Persist it once, keyed by its
+/// own content id, and leave a digest-sized reference in each row.
+fn slim_repository_provenance(
+    attachment: &RepositoryProvenanceAttachmentV1,
+) -> rusqlite::Result<SlimRepositoryProvenance> {
+    let mut availability = serde_json::to_value(attachment.availability())
+        .map_err(|error| invalid(error.to_string()))?;
+    let mut capture_json = None;
+    let mut capture = None;
+    if let Some(provenance) = attachment.provenance() {
+        let mut provenance_value =
+            serde_json::to_value(provenance).map_err(|error| invalid(error.to_string()))?;
+        let capture_id = provenance.capture().capture_id().as_str().to_owned();
+        let detached = provenance_value
+            .as_object_mut()
+            .and_then(|object| object.remove("capture"))
+            .ok_or_else(|| invalid("repository provenance encoding has no capture"))?;
+        capture = Some((
+            capture_id,
+            serde_json::to_string(&detached).map_err(|error| invalid(error.to_string()))?,
+        ));
+        capture_json = Some(
+            serde_json::to_string(&provenance_value).map_err(|error| invalid(error.to_string()))?,
+        );
+        if let Some(value) = availability
+            .as_object_mut()
+            .and_then(|object| object.get_mut("value"))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            value.remove("capture");
+        }
+    }
+    Ok(SlimRepositoryProvenance {
+        availability_json: serde_json::to_string(&availability)
+            .map_err(|error| invalid(error.to_string()))?,
+        capture_json,
+        capture,
+    })
+}
+
 pub(super) fn persist_repository_provenance(
     connection: &rusqlite::Connection,
     observation_id: &str,
@@ -294,14 +365,22 @@ pub(super) fn persist_repository_provenance(
     if let Some(anchor) = attachment.anchor() {
         persist_retrieval_anchor(connection, anchor)?;
     }
+    let slim = slim_repository_provenance(attachment)?;
+    if let Some((capture_id, capture_json)) = &slim.capture {
+        connection.execute(
+            "INSERT OR IGNORE INTO observation_repository_captures (capture_id, capture_json)
+             VALUES (?1, ?2)",
+            params![capture_id, capture_json],
+        )?;
+    }
     connection.execute(
         "INSERT INTO observation_repository_provenance (
             observation_id, availability_json, capture_json, retrieval_anchor_id, owner_json
          ) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             observation_id,
-            encode(attachment.availability())?,
-            attachment.provenance().map(encode).transpose()?,
+            slim.availability_json,
+            slim.capture_json,
             attachment
                 .anchor()
                 .map(|anchor| anchor.anchor_id().as_str()),
@@ -334,8 +413,13 @@ pub(super) fn verify_observation_authority(
     let attachment = write.repository_provenance_attachment();
     let stored = connection
         .query_row(
-            "SELECT availability_json, capture_json, retrieval_anchor_id, owner_json
-             FROM observation_repository_provenance WHERE observation_id = ?1",
+            &format!(
+                "SELECT {REPOSITORY_PROVENANCE_HYDRATED_COLUMNS},
+                        repository.retrieval_anchor_id, repository.owner_json
+                 FROM observation_repository_provenance AS repository
+                 {REPOSITORY_PROVENANCE_CAPTURE_JOIN}
+                 WHERE repository.observation_id = ?1"
+            ),
             [observation_id],
             |row| {
                 Ok((
@@ -358,21 +442,47 @@ pub(super) fn verify_observation_authority(
             .map(|anchor| encode(anchor.owner()))
             .transpose()?,
     );
-    if stored.as_ref() != Some(&expected) {
+    // The hydrated columns are SQLite-minified, so the documents are compared,
+    // not their bytes.
+    let matches_expected = stored
+        .as_ref()
+        .is_some_and(|(availability, capture, anchor, owner)| {
+            same_json(availability, &expected.0)
+                && match (capture, &expected.1) {
+                    (Some(stored), Some(expected)) => same_json(stored, expected),
+                    (None, None) => true,
+                    _ => false,
+                }
+                && *anchor == expected.2
+                && *owner == expected.3
+        });
+    if !matches_expected {
         let Some((availability, capture, anchor_id, owner)) = stored else {
-            return Err(invalid("observation repository provenance collision"));
+            return Err(invalid(
+                "observation repository provenance collision: no retained provenance row",
+            ));
         };
         let replay = repository_replay_anchor(attachment, &availability)?;
         let Some(replay) = replay else {
-            return Err(invalid("observation repository provenance collision"));
+            return Err(invalid(
+                "observation repository provenance collision: retained provenance is not replayable",
+            ));
         };
         let retained: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> =
             decode(availability)?;
-        if capture != retained.value().map(encode).transpose()?
+        let retained_capture = retained.value().map(encode).transpose()?;
+        let capture_matches = match (&capture, &retained_capture) {
+            (Some(stored), Some(retained)) => same_json(stored, retained),
+            (None, None) => true,
+            _ => false,
+        };
+        if !capture_matches
             || anchor_id.as_deref() != Some(replay.anchor_id().as_str())
             || owner.as_deref() != Some(encode(replay.owner())?.as_str())
         {
-            return Err(invalid("observation repository provenance collision"));
+            return Err(invalid(
+                "observation repository provenance collision: retained capture or anchor differs",
+            ));
         }
         return verify_retrieval_anchor(connection, &replay);
     }
@@ -421,7 +531,7 @@ fn repository_replay_anchor(
         }
         _ => return Ok(None),
     };
-    if encode(&normalized)? != retained_json {
+    if !same_json(retained_json, &encode(&normalized)?) {
         return Ok(None);
     }
     let RetrievalAnchorTargetV2::RepositoryCapture {

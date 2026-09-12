@@ -13,6 +13,9 @@ use tracedecay_store::{
 };
 
 use super::super::support::{decode, encode, invalid};
+use super::authority::{
+    REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,
+};
 
 pub(super) fn decode_nonnegative(value: i64, message: &'static str) -> rusqlite::Result<u64> {
     u64::try_from(value).map_err(|_| invalid(message))
@@ -38,28 +41,32 @@ pub(super) type EncodedObservationRow = (
 /// append their own `WHERE`/`ORDER BY`/`LIMIT` clauses; the column list and its
 /// order are fixed here because [`encoded_observation_row`] reads them
 /// positionally.
-pub(super) const OBSERVATION_ROW_PROJECTION: &str =
-    "SELECT observation.sequence, observation.observation_json,
-            observation.committed_cursor_json, anchor.anchor_json,
-            anchor.projection_generation, repository.availability_json,
-            repository.capture_json, repository_anchor.anchor_json,
-            repository.owner_json,
-            EXISTS(
-                SELECT 1 FROM projection_queue
-                WHERE projection_queue.observation_id =
-                      observation.observation_id
-            )
-     FROM observations AS observation
-     LEFT JOIN observation_retrieval_anchors AS binding
-       ON binding.observation_id = observation.observation_id
-     LEFT JOIN retrieval_anchors AS anchor
-       ON anchor.anchor_id = binding.anchor_id
-     LEFT JOIN observation_repository_provenance AS repository
-       ON repository.observation_id = observation.observation_id
-     LEFT JOIN retrieval_anchors AS repository_anchor
-       ON repository_anchor.anchor_id = repository.retrieval_anchor_id";
+pub(super) fn observation_row_projection() -> String {
+    format!(
+        "SELECT observation.sequence, observation.observation_json,
+                observation.committed_cursor_json, anchor.anchor_json,
+                anchor.projection_generation, {REPOSITORY_PROVENANCE_HYDRATED_COLUMNS},
+                repository_anchor.anchor_json,
+                repository.owner_json,
+                EXISTS(
+                    SELECT 1 FROM projection_queue
+                    WHERE projection_queue.observation_id =
+                          observation.observation_id
+                )
+         FROM observations AS observation
+         LEFT JOIN observation_retrieval_anchors AS binding
+           ON binding.observation_id = observation.observation_id
+         LEFT JOIN retrieval_anchors AS anchor
+           ON anchor.anchor_id = binding.anchor_id
+         LEFT JOIN observation_repository_provenance AS repository
+           ON repository.observation_id = observation.observation_id
+         {REPOSITORY_PROVENANCE_CAPTURE_JOIN}
+         LEFT JOIN retrieval_anchors AS repository_anchor
+           ON repository_anchor.anchor_id = repository.retrieval_anchor_id"
+    )
+}
 
-/// Reads one [`OBSERVATION_ROW_PROJECTION`] row in column order.
+/// Reads one [`observation_row_projection`] row in column order.
 pub(super) fn encoded_observation_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<EncodedObservationRow> {

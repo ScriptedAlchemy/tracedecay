@@ -581,6 +581,13 @@ impl crate::db::engine::Executor for DatabaseWriteTransaction<'_> {
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.execute_batch_engine(sql).await
     }
+
+    #[hotpath::skip]
+    async fn execute_bulk_migration_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        self.transaction
+            .execute_authority_revalidated_batch(sql)
+            .await
+    }
 }
 
 impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseWriteTransaction<'_> {

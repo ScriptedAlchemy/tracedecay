@@ -7,8 +7,9 @@ use tracedecay_store::runtime::{
     GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
     GraphPublicationReplayPageRequestV1, GraphPublicationReplayRecordV1,
-    GraphPublicationReplayRetirementV1, GraphPublicationRetiredCleanupPageRequestV1,
-    GraphPublicationStoreV1, GraphRecoveredGenerationDigestV1, GraphReplayRetirementOutcomeV1,
+    GraphPublicationReplayRetirementV1, GraphPublicationReplayTombstoneV1,
+    GraphPublicationRetiredCleanupPageRequestV1, GraphPublicationStoreV1,
+    GraphRecoveredGenerationDigestV1, GraphReplayRetirementOutcomeV1,
     GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
     GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
     MAX_GRAPH_PUBLICATION_PROJECTION_PAGE_RECORDS_V1, MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
@@ -1183,6 +1184,60 @@ impl GraphDbRegistry {
             }
             selected
         };
+        // Same policy as the staging-row release sweep: a hibernated engine
+        // used to defer every native delete to "a later tick that already
+        // holds the engine open", and on a project nobody publishes to again
+        // that tick never comes. Deleting the rows is exactly the work that
+        // makes the next open cheaper, so when there is work it is worth one
+        // open now, and the engine goes straight back to hibernation after.
+        // A clean projection never opens anything.
+        let opened_for_retirement = (!selected.is_empty()
+            || stale_tombstones
+                .iter()
+                .any(|(locator, _)| *locator != head_locator))
+            && !database.native_engine_open()?;
+        if opened_for_retirement {
+            database.ensure_opened()?;
+        }
+        let receipt = self.finish_superseded_retirement(
+            &database,
+            operation,
+            authority,
+            context,
+            projection,
+            &head,
+            &head_locator,
+            selected,
+            stale_tombstones,
+            receipt,
+        );
+        if opened_for_retirement && let Err(error) = database.hibernate_if_lazy() {
+            tracing::warn!(
+                %error,
+                namespace = projection.namespace.as_str(),
+                projection = projection.projection.as_str(),
+                "staging engine opened for superseded retirement could not hibernate again"
+            );
+        }
+        receipt
+    }
+
+    /// Runs the retirements the census selected, with the engine already in
+    /// whatever state the caller decided on.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_superseded_retirement(
+        &self,
+        database: &GraphDb,
+        operation: &RegisteredGraphDbOperationV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+        head: &GraphVerifiedHeadV1,
+        head_locator: &GenerationLocator,
+        selected: Vec<(GenerationLocator, GraphPublicationReplayRecordV1)>,
+        stale_tombstones: Vec<(GenerationLocator, GraphPublicationReplayTombstoneV1)>,
+        mut receipt: SupersededReplayRetirement,
+    ) -> Result<SupersededReplayRetirement, GraphDbError> {
         for (locator, replay) in selected {
             let retirement = match GraphPublicationReplayRetirementV1::new(
                 replay.publication.key.clone(),
@@ -1198,14 +1253,14 @@ impl GraphDbRegistry {
             ) {
                 Ok(retirement) => retirement,
                 Err(error) => {
-                    clear_retiring_fence(&database, &locator)?;
+                    clear_retiring_fence(database, &locator)?;
                     return Err(GraphDbError::invalid(error.to_string()));
                 }
             };
             let outcome = match authority.retire_replay(&retirement, context) {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    clear_retiring_fence(&database, &locator)?;
+                    clear_retiring_fence(database, &locator)?;
                     return Err(GraphDbError::from(error));
                 }
             };
@@ -1222,7 +1277,7 @@ impl GraphDbRegistry {
                         "superseded graph replay retired behind the installed head"
                     );
                     Self::finish_retired_replay(
-                        &database,
+                        database,
                         &|| operation.check(self, context),
                         authority,
                         context,
@@ -1233,11 +1288,11 @@ impl GraphDbRegistry {
                 }
                 GraphReplayRetirementOutcomeV1::CurrentVerifiedHead { .. }
                 | GraphReplayRetirementOutcomeV1::PendingReplay { .. } => {
-                    clear_retiring_fence(&database, &locator)?;
+                    clear_retiring_fence(database, &locator)?;
                     receipt.retained += 1;
                 }
                 GraphReplayRetirementOutcomeV1::Conflict => {
-                    clear_retiring_fence(&database, &locator)?;
+                    clear_retiring_fence(database, &locator)?;
                     tracing::warn!(
                         event = "graph_superseded_replay_retirement_conflict",
                         namespace = projection.namespace.as_str(),
@@ -1249,7 +1304,7 @@ impl GraphDbRegistry {
                     receipt.retained += 1;
                 }
                 GraphReplayRetirementOutcomeV1::Missing => {
-                    clear_retiring_fence(&database, &locator)?;
+                    clear_retiring_fence(database, &locator)?;
                     return Err(GraphDbError::Corrupt {
                         message: "graph replay disappeared during superseded retirement".to_owned(),
                     });
@@ -1257,11 +1312,11 @@ impl GraphDbRegistry {
             }
         }
         for (locator, tombstone) in stale_tombstones {
-            if locator == head_locator {
+            if locator == *head_locator {
                 continue;
             }
             Self::finish_retired_replay(
-                &database,
+                database,
                 &|| operation.check(self, context),
                 authority,
                 context,

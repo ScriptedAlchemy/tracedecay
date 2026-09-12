@@ -14,7 +14,7 @@ use tracedecay_store::{
     apply_source_projection_owned, build_source_projection,
 };
 
-use super::support::{decode, encode, invalid};
+use super::support::{decode, encode, invalid, same_json};
 
 // Immutable histories stay append-only until the canonical retention policy
 // explicitly covers external-source receipts. Current-state reads and writes

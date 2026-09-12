@@ -31,12 +31,12 @@ mod steering;
 mod store_layout;
 pub mod tool_hints;
 pub use dispatch::NATIVE_HOOK_HOSTS;
-pub use dispatch::NativeContextScoutLifecycleV1;
 pub use dispatch::native_capture_material;
 pub use dispatch::project_and_worktree_locators_for_scope as hook_scope_locators;
 pub use dispatch::project_id_for_layout as hook_project_id_for_layout;
 pub use dispatch::protected_session_id_for_native as protected_native_session_id;
 pub use dispatch::publish_daemon_bindings as publish_hook_bindings;
+pub use tracedecay_hooks::NativeContextScoutLifecycleV1;
 
 pub use claude::{
     evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
