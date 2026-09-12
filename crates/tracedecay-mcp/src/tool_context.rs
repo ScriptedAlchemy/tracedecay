@@ -31,12 +31,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_configuration::ProjectConfigurationRuntime;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReader,
+};
 use tracedecay_contracts::doctor::SemanticOwnerStateV1;
 use tracedecay_contracts::{CancellationSignal, Deadline, ResolvedScope};
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
-use tracedecay_dashboard_api::code_index_freshness_api::{
-    CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReader,
-};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::VerifiedGraphQuery;

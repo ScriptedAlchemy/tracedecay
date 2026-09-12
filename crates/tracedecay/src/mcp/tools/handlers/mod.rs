@@ -305,7 +305,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) remote_operational_status:
         Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     pub(crate) code_index_freshness_reader:
-        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
     pub(crate) explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,

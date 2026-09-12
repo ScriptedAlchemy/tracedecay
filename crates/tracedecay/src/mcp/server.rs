@@ -327,7 +327,7 @@ pub struct McpServer {
     dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
-        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
     dashboard_explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,

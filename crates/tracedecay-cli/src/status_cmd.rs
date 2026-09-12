@@ -348,7 +348,7 @@ async fn handle_status_command_within(
             },
         )?)?;
     let freshness: Option<
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
+        tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1,
     > = daemon_status
         .get("code_index_freshness")
         .and_then(|freshness| freshness.get("worktree"))

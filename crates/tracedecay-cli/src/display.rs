@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1;
+use tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1;
 use tracedecay_runtime_core::text::{
     format_bytes, format_number, format_relative_time, format_token_count,
 };
