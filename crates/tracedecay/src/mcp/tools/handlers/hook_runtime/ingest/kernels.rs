@@ -20,7 +20,7 @@ use std::pin::Pin;
 use serde_json::Value;
 use tracedecay_domain::ObservationScopeV1;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;

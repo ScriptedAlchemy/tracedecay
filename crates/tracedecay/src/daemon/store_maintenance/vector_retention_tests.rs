@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::daemon::maintenance::project_store_maintenance_lease;
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurableGenerationIndexEntryV1,

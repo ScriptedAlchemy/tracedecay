@@ -103,7 +103,7 @@ fn awaited_sizes() -> Vec<(&'static str, usize)> {
         ),
         (
             "TraceDecay::register_project_store_in_global_registry",
-            future_size(crate::tracedecay::TraceDecay::register_project_store_in_global_registry),
+            future_size(crate::project::TraceDecay::register_project_store_in_global_registry),
         ),
         (
             "McpServer::new_with_context",

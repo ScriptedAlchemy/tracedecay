@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
+use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay::test_support::host_admission::{
     HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
 };
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 /// Two registered projects inside one throwaway profile for fail-closed route
 /// tests. Neither project claims a mounted code-index authority.

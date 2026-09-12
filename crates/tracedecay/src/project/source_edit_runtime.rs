@@ -2,45 +2,45 @@
 //! use the canonical source-edit transaction.
 //!
 //! ```compile_fail
-//! async fn direct_str_replace_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//! async fn direct_str_replace_is_not_public(graph: &tracedecay::project::TraceDecay) {
 //!     let _ = graph.str_replace("src/lib.rs", "old", "new", true).await;
 //! }
 //! ```
 //! ```compile_fail
-//! async fn direct_multi_str_replace_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//! async fn direct_multi_str_replace_is_not_public(graph: &tracedecay::project::TraceDecay) {
 //!     let _ = graph
 //!         .multi_str_replace("src/lib.rs", &[("old", "new")], true)
 //!         .await;
 //! }
 //! ```
 //! ```compile_fail
-//! async fn direct_insert_at_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//! async fn direct_insert_at_is_not_public(graph: &tracedecay::project::TraceDecay) {
 //!     let _ = graph
 //!         .insert_at("src/lib.rs", "anchor", "content", true, true)
 //!         .await;
 //! }
 //! ```
 //! ```compile_fail
-//! async fn direct_replace_symbol_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//! async fn direct_replace_symbol_is_not_public(graph: &tracedecay::project::TraceDecay) {
 //!     let _ = graph.replace_symbol("symbol", "fn symbol() {}", true).await;
 //! }
 //! ```
 //! ```compile_fail
-//! async fn direct_insert_at_symbol_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//! async fn direct_insert_at_symbol_is_not_public(graph: &tracedecay::project::TraceDecay) {
 //!     let _ = graph
 //!         .insert_at_symbol("symbol", "content", "before", true)
 //!         .await;
 //! }
 //! ```
 //! ```compile_fail
-//! async fn direct_ast_grep_rewrite_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//! async fn direct_ast_grep_rewrite_is_not_public(graph: &tracedecay::project::TraceDecay) {
 //!     let _ = graph
 //!         .ast_grep_rewrite("src/lib.rs", "$A", "$A", true)
 //!         .await;
 //! }
 //! ```
 //! ```compile_fail
-//! async fn direct_move_symbol_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//! async fn direct_move_symbol_is_not_public(graph: &tracedecay::project::TraceDecay) {
 //!     let _ = graph
 //!         .move_symbol("symbol", "src/dest.rs", true, false)
 //!         .await;
@@ -48,7 +48,7 @@
 //! ```
 //! ```compile_fail
 //! async fn direct_rename_symbol_is_not_public(
-//!     graph: &tracedecay::tracedecay::TraceDecay,
+//!     graph: &tracedecay::project::TraceDecay,
 //!     binding: &tracedecay_contracts::RenameSymbolBindingV1,
 //! ) {
 //!     let _ = graph.rename_symbol(binding, "new_name", true).await;

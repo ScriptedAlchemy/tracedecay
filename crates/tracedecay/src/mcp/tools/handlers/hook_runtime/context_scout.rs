@@ -1,4 +1,4 @@
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};

@@ -93,7 +93,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
             .host_runtime
             .open_project_graph_for_test(
                 &fixture.project_root,
-                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+                tracedecay::project::TraceDecayOpenOptions::default(),
             )
             .await
             .unwrap_or_else(|err| panic!("failed to reopen dashboard fixture project: {err}"));

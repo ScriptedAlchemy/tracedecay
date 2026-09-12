@@ -1099,7 +1099,7 @@ mod tests {
         assert!(
             matches!(
                 read_only.context_scout_owner_lookup(),
-                crate::tracedecay::ContextScoutOwnerLookupV1::ReadOnly
+                crate::project::ContextScoutOwnerLookupV1::ReadOnly
             ),
             "a read-only open must not resolve the writable instance's owner"
         );

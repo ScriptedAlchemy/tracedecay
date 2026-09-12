@@ -1,40 +1,7 @@
-//! Daemon-side serve guards: MCP root-URI decoding and the fail-closed
-//! direct-open contract. The `tracedecay serve` proxy command itself lives in
-//! the CLI crate.
-
-use std::path::Path;
+//! MCP root-URI decoding for the daemon's serve path. The `tracedecay serve`
+//! proxy command itself lives in the CLI crate.
 
 use tracedecay_lsp::percent_hex_nibble;
-
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_domain::errors::{Result, TraceDecayError};
-
-/// Legacy compatibility entry point for callers that previously opened a
-/// project database in-process.
-///
-/// Project databases are daemon-owned. Returning a local [`TraceDecay`] would
-/// reintroduce a second `SQLite` owner, so this API deliberately fails closed.
-#[allow(clippy::unused_async)]
-pub async fn ensure_initialized(project_path: &Path) -> Result<TraceDecay> {
-    Err(direct_project_open_disabled(project_path))
-}
-
-#[allow(clippy::unused_async)]
-pub async fn ensure_initialized_with_options(
-    project_path: &Path,
-    _open_options: TraceDecayOpenOptions,
-) -> Result<TraceDecay> {
-    Err(direct_project_open_disabled(project_path))
-}
-
-fn direct_project_open_disabled(project_path: &Path) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
-            "direct project database access is disabled for '{}'; route the operation through the managed TraceDecay daemon",
-            project_path.display()
-        ),
-    }
-}
 
 pub(crate) fn local_path_from_mcp_root_uri(uri: &str) -> Option<std::path::PathBuf> {
     let path = if let Some(rest) = uri.strip_prefix("file://") {
@@ -89,18 +56,4 @@ fn strip_windows_drive_slash(path: String) -> String {
 #[cfg(not(windows))]
 fn strip_windows_drive_slash(path: String) -> String {
     path
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn direct_project_open_fails_closed() {
-        let path = Path::new("/tmp/tracedecay-direct-open-must-not-run");
-        let Err(error) = ensure_initialized(path).await else {
-            panic!("legacy local open must fail closed");
-        };
-        assert!(error.to_string().contains("managed TraceDecay daemon"));
-    }
 }

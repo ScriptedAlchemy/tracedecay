@@ -1190,7 +1190,7 @@ impl McpServer {
             let project_path_str =
                 RegisteredGlobalDb::canonical_project_key(accounting_project_root);
             let tool_name_owned = tool_name.to_string();
-            let ts = crate::tracedecay::current_timestamp();
+            let ts = crate::project::current_timestamp();
             let failure_reason = (analytics_outcome == "error")
                 .then(|| semantic_failure_reason(result))
                 .flatten();
