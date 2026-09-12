@@ -755,6 +755,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// text and persistent graph reads do not. Only their explicit demand
     /// admits this optional decode after verified-head recovery.
     complete_generation_requested: Arc<AtomicBool>,
+    complete_generation_requested_changed: tokio::sync::watch::Sender<bool>,
     /// Source-freshness state is independent from scheduler build state so
     /// readiness probes remain available throughout a long publication.
     source_freshness: super::SourceFreshnessFenceV1,
@@ -2753,6 +2754,14 @@ impl CodeIndexSchedulerRegistryV1 {
     /// withdraws it and the next pass restores a fresh one from the durable
     /// pointer. A publication's owner is not installed until it reopens, so
     /// that caller passes `None`.
+    async fn join_retained_text_projection_on_worker_exit(
+        projection: &mut Option<tokio::task::JoinHandle<PublishedTextProjectionOutcomeV1>>,
+    ) {
+        if let Some(projection) = projection.take() {
+            let _ = projection.await;
+        }
+    }
+
     async fn drive_text_projection(
         text: LatestCodeTextGenerationV1,
         shutting_down: Arc<AtomicBool>,
@@ -3087,6 +3096,9 @@ impl CodeIndexSchedulerRegistryV1 {
             .complete_generation_requested
             .swap(true, Ordering::AcqRel)
         {
+            worktree
+                .complete_generation_requested_changed
+                .send_replace(true);
             Self::note_wake(
                 &worktree.pending_wake,
                 &worktree.wake,
@@ -3475,6 +3487,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>> =
             Arc::new(RwLock::new(None));
         let complete_generation_requested = Arc::new(AtomicBool::new(false));
+        let (
+            complete_generation_requested_changed,
+            mut worker_complete_generation_requested_changed,
+        ) = tokio::sync::watch::channel(false);
         let text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>> =
             Arc::new(RwLock::new(None));
         let convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>> =
@@ -3656,6 +3672,11 @@ impl CodeIndexSchedulerRegistryV1 {
             // on a busy checkout is the quiet-tree starvation the seat gate
             // rework removed.
             let mut graph_prepare_yielded_to_arrival = false;
+            // A retained owner's projection may outlive the pass that seats
+            // its verified graph. Keep the task owned by this worker while a
+            // late complete-generation request starts a successor pass; that
+            // successor must neither detach nor duplicate the text owner.
+            let mut retained_text_projection = None;
             loop {
                 hotpath::future!(
                     worker_wake.notified(),
@@ -3668,6 +3689,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         phase = "wake",
                         "code-index worker observed shutdown and stopped its pass"
                     );
+                    Self::join_retained_text_projection_on_worker_exit(
+                        &mut retained_text_projection,
+                    )
+                    .await;
                     return;
                 }
                 // This aggregate starts when the wake is observed and ends
@@ -3696,6 +3721,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 )
                 .await
                 else {
+                    Self::join_retained_text_projection_on_worker_exit(
+                        &mut retained_text_projection,
+                    )
+                    .await;
                     return;
                 };
                 let _semantic_evaluation_publication =
@@ -3706,6 +3735,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         phase = "gates_held",
                         "code-index worker observed shutdown and stopped its pass"
                     );
+                    Self::join_retained_text_projection_on_worker_exit(
+                        &mut retained_text_projection,
+                    )
+                    .await;
                     return;
                 }
                 let mut build_publication =
@@ -3720,6 +3753,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                     phase = "build_publication_lock",
                                     "code-index worker observed shutdown and stopped its pass"
                                 );
+                                Self::join_retained_text_projection_on_worker_exit(
+                                    &mut retained_text_projection,
+                                )
+                                .await;
                                 return;
                             }
                         }
@@ -3798,8 +3835,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 // The retained owner's bounded projection, driven to
                 // completion concurrently with this pass's graph seat and
                 // joined before the pass ends.
-                let mut retained_text_projection = None;
-                if let Some(latest) = text_generation.clone()
+                if retained_text_projection.is_none()
+                    && let Some(latest) = text_generation.clone()
                     && latest.text_serving_needs_work()
                     && graph_activation_enabled
                 {
@@ -3817,10 +3854,15 @@ impl CodeIndexSchedulerRegistryV1 {
                     let installed = Arc::clone(&worker_text_generation);
                     #[cfg(any(test, feature = "test-helpers"))]
                     let gated_root = worker_project_root.clone();
+                    let projection_pass =
+                        super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
+                    let projection_pending_wake = Arc::clone(&worker_pending_wake);
+                    let projection_wake = Arc::clone(&worker_wake);
                     retained_text_projection = Some(tokio::spawn(async move {
+                        let _projection_pass = projection_pass;
                         #[cfg(any(test, feature = "test-helpers"))]
                         Self::wait_for_retained_text_projection_gate(&gated_root).await;
-                        Self::drive_text_projection(
+                        let outcome = Self::drive_text_projection(
                             latest,
                             shutting_down,
                             park,
@@ -3828,7 +3870,14 @@ impl CodeIndexSchedulerRegistryV1 {
                             #[cfg(test)]
                             gated_root,
                         )
-                        .await
+                        .await;
+                        if matches!(outcome, PublishedTextProjectionOutcomeV1::Unfinished) {
+                            Self::note_worker_continuation(
+                                &projection_pending_wake,
+                                &projection_wake,
+                            );
+                        }
+                        outcome
                     }));
                 } else if let Some(latest) = text_generation
                     && latest.text_serving_needs_work()
@@ -3918,6 +3967,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         phase = "text_projection",
                         "code-index worker observed shutdown and stopped its pass"
                     );
+                    Self::join_retained_text_projection_on_worker_exit(
+                        &mut retained_text_projection,
+                    )
+                    .await;
                     return;
                 }
                 if text_slice_incomplete {
@@ -3961,6 +4014,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             phase = "text_restore",
                             "code-index worker observed shutdown and stopped its pass"
                         );
+                        Self::join_retained_text_projection_on_worker_exit(
+                            &mut retained_text_projection,
+                        )
+                        .await;
                         return;
                     }
                     match retained_text {
@@ -3969,7 +4026,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(retained_text);
-                            Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                            worker_wake.notify_one();
                             continue;
                         }
                         Ok(Ok(Some(RetainedTextGenerationRestoreV1::Refused(metadata)))) => {
@@ -4134,6 +4191,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         phase = "reconcile_or_seal",
                         "code-index worker observed shutdown and stopped its pass"
                     );
+                    Self::join_retained_text_projection_on_worker_exit(
+                        &mut retained_text_projection,
+                    )
+                    .await;
                     return;
                 }
                 if let Ok(Ok(CodeIndexReconcileOutcomeV1::Published(evidence))) = &source_result {
@@ -4217,6 +4278,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             phase = "published_text_reopen",
                             "code-index worker observed shutdown and stopped its pass"
                         );
+                        Self::join_retained_text_projection_on_worker_exit(
+                            &mut retained_text_projection,
+                        )
+                        .await;
                         return;
                     }
                     graph_text = if let Ok(Ok(Some(published_text))) = published_text {
@@ -4321,6 +4386,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let mut prepare_graph =
                     gate == GraphSeatGateV1::Prepare && !arrival_pending_before_graph_prepare;
+                let mut retained_head_recovered_without_complete_replay = false;
                 if prepare_graph {
                     graph_prepare_yielded_to_arrival = false;
                 }
@@ -4433,17 +4499,35 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .await
                             {
                                 Ok(true) => {
-                                    prepare_graph = false;
+                                    // Verified-head recovery is sufficient for
+                                    // graph-only readers, but an explicit
+                                    // complete-generation consumer still needs
+                                    // the decoded serving owner. Continue that
+                                    // replay in this pass: the retained text
+                                    // projection is joined at the end of the
+                                    // pass and can take minutes on a cold large
+                                    // store, so deferring the replay to the
+                                    // successor strands branch publication
+                                    // behind unrelated lexical work.
+                                    let complete_generation_requested =
+                                        worker_complete_generation_requested
+                                            .load(Ordering::Acquire);
+                                    prepare_graph = complete_generation_requested;
+                                    retained_head_recovered_without_complete_replay =
+                                        !complete_generation_requested;
                                     tracing::info!(
                                         event = "code_index_graph_head_recovered",
+                                        complete_generation_requested,
                                         "revision-7 manifest matched the durable verified graph \
                                          head; startup seated graph reads without replay"
                                     );
                                     #[cfg(any(test, feature = "test-helpers"))]
-                                    Self::wait_for_retained_graph_recovery_successor_gate(
-                                        &worker_project_root,
-                                    )
-                                    .await;
+                                    if !complete_generation_requested {
+                                        Self::wait_for_retained_graph_recovery_successor_gate(
+                                            &worker_project_root,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 Ok(false) => {}
                                 Err(error) => {
@@ -4838,6 +4922,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                 phase = "text_projection_before_seat",
                                 "code-index worker observed shutdown and stopped its pass"
                             );
+                            Self::join_retained_text_projection_on_worker_exit(
+                                &mut retained_text_projection,
+                            )
+                            .await;
                             return;
                         }
                         PublishedTextProjectionOutcomeV1::Unfinished => {
@@ -5318,8 +5406,53 @@ impl CodeIndexSchedulerRegistryV1 {
                 // serving. `reconcile_in_progress` stays truthful until here so
                 // admission does not misread in-flight text work as
                 // unavailability.
-                if let Some(projection) = retained_text_projection.take() {
-                    let outcome = match projection.await {
+                if let Some(projection) = retained_text_projection.as_mut() {
+                    let projection_result = if retained_head_recovered_without_complete_replay {
+                        let mut preserve_worker_wake = false;
+                        let result = loop {
+                            tokio::select! {
+                                outcome = &mut *projection => break Some(outcome),
+                                () = async {
+                                    match worker_complete_generation_requested_changed
+                                        .wait_for(|requested| *requested)
+                                        .await
+                                    {
+                                        Ok(_) | Err(_) => {}
+                                    }
+                                } => {
+                                    // Recovery already satisfied graph-only reads, but a complete
+                                    // consumer arrived after that decision while text projection
+                                    // was still running. Retain the projection handle across the
+                                    // successor pass so it remains uniquely owned and joined.
+                                    break None;
+                                }
+                                () = worker_wake.notified() => {
+                                    if worker_shutting_down.load(Ordering::Acquire) {
+                                        break Some((&mut *projection).await);
+                                    }
+                                    // The pending arrival remains authoritative while this pass
+                                    // owns the projection. Preserve one permit after the join;
+                                    // unlike complete demand, an unrelated wake cannot end it.
+                                    preserve_worker_wake = true;
+                                }
+                            }
+                        };
+                        if preserve_worker_wake {
+                            worker_wake.notify_one();
+                        }
+                        result
+                    } else {
+                        Some(projection.await)
+                    };
+                    let Some(projection_result) = projection_result else {
+                        drop(reconcile_pass.take());
+                        continue;
+                    };
+                    // The task completed in the branch above. Remove that
+                    // completed handle before processing its outcome so a
+                    // later pass may start a new owner only when needed.
+                    retained_text_projection.take();
+                    let outcome = match projection_result {
                         Ok(outcome) => outcome,
                         Err(error) => {
                             if let Some(text) = retained_text.as_ref() {
@@ -5348,6 +5481,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                 phase = "retained_text_projection",
                                 "code-index worker observed shutdown and stopped its pass"
                             );
+                            Self::join_retained_text_projection_on_worker_exit(
+                                &mut retained_text_projection,
+                            )
+                            .await;
                             return;
                         }
                         PublishedTextProjectionOutcomeV1::Unfinished => {
@@ -5366,6 +5503,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         phase = "pass_end",
                         "code-index worker observed shutdown and stopped its pass"
                     );
+                    Self::join_retained_text_projection_on_worker_exit(
+                        &mut retained_text_projection,
+                    )
+                    .await;
                     return;
                 }
                 let _ = result;
@@ -5392,6 +5533,7 @@ impl CodeIndexSchedulerRegistryV1 {
             historical_generation_owner,
             serving_generation,
             complete_generation_requested,
+            complete_generation_requested_changed,
             source_freshness,
             last_reconciled_at_micros,
             text_generation,
