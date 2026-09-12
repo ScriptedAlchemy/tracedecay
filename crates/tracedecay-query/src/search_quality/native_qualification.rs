@@ -50,6 +50,14 @@ const MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 10
 // This checked-in gzip is generated only from a genuine `qualify-native` run.
 // The decoded canonical JSON remains the validation authority; compression
 // keeps the package and shipped binary from carrying 7.6 MiB of repeated JSON.
+//
+// These bytes no longer bind the current evaluator: the workload's
+// query-fallback digests have been re-pinned since they were produced, and
+// their retained aggregates were computed before nDCG stopped crediting one
+// label through its aliases. Loading therefore refuses them, which is why
+// nothing here activates semantics from the package. Replacing them requires a
+// genuine `qualify-native` run whose report passes `evaluate.rs` — including
+// the pairwise natural-language gain the candidate currently ties.
 const PACKAGED_NATIVE_QUALIFICATION_GZIP: &[u8] =
     include_bytes!("../../assets/native-qualification-v1.json.gz");
 const PACKAGED_NATIVE_QUALIFICATION_BYTES: usize = 7_644_855;
