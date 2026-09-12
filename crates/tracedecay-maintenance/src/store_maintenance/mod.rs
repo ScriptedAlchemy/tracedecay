@@ -588,15 +588,28 @@ pub async fn apply_code_generation_retention(
     // preflight and terminal apply. Their durable commitments are liveness
     // roots just like vector-readable generations; omitting them lets an
     // ordinary maintenance tick collect the exact evidence apply must reopen.
-    let Some(serving_scope) = schedulers.serving_code_scope(&layout.project_root).await else {
-        return CodeGenerationRetentionOutcomeV1::Failed;
+    // The bindings are keyed by repository, which is a pure function of the
+    // checkout's git common dir: a project whose worktree is not mounted in
+    // this daemon — the inactive project with the largest backlog — still
+    // resolves it, so retention neither collects blind nor fails every tick.
+    // Only a root that cannot yield an identity at all stays fail-closed.
+    let repository_id = match schedulers.serving_code_scope(&layout.project_root).await {
+        Some(serving_scope) => serving_scope.repository_id,
+        None => {
+            match tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+                &layout.project_root,
+            ) {
+                Ok(repository_id) => repository_id,
+                Err(_) => return CodeGenerationRetentionOutcomeV1::Failed,
+            }
+        }
     };
     let native_store = tracedecay_global_db::GlobalDbNativeIntegrationStore::new(
         lease.profile_database().as_ref(),
     );
     let native_pins = match native_store
         .live_candidate_generation_bindings(
-            &serving_scope.repository_id,
+            &repository_id,
             tracedecay_contracts::clock::now_micros(),
         )
         .await
