@@ -87,10 +87,16 @@ impl DaemonInvocationState {
                     tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                 );
             }
-            let scope_set = self
+            let Some(scope_set) = self
                 .service
                 .persisted_scope_set(active_project_root, &scope_set_request.scope_set_id)
-                .await;
+                .await
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
             if direct_request_cancellation
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled)
@@ -120,7 +126,7 @@ impl DaemonInvocationState {
                     active_project_root,
                     application_request_id,
                     "scope_set_read",
-                    scope_set,
+                    Some(scope_set),
                     *observed_at,
                     deadline.clone(),
                     cancellation.clone(),
