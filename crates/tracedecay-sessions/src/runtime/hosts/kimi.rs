@@ -133,11 +133,6 @@ impl KimiSource {
                 &mut budget,
             )?;
             'session_dirs: for work_dir in work_dirs {
-                if !budget.try_charge_unit() {
-                    discovery.scan_complete = false;
-                    discovery.reached_end = false;
-                    break;
-                }
                 let session_dirs = read_real_directories(
                     &work_dir,
                     KimiDiscoveryFailureKind::DirectoryUnavailable,
@@ -221,9 +216,7 @@ impl KimiSource {
                         {
                             continue;
                         }
-                        if !budget.try_charge_unit()
-                            || !charge_discovered_path(&mut budget, &candidate)?
-                        {
+                        if !charge_discovered_path(&mut budget, &candidate)? {
                             discovery.scan_complete = false;
                             discovery.reached_end = false;
                             break 'session_dirs;
@@ -320,7 +313,17 @@ fn read_real_directories(
                 continue;
             }
         };
+        if !budget.try_charge_unit() {
+            discovery.scan_complete = false;
+            discovery.reached_end = false;
+            break;
+        }
         let path = entry.path();
+        if !charge_discovered_path(budget, &path)? {
+            discovery.scan_complete = false;
+            discovery.reached_end = false;
+            break;
+        }
         match entry.file_type() {
             Ok(kind) if kind.is_dir() && !kind.is_symlink() => paths.push(path),
             Ok(_) => {}
@@ -952,6 +955,56 @@ mod tests {
             .unwrap()
             .0;
         assert!(out_of_scope.files.paths.is_empty());
+    }
+
+    #[test]
+    fn discovery_stops_before_accumulating_past_its_directory_unit_budget() {
+        let (_temp, project, path, source) = fixture();
+        std::fs::write(&path, wire_message("user", "first", 1)).unwrap();
+        let work_dir = path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .unwrap();
+        let second_session = work_dir.join("session-second");
+        std::fs::create_dir_all(second_session.join("agents/main")).unwrap();
+        std::fs::write(
+            second_session.join("state.json"),
+            json!({
+                "id": "session-second",
+                "version": 2,
+                "cwd": project,
+                "agents": {"main": {"type": "main"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            second_session.join("agents/main/wire.jsonl"),
+            wire_message("user", "second", 2),
+        )
+        .unwrap();
+        let budget = HostScanBudget::new(
+            super::MAX_DISCOVERY_INPUT_BYTES,
+            2,
+            Instant::now() + HOST_SCAN_WINDOW,
+            ObservationCancellation::default(),
+        );
+
+        let (report, budget) = source
+            .discover(
+                &project,
+                TranscriptDiscoveryBounds::default_walk(),
+                None,
+                budget,
+            )
+            .unwrap();
+
+        assert!(!report.scan_complete);
+        assert!(!report.reached_end);
+        assert!(budget.evidence().unit_bound_reached);
+        assert!(report.files.paths.len() <= 1);
     }
 
     #[cfg(unix)]
