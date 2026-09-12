@@ -25,6 +25,7 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+pub use tracedecay_runtime_core::config::brand_env;
 use tracedecay_runtime_core::config::{
     GENERATED_DIR_SEGMENTS, active_data_dir_name, discover_project_root, get_tracedecay_dir,
     is_generated_dir_segment,
@@ -663,11 +664,6 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
     }
-}
-
-/// Reads the `TRACEDECAY_<suffix>` environment variable.
-pub fn brand_env(suffix: &str) -> Option<String> {
-    std::env::var(format!("TRACEDECAY_{suffix}")).ok()
 }
 
 /// Returns the path to the configuration file (`config.json`) within the

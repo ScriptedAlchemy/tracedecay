@@ -4,9 +4,9 @@ use std::process::Command;
 use tempfile::TempDir;
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorLineageRefV2, AnchorProvenanceRelationV2, AnchorSourceGenerationV2, ClaudeSourceCursorV1,
-    FactOwnerV1, ObservationScopeV1, ObservationSourceGenerationV1, ProjectId, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
+    AnchorLineageRefV2, AnchorProvenanceRelationV2, AnchorSourceGenerationV2, FactOwnerV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1, ProjectId,
+    RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
 };
 use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay_session_memory::anchor_resolution::EvidenceAnchorReportResolver;
@@ -396,7 +396,7 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
             project_id: project_a.clone(),
         },
     );
-    let next_cursor = ClaudeSourceCursorV1::new(
+    let next_cursor = ObservationSourceCursorV1::new(
         candidate.source().clone(),
         candidate.scope().clone(),
         candidate.identity().generation(),

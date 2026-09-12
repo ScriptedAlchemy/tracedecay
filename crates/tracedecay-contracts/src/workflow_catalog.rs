@@ -2,17 +2,19 @@ use std::sync::LazyLock;
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
-    CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError,
-    CodecBindingKey, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    IdempotencyContract, LifecycleClass, OperationId, PaginationContract, PrivacyClass, ProfileId,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    AvailabilityContract, BindingId, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestV1, CatalogValidationError, CodecBindingKey, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
+    ExecutableBindingRegistryV1, ExecutableBindingV1, LifecycleClass, OperationId,
+    PaginationContract, PrivacyClass, ProfileId, RevalidationContract, RevalidationPoint,
     RouteExposureV1, RoutingContractV1, SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension,
     ScopeRequirement, ServiceId, StreamingContract, TerminalState, TerminalStateContract,
     UseCaseId,
 };
 
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::{
     TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed,
     WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest,
@@ -314,7 +316,7 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
     );
     let binding_id = BindingId::new(format!("binding.http.workflow.{operation}"))
         .map_err(|_| invalid_catalog_value("workflow binding ID", "ID is invalid"))?;
-    CapabilityManifestV1::new(CapabilityManifestInputV1 {
+    application_capability_manifest(ApplicationCapabilityManifestInput {
         capability_id: CapabilityId::new(format!("capability.workflow.{operation}"))
             .map_err(|_| invalid_catalog_value("workflow capability ID", "ID is invalid"))?,
         use_case_id: UseCaseId::new(format!("use-case.workflow.{operation}"))
@@ -337,7 +339,6 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
             ScopeDimension::Repository,
             ScopeDimension::Worktree,
         ])?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: if read_only {
@@ -364,34 +365,13 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
             },
         )?,
         pagination: None::<PaginationContract>,
-        idempotency: if read_only {
-            IdempotencyContract::NotRequired
-        } else {
-            IdempotencyContract::Required
-        },
-        inverse: if read_only {
-            tracedecay_tool_catalog::InverseContract::NotApplicable
-        } else {
-            tracedecay_tool_catalog::InverseContract::Unavailable {
-                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
-            }
-        },
+        inverse: None,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
             RevalidationPoint::Policy,
             RevalidationPoint::ExpectedState,
         ])?,
-        reconciliation: if read_only {
-            ReconciliationContract::NotRequired
-        } else {
-            ReconciliationContract::Required
-        },
-        receipt: if read_only {
-            ReceiptContract::Operation
-        } else {
-            ReceiptContract::DurableEffect
-        },
         terminal_states: TerminalStateContract::new({
             let mut states = vec![
                 TerminalState::Completed,

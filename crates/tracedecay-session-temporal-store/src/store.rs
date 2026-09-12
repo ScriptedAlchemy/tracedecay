@@ -32,7 +32,7 @@ use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
 use tracedecay_store::SessionStoreError;
 
 /// Session-temporal projection adapter over an already-open authoritative database.
-pub struct GlobalDbSessionTemporalStore<'a, D: SessionTemporalRegisteredDb> {
+pub struct SessionTemporalStore<'a, D: SessionTemporalRegisteredDb> {
     db: &'a D,
 }
 
@@ -59,7 +59,7 @@ pub fn execution_control_graph_cancellation(
     Arc::new(ExecutionControlGraphCancellation(control.clone()))
 }
 
-impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a, D> {
+impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
     #[hotpath::skip]
     pub const fn new(db: &'a D) -> Self {
         Self { db }
@@ -200,7 +200,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalCapabilityProvider
-    for GlobalDbSessionTemporalStore<'_, D>
+    for SessionTemporalStore<'_, D>
 {
     fn session_temporal_capabilities(&self) -> &SessionTemporalCapabilitiesV1 {
         static CAPABILITIES: LazyLock<SessionTemporalCapabilitiesV1> = LazyLock::new(|| {
@@ -216,9 +216,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalCapabilityProvider
     }
 }
 
-impl<D: SessionTemporalRegisteredDb + Sync> SessionRetrievalStore
-    for GlobalDbSessionTemporalStore<'_, D>
-{
+impl<D: SessionTemporalRegisteredDb + Sync> SessionRetrievalStore for SessionTemporalStore<'_, D> {
     fn freeze_session_temporal_snapshot_supported(
         &self,
         _permit: SessionSnapshotFreezePermit,
@@ -247,7 +245,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionRetrievalStore
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalProjectionStore
-    for GlobalDbSessionTemporalStore<'_, D>
+    for SessionTemporalStore<'_, D>
 {
     fn begin_session_generation_rebuild_supported(
         &self,
@@ -290,9 +288,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalProjectionStore
     }
 }
 
-impl<D: SessionTemporalRegisteredDb + Sync> SessionRefreshStore
-    for GlobalDbSessionTemporalStore<'_, D>
-{
+impl<D: SessionTemporalRegisteredDb + Sync> SessionRefreshStore for SessionTemporalStore<'_, D> {
     fn begin_or_join_session_refresh_supported(
         &self,
         _permit: SessionRefreshBeginOrJoinPermit,

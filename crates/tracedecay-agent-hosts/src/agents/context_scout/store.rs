@@ -11,15 +11,14 @@ use super::{
     ContextScoutAddressExt, ContextScoutAddressV1, ContextScoutDeliveryReceiptV1,
     ContextScoutDeliveryWindowV1, ContextScoutDurableClaimOutcomeV1, ContextScoutDurableClaimV1,
     ContextScoutDurableQueueEntryExt, ContextScoutDurableQueueEntryV1,
-    ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1,
-    ContextScoutDurableStoreV1, ContextScoutFeedbackV1, ContextScoutLeaseExt, ContextScoutLeaseV1,
-    ContextScoutMutationBindingV1, ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
+    ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1, ContextScoutFeedbackV1,
+    ContextScoutLeaseExt, ContextScoutLeaseV1, ContextScoutMutationBindingV1,
+    ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
     ContextScoutMutationSettlementOutcomeV1, ContextScoutMutationSettlementV1,
     ContextScoutPublicMutationV1, ContextScoutRecentDeliveryV1, ContextScoutRecentReadOutcomeV1,
-    ContextScoutRecentStateV1, ContextScoutStoreFuture, ContextScoutWorkV1,
-    MAX_SCOUT_ACTIVE_ADDRESSES, MAX_SCOUT_RECENT_DELIVERIES,
-    validate_context_scout_delivery_receipt, validate_context_scout_feedback,
-    validate_receipt_shape,
+    ContextScoutRecentStateV1, ContextScoutWorkV1, MAX_SCOUT_ACTIVE_ADDRESSES,
+    MAX_SCOUT_RECENT_DELIVERIES, validate_context_scout_delivery_receipt,
+    validate_context_scout_feedback, validate_receipt_shape,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
@@ -930,7 +929,7 @@ impl ProjectContextScoutDurableStoreV1 {
         Some(outcome)
     }
 
-    /// The ready page `startup_inner` answers from an already-decoded state.
+    /// The ready page `startup` answers from an already-decoded state.
     fn startup_page(
         state: &StoredContextScoutStateV1,
         limit: usize,
@@ -947,7 +946,8 @@ impl ProjectContextScoutDurableStoreV1 {
         ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated }
     }
 
-    async fn startup_inner(
+    /// Requeues expired claims and returns at most `limit` unclaimed entries.
+    pub async fn startup(
         &self,
         now: UtcMicros,
         limit: usize,
@@ -1174,7 +1174,9 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStartupOutcomeV1::Unavailable)
     }
 
-    async fn enqueue_inner(
+    /// Atomically commits one queue entry. The envelope already carries its
+    /// durable evidence anchors; no duplicate checkpoint record is written.
+    pub async fn enqueue(
         &self,
         entry: ContextScoutDurableQueueEntryV1,
     ) -> ContextScoutDurableStoreOutcomeV1 {
@@ -1229,7 +1231,8 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
-    async fn claim_inner(
+    /// Claims one exact address with a caller-owned lease.
+    pub async fn claim(
         &self,
         address: ContextScoutAddressV1,
         now: UtcMicros,
@@ -1245,7 +1248,8 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableClaimOutcomeV1::Unavailable)
     }
 
-    async fn requeue_inner(
+    /// Clears only the exact claim represented by `claimed`.
+    pub async fn requeue(
         &self,
         claimed: ContextScoutDurableClaimV1,
     ) -> ContextScoutDurableStoreOutcomeV1 {
@@ -1282,7 +1286,8 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
-    async fn cancel_inner(&self, work: ContextScoutWorkV1) -> ContextScoutDurableStoreOutcomeV1 {
+    /// Cancels exactly one currently queued work generation.
+    pub async fn cancel_work(&self, work: ContextScoutWorkV1) -> ContextScoutDurableStoreOutcomeV1 {
         if work.generation == 0 || work.input_watermark == [0; 32] || !self.in_scope(work.address) {
             return ContextScoutDurableStoreOutcomeV1::Unavailable;
         }
@@ -1293,7 +1298,10 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
-    async fn record_delivery_inner(
+    /// Atomically records the delivery receipt for this exact claimed queue
+    /// entry. The lease is part of the write authority; an entry alone can
+    /// never complete delivery after requeue or takeover.
+    pub async fn record_delivery(
         &self,
         claim: &ContextScoutDurableClaimV1,
         receipt: &ContextScoutDeliveryReceiptV1,
@@ -1314,7 +1322,10 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
-    async fn record_delivery_by_lease_inner(
+    /// Atomically resolves one public opaque claim proof and records its
+    /// delivery. Resolution and mutation share the store transaction so lease
+    /// takeover or supersession cannot race a transport round trip.
+    pub async fn record_delivery_by_lease(
         &self,
         work: ContextScoutWorkV1,
         envelope_id: [u8; 16],
@@ -1347,7 +1358,9 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
-    async fn record_feedback_inner(
+    /// Records explicit feedback only after the receipt binding has survived
+    /// the caller-side validation in this module.
+    pub async fn record_feedback(
         &self,
         receipt: &ContextScoutDeliveryReceiptV1,
         feedback: ContextScoutFeedbackV1,
@@ -1361,78 +1374,5 @@ impl ProjectContextScoutDurableStoreV1 {
         })
         .await
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
-    }
-}
-
-impl ContextScoutDurableStoreV1 for ProjectContextScoutDurableStoreV1 {
-    fn startup(
-        &self,
-        now: UtcMicros,
-        limit: usize,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStartupOutcomeV1> {
-        Box::pin(self.startup_inner(now, limit))
-    }
-
-    fn enqueue(
-        &self,
-        entry: ContextScoutDurableQueueEntryV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-        Box::pin(self.enqueue_inner(entry))
-    }
-
-    fn claim(
-        &self,
-        address: ContextScoutAddressV1,
-        now: UtcMicros,
-        lease: ContextScoutLeaseV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableClaimOutcomeV1> {
-        Box::pin(self.claim_inner(address, now, lease))
-    }
-
-    fn requeue(
-        &self,
-        claimed: ContextScoutDurableClaimV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-        Box::pin(self.requeue_inner(claimed))
-    }
-
-    fn cancel_work(
-        &self,
-        work: ContextScoutWorkV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-        Box::pin(self.cancel_inner(work))
-    }
-
-    fn record_delivery<'a>(
-        &'a self,
-        claim: &'a ContextScoutDurableClaimV1,
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-        Box::pin(self.record_delivery_inner(claim, receipt))
-    }
-
-    fn record_delivery_by_lease<'a>(
-        &'a self,
-        work: ContextScoutWorkV1,
-        envelope_id: [u8; 16],
-        lease: ContextScoutLeaseV1,
-        configuration_revision: [u8; 32],
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-        Box::pin(self.record_delivery_by_lease_inner(
-            work,
-            envelope_id,
-            lease,
-            configuration_revision,
-            receipt,
-        ))
-    }
-
-    fn record_feedback<'a>(
-        &'a self,
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-        feedback: ContextScoutFeedbackV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-        Box::pin(self.record_feedback_inner(receipt, feedback))
     }
 }

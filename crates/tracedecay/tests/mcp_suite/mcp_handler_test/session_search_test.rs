@@ -13,7 +13,7 @@ use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_domain::SessionId;
 #[cfg(feature = "test-transport")]
-use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
+use tracedecay_session_temporal_store::SessionTemporalStore;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -345,7 +345,7 @@ async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
             )
             .await;
         }
-        GlobalDbSessionTemporalStore::new(
+        SessionTemporalStore::new(
             runtime
                 .registered_database(HostAdmissionScope::Project)
                 .expect("registered project session database"),

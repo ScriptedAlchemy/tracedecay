@@ -6,8 +6,6 @@ mod tests;
 
 use std::sync::{Arc, Mutex};
 
-use crate::profiled_lock::ProfiledMutex;
-
 use tracedecay_store::{OperationPriorityV1, SaturationScopeV1, StoreOperationMetadataV1};
 
 #[cfg(test)]
@@ -108,7 +106,7 @@ impl State {
 /// from `submit` until the accepted request sends its terminal reply.
 #[derive(Clone)]
 pub(crate) struct Admission {
-    state: Arc<ProfiledMutex<State>>,
+    state: Arc<hotpath::mutexes::Mutex<State>>,
 }
 
 impl Admission {
@@ -181,7 +179,7 @@ impl Admission {
 
 #[must_use = "the permit must be retained through the request's terminal reply"]
 pub(crate) struct Permit {
-    state: Arc<ProfiledMutex<State>>,
+    state: Arc<hotpath::mutexes::Mutex<State>>,
     lane: Lane,
     bytes: u64,
 }

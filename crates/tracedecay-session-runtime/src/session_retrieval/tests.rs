@@ -292,7 +292,7 @@ async fn seed_real_page_fixture_in_session(
             .lcm_protect_session_raw_messages(&provider, &session_id)
             .await
             .expect("protect canonical raw message");
-        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(database)
+        tracedecay_session_temporal_store::SessionTemporalStore::new(database)
             .materialize_pending_session_refresh_for_test(
                 &SessionId::new(session_id.clone()).expect("refresh session"),
             )

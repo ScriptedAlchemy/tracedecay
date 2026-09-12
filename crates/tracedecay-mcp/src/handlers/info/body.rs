@@ -4,10 +4,11 @@ use crate::ToolResult;
 use crate::rendered_tool_result;
 use crate::tools::render::{self, Md};
 use serde_json::{Value, json};
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_graph_query::context::read_modes::estimate_tokens;
-use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
 
 use super::verified::{
     end_line, info_graph_error, required_file_path, required_metadata, required_symbol_parts,

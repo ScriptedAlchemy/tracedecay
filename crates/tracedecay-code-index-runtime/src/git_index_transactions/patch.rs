@@ -7,10 +7,11 @@ use super::NativeGitIndexError;
 
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
+/// Canonical digest input for one hunk: its `@@` header and body lines.
 #[derive(Serialize)]
-struct NativePatchDigestMaterial<'a> {
-    header: &'a str,
-    body: &'a [String],
+pub(crate) struct PatchDigestMaterial<'a> {
+    pub(crate) header: &'a str,
+    pub(crate) body: &'a [String],
 }
 
 /// A patch fragment produced by the fixed preview builder. Its fields are
@@ -65,7 +66,7 @@ impl ValidatedIndexPatch {
         {
             return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
         }
-        let patch_digest = canonical_sha256(&NativePatchDigestMaterial {
+        let patch_digest = canonical_sha256(&PatchDigestMaterial {
             header: &hunk.hunk_header,
             body: &body,
         })?;

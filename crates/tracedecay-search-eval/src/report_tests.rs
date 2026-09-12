@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
-use crate::{
-    DirectEvaluationReportV1, GenerateCandidateOutputsOptions, QUERY_BASELINE_PROFILE,
-    compute_profile_material_digest, evaluate_generated_outputs, generate_candidate_outputs,
-    load_candidate_workload,
+use tracedecay_query::search_quality::{
+    DirectEvaluationReportV1, QUERY_BASELINE_PROFILE, compute_profile_material_digest,
+    evaluate_generated_outputs, load_candidate_workload,
 };
+
+use crate::{GenerateCandidateOutputsOptions, generate_candidate_outputs};
 
 const BASELINE_REPORT_RESOURCE_CHILD_ENV: &str = "TRACEDECAY_BASELINE_REPORT_RESOURCE_CHILD";
 

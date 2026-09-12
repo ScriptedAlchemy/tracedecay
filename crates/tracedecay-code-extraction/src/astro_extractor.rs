@@ -18,7 +18,6 @@
 
 use std::borrow::Cow;
 
-use crate::types::ExtractionResult;
 use crate::typescript_extractor::TypeScriptExtractor;
 use crate::{ExtractionArtifactV1, LanguageExtractor};
 use tree_sitter::Tree;
@@ -28,11 +27,6 @@ use tree_sitter::Tree;
 pub struct AstroExtractor;
 
 impl AstroExtractor {
-    pub fn extract_astro(file_path: &str, source: &str) -> ExtractionResult {
-        let masked = Self::mask_non_frontmatter(source);
-        TypeScriptExtractor::extract_typescript(file_path, &masked)
-    }
-
     /// Replace every byte outside the `---` frontmatter block with whitespace.
     ///
     /// Keeping both byte length and line endings unchanged means the TypeScript
@@ -86,10 +80,6 @@ impl LanguageExtractor for AstroExtractor {
         crate::hotpath_observe::measure_language(|| Cow::Owned(Self::mask_non_frontmatter(source)))
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_astro(file_path, source)
-    }
-
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
         crate::hotpath_observe::measure_extract_file(
             self.language_name(),
@@ -102,28 +92,6 @@ impl LanguageExtractor for AstroExtractor {
         )
     }
 
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let masked = Self::mask_non_frontmatter(source);
-        TypeScriptExtractor.extract_parsed(file_path, &masked, tree, scope)
-    }
-
-    fn extract_parsed_artifact(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        let masked = Self::mask_non_frontmatter(source);
-        TypeScriptExtractor.extract_parsed_artifact(file_path, &masked, tree, scope)
-    }
-
     /// The retained document already holds this extractor's mask as its parse
     /// text, so reuse it instead of re-masking the whole source per pass.
     fn extract_parsed_artifact_prepared(
@@ -134,7 +102,13 @@ impl LanguageExtractor for AstroExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        TypeScriptExtractor.extract_parsed_artifact(file_path, parsed_source, tree, scope)
+        TypeScriptExtractor.extract_parsed_artifact_prepared(
+            file_path,
+            parsed_source,
+            parsed_source,
+            tree,
+            scope,
+        )
     }
 }
 

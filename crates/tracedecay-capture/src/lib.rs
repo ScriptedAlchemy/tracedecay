@@ -5,6 +5,7 @@ pub mod codex;
 mod content;
 pub mod cursor;
 pub mod cursor_composer;
+mod git_facts;
 pub mod kimi;
 pub mod kiro;
 pub mod opencode;

@@ -5,14 +5,14 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, SettingKey,
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
 };
 use tracedecay_domain::{
-    ManifestDigest, WorkExecutableReference, WorkProviderBackendV1, WorkProviderProtocol,
+    ManifestDigest, ManifestDigestHasher, WorkExecutableReference, WorkProviderBackendV1,
+    WorkProviderProtocol,
 };
 
 use super::PinnedRuntimeConfiguration;
@@ -177,7 +177,7 @@ fn digest_file(path: &Path) -> std::io::Result<(ManifestDigest, u64)> {
             "configured provider executable is not an executable file",
         ));
     }
-    let mut hasher = Sha256::new();
+    let mut hasher = ManifestDigestHasher::new();
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
@@ -190,8 +190,7 @@ fn digest_file(path: &Path) -> std::io::Result<(ManifestDigest, u64)> {
             .checked_add(read as u64)
             .ok_or_else(|| std::io::Error::other("provider executable byte length overflow"))?;
     }
-    let digest =
-        ManifestDigest::from_sha256_bytes(&hasher.finalize()).map_err(std::io::Error::other)?;
+    let digest = hasher.finalize().map_err(std::io::Error::other)?;
     Ok((digest, bytes))
 }
 
@@ -212,15 +211,14 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
-    use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use tracedecay_domain::configuration::{
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
         WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
     };
     use tracedecay_domain::{
-        ManifestDigest, ProjectId, WorkExecutableReference, WorkProviderBackendV1,
-        WorkProviderProtocol,
+        ManifestDigest, ManifestDigestHasher, ProjectId, WorkExecutableReference,
+        WorkProviderBackendV1, WorkProviderProtocol,
     };
     use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
     use tracedecay_global_db::configuration::resolver::{
@@ -229,12 +227,36 @@ mod tests {
 
     use super::{
         PinnedWorkExecutableBindingResolver, WorkExecutableBindingError,
-        WorkExecutableBindingResolver,
+        WorkExecutableBindingResolver, digest_file,
     };
     use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
     fn digest(bytes: &[u8]) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap()
+        let mut hasher = ManifestDigestHasher::new();
+        hasher.update(bytes);
+        hasher.finalize().unwrap()
+    }
+
+    #[test]
+    fn executable_digest_remains_raw_sha256() {
+        let directory = TempDir::new().unwrap();
+        let executable_path = directory.path().join("fixture");
+        std::fs::write(&executable_path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&executable_path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&executable_path, permissions).unwrap();
+        }
+
+        let (digest, byte_length) = digest_file(&executable_path).unwrap();
+        assert_eq!(
+            digest.as_str(),
+            "sha256:306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb"
+        );
+        assert_eq!(byte_length, 17);
     }
 
     fn pinned(root: &Path, bindings: Vec<WorkExecutableBindingV1>) -> PinnedRuntimeConfiguration {

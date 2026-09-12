@@ -425,15 +425,14 @@ Related: tracedecay install (fix missing integration), tracedecay daemon
 status, tracedecay status (index health).";
 
 pub(crate) const COST_LONG_ABOUT: &str = "\
-Summarises token spend from local Claude Code session transcripts: totals, \
-per-model and per-task-category breakdowns, and CSV/JSON export. Reads only \
-local files; nothing is uploaded.";
+Summarises provider token spend from daemon-local profile accounting: totals, \
+per-model breakdowns, and CSV/JSON export. The command queries the local \
+TraceDecay daemon; no data is uploaded to a network service.";
 
 pub(crate) const COST_AFTER_HELP: &str = "\
 Examples:
   tracedecay cost                                Last 7 days
   tracedecay cost 30d --by-model                 Per-model breakdown
-  tracedecay cost month --by-task                Per-task-category breakdown
   tracedecay cost all --export csv               Export the full history
 
 Related: tracedecay gain (savings ledger), tracedecay monitor.";

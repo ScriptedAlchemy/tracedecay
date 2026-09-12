@@ -22,17 +22,17 @@ use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1};
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay_query::temporal::ports::{
+use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
+use tracedecay_temporal_query::ports::{
     BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions, TemporalExecutionSnapshot,
     TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
 };
-use tracedecay_query::temporal::resolution::ValidatedAuthorization;
-use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 use super::{
-    BackendFuture, BoundedPayload, GlobalDbHydrationBackend, HydrationAuthorization,
-    HydrationError, HydrationResolution, PayloadDescriptor, PayloadSource,
-    SessionTemporalHydrationAdapter, TemporalHydrationBackend,
+    BackendFuture, BoundedPayload, HydrationAuthorization, HydrationError, HydrationResolution,
+    PayloadDescriptor, PayloadSource, SessionTemporalHydrationAdapter,
+    SessionTemporalHydrationBackend, TemporalHydrationBackend,
 };
 
 /// Default per-payload limit; the fixture payload sits just under it.
@@ -194,7 +194,7 @@ fn run_hook(hook: &Hook) {
 /// the payload; `after_open` runs once between the proof and the adapter's
 /// emission.
 struct ExternalPayloadBackend<'snapshot> {
-    inner: GlobalDbHydrationBackend<'snapshot>,
+    inner: SessionTemporalHydrationBackend<'snapshot>,
     descriptor: PayloadDescriptor,
     before_open: Hook,
     after_open: Hook,
@@ -203,7 +203,7 @@ struct ExternalPayloadBackend<'snapshot> {
 impl<'snapshot> ExternalPayloadBackend<'snapshot> {
     fn new(read: &'snapshot RegisteredRead, content: &[u8]) -> Self {
         Self {
-            inner: GlobalDbHydrationBackend::new_registered(&read.read, &read.storage_root),
+            inner: SessionTemporalHydrationBackend::new_registered(&read.read, &read.storage_root),
             descriptor: external_descriptor(content),
             before_open: Mutex::new(None),
             after_open: Mutex::new(None),

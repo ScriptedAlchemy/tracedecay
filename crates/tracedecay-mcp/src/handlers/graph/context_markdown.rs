@@ -12,10 +12,11 @@ use crate::context_headings::{
 };
 use crate::path_tree::format_compact_path_list;
 use serde_json::Value;
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::Result;
-use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 #[hotpath::measure(label = "mcp.graph.context_markdown")]
 pub(super) fn verified_context_markdown(

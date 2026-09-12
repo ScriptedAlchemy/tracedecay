@@ -645,14 +645,14 @@ fn remove_host_file_from_snapshot(path: &Path, observed: &HostFileSnapshot) -> R
     if matches!(observed, HostFileSnapshot::Missing) {
         return Ok(());
     }
-    super::persist_host_config_remove_intent(path)?;
+    super::host_config_io::persist_host_config_remove_intent(path)?;
     tracedecay_private_fs::framed_log::remove_conditionally(
         path,
         || {
             #[cfg(test)]
-            super::test_pause_host_config_write(
+            super::host_config_io::test_pause_host_config_write(
                 path,
-                super::TestHostConfigWriteBoundary::Publication,
+                super::host_config_io::TestHostConfigWriteBoundary::Publication,
             );
         },
         |displaced| {
@@ -695,29 +695,33 @@ fn safe_write_bytes_file_from_snapshot(
                 }
                 let expected_metadata = super::capture_host_file_metadata(temporary)?;
                 staged_snapshot.replace(Some(capture_host_file_snapshot(temporary)?));
-                super::persist_host_config_write_intent(path, contents, Some(&expected_metadata))
-                    .map_err(std::io::Error::other)?;
+                super::host_config_io::persist_host_config_write_intent(
+                    path,
+                    contents,
+                    Some(&expected_metadata),
+                )
+                .map_err(std::io::Error::other)?;
                 verify_host_file_snapshot(path, observed)?;
                 #[cfg(test)]
-                super::test_pause_host_config_write(
+                super::host_config_io::test_pause_host_config_write(
                     path,
-                    super::TestHostConfigWriteBoundary::Validation,
+                    super::host_config_io::TestHostConfigWriteBoundary::Validation,
                 );
                 verify_host_file_snapshot(path, observed)?;
                 Ok(())
             },
             before_publish: || {
                 #[cfg(test)]
-                super::test_pause_host_config_write(
+                super::host_config_io::test_pause_host_config_write(
                     path,
-                    super::TestHostConfigWriteBoundary::Publication,
+                    super::host_config_io::TestHostConfigWriteBoundary::Publication,
                 );
             },
             after_publish: || {
                 #[cfg(test)]
-                super::test_pause_host_config_write(
+                super::host_config_io::test_pause_host_config_write(
                     path,
-                    super::TestHostConfigWriteBoundary::Published,
+                    super::host_config_io::TestHostConfigWriteBoundary::Published,
                 );
             },
             verify_displaced: |displaced: &Path| {
@@ -748,6 +752,6 @@ fn safe_write_bytes_file_from_snapshot(
         });
     }
     #[cfg(feature = "test-transport")]
-    super::test_abort_after_host_config_write(path);
+    super::host_config_io::test_abort_after_host_config_write(path);
     Ok(())
 }

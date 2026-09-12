@@ -51,9 +51,17 @@ struct IngestTestRuntime {
 
 impl IngestTestRuntime {
     /// Observation capture refuses to run without the process background-CPU
-    /// authority that daemon startup installs; the fixture injects the same
-    /// one the production worker plan uses.
+    /// authority that daemon startup installs, and a user-global pass refuses
+    /// to run without the session review port; the fixture injects the same
+    /// ones the production daemon composes.
     fn authority(&self) -> GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1> {
+        self.authority_without_session_review()
+            .with_session_review(tracedecay::session_review_port())
+    }
+
+    fn authority_without_session_review(
+        &self,
+    ) -> GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1> {
         let background_cpu =
             tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
                 .expect("install fixture worker plan authority");
@@ -373,6 +381,42 @@ async fn one_profile_root_reopens_with_its_persisted_session_identity() {
     assert_eq!(first_identity, second_identity);
     assert_eq!(first_shard, second_database.binding().shard_id);
     drop((second_database, second_registry, second_scope));
+}
+
+/// An authority with no session review port is a composition defect: the
+/// user pass refuses before admitting any unit or touching the frontier, and
+/// the refusal is a non-retryable typed failure rather than a silent skip.
+#[tokio::test]
+async fn unwired_session_review_port_refuses_the_user_pass() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = profile_test_runtime().await;
+    let authority = runtime.authority_without_session_review();
+    let shard = &runtime.database.binding().shard_id;
+
+    let outcome = ingest_user_global_sources_for_provider_with_roots_bounded(
+        (&shard.brain_id, &shard.profile_id, &authority),
+        temp.path(),
+        None,
+        Vec::new(),
+        TEST_INGEST_BOUNDS,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(outcome.failures[0].reason_code, "session_review_unwired");
+    assert!(!outcome.failures[0].retryable);
+    assert_eq!(outcome.units_admitted, 0);
+    assert!(!outcome.scheduling_state_written);
+    assert!(
+        runtime
+            .database
+            .get_parse_offset_result(USER_INGEST_PROVIDER_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .is_none(),
+        "an unwired pass must not advance the user-ingest frontier"
+    );
 }
 
 #[tokio::test]

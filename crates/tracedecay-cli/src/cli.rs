@@ -670,9 +670,6 @@ pub enum Commands {
         /// Group by model
         #[arg(long)]
         by_model: bool,
-        /// Group by task category
-        #[arg(long)]
-        by_task: bool,
         /// Export format: csv or json
         #[arg(long)]
         export: Option<String>,

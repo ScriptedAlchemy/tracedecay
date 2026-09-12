@@ -6,12 +6,14 @@
 //! spawner (root `src/hooks/`). Depending on either from here would point the
 //! session layer back at the composition root.
 //!
-//! Each capability is therefore a process-global slot the composition root
-//! fills once during startup. Every slot has a
-//! conservative default so an unwired process still runs — it just does less.
+//! The Hermes pin resolver and the unregistered-admission factory are
+//! process-global slots the composition root fills once during startup; each
+//! reads as "unwired" until then. The session review scheduler is different:
+//! it is an explicit [`session_review::SessionReviewPort`] value that a user
+//! ingest pass receives through its `SessionIngestAuthority`, so an unwired
+//! pass is a typed refusal rather than a silent skip.
 //!
-//! Root startup must call
-//! [`hermes_profile_pin::register`] and [`session_review::register`] before any
+//! Root startup must call [`hermes_profile_pin::register`] before any
 //! transcript ingest runs.
 
 use std::future::Future;
@@ -47,23 +49,31 @@ pub mod hermes_profile_pin {
 /// The review hint is delivered through the root-owned daemon client. This
 /// crate must not know the daemon transport or scheduling policy.
 pub mod session_review {
-    use super::{Future, OnceLock, Pin};
+    use super::{Future, Pin};
 
     pub type Scheduler =
         for<'a> fn(&'a str, Option<&'a str>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
-    static SCHEDULER: OnceLock<Scheduler> = OnceLock::new();
-
-    /// Installs the hook scheduler. First call wins.
-    pub fn register(scheduler: Scheduler) {
-        let _ = SCHEDULER.set(scheduler);
+    /// The root-owned review scheduler as an explicit handle.
+    ///
+    /// Constructing one requires the scheduler, and a user ingest pass must be
+    /// handed one by its authority; there is no process-global slot that can
+    /// be left empty and read back as "do nothing".
+    #[derive(Clone, Copy, Debug)]
+    pub struct SessionReviewPort {
+        scheduler: Scheduler,
     }
 
-    /// Requests a review pass; a no-op when unwired.
-    #[hotpath::skip]
-    pub async fn schedule(provider: &str, session_id: Option<&str>) {
-        if let Some(scheduler) = SCHEDULER.get() {
-            scheduler(provider, session_id).await;
+    impl SessionReviewPort {
+        #[must_use]
+        pub const fn new(scheduler: Scheduler) -> Self {
+            Self { scheduler }
+        }
+
+        /// Requests a review pass for the sessions the ingest pass just wrote.
+        #[hotpath::skip]
+        pub async fn schedule(self, provider: &str, session_id: Option<&str>) {
+            (self.scheduler)(provider, session_id).await;
         }
     }
 }

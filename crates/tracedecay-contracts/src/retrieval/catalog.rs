@@ -1,19 +1,21 @@
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
-    BindingStatus, BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
-    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CatalogContributionInputV1,
     CatalogContributionV1, ContributionContractRef, ContributionId, CoverageContractRef,
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OmissionContractRef,
-    PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract,
-    ReconciliationContract, RetrievalFamily, RetrievalPrimitiveManifestInputV1,
-    RetrievalPrimitiveManifestV1, RetrieverId, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ScoringContractRef,
-    SortContract, SortContractId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
-    SurfaceOperationName, TemporalMode, TerminalState, TerminalStateContract,
+    ExecutableSchemaAuthority, LifecycleClass, OmissionContractRef, PaginationContract,
+    PrivacyClass, ProfileId, ProtocolRevisionRange, RetrievalFamily,
+    RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, RetrieverId,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, ScoringContractRef, SortContract, SortContractId,
+    StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TemporalMode,
+    TerminalState, TerminalStateContract,
 };
 
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -368,69 +370,68 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             })?);
             binding_ids.push(binding_id);
         }
-        capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
-            capability_id,
-            use_case_id: tracedecay_tool_catalog::UseCaseId::new(format!(
-                "use-case.application.primitive.{}",
-                spec.use_case.replace('_', "-")
-            ))?,
-            routing: RoutingContractV1::new(
-                1,
-                format!("Read {}", spec.operation.replace('_', " ")),
-                primitive_read_description(spec.operation),
-                vec![format!("Read {}", spec.operation.replace('_', " "))],
-            )?,
-            request_schema: primitive_schema(spec.operation, "request")?,
-            result_schema: primitive_schema(spec.operation, "result")?,
-            effect: EffectClass::Read,
-            scope: symbol_search_scope()?,
-            authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
-            denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
-            privacy: PrivacyClass::ScopedMetadata,
-            lifecycle: LifecycleClass::Resumable,
-            streaming: StreamingContract::Unsupported,
-            cancellation: CancellationContract::cooperative(vec![
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::BeforeRead,
-                CancellationPoint::DuringRead,
-            ])?,
-            deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
-            pagination: Some(PaginationContract::new(
-                spec.default_page_size,
-                1_000,
-                60_000,
-            )?),
-            idempotency: IdempotencyContract::NotRequired,
-            inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
-            authority_revalidation: RevalidationContract::required(vec![
-                RevalidationPoint::Authority,
-                RevalidationPoint::Scope,
-                RevalidationPoint::Policy,
-                RevalidationPoint::Configuration,
-            ])?,
-            reconciliation: ReconciliationContract::NotRequired,
-            receipt: ReceiptContract::Operation,
-            terminal_states: TerminalStateContract::new(vec![
-                TerminalState::Completed,
-                TerminalState::Cancelled,
-                TerminalState::TimedOut,
-                TerminalState::Failed,
-                TerminalState::Unavailable,
-                TerminalState::Partial,
-            ])?,
-            availability: AvailabilityContract::Available,
-            binding_ids,
-            profile_eligibility: application_profile_ids(primitive_profile_ids(spec.operation))?,
-            required_features: Vec::new(),
-        })?);
+        capabilities.push(application_capability_manifest(
+            ApplicationCapabilityManifestInput {
+                capability_id,
+                use_case_id: tracedecay_tool_catalog::UseCaseId::new(format!(
+                    "use-case.application.primitive.{}",
+                    spec.use_case.replace('_', "-")
+                ))?,
+                routing: RoutingContractV1::new(
+                    1,
+                    format!("Read {}", spec.operation.replace('_', " ")),
+                    primitive_read_description(spec.operation),
+                    vec![format!("Read {}", spec.operation.replace('_', " "))],
+                )?,
+                request_schema: primitive_schema(spec.operation, "request")?,
+                result_schema: primitive_schema(spec.operation, "result")?,
+                effect: EffectClass::Read,
+                scope: symbol_search_scope()?,
+                denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+                privacy: PrivacyClass::ScopedMetadata,
+                lifecycle: LifecycleClass::Resumable,
+                streaming: StreamingContract::Unsupported,
+                cancellation: CancellationContract::cooperative(vec![
+                    CancellationPoint::BeforeAdmission,
+                    CancellationPoint::BeforeRead,
+                    CancellationPoint::DuringRead,
+                ])?,
+                deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
+                pagination: Some(PaginationContract::new(
+                    spec.default_page_size,
+                    1_000,
+                    60_000,
+                )?),
+                inverse: None,
+                authority_revalidation: RevalidationContract::required(vec![
+                    RevalidationPoint::Authority,
+                    RevalidationPoint::Scope,
+                    RevalidationPoint::Policy,
+                    RevalidationPoint::Configuration,
+                ])?,
+                terminal_states: TerminalStateContract::new(vec![
+                    TerminalState::Completed,
+                    TerminalState::Cancelled,
+                    TerminalState::TimedOut,
+                    TerminalState::Failed,
+                    TerminalState::Unavailable,
+                    TerminalState::Partial,
+                ])?,
+                availability: AvailabilityContract::Available,
+                binding_ids,
+                profile_eligibility: application_profile_ids(primitive_profile_ids(
+                    spec.operation,
+                ))?,
+                required_features: Vec::new(),
+            },
+        )?);
     }
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.primitive-reads")?,
-        depends_on: Vec::new(),
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
+        ContributionId::new("contribution.application.primitive-reads")?,
+        Vec::new(),
         capabilities,
-        retrieval_primitives: Vec::new(),
         bindings,
-    })?;
+    ))?;
     let schemas = primitive_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
 }
@@ -648,7 +649,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         alias_of: None,
     })?);
     binding_ids.push(lsp_binding_id);
-    let capability = CapabilityManifestV1::new(CapabilityManifestInputV1 {
+    let capability = application_capability_manifest(ApplicationCapabilityManifestInput {
         capability_id: capability_id.clone(),
         use_case_id: tracedecay_tool_catalog::UseCaseId::new(SYMBOL_SEARCH_USE_CASE)?,
         routing: RoutingContractV1::new(
@@ -661,7 +662,6 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         result_schema: result_schema.clone(),
         effect: EffectClass::Read,
         scope: symbol_search_scope()?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Resumable,
@@ -673,16 +673,13 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         ])?,
         deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
         pagination: Some(PaginationContract::new(10, 100, 60_000)?),
-        idempotency: IdempotencyContract::NotRequired,
-        inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
+        inverse: None,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
             RevalidationPoint::Policy,
             RevalidationPoint::Configuration,
         ])?,
-        reconciliation: ReconciliationContract::NotRequired,
-        receipt: ReceiptContract::Operation,
         terminal_states: TerminalStateContract::new(vec![
             TerminalState::Completed,
             TerminalState::Cancelled,
@@ -736,13 +733,15 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         ],
         deadline_behavior: DeadlineBehavior::ReturnOperationReceipt,
     })?;
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.symbol-search")?,
-        depends_on: Vec::new(),
-        capabilities: vec![capability],
-        retrieval_primitives: vec![primitive],
-        bindings,
-    })?;
+    let contribution = CatalogContributionV1::new(
+        CatalogContributionInputV1::new(
+            ContributionId::new("contribution.application.symbol-search")?,
+            Vec::new(),
+            vec![capability],
+            bindings,
+        )
+        .with_retrieval_primitives(vec![primitive]),
+    )?;
     let manifest = contribution.capabilities().first().cloned().ok_or(
         ApplicationContractError::Inconsistent {
             field: "symbol-search capability",

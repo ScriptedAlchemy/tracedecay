@@ -7,7 +7,7 @@ use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTest
 use tracedecay_runtime_core::db::engine::{IntoParams, params};
 use tracedecay_temporal_query::ports::SessionCursorAuthenticator;
 
-use super::{GlobalDbCursorKeyProvider, GlobalDbCursorKeyProviderError};
+use super::{SessionTemporalCursorKeyProvider, SessionTemporalCursorKeyProviderError};
 use crate::SessionTemporalAccess;
 
 const LOAD_DEADLINE: Duration = Duration::from_secs(5);
@@ -26,7 +26,7 @@ fn database(runtime: &HostAdmissionTestRuntimeV1) -> &RegisteredGlobalDb {
 
 async fn load(
     database: &RegisteredGlobalDb,
-) -> Result<GlobalDbCursorKeyProvider, GlobalDbCursorKeyProviderError> {
+) -> Result<SessionTemporalCursorKeyProvider, SessionTemporalCursorKeyProviderError> {
     tokio::time::timeout(
         LOAD_DEADLINE,
         SessionTemporalAccess::new(database).load_session_cursor_key_provider_result(),
@@ -116,7 +116,7 @@ async fn multiple_active_keys_refuse_without_minting() {
     assert!(
         matches!(
             error,
-            GlobalDbCursorKeyProviderError::MultipleActiveKeys { .. }
+            SessionTemporalCursorKeyProviderError::MultipleActiveKeys { .. }
         ),
         "{error:?}"
     );
@@ -151,7 +151,10 @@ async fn invalid_active_key_material_refuses_without_minting() {
 
     let error = load(database).await.expect_err("corrupt material refuses");
     assert!(
-        matches!(error, GlobalDbCursorKeyProviderError::InvalidKeyMaterial),
+        matches!(
+            error,
+            SessionTemporalCursorKeyProviderError::InvalidKeyMaterial
+        ),
         "{error:?}"
     );
     assert_eq!(key_rows(database).await, before, "refusal must not mint");

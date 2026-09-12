@@ -10,7 +10,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::cli::ProjectsAction;
 use crate::commands::{
-    ProfileOfflineAuthority, join_outcome_and_restore, take_profile_offline,
+    ProfileOfflineAuthority, daemon_tool_json, join_outcome_and_restore, take_profile_offline,
     try_admit_profile_registry,
 };
 
@@ -334,17 +334,11 @@ fn render_project_context_payload(payload: &Value) -> String {
 async fn call_registry_admin(arguments: Value) -> Result<Value> {
     let cwd = std::env::current_dir()?;
     let project_root = tracedecay::config::discover_project_root(&cwd);
-    let (handshake, arguments) = registry_admin_request(project_root, arguments)?;
-    let result =
-        tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
-            .await?;
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
+    let arguments = registry_admin_arguments(project_root, arguments);
+    daemon_tool_json(None, "tracedecay_admin_cli", arguments).await
 }
 
-fn registry_admin_request(
-    project_root: Option<PathBuf>,
-    mut arguments: Value,
-) -> Result<(tracedecay_daemon_protocol::DaemonHandshake, Value)> {
+fn registry_admin_arguments(project_root: Option<PathBuf>, mut arguments: Value) -> Value {
     if let Some(project_root) = project_root
         && let Some(arguments) = arguments.as_object_mut()
     {
@@ -352,8 +346,7 @@ fn registry_admin_request(
             .entry("project_arg")
             .or_insert_with(|| json!(project_root));
     }
-    let handshake = tracedecay::daemon::handshake_for_current_client(None, None, false, false)?;
-    Ok((handshake, arguments))
+    arguments
 }
 
 /// Renders the plain-text `projects context` view. Deliberately omits
@@ -427,16 +420,14 @@ mod tests {
         "https://user:sekret-token@github.com/example/private-repo.git";
 
     #[test]
-    fn registry_admin_request_is_projectless_and_carries_cwd_project() {
+    fn registry_admin_arguments_carries_cwd_project() {
         crate::product_runtime::register_for_tests();
         let project_root = PathBuf::from("/repo");
-        let (handshake, arguments) = registry_admin_request(
+        let arguments = registry_admin_arguments(
             Some(project_root.clone()),
             json!({ "action": "registry_list", "limit": 10, "query": null }),
-        )
-        .unwrap();
+        );
 
-        assert_eq!(handshake.project_path, None);
         assert_eq!(arguments["project_arg"], json!(project_root));
     }
 

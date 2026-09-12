@@ -1271,6 +1271,7 @@ impl ProjectOpenInputs<'_> {
                     core.transcript_source_home.clone(),
                     refresh_schedulers.codex_discovery(),
                     Arc::clone(&background_cpu),
+                    crate::session_review_port(),
                 )),
             )
             .await;

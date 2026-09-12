@@ -464,13 +464,13 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> Result<
-        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
+        tracedecay_session_temporal_store::SessionTemporalStore<
             '_,
             tracedecay_global_db::RegisteredGlobalDb,
         >,
     > {
         Ok(
-            tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
+            tracedecay_session_temporal_store::SessionTemporalStore::new(
                 self.session_database_for_test(scope)?,
             ),
         )

@@ -11,8 +11,6 @@ use super::contracts::{
 use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
 use super::schema::ConfigurationSchemaError;
-#[cfg(test)]
-use super::schema::ensure_configuration_schema;
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
@@ -29,7 +27,7 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
-use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_store::StoreShardScopeV1;
 use tracedecay_store::configuration::{
@@ -52,27 +50,17 @@ use activation::{
     insert_component_activation_event, latest_component_activation_state,
     validate_activation_error_code, validate_component_name,
 };
-#[cfg(test)]
-use audit::decode_audit_row;
 use codec::{StoredConfigurationProtectedOperationV1, invalid_store_data, unavailable_store};
-#[cfg(test)]
-use mutation::commit_configuration_transaction;
-#[cfg(test)]
-use mutation::validate_commit_bindings;
 use mutation::{
     ConfigurationCommitDraft, commit_direct_in_transaction_with_registry,
     current_state_from_transaction, derived_identifier, map_protected_change_snapshot_error,
     map_store_error,
 };
 use read::read_revision_from_executor;
-#[cfg(test)]
-use read::{current_revision_id_from_executor, read_change_plan_from_executor};
 use read::{
     validate_snapshot_registry_completeness, validate_snapshot_registry_completeness_with_registry,
 };
 use revision::{insert_revision, insert_revision_with_registry};
-#[cfg(test)]
-use write::insert_change_plan;
 
 pub use mutation::{ConfigurationDirectCommitOutcomeV1, commit_direct_in_transaction};
 
@@ -84,227 +72,6 @@ pub enum ConfigurationStorageError {
     Sql(#[from] tracedecay_runtime_core::db::engine::Error),
     #[error("configuration storage encoded invalid data: {0}")]
     Encoding(String),
-}
-
-/// Connection-local SQL helper used only behind the registered database's writer and
-/// read-snapshot lanes. It is deliberately not a public authority surface.
-#[cfg(test)]
-struct ConfigurationSqlStore<'a> {
-    connection: &'a Connection,
-}
-
-#[cfg(test)]
-impl<'a> ConfigurationSqlStore<'a> {
-    fn new(connection: &'a Connection) -> Self {
-        Self { connection }
-    }
-}
-
-#[cfg(test)]
-impl ConfigurationSqlStore<'_> {
-    #[hotpath::skip]
-    pub async fn current_revision(
-        &self,
-    ) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
-        let revision_id = current_revision_id_from_executor(self.connection).await?;
-        read_revision_from_executor(self.connection, &revision_id)
-            .await?
-            .ok_or_else(|| invalid_store_data("current configuration revision disappeared"))
-    }
-
-    #[hotpath::skip]
-    pub async fn read_revision(
-        &self,
-        revision_id: &ConfigurationRevisionId,
-    ) -> ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>> {
-        revision_id
-            .validate()
-            .map_err(ConfigurationStoreError::from)?;
-        read_revision_from_executor(self.connection, revision_id).await
-    }
-
-    #[hotpath::skip]
-    pub async fn save_change_plan(
-        &self,
-        plan: &ConfigurationProtectedPlanRecordV1,
-    ) -> ConfigurationStoreResult<()> {
-        plan.validate().map_err(ConfigurationStoreError::from)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(unavailable_store)?;
-        let outcome = match read_change_plan_from_executor(&transaction, &plan.plan.plan_id).await {
-            Ok(Some(existing)) if existing == *plan => Ok(()),
-            Ok(Some(_)) => Err(invalid_store_data(
-                "configuration change plan id conflicts with immutable prior input",
-            )),
-            Ok(None) => insert_change_plan(&transaction, plan).await,
-            Err(error) => Err(error),
-        };
-        crate::sqlite_persist::commit_outcome(
-            transaction,
-            outcome,
-            ConfigurationStoreError::Unavailable,
-        )
-        .await
-    }
-
-    #[hotpath::skip]
-    pub async fn read_change_plan(
-        &self,
-        plan_id: &ChangePlanId,
-    ) -> ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>> {
-        plan_id.validate().map_err(ConfigurationStoreError::from)?;
-        read_change_plan_from_executor(self.connection, plan_id).await
-    }
-
-    #[hotpath::skip]
-    pub async fn commit(
-        &self,
-        commit: ConfigurationCommitV1,
-    ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1> {
-        validate_commit_bindings(&commit)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(unavailable_store)?;
-        let outcome = commit_configuration_transaction(&transaction, &commit, false, None).await;
-        crate::sqlite_persist::commit_outcome(
-            transaction,
-            outcome,
-            ConfigurationStoreError::Unavailable,
-        )
-        .await
-    }
-
-    #[hotpath::skip]
-    pub async fn audit(
-        &self,
-        after: Option<&ConfigurationAuditEventId>,
-        limit: usize,
-    ) -> ConfigurationStoreResult<Vec<ConfigurationAuditEvent>> {
-        if limit == 0 {
-            return Err(invalid_store_data(
-                "configuration audit limit must be non-zero",
-            ));
-        }
-        let limit = i64::try_from(limit).map_err(|_| {
-            invalid_store_data("configuration audit limit exceeds SQLite integer range")
-        })?;
-        let cursor = if let Some(after) = after {
-            after.validate().map_err(ConfigurationStoreError::from)?;
-            let mut rows = self
-                .connection
-                .query(
-                    "SELECT occurred_at FROM configuration_audit_events WHERE event_id = ?1",
-                    params![after.as_str()],
-                )
-                .await
-                .map_err(unavailable_store)?;
-            let Some(row) = rows.next().await.map_err(unavailable_store)? else {
-                return Err(invalid_store_data(
-                    "configuration audit cursor does not exist",
-                ));
-            };
-            let occurred_at = row.get::<i64>(0).map_err(|error| {
-                invalid_store_data(format!("read configuration audit cursor time: {error}"))
-            })?;
-            Some((occurred_at, after.as_str().to_owned()))
-        } else {
-            None
-        };
-        let mut rows = match cursor {
-            Some((occurred_at, event_id)) => self
-                .connection
-                .query(
-                    "SELECT event_id, actor_id, idempotency_key, operation_kind,
-                            base_revision_id, result_revision_id, sealed_target_reference,
-                            event_scoped_target_commitment, receipt_digest, safe_reason_code, occurred_at
-                     FROM configuration_audit_events
-                     WHERE occurred_at > ?1 OR (occurred_at = ?1 AND event_id > ?2)
-                     ORDER BY occurred_at ASC, event_id ASC
-                     LIMIT ?3",
-                    params![occurred_at, event_id, limit],
-                )
-                .await
-                .map_err(unavailable_store)?,
-            None => self
-                .connection
-                .query(
-                    "SELECT event_id, actor_id, idempotency_key, operation_kind,
-                            base_revision_id, result_revision_id, sealed_target_reference,
-                            event_scoped_target_commitment, receipt_digest, safe_reason_code, occurred_at
-                     FROM configuration_audit_events
-                     ORDER BY occurred_at ASC, event_id ASC
-                     LIMIT ?1",
-                    params![limit],
-                )
-                .await
-                .map_err(unavailable_store)?,
-        };
-        let mut events = Vec::new();
-        while let Some(row) = rows.next().await.map_err(unavailable_store)? {
-            let (event, sealed_target_reference) = decode_audit_row(&row)?;
-            if sealed_target_reference.is_some() {
-                return Err(invalid_store_data(
-                    "connection-local test store cannot authorize sealed audit targets",
-                ));
-            }
-            events.push(event);
-        }
-        Ok(events)
-    }
-}
-
-#[cfg(test)]
-impl ConfigurationRevisionStore for ConfigurationSqlStore<'_> {
-    #[hotpath::skip]
-    async fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
-        ConfigurationSqlStore::current_revision(self).await
-    }
-
-    #[hotpath::skip]
-    async fn read_revision(
-        &self,
-        revision_id: &ConfigurationRevisionId,
-    ) -> ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>> {
-        ConfigurationSqlStore::read_revision(self, revision_id).await
-    }
-
-    #[hotpath::skip]
-    async fn save_change_plan(
-        &self,
-        plan: &ConfigurationProtectedPlanRecordV1,
-    ) -> ConfigurationStoreResult<()> {
-        ConfigurationSqlStore::save_change_plan(self, plan).await
-    }
-
-    #[hotpath::skip]
-    async fn read_change_plan(
-        &self,
-        plan_id: &ChangePlanId,
-    ) -> ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>> {
-        ConfigurationSqlStore::read_change_plan(self, plan_id).await
-    }
-
-    #[hotpath::skip]
-    async fn commit(
-        &self,
-        commit: ConfigurationCommitV1,
-    ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1> {
-        ConfigurationSqlStore::commit(self, commit).await
-    }
-
-    #[hotpath::skip]
-    async fn audit(
-        &self,
-        after: Option<&ConfigurationAuditEventId>,
-        limit: usize,
-    ) -> ConfigurationStoreResult<Vec<ConfigurationAuditEvent>> {
-        ConfigurationSqlStore::audit(self, after, limit).await
-    }
 }
 
 /// Concrete control-plane adapter over one already-open owned session store.

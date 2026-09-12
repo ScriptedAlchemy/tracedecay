@@ -3,13 +3,18 @@
 //! Candidate generation and live comparison over packaged authoritative
 //! workload and corpus. Production candidate types, packaged-profile inputs,
 //! native qualification, and direct-report scoring live in
-//! `tracedecay_query::search_quality`; this crate re-exports that kernel so
-//! existing evaluator paths keep resolving.
+//! `tracedecay_query::search_quality`; callers import that kernel directly.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tracedecay_query::search_quality::{
+    DirectActivationEvaluationV1, DirectEvaluationReportV1, DirectEvaluationStatusV1,
+    GenerateCandidateOutputsResultV1, ProductionCandidateNativeExecutionAuthorityV1,
+    SearchEvalError, activation_profile_chain, compute_corpus_digest, compute_workload_digest,
+    direct_evaluated_profile_material, evaluate_generated_outputs, load_candidate_workload,
+};
 
 mod admitted_corpus;
 pub mod candidate_output;
@@ -18,36 +23,6 @@ mod packaged_assets;
 
 #[cfg(test)]
 mod report_tests;
-
-pub use tracedecay_query::search_quality::semantic_native;
-pub use tracedecay_query::search_quality::{
-    CandidateOutputError, CandidateWorkloadV1, DirectActivationEvaluationV1,
-    DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1, DirectEvaluationStatusV1,
-    DirectProfileEvaluationV1, DirectQualityMetricsV1, DirectQueryEvaluationV1,
-    DirectQueryQualityV1, DirectRatioMetricV1, DirectStratumQualityV1, DirectWorstStratumV1,
-    EvaluationConcurrencyContractV1, EvaluationExecutionContractV1,
-    GenerateCandidateOutputsResultV1, NativeQualificationEvaluatorKeyV1,
-    NativeQualificationExecutionResourceKeyV1, NativeQualificationExpectationsV1,
-    NativeQualificationKeyV1, NativeQualificationModelKeyV1, NativeQualificationPlatformV1,
-    NativeQualificationRuntimeKeyV1, NativeQualificationVectorGenerationRetentionV1,
-    OptionalStageMeasurementV1, OptionalStageMeasurementsV1, PackagedNativeActivationCandidateV1,
-    PackagedNativeQualificationErrorV1, PackagedNativeQualificationV1,
-    PortableNativeQualificationEvidenceV1, ProductionCandidateNativeExecutionAuthorityV1,
-    ProductionCandidateNativeGenerationResourcesV1, ProductionCandidateNativeQueryContextV1,
-    ProductionCandidateNativeQueryInputsV1, ProductionCandidateNativeResourceContextV1,
-    ProductionCandidateOutputV1, QUERY_BASELINE_PROFILE, RERANK_PROFILE,
-    ResourceMeasurementStatusV1, SEMANTIC_PROFILE, SearchEvalError, WorkloadQueryV1,
-    activation_profile_chain, compute_corpus_digest, compute_profile_material_digest,
-    compute_workload_digest, direct_evaluated_profile_material,
-    encode_daemon_native_qualification_blob, encode_packaged_native_qualification,
-    evaluate_generated_outputs, evaluate_generated_outputs_against_corpus,
-    load_authoritative_default_workload_metadata, load_candidate_workload,
-    load_default_evaluated_profile_material, load_direct_evaluated_profile_material,
-    load_packaged_native_qualification_from_bytes, nearest_rank,
-    packaged_native_qualification_bytes, qualified_default_activation_candidate,
-    validate_packaged_native_activation_report, validate_workload_for_tuning,
-    write_daemon_native_qualification, write_packaged_native_qualification,
-};
 
 pub use admitted_corpus::root_admitted_corpus_scope;
 pub use candidate_output::{

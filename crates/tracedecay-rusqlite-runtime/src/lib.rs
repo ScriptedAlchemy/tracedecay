@@ -28,7 +28,6 @@ pub mod runtime_ledger {
 pub mod maintenance;
 mod operation;
 mod persistence;
-mod profiled_lock;
 pub mod read_consistency;
 pub mod reader;
 pub mod remote;

@@ -10,14 +10,17 @@ use std::sync::LazyLock;
 
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingStatus, BindingSurface, CatalogValidationError,
-    CodecBindingKey, ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1,
-    ExecutableBindingV1, ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1,
+    ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1,
     SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1, SdkExecutableBindingV1,
     SdkTransportBindingV1, SurfaceBindingV1, SurfaceOperationName,
 };
 
+use crate::application_catalog_projection::{
+    ApplicationCatalogProjection, project_application_executable_bindings,
+};
 use crate::{
-    ApplicationContractError, application_catalog_contributions, application_handler_descriptors,
+    ApplicationContractError, application_catalog_contributions,
     handoff_executable_binding_registry, multi_root::multi_root_executable_binding_registry,
     retained_surface_executable_binding_registry, work_executable_binding_registry,
     workflow_executable_binding_registry,
@@ -33,63 +36,17 @@ pub fn application_http_executable_binding_registry()
 
 fn build_application_http_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let handlers = application_handler_descriptors()?;
-    let contributions = application_catalog_contributions()?;
-    let mut bindings = Vec::new();
-    for (operation, descriptor) in handlers.surface_operations() {
-        let capability_id = descriptor.operation().capability_id();
-        let Some(contribution) = contributions.iter().find(|contribution| {
-            contribution
-                .capabilities()
-                .iter()
-                .any(|manifest| manifest.capability_id() == capability_id)
-        }) else {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "application HTTP contribution",
-            });
-        };
-        let Some(http_binding) = contribution.bindings().iter().find(|binding| {
-            binding.capability_id() == capability_id
-                && binding.surface() == BindingSurface::Http
-                && binding.operation().as_str() == operation.name_for_surface(BindingSurface::Http)
-                && matches!(binding.status(), BindingStatus::Current)
-                && !binding.is_alias()
-        }) else {
-            continue;
-        };
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| manifest.capability_id() == capability_id)
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "application HTTP capability",
-            })?;
-        let schema = contribution.executable_schema(capability_id).ok_or(
+    project_application_executable_bindings(ApplicationCatalogProjection::Http, |binding, name| {
+        let operation = ApplicationSurfaceOperation::from_catalog_name(name).ok_or(
             ApplicationContractError::Inconsistent {
-                field: "application HTTP schema",
+                field: "application HTTP operation",
             },
         )?;
-        let service_id = descriptor
-            .service_id()
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "application HTTP service",
-            })?;
-        bindings.push(ExecutableBindingAvailabilityV1::available(
-            ExecutableBindingV1::daemon_owned(
-                manifest,
-                OperationId::new(format!("operation.application.{}", operation.as_str()))?,
-                service_id.clone(),
-                schema.request_schema().clone(),
-                schema.result_schema().clone(),
-                CodecBindingKey::new(format!("codec.application.{}.json.v1", operation.as_str()))?,
-                RouteExposureV1::Public {
-                    binding_id: http_binding.binding_id().clone(),
-                    route_path: format!("/application{}", application_http_route_path(operation)),
-                },
-            )?,
-        ));
-    }
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
+        Ok(RouteExposureV1::Public {
+            binding_id: binding.binding_id().clone(),
+            route_path: format!("/application{}", application_http_route_path(operation)),
+        })
+    })
 }
 
 pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> String {

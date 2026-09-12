@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::plugin_validation_support::body_after_frontmatter;
-use tracedecay_automation_runtime::automation::skill_frontmatter::parse_skill_frontmatter;
+use tracedecay_automation::skill_frontmatter::parse_skill_frontmatter;
 
 /// Reads a required scalar frontmatter field from a `---`-fenced markdown file,
 /// asserting it is present and non-empty through the production parser.

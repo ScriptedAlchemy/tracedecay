@@ -9,10 +9,9 @@ use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
-    CanonicalObservationRelationsV1, ClaudeByteRangeV1, ClaudeFileGenerationV1,
-    ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, CommitId,
-    ComponentVersion, CoverageReportV1, DurableClaudeObservationV1, EvidenceAvailabilityV1,
-    EvidenceClass, GenerationBoundRepositoryProvenanceV1, NativeAliasV2, ObservationId,
+    CanonicalObservationRelationsV1, CommitId, ComponentVersion, CoverageReportV1,
+    DurableClaudeObservationV1, EvidenceAvailabilityV1, EvidenceClass,
+    GenerationBoundRepositoryProvenanceV1, NativeAliasV2, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1,
@@ -42,23 +41,23 @@ async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
         .unwrap()
 }
 
-fn source() -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new("session.observation-store").unwrap()).unwrap()
+fn source() -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(SessionId::new("session.observation-store").unwrap()).unwrap()
 }
 
 fn scope() -> ObservationScopeV1 {
     ObservationScopeV1::Profile
 }
 
-fn cursor(byte_offset: u64) -> ClaudeSourceCursorV1 {
+fn cursor(byte_offset: u64) -> ObservationSourceCursorV1 {
     cursor_in_generation(GENERATION, byte_offset)
 }
 
-fn cursor_in_generation(generation: u64, byte_offset: u64) -> ClaudeSourceCursorV1 {
-    ClaudeSourceCursorV1::new(
+fn cursor_in_generation(generation: u64, byte_offset: u64) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::new(
         source(),
         scope(),
-        ClaudeFileGenerationV1::new(generation).unwrap(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
         byte_offset,
     )
     .unwrap()
@@ -102,11 +101,11 @@ fn observation_in_scope(
         Some(payload_reference),
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::new(
         source(),
         scope,
-        ClaudeFileGenerationV1::new(generation).unwrap(),
-        ClaudeByteRangeV1::new(start, end).unwrap(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationSourceRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
 
@@ -121,9 +120,9 @@ fn observation_in_scope(
 
 fn write(
     observation: DurableClaudeObservationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
-    let next_cursor = ClaudeSourceCursorV1::new(
+    let next_cursor = ObservationSourceCursorV1::new(
         observation.source().clone(),
         observation.scope().clone(),
         observation.identity().generation(),
@@ -576,13 +575,13 @@ fn provider_malformed_advance(
 }
 
 fn cursor_advance(
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
     start: u64,
     end: u64,
     reason: NonDurableFrameReason,
 ) -> ObservationCursorAdvance {
-    let generation = ClaudeFileGenerationV1::new(GENERATION).unwrap();
-    let covered = ClaudeByteRangeV1::new(start, end).unwrap();
+    let generation = ObservationSourceGenerationV1::new(GENERATION).unwrap();
+    let covered = ObservationSourceRangeV1::new(start, end).unwrap();
     let disposition = match reason {
         NonDurableFrameReason::SanitizerRejected => Some(SanitizerDispositionV1::Rejected),
         NonDurableFrameReason::SanitizerQuarantined => Some(SanitizerDispositionV1::Quarantined),
@@ -1424,7 +1423,10 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
     let before = user_table_counts(&database_path);
     let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::BlankFrame);
 
-    assert_eq!(advance.covered(), ClaudeByteRangeV1::new(0, 10).unwrap());
+    assert_eq!(
+        advance.covered(),
+        ObservationSourceRangeV1::new(0, 10).unwrap()
+    );
     assert_eq!(advance.reason(), NonDurableFrameReason::BlankFrame);
     assert_eq!(
         store.advance_source_cursor(advance.clone()).await.unwrap(),
@@ -1640,9 +1642,9 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
         ObservationCursorAdvance::new(
             source(),
             scope(),
-            ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+            ObservationSourceGenerationV1::new(GENERATION).unwrap(),
             Some(cursor(10)),
-            ClaudeByteRangeV1::new(11, 20).unwrap(),
+            ObservationSourceRangeV1::new(11, 20).unwrap(),
             NonDurableFrameReason::BlankFrame,
         ),
         Err(ObservationStoreError::CursorCoverageMismatch)
@@ -1722,18 +1724,18 @@ async fn cursor_only_progress_allows_file_replacement_from_zero_with_exact_cas()
         .await
         .unwrap();
 
-    let replacement_generation = ClaudeFileGenerationV1::new(GENERATION + 1).unwrap();
+    let replacement_generation = ObservationSourceGenerationV1::new(GENERATION + 1).unwrap();
     let advance = ObservationCursorAdvance::new(
         source(),
         scope(),
         replacement_generation,
         Some(cursor(42)),
-        ClaudeByteRangeV1::new(0, 10).unwrap(),
+        ObservationSourceRangeV1::new(0, 10).unwrap(),
         NonDurableFrameReason::OutOfScope,
     )
     .unwrap();
     let replacement_cursor =
-        ClaudeSourceCursorV1::new(source(), scope(), replacement_generation, 10).unwrap();
+        ObservationSourceCursorV1::new(source(), scope(), replacement_generation, 10).unwrap();
 
     assert_eq!(
         store.advance_source_cursor(advance.clone()).await.unwrap(),
@@ -1755,9 +1757,9 @@ fn cursor_only_progress_rejects_file_replacement_after_zero() {
         ObservationCursorAdvance::new(
             source(),
             scope(),
-            ClaudeFileGenerationV1::new(GENERATION + 1).unwrap(),
+            ObservationSourceGenerationV1::new(GENERATION + 1).unwrap(),
             Some(cursor(42)),
-            ClaudeByteRangeV1::new(1, 10).unwrap(),
+            ObservationSourceRangeV1::new(1, 10).unwrap(),
             NonDurableFrameReason::OutOfScope,
         ),
         Err(ObservationStoreError::CursorCoverageMismatch)

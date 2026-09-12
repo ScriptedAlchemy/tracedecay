@@ -186,12 +186,7 @@ static CODE_INDEX_GENERATION_DECODES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hotpath")]
 static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
-pub fn scoped_code_index_store_root(store_root: &Path, canonical_project_root: &Path) -> PathBuf {
-    tracedecay_code_index_retention::code_index_generations::scoped_code_index_store_root(
-        store_root,
-        canonical_project_root,
-    )
-}
+pub use tracedecay_code_index_retention::code_index_generations::scoped_code_index_store_root;
 
 /// How the scheduler is hinted about changes.
 ///
@@ -3814,19 +3809,20 @@ impl DaemonCodeTextArtifactStoreV1 {
             // a plan made before the descriptor was attached.
             let lock = acquire_code_generation_store_lock(&self.store_root)
                 .map_err(text_artifact_unavailable)?;
-            let (artifact_hex, artifact_size_bytes) = hotpath::measure_block!(
+            let (artifact_sha256, artifact_size_bytes) = hotpath::measure_block!(
                 "query.artifact.store.state_digest",
-                sha256_private_file_hex_and_size(staging_path, control)
+                sha256_private_file_and_size(staging_path, control)
             )?;
             #[cfg(feature = "hotpath")]
             hotpath::gauge!("query.artifact.store.digest_bytes").set(artifact_size_bytes);
             let descriptor = DurableCodeTextArtifactDescriptorV1 {
                 generation_id: generation_id.clone(),
-                artifact_file: format!("text-artifact-{artifact_hex}.bin"),
-                artifact_digest: ManifestDigest::from_sha256_bytes(
-                    &hex::decode(&artifact_hex).map_err(text_artifact_unavailable)?,
-                )
-                .map_err(text_artifact_unavailable)?,
+                artifact_file: format!(
+                    "text-artifact-{}.bin",
+                    encode_lowercase_hex(&artifact_sha256)
+                ),
+                artifact_digest: ManifestDigest::from_sha256_bytes(&artifact_sha256)
+                    .map_err(text_artifact_unavailable)?,
                 artifact_size_bytes,
             };
             let final_path = artifacts_root.join(&descriptor.artifact_file);
@@ -3836,9 +3832,9 @@ impl DaemonCodeTextArtifactStoreV1 {
                     // object contains the named bytes. Verify the stable destination
                     // before withdrawing staging evidence; a symlink, non-regular
                     // object, truncated file, or same-name collision fails closed.
-                    let (existing_hex, existing_size_bytes) = hotpath::measure_block!(
+                    let (existing_sha256, existing_size_bytes) = hotpath::measure_block!(
                         "query.artifact.store.dedupe_compare",
-                        sha256_private_file_hex_and_size(&final_path, control)
+                        sha256_private_file_and_size(&final_path, control)
                     )?;
                     if existing_size_bytes != artifact_size_bytes {
                         return Err(RetrievalPortError::Contract(
@@ -3846,7 +3842,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                                 .to_owned(),
                         ));
                     }
-                    if existing_hex != artifact_hex {
+                    if existing_sha256 != artifact_sha256 {
                         return Err(RetrievalPortError::Contract(
                             "existing code text artifact contains different bytes".to_owned(),
                         ));
@@ -8900,10 +8896,10 @@ fn snapshot_content_identity(
 /// Cancellation is checked before opening and after every bounded read, so a
 /// shutdown or superseding generation cannot strand publication in a
 /// corpus-sized uninterruptible hash.
-fn sha256_private_file_hex_and_size(
+fn sha256_private_file_and_size(
     path: &Path,
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(String, u64), RetrievalPortError> {
+) -> Result<([u8; 32], u64), RetrievalPortError> {
     checkpoint_text_artifact_control(control)?;
     let named_metadata = path.symlink_metadata().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -8958,10 +8954,7 @@ fn sha256_private_file_hex_and_size(
             "code text artifact named file changed while hashing".to_owned(),
         ));
     }
-    Ok((
-        encode_lowercase_hex(&hasher.finalize()),
-        file_metadata.len(),
-    ))
+    Ok((hasher.finalize().into(), file_metadata.len()))
 }
 
 fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortError> {

@@ -6,6 +6,8 @@
 //! `application_handler_descriptors` so the descriptor-derived catalog has one
 //! owner every transport can reach.
 
+use std::collections::BTreeSet;
+
 use crate::handlers::BoundApplicationHandler;
 use crate::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
@@ -19,13 +21,6 @@ use tracedecay_tool_catalog::{
     CatalogValidationError, IdentifierError, ProfileBudget, ProfileDefinition,
     ProfileDefinitionInputV1, ProfileId, ProfileKind, UseCaseId,
 };
-
-// The default profile currently composes 403 shipped bindings. This reviewed
-// ceiling leaves 45 bindings of admission headroom while the eager-profile
-// routing and serialized discovery assertions in the root
-// `product_surface_suite/catalog_composition_contract.rs` suite bound the
-// client-facing cost.
-const DEFAULT_PROFILE_MAXIMUM_BINDINGS: u32 = 448;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CatalogCompositionError {
@@ -156,11 +151,19 @@ pub fn validate_application_catalog(
 fn application_profiles(
     contributions: &[CatalogContributionV1],
 ) -> Result<Vec<ProfileDefinition>, CatalogCompositionError> {
+    let default_maximum_bindings = u32::try_from(profile_binding_count(
+        contributions,
+        APPLICATION_DEFAULT_PROFILE_ID,
+    ))
+    .map_err(|_| CatalogValidationError::InvalidValue {
+        field: "default profile binding budget",
+        reason: "composed binding count exceeds u32",
+    })?;
     [
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(DEFAULT_PROFILE_MAXIMUM_BINDINGS, 18_000)?,
+            ProfileBudget::new(default_maximum_bindings, 18_000)?,
             true,
         ),
         (
@@ -193,6 +196,26 @@ fn application_profiles(
         )
     })
     .collect()
+}
+
+fn profile_binding_count(contributions: &[CatalogContributionV1], profile_id: &str) -> usize {
+    let capability_ids = contributions
+        .iter()
+        .flat_map(CatalogContributionV1::capabilities)
+        .filter(|capability| {
+            capability.availability().is_callable()
+                && capability
+                    .profile_eligibility()
+                    .iter()
+                    .any(|eligible| eligible.as_str() == profile_id)
+        })
+        .map(|capability| capability.capability_id())
+        .collect::<BTreeSet<_>>();
+    contributions
+        .iter()
+        .flat_map(CatalogContributionV1::bindings)
+        .filter(|binding| capability_ids.contains(binding.capability_id()))
+        .count()
 }
 
 fn application_profile(
@@ -241,8 +264,6 @@ fn application_profile(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
     use crate::handlers::CanonicalApplicationDispatcher;
     use crate::{ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic};

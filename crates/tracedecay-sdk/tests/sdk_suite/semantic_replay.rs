@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN};
 use serde_json::Value;
 use tempfile::TempDir;
+use tracedecay_contracts::{APPLICATION_REQUEST_ID_HEADER, RequestId};
 use tracedecay_sdk::client::{
     Client, ClientError, ConnectionMode, OperationRequestOptions, TypedResponse,
 };
-use tracedecay_sdk::contracts::{APPLICATION_REQUEST_ID_HEADER, RequestId};
 use tracedecay_sdk::operations::ApplicationFactStoreCurate;
 
 const VALID_REQUEST_ID: &str = "request.sdk.semantic-replay";
@@ -54,7 +54,7 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     let project_id = project_id(&binary, &home, &profile, &project);
     let client = sdk_client(&authority, &project_id);
 
-    let request = tracedecay_sdk::contracts::retained_surfaces::FactStoreCurateRequestV1::default();
+    let request = tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1::default();
     let request_id = RequestId::new(VALID_REQUEST_ID).expect("canonical replay identity");
 
     assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 0);
@@ -214,10 +214,10 @@ fn sdk_client(authority: &Value, project_id: &str) -> Client {
 
 fn execute_curate(
     client: &Client,
-    request: &tracedecay_sdk::contracts::retained_surfaces::FactStoreCurateRequestV1,
+    request: &tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1,
     request_id: &RequestId,
 ) -> Result<
-    TypedResponse<tracedecay_sdk::contracts::retained_surfaces::AutomationRunResultV1>,
+    TypedResponse<tracedecay_contracts::retained_surfaces::AutomationRunResultV1>,
     ClientError,
 > {
     client.execute_with_options::<ApplicationFactStoreCurate>(
