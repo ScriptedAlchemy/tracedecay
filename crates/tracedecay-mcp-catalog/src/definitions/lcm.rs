@@ -295,7 +295,7 @@ pub(super) fn def_lcm_expand() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand",
         "LCM Expand",
-        "Expand one raw message, summary node, or external payload through the bounded LCM query API from the active project store.",
+        "Expand one canonical occurrence, legacy raw-message alias, summary node, or external payload through the bounded LCM query API from the active project store.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -311,6 +311,19 @@ pub(super) fn def_lcm_expand() -> ToolDefinition {
                 "target": {
                     "description": "Expansion target.",
                     "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": {"const": "canonical_occurrence"},
+                                "message_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Canonical message identity returned by lcm_load_session."
+                                }
+                            },
+                            "required": ["kind", "message_id"]
+                        },
                         {
                             "type": "object",
                             "additionalProperties": false,

@@ -344,8 +344,12 @@ mod lcm_definition_compatibility_tests {
             "string"
         );
         assert_eq!(
-            expand.input_schema["properties"]["target"]["oneOf"][1]["properties"]["node_id"]["type"],
+            expand.input_schema["properties"]["target"]["oneOf"][2]["properties"]["node_id"]["type"],
             "string"
+        );
+        assert_eq!(
+            expand.input_schema["properties"]["target"]["oneOf"][0]["properties"]["kind"]["const"],
+            "canonical_occurrence"
         );
         assert!(
             expand.input_schema["properties"]

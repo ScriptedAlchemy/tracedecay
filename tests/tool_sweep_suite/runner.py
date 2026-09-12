@@ -1007,21 +1007,44 @@ def prime_fixture_values(
                     (
                         value
                         for value in _objects(loaded)
-                        if value.get("content") == fixture["lcm_message"]
+                        if value.get("storage_kind") == "canonical_occurrence"
+                        and isinstance(value.get("message_id"), str)
+                        and value.get("content") == fixture["lcm_message"]
                     ),
                     None,
                 )
                 if captured_message is not None:
-                    store_id = captured_message.get("store_id")
-                    if not isinstance(store_id, int) or isinstance(store_id, bool):
-                        raise SweepError(
-                            "LCM captured prompt has no expandable raw-message store identity"
-                        )
-                    fixture["lcm_store_id"] = store_id
+                    fixture["lcm_message_id"] = captured_message["message_id"]
                     break
                 if time.monotonic() >= ready_at:
                     raise SweepError("LCM session producer omitted the captured prompt message")
                 time.sleep(MOUNT_RETRY_DELAY_S)
+
+            expanded = _producer_call(
+                client,
+                "tracedecay_lcm_expand",
+                {
+                    "provider": "codex",
+                    "session_id": fixture["session_id"],
+                    "target": {
+                        "kind": "canonical_occurrence",
+                        "message_id": fixture["lcm_message_id"],
+                    },
+                    "format": "json",
+                },
+                deadline("tracedecay_lcm_expand"),
+            )
+            expanded_objects = list(_objects(expanded))
+            if not any(
+                value.get("content") == fixture["lcm_message"]
+                for value in expanded_objects
+            ) or not any(
+                value.get("message_id") == fixture["lcm_message_id"]
+                for value in expanded_objects
+            ):
+                raise SweepError(
+                    "LCM expansion did not return the canonical prompt identity and content"
+                )
 
     with prime_group("code_navigation"):
         prime_code_navigation(
@@ -1299,7 +1322,10 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return {
             "provider": "codex",
             "session_id": fixture["session_id"],
-            "target": {"kind": "raw_message", "store_id": fixture["lcm_store_id"]},
+            "target": {
+                "kind": "canonical_occurrence",
+                "message_id": fixture["lcm_message_id"],
+            },
             "format": "json",
         }
     if name == "tracedecay_lcm_load_session":

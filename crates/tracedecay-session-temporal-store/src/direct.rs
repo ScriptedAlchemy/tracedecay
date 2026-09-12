@@ -40,6 +40,9 @@ pub async fn resolve_expand_target(
     target: &LcmExpandTarget,
 ) -> Result<ResolvedDirectAnchor, SessionTemporalExecutionError> {
     match target {
+        LcmExpandTarget::CanonicalOccurrence { message_id } => {
+            resolve_canonical_occurrence_anchor(read, provider, session_id, message_id).await
+        }
         LcmExpandTarget::RawMessage { store_id } => {
             resolve_occurrence_anchor(read, provider, *store_id).await
         }
@@ -50,6 +53,57 @@ pub async fn resolve_expand_target(
             resolve_external_anchor(read, provider, session_id, payload_ref).await
         }
     }
+}
+
+#[hotpath::measure(
+    future = true,
+    label = "session_temporal.query.direct_canonical_occurrence"
+)]
+async fn resolve_canonical_occurrence_anchor(
+    read: &TemporalSqlRead<'_>,
+    provider: &str,
+    session_id: &SessionId,
+    message_id: &str,
+) -> Result<ResolvedDirectAnchor, SessionTemporalExecutionError> {
+    let mut rows = read
+        .query(
+            "SELECT occurrence.retrieval_anchor_id
+             FROM session_temporal_generations AS generation
+             JOIN session_occurrences AS occurrence
+               ON occurrence.session_id = generation.session_id
+              AND occurrence.generation = generation.generation
+             WHERE generation.session_id = ?1
+               AND generation.state = 'active'
+               AND occurrence.message_id = ?2
+               AND occurrence.source_provider = ?3
+             ORDER BY occurrence.occurrence_id
+             LIMIT 2",
+            params![session_id.as_str(), message_id, provider],
+        )
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
+        .ok_or(SessionTemporalExecutionError::Deleted)?;
+    let anchor_id = RetrievalAnchorId::new(
+        row.get::<String>(0)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+    )
+    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
+        .is_some()
+    {
+        return Err(SessionTemporalExecutionError::Unavailable);
+    }
+    Ok(ResolvedDirectAnchor {
+        anchor_id,
+        owner_session_id: session_id.clone(),
+    })
 }
 
 /// Provider matching reads `session_occurrences.source_provider`, the

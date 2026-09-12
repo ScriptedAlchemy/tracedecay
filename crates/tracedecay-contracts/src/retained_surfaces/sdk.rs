@@ -398,6 +398,7 @@ pub struct LcmDescribeRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LcmExpandTargetV1 {
+    CanonicalOccurrence { message_id: String },
     RawMessage { store_id: u64 },
     SummaryNode { node_id: String },
     ExternalPayload { payload_ref: String },
