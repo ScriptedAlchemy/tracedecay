@@ -5,10 +5,8 @@
 //! building, call graph traversal, impact analysis, and more.
 
 pub(crate) mod project_route;
-pub(crate) mod scope;
 /// MCP server implementation.
 pub mod server;
-mod tool_analytics;
 
 /// Tool dispatch and daemon-coupled handlers.
 pub mod tools;

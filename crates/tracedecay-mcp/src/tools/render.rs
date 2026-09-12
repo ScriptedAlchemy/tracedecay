@@ -12,8 +12,8 @@ use crate::response_handles::{
     note_response_handle_store_skipped_no_project_root, observe_response_truncation,
     store_response_handle,
 };
-use tracedecay_mcp_catalog::MAX_RESPONSE_CHARS;
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
+use tracedecay_mcp_catalog::MAX_RESPONSE_CHARS;
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 

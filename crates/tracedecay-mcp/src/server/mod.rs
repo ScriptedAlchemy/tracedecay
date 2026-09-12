@@ -3,9 +3,11 @@
 mod connection;
 mod dispatch;
 mod live_transcript_refresh;
+mod project_host_admission_replay;
 mod protocol;
 mod read_coalescing;
 mod rmcp;
+mod session_refresh;
 mod settlement;
 
 pub use crate::lifecycle::{
@@ -21,6 +23,9 @@ pub use dispatch::{
 pub use live_transcript_refresh::{
     LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
 };
+pub use project_host_admission_replay::{
+    ProjectHostAdmissionReplayTask, ProjectHostAdmissionReplayWorker,
+};
 pub use protocol::{McpMethod, classify_mcp_method, initialize_result, resources_list_result};
 pub use read_coalescing::{
     IdenticalReadCoalescer, ReadCoalescingSnapshot, ReadFlight, ReadFlightClaim, ReadFlightLeader,
@@ -31,6 +36,7 @@ pub use rmcp::{
     RmcpWorkDeliverySettlement, await_dispatch_with_cancellation, project_server_retired_error,
     rmcp_response_result,
 };
+pub use session_refresh::DaemonSessionRefreshService;
 pub use settlement::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest, DispatchFailure,
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, RetainedDispatchAuthority,

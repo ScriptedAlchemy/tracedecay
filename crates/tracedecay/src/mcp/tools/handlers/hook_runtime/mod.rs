@@ -10,8 +10,8 @@ use tracedecay_mcp::ToolResult;
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
-use super::SessionAuthorities;
 use super::support::tool_json;
+use tracedecay_mcp::handlers::SessionAuthorities;
 
 mod admission;
 mod context_scout;

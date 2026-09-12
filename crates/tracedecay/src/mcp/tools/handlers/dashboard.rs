@@ -28,9 +28,9 @@ use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
-use super::dashboard_lcm::DashboardLcmReadAdapter;
 use super::support::generic_tool_result;
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter;
 
 use tracedecay_dashboard_api::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
@@ -908,17 +908,18 @@ pub(super) async fn handle_dashboard(
             let git_correlation_read_authority =
                 registered_project_session_db.as_ref().map(|database| {
                     Arc::new(
-                        super::dashboard_git_correlation::DashboardGitCorrelationReadAdapter::new(
+                        tracedecay_mcp::handlers::dashboard_git_correlation::DashboardGitCorrelationReadAdapter::new(
                             database.clone(),
                         ),
                     )
                         as Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>
                 });
             let delivery_read_authority = daemon_invocation_service.map(|service| {
-                let adapter = super::dashboard_delivery::DashboardDeliveryReadAdapter::new(
-                    service,
-                    retained_cg.store_layout.project_root.clone(),
-                );
+                let adapter =
+                    tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter::new(
+                        service,
+                        retained_cg.store_layout.project_root.clone(),
+                    );
                 Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>
             });
             crate::hooks::install_dashboard_hook_readiness_projection()?;

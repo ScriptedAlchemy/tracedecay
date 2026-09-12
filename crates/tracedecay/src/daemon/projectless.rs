@@ -404,7 +404,7 @@ async fn projectless_hook_runtime_response(
         &connection.client_identity.profile_root,
         session_runtime_registry,
         global_db.as_ref(),
-        crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
+        tracedecay_mcp::handlers::SessionAuthorities::new(None, Some(&user_session_db))
             .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
             .with_background_cpu(
                 store_administration

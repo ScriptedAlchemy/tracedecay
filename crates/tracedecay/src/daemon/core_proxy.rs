@@ -195,7 +195,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 ///
 /// This is *not* a timeout invented here: it is the daemon's own published
 /// dispatch ceiling for that exact request — "nothing may run unbounded", per
-/// [`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
+/// [`tool_dispatch_ceiling`](tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling)
 /// — plus
 /// [`DAEMON_TOOL_RESPONSE_GRACE`](tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE), the grace
 /// this crate already keeps reading for beyond a request deadline. A daemon
@@ -206,7 +206,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 ///
 /// A line that is not a `tools/call` (initialize, tools/list, resources/*) has
 /// no tool of its own and takes the unnamed-tool default ceiling
-/// ([`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
+/// ([`tool_dispatch_ceiling`](tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling)
 /// with an empty name), not a named catalog tool's possibly shorter deadline.
 struct DaemonProxyRequest<'a> {
     raw: &'a str,
@@ -225,8 +225,10 @@ impl<'a> DaemonProxyRequest<'a> {
 #[cfg(unix)]
 fn disconnect_drain_bound(request: &DaemonProxyRequest<'_>) -> Duration {
     let ceiling = request_tool_name(request.parsed.as_ref())
-        .and_then(|tool| crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok())
-        .unwrap_or_else(|| crate::mcp::tools::handlers::tool_dispatch_ceiling(""));
+        .and_then(|tool| {
+            tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok()
+        })
+        .unwrap_or_else(|| tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling(""));
     ceiling.saturating_add(DAEMON_TOOL_RESPONSE_GRACE)
 }
 
@@ -1000,7 +1002,7 @@ mod tests {
         for line in [&long, &interactive] {
             let tool =
                 request_tool_name(line.parsed.as_ref()).expect("a tools/call names its tool");
-            let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool)
+            let ceiling = tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool)
                 .expect("every tool has a dispatch ceiling");
             assert!(
                 disconnect_drain_bound(line) > ceiling,
@@ -1014,7 +1016,7 @@ mod tests {
         // the longest bound that actually applies to this request — rather
         // than a hardcoded catalog value.
         assert_eq!(request_tool_name(non_tool.parsed.as_ref()), None);
-        let unnamed_ceiling = crate::mcp::tools::handlers::tool_dispatch_ceiling("");
+        let unnamed_ceiling = tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling("");
         assert!(
             disconnect_drain_bound(&non_tool) > unnamed_ceiling,
             "tools/list must drain past the unnamed-tool default ceiling {unnamed_ceiling:?}"

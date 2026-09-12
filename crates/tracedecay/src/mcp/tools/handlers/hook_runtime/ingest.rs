@@ -17,7 +17,7 @@ use tracedecay_sessions::admission::{
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::source::TranscriptSource;
 
-use super::super::SessionAuthorities;
+use tracedecay_mcp::handlers::SessionAuthorities;
 
 use super::required_str;
 use tracedecay_mcp::{

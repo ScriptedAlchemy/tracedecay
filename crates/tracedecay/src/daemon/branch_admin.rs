@@ -58,8 +58,9 @@ type HostAdmissionBrokers =
 /// owns the opaque refresh handles it issued, so every route that reaches the
 /// same store (project MCP servers and the projectless client) must share the
 /// instance for `status`/`cancel` to resolve a `begin` handle.
-type ProfileSessionRefreshServices =
-    Arc<ProfiledTokioMutex<HashMap<PathBuf, Arc<crate::mcp::server::DaemonSessionRefreshService>>>>;
+type ProfileSessionRefreshServices = Arc<
+    ProfiledTokioMutex<HashMap<PathBuf, Arc<tracedecay_mcp::server::DaemonSessionRefreshService>>>,
+>;
 
 /// Resolves the writer scope for one store family.
 ///
@@ -1295,7 +1296,7 @@ impl StoreAdministration {
     pub(super) async fn profile_session_refresh_service(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    ) -> Arc<crate::mcp::server::DaemonSessionRefreshService> {
+    ) -> Arc<tracedecay_mcp::server::DaemonSessionRefreshService> {
         let path = database.db_path().to_path_buf();
         let mut services = self.profile_session_refresh_services.lock().await;
         if let Some(service) = services.get(&path) {
@@ -1305,7 +1306,7 @@ impl StoreAdministration {
             .session_temporal_refresh_schedulers
             .ensure_profile(path.clone(), database.clone())
             .await;
-        let service = Arc::new(crate::mcp::server::DaemonSessionRefreshService::new(
+        let service = Arc::new(tracedecay_mcp::server::DaemonSessionRefreshService::new(
             database.clone(),
             Arc::new(wake),
             None,

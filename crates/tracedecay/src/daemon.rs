@@ -22,9 +22,6 @@ use crate::mcp::server::{
     McpMethod, ProductionMcpConnectionContext, RmcpInitializeResponseDecorator,
     SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result,
 };
-use crate::mcp::tools::{
-    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
-};
 use branch_add::{branch_add_response, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
 #[cfg(all(unix, test))]
@@ -45,6 +42,9 @@ pub(crate) use tracedecay_daemon_protocol::{
     ensure_private_socket_parent, unix_socket_path_within_limit,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::tools::catalog_discovery::{
+    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
+};
 use tracedecay_mcp::transport::ReplayTransport;
 use tracedecay_mcp::{
     BrokerStreamTransport, ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport,

@@ -258,7 +258,7 @@ pub async fn dashboard_lcm_read_authority_for_test(
     let root = DaemonSessionRetrievalRoot::project(serving, registry).await?;
     let identity = root.identity().clone();
     let service = DaemonSessionRetrievalService::new(project_database.clone(), root, None)?;
-    let adapter = crate::mcp::tools::handlers::DashboardLcmReadAdapter::new(
+    let adapter = tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter::new(
         std::sync::Arc::new(service),
         identity,
     )?;
@@ -276,7 +276,9 @@ pub fn dashboard_git_correlation_read_authority_for_test(
     project_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> std::sync::Arc<dyn DashboardGitCorrelationReadPortV1> {
     std::sync::Arc::new(
-        crate::mcp::tools::handlers::DashboardGitCorrelationReadAdapter::new(project_database),
+        tracedecay_mcp::handlers::dashboard_git_correlation::DashboardGitCorrelationReadAdapter::new(
+            project_database,
+        ),
     )
 }
 

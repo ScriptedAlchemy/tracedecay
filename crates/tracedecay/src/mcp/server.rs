@@ -12,9 +12,6 @@ use serde_json::{Value, json};
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
-use crate::mcp::tool_analytics::{
-    McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
-};
 use crate::project::TraceDecay;
 use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -22,6 +19,9 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
+};
+use tracedecay_mcp::tool_analytics::{
+    McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use tracedecay_session_runtime::lcm_authority::{
     MountedLcmAuthorityPort, mount_registered_lcm_authority,
@@ -36,9 +36,9 @@ use tracedecay_sessions::runtime::git_correlation::{
     SpanObservation, SpanSource,
 };
 
-use super::tools::default_catalog_discovery_authority;
 use tracedecay_contracts::ProjectRegistryReadPort;
 use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
+use tracedecay_mcp::tools::catalog_discovery::default_catalog_discovery_authority;
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
     project_catalog_discovery_scope,
@@ -56,7 +56,6 @@ mod requests;
 pub use requests::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 mod rmcp;
 mod routing;
-mod session_refresh;
 mod status_resource;
 
 pub(crate) use connection::ProductionMcpConnectionContext;
@@ -68,11 +67,11 @@ pub(crate) use rmcp::RmcpInitializeResponseDecorator;
 #[cfg(test)]
 pub(crate) use rmcp::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
 pub(crate) use routing::*;
-pub(crate) use session_refresh::*;
 use tracedecay_daemon_service::{DaemonProjectRegistryReadService, DaemonWorkflowIndexReadService};
 pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
 use tracedecay_mcp::server::{
-    IdenticalReadCoalescer, McpBackgroundTaskOwner, McpDispatchRequest, RetainedDispatchAuthority,
+    DaemonSessionRefreshService, IdenticalReadCoalescer, McpBackgroundTaskOwner,
+    McpDispatchRequest, ProjectHostAdmissionReplayTask, RetainedDispatchAuthority,
     StartupCatchUpMachineV1, ToolCallParams, join_required_live_transcript_refresh,
     needs_lazy_sync_before_dispatch,
 };
@@ -310,8 +309,7 @@ pub struct McpServer {
     user_lcm_authority: Option<Arc<dyn MountedLcmAuthorityPort>>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
     /// [`Self::shutdown`] so Unix and Windows drain the same way.
-    project_host_admission_replay:
-        tokio::sync::Mutex<Option<project_host_admission_replay::ProjectHostAdmissionReplayTask>>,
+    project_host_admission_replay: tokio::sync::Mutex<Option<ProjectHostAdmissionReplayTask>>,
     /// Registry used for project-selector reads. This remains available even
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
@@ -1177,8 +1175,7 @@ impl McpServer {
                         Box<dyn std::future::Future<Output = HostAdmissionOutcome> + Send>,
                     >
             });
-            let worker =
-                project_host_admission_replay::ProjectHostAdmissionReplayTask::start(broker, pass);
+            let worker = ProjectHostAdmissionReplayTask::start(broker, pass);
             *server.project_host_admission_replay.lock().await = Some(worker);
         }
 
@@ -1520,8 +1517,6 @@ mod work_evidence_mount_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod lcm_claude_recall_tests;
-
-mod project_host_admission_replay;
 
 /// Staleness-banner, startup catch-up, and sync-on-read behavioural tests.
 /// The pure-logic banner tests need no server; the server tests build

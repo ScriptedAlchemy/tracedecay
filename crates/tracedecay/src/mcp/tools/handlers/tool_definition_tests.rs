@@ -14,7 +14,7 @@ fn retired_simplify_scan_is_absent_from_the_public_catalog() {
             .all(|definition| definition.name != retired)
     );
     assert!(
-        crate::mcp::tools::binding::mcp_dispatch_catalog()
+        tracedecay_mcp::tools::binding::mcp_dispatch_catalog()
             .expect("MCP dispatch catalog")
             .contract(retired)
             .is_none()
@@ -292,7 +292,8 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 
 #[test]
 fn advertised_read_only_matches_canonical_execution_effect() {
-    let catalog = crate::mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
+    let catalog =
+        tracedecay_mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
     for tool in get_tool_definitions().expect("tool definitions") {
         if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool.name.as_str()) {
             continue;

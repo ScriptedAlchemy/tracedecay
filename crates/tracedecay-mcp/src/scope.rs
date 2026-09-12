@@ -19,7 +19,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
+use crate::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_session_memory::context::ApplicationScopeError;
@@ -28,7 +28,7 @@ use tracedecay_session_memory::context::ApplicationScopeError;
 /// its exact application scope. Every variant fails closed: no path, CWD, or
 /// sibling-root fallback exists at this boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum QueryScopeError {
+pub enum QueryScopeError {
     /// The requested root is not absolute; resolving it against the process
     /// CWD would be the CWD fallback the plan forbids.
     RelativeRoot {
@@ -61,7 +61,7 @@ pub(crate) enum QueryScopeError {
 impl QueryScopeError {
     /// Maps the failure onto the project-route taxonomy so callers report the
     /// same explicit route failures the transport already distinguishes.
-    pub(crate) fn into_route_failure(self) -> ProjectRouteFailure {
+    pub fn into_route_failure(self) -> ProjectRouteFailure {
         let kind = match self {
             Self::RelativeRoot { .. }
             | Self::NonCanonicalProjectId { .. }
@@ -139,7 +139,7 @@ impl From<ApplicationScopeError> for QueryScopeError {
 /// revalidates the resulting digest. Resolution fails closed rather than
 /// falling back to the CWD, another registered project, or a sibling
 /// repository.
-pub(crate) fn resolve_query_scope(
+pub fn resolve_query_scope(
     owner: &ProjectRegistryContext,
     requested_root: &Path,
 ) -> Result<(PathBuf, ResolvedScope), QueryScopeError> {
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn scope_failures_map_onto_explicit_route_failure_kinds() {
-        use crate::mcp::project_route::ProjectRouteFailureKind;
+        use crate::project_route::ProjectRouteFailureKind;
 
         let relative = QueryScopeError::RelativeRoot {
             requested_root: "relative".to_string(),

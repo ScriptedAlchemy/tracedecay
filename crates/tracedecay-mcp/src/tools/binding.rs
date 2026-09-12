@@ -1,7 +1,7 @@
 //! Canonical binding between an MCP tool name and how the server treats it.
 //!
-//! The root-owned table answers both questions the dispatcher and schema layer
-//! used to answer from separate name lists: which dispatch group owns a tool,
+//! This table answers both questions the dispatcher and schema layer used to
+//! answer from separate name lists: which dispatch group owns a tool,
 //! and whether it accepts a registered-project selector. Work is intentionally
 //! projected from its executable registry instead, because that registry owns
 //! its complete mounted operation set and lifecycle contracts.
@@ -29,13 +29,23 @@ mod work;
 mod workflow;
 
 use work::work_executable_binding_for_tool;
-pub(crate) use work::work_operation_for_tool;
+pub use work::work_operation_for_tool;
 use workflow::workflow_executable_binding_for_tool;
-pub(crate) use workflow::workflow_operation_for_tool;
+pub use workflow::workflow_operation_for_tool;
+
+/// Tools the daemon serves itself; they carry no application-catalog
+/// contract and never enter the advertised dispatch catalog.
+pub const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
+    "tracedecay_admin_branch_add",
+    "tracedecay_admin_cli",
+    "tracedecay_admin_project",
+    "tracedecay_admin_sync",
+    "tracedecay_hook_runtime",
+];
 
 /// Which dispatch family owns a tool once the surface predicates decline it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum McpToolDispatchGroup {
+pub enum McpToolDispatchGroup {
     ApplicationSurface,
     MultiRoot,
     Graph,
@@ -58,7 +68,7 @@ pub(crate) enum McpToolDispatchGroup {
 /// this policy, and advertising it would freeze a request-routing concern
 /// into the wire catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BranchSensitivity {
+pub enum BranchSensitivity {
     /// Reads the code graph, project files, or git. Must detect a checkout
     /// on the next request (today's `reopen_if_branch_drifted_memoized` path).
     Sensitive,
@@ -71,7 +81,7 @@ pub(crate) enum BranchSensitivity {
 ///
 /// Unknown and unlisted names are [`BranchSensitivity::Sensitive`] so a newly
 /// advertised tool keeps today's drift detection until it is classified.
-pub(crate) fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
+pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
         return application_surface_branch_sensitivity(operation);
     }
@@ -214,7 +224,7 @@ fn application_surface_branch_sensitivity(
 
 /// How a tool may be pointed at a project other than the active one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RegisteredProjectAccess {
+pub enum RegisteredProjectAccess {
     /// Reads bind to whichever project is active; a selector is rejected.
     ActiveProjectOnly,
     /// Accepts a selector but does not dispatch a registered-project reader.
@@ -223,10 +233,10 @@ pub(crate) enum RegisteredProjectAccess {
     Reader,
 }
 
-pub(crate) struct McpToolBinding {
-    pub(crate) name: &'static str,
-    pub(crate) group: Option<McpToolDispatchGroup>,
-    pub(crate) project: RegisteredProjectAccess,
+pub struct McpToolBinding {
+    pub name: &'static str,
+    pub group: Option<McpToolDispatchGroup>,
+    pub project: RegisteredProjectAccess,
 }
 
 #[rustfmt::skip]
@@ -354,12 +364,12 @@ const MCP_TOOL_BINDING_SPECS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_message_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
 ];
 
-pub(crate) static MCP_TOOL_BINDINGS: LazyLock<Vec<McpToolBinding>> =
+pub static MCP_TOOL_BINDINGS: LazyLock<Vec<McpToolBinding>> =
     LazyLock::new(assemble_mcp_tool_bindings);
 
 fn registered_project_readers() -> &'static HashSet<&'static str> {
     static READERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-        tracedecay_mcp::registered_project_reader_tool_names()
+        crate::registered_project_reader_tool_names()
             .into_iter()
             .collect()
     });
@@ -437,7 +447,7 @@ fn registered_project_access(tool_name: &str) -> Option<RegisteredProjectAccess>
 
 /// The canonical dispatch group, deriving application tools from their
 /// operation identity instead of restoring manual binding rows.
-pub(crate) fn dispatch_group_for_tool(tool_name: &str) -> Option<McpToolDispatchGroup> {
+pub fn dispatch_group_for_tool(tool_name: &str) -> Option<McpToolDispatchGroup> {
     ApplicationSurfaceOperation::from_tool_name(tool_name)
         .map(|_| McpToolDispatchGroup::ApplicationSurface)
         .or_else(|| binding(tool_name).and_then(|binding| binding.group))
@@ -445,14 +455,14 @@ pub(crate) fn dispatch_group_for_tool(tool_name: &str) -> Option<McpToolDispatch
         .or_else(|| workflow_operation_for_tool(tool_name).map(|_| McpToolDispatchGroup::Workflow))
 }
 
-pub(super) fn tool_accepts_registered_project_selector(tool_name: &str) -> bool {
+pub fn tool_accepts_registered_project_selector(tool_name: &str) -> bool {
     matches!(
         registered_project_access(tool_name),
         Some(RegisteredProjectAccess::SelectorOnly | RegisteredProjectAccess::Reader)
     )
 }
 
-pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
+pub fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
     matches!(
         registered_project_access(tool_name),
         Some(RegisteredProjectAccess::Reader)
@@ -527,7 +537,7 @@ fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::dispatch::McpDispatchMetadataError> {
     let mut bindings = MCP_TOOL_BINDINGS
         .iter()
-        .filter(|binding| !super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name))
+        .filter(|binding| !INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name))
         .map(|binding| DispatchCatalogBinding {
             name: binding.name.to_owned(),
             group: binding.group,
@@ -590,7 +600,7 @@ fn application_capability_for_tool(
     }))
 }
 
-pub(crate) fn canonical_tool_dispatch_ceiling(
+pub fn canonical_tool_dispatch_ceiling(
     tool_name: &str,
 ) -> Result<std::time::Duration, super::dispatch::McpDispatchMetadataError> {
     let catalog = mcp_dispatch_catalog()?;
@@ -615,7 +625,7 @@ pub(crate) fn canonical_tool_dispatch_ceiling(
         ));
     }
     Ok(application_capability_for_tool(tool_name)?.map_or_else(
-        || super::handlers::tool_dispatch_ceiling(tool_name),
+        || super::dispatch_ceiling::tool_dispatch_ceiling(tool_name),
         |capability| std::time::Duration::from_millis(capability.deadline().maximum_millis()),
     ))
 }
@@ -673,7 +683,7 @@ fn tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredicateFlags 
         .unwrap_or_else(|| compute_tool_dispatch_predicate_flags(tool_name))
 }
 
-pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
+pub fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
     tool_dispatch_predicate_flags(tool_name).source_edit_effect
 }
 
@@ -687,7 +697,7 @@ fn compute_tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
         .is_some_and(|capability| capability.effect() == EffectClass::SourceEdit)
 }
 
-pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
+pub fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     tool_dispatch_predicate_flags(tool_name).live_cancellation
 }
 
@@ -728,7 +738,7 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
         )
 }
 
-pub(crate) fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
+pub fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
     tool_dispatch_predicate_flags(tool_name).canonical_effect_settlement
 }
 
@@ -934,7 +944,10 @@ fn build_mcp_dispatch_catalog()
             deadline: McpDeadlineContractV1::new(executable_binding.map_or_else(
                 || {
                     contract_capability.map_or_else(
-                        || super::handlers::tool_dispatch_ceiling(&binding.name).as_millis() as u64,
+                        || {
+                            super::dispatch_ceiling::tool_dispatch_ceiling(&binding.name)
+                                .as_millis() as u64
+                        },
                         |capability| capability.deadline().maximum_millis(),
                     )
                 },
@@ -975,7 +988,7 @@ fn build_mcp_dispatch_catalog()
     Ok(McpDispatchCatalogV1::new(contracts)?)
 }
 
-pub(crate) fn mcp_dispatch_catalog()
+pub fn mcp_dispatch_catalog()
 -> Result<&'static McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     static CATALOG: LazyLock<Result<McpDispatchCatalogV1, String>> =
         LazyLock::new(|| build_mcp_dispatch_catalog().map_err(|error| error.to_string()));
@@ -987,7 +1000,7 @@ pub(crate) fn mcp_dispatch_catalog()
     }
 }
 
-pub(crate) fn mcp_dispatch_contract(
+pub fn mcp_dispatch_contract(
     tool_name: &str,
 ) -> Result<&'static McpDispatchContractV1, super::dispatch::McpDispatchMetadataError> {
     mcp_dispatch_catalog()?.contract(tool_name).ok_or_else(|| {
@@ -1055,7 +1068,7 @@ mod tests {
         let ceiling = canonical_tool_dispatch_ceiling("tracedecay_context").unwrap();
         assert_eq!(ceiling, std::time::Duration::from_secs(10));
         assert!(
-            ceiling < crate::mcp::tools::handlers::tool_dispatch_ceiling("tracedecay_context"),
+            ceiling < crate::tools::dispatch_ceiling::tool_dispatch_ceiling("tracedecay_context"),
             "the capability contract, not the generic dispatch ceiling, bounds context"
         );
         assert!(
@@ -1280,11 +1293,11 @@ mod tests {
         ("tracedecay_dashboard", BranchSensitivity::Sensitive),
     ];
 
-    fn advertised_tool_names(mode: tracedecay_mcp::ToolRegistryMode) -> Vec<String> {
-        use crate::mcp::tools::catalog_discovery::{
+    fn advertised_tool_names(mode: crate::ToolRegistryMode) -> Vec<String> {
+        use crate::tools::catalog_discovery::{
             default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
         };
-        use tracedecay_mcp::{explore_call_budget, project_catalog_discovery_scope};
+        use crate::{explore_call_budget, project_catalog_discovery_scope};
 
         let profile_id = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
             .expect("default profile");
@@ -1308,8 +1321,8 @@ mod tests {
     /// classification is a failed audit, not a silent pass.
     #[test]
     fn advertised_tools_have_exactly_one_branch_sensitivity_policy() {
+        use crate::ToolRegistryMode;
         use std::collections::HashMap;
-        use tracedecay_mcp::ToolRegistryMode;
 
         let pinned: HashMap<&str, BranchSensitivity> =
             PINNED_BRANCH_SENSITIVITY.iter().copied().collect();

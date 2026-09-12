@@ -21,7 +21,7 @@ use tracedecay_session_runtime::retained::{
 use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 
-use crate::mcp::server::DaemonSessionRefreshService;
+use tracedecay_mcp::server::DaemonSessionRefreshService;
 
 fn profile_retrieval_root(
     profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,

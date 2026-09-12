@@ -34,12 +34,12 @@ use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
 
-use super::super::super::SessionAuthorities;
 use super::super::{required_str, required_user_db};
 use super::{
     admit_codex_project_rollouts, compaction_unavailable_reason,
     drain_host_observation_projections, project_observation_id,
 };
+use tracedecay_mcp::handlers::SessionAuthorities;
 use tracedecay_mcp::{map_claude_observation_ingest_error, map_transcript_ingest_error};
 
 /// Which payload shape a hook ingest request carries.

@@ -1,4 +1,3 @@
-use crate::mcp::tools::SessionAuthorities;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::path::Path;
@@ -6,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::Result;
+use tracedecay_mcp::handlers::SessionAuthorities;
 
 use super::hermes::user_review;
 use super::ingest::ingest_transcript_with_cancellation;

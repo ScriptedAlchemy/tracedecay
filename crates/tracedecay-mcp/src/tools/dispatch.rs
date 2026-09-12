@@ -10,6 +10,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
+use crate::McpCatalogError;
+use crate::ToolDefinition;
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
 };
@@ -20,10 +22,8 @@ use tracedecay_daemon_service::application_surface::{
     execute_application_surface, observe_surface_argument_rejection,
     resolve_application_surface_dispatch, resolve_application_surface_dispatch_with_controls,
 };
-use tracedecay_mcp::McpCatalogError;
-use tracedecay_mcp::ToolDefinition;
 
-pub(crate) const DISPATCH_METADATA_KEY: &str = "tracedecay/dispatch";
+pub const DISPATCH_METADATA_KEY: &str = "tracedecay/dispatch";
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpDispatchMetadataError {
@@ -65,7 +65,7 @@ pub(crate) fn reset_attach_dispatch_metadata_calls_for_test() {
     ATTACH_DISPATCH_METADATA_CALLS.with(|calls| calls.set(0));
 }
 
-pub(crate) fn attach_dispatch_metadata(
+pub fn attach_dispatch_metadata(
     definitions: &mut [ToolDefinition],
 ) -> Result<(), McpDispatchMetadataError> {
     #[cfg(test)]

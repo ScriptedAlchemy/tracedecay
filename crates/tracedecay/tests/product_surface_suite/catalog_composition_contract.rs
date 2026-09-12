@@ -1,8 +1,5 @@
 use std::collections::BTreeSet;
 
-use tracedecay::mcp::tools::{
-    default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
-};
 use tracedecay_api::{
     http_application_full_route_path, http_route_documents, is_http_application_operation_exposed,
     retained_application_route_path,
@@ -15,6 +12,9 @@ use tracedecay_contracts::{
     ApplicationHandlerDescriptors, ApplicationOperation, ResultContractRef,
     RetainedSurfaceOperation, application_catalog_contributions, application_handler_descriptors,
     retrieval::catalog::symbol_search_contribution,
+};
+use tracedecay_mcp::tools::catalog_discovery::{
+    default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
 };
 use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_tool_catalog::{

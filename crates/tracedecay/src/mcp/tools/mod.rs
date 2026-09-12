@@ -1,33 +1,22 @@
 //! MCP tool dispatch for the code graph.
 //!
-//! Portable catalog types, definitions, and rendering live in `tracedecay-mcp`.
-//! This module keeps daemon-coupled dispatch, bindings, and handlers.
+//! Portable catalog types, definitions, rendering, the binding table, and
+//! catalog discovery live in `tracedecay-mcp`. This module keeps the
+//! daemon-coupled handlers and the composition root's dispatch.
 
-pub(crate) mod binding;
-pub(crate) mod catalog_discovery;
-pub mod dispatch;
 pub(crate) mod handlers;
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use tracedecay_mcp::get_tool_definitions;
+use tracedecay_mcp::tools::dispatch::McpDispatchMetadataError;
 
-pub(crate) use binding::{
-    mcp_dispatch_contract, tool_dispatches_registered_project_reader,
-    tool_dispatches_source_edit_effect, tool_supports_live_cancellation,
-};
-pub use catalog_discovery::{
-    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
-    get_catalog_filtered_tool_definitions_with_budget,
-    get_catalog_filtered_tool_definitions_with_warming_budget,
-};
 pub(crate) use handlers::retained_catalog::{
     execute_profile_retained_mcp_tool, session_refresh_profile_scope_requested,
 };
 pub use handlers::{
-    SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,
-    handle_tool_call_with_registry_options,
+    ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry_options,
 };
 pub(crate) use handlers::{
     handle_projectless_admin_cli, handle_projectless_hook_runtime,
@@ -42,9 +31,7 @@ pub(crate) use handlers::{
 pub struct LegacyToolCompatibilityOwner;
 
 impl LegacyToolCompatibilityOwner {
-    pub fn admits(
-        tool_name: &str,
-    ) -> std::result::Result<bool, dispatch::McpDispatchMetadataError> {
+    pub fn admits(tool_name: &str) -> std::result::Result<bool, McpDispatchMetadataError> {
         // Every dispatched compatibility tool call asks this, and rebuilding
         // the full schema catalog per call was the dominant per-dispatch cost.
         // The advertised name set is process-stable: the definitions are
@@ -60,9 +47,7 @@ impl LegacyToolCompatibilityOwner {
             });
         match &*ADVERTISED_TOOL_NAMES {
             Ok(names) => Ok(names.contains(tool_name)),
-            Err(error) => Err(dispatch::McpDispatchMetadataError::Initialization(
-                error.clone(),
-            )),
+            Err(error) => Err(McpDispatchMetadataError::Initialization(error.clone())),
         }
     }
 }

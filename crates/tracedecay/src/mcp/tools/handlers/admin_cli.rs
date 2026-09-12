@@ -18,6 +18,7 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 use super::json_result;
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::SessionAuthorities;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -107,7 +108,7 @@ impl<'a> AdminCliContext<'a> {
         global_db: &'a RegisteredGlobalDbLeaseV1,
         accounting_db: Option<&'a RegisteredGlobalDb>,
         profile_root: Option<&'a Path>,
-        session_authorities: super::SessionAuthorities<'a>,
+        session_authorities: SessionAuthorities<'a>,
         session_sync: Option<&'a dyn SessionSyncServicePort>,
         request_id: Option<RequestId>,
         deadline: Option<Deadline>,
@@ -234,7 +235,7 @@ pub(super) async fn handle_admin_cli(
     global_db: Option<&RegisteredGlobalDbLeaseV1>,
     accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: Option<&Path>,
-    session_authorities: super::SessionAuthorities<'_>,
+    session_authorities: SessionAuthorities<'_>,
     session_sync: Option<&dyn SessionSyncServicePort>,
     request_id: Option<RequestId>,
     deadline: Option<Deadline>,
