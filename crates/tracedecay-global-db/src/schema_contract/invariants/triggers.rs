@@ -1674,8 +1674,8 @@ const RELEASED_V3_TRIGGER_DRIFT: &[ReleasedV3TriggerDrift] = &[
 ];
 
 /// The released-v3 body of every drifted authority trigger, keyed by name.
-fn released_v3_trigger_contracts()
--> tracedecay_domain::errors::Result<Vec<(&'static str, String)>> {
+fn released_v3_trigger_contracts() -> tracedecay_domain::errors::Result<Vec<(&'static str, String)>>
+{
     RELEASED_V3_TRIGGER_DRIFT
         .iter()
         .map(|drift| {
@@ -1703,7 +1703,9 @@ fn released_v3_trigger_contracts()
             }
             Ok((
                 drift.trigger,
-                trigger.create_sql.replacen(drift.current, drift.released, 1),
+                trigger
+                    .create_sql
+                    .replacen(drift.current, drift.released, 1),
             ))
         })
         .collect()

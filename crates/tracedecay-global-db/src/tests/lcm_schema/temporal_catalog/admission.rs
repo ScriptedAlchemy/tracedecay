@@ -683,7 +683,11 @@ async fn published_v3_authority_triggers_migrate_and_retain_every_session() {
     drop(db);
     seed_retained_sessions_and_messages(&db_path).await;
     let retained = retained_sessions_and_messages(&db_path).await;
-    assert_eq!(retained.len(), 5, "the fixture must seed sessions to retain");
+    assert_eq!(
+        retained.len(),
+        5,
+        "the fixture must seed sessions to retain"
+    );
     convert_final_temporal_schema_to_released_v3(&db_path).await;
     insert_seeded_active_released_v3_refresh_receipts(&db_path, (8, 2, 2)).await;
 
