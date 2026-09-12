@@ -7086,6 +7086,57 @@ impl CodeIndexSchedulerRegistryV1 {
             .then_some(latest)
     }
 
+    /// Recover one retained persistent graph generation for an authenticated
+    /// immutable query. The retained publication metadata and verified graph
+    /// head are generation-addressed, so this does not admit the generation's
+    /// lexical artifact or alias the currently serving graph.
+    pub(crate) async fn retained_graph_generation_for_scope(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<LatestCodeTextGenerationV1>, CodeIndexSchedulerErrorV1> {
+        let (
+            historical_generation_owner,
+            graph_activation,
+            project_id,
+            repository_id,
+            worktree_id,
+            shutting_down,
+        ) = {
+            let mounted = self.mounted.lock().await;
+            let Some((_, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
+                return Ok(None);
+            };
+            (
+                worktree.historical_generation_owner.clone(),
+                worktree.graph_activation.clone(),
+                worktree.historical_generation_owner.project_id.clone(),
+                worktree.repository_id.clone(),
+                worktree.worktree_id.clone(),
+                Arc::clone(&worktree.shutting_down),
+            )
+        };
+        let Some(latest) = historical_generation_owner.published_text_generation(generation_id)?
+        else {
+            return Ok(None);
+        };
+        let replay_binding = historical_generation_owner.sealed_replay_binding(generation_id)?;
+        if !graph_activation
+            .recover_verified_head(
+                &project_id,
+                &repository_id,
+                &worktree_id,
+                latest.clone(),
+                replay_binding,
+                shutting_down,
+            )
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(latest))
+    }
+
     /// The queryable exact/lexical owner for one mounted root, if the
     /// lightweight text slot has finished seating. Distinct from
     /// [`Self::latest_generation_id`], which prefers the graph-bearing serving
