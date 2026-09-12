@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -580,401 +581,464 @@ def prime_fixture_values(
             raise SweepError(f"required fixture producer is unavailable: {tool}")
         return policy.deadline_ms
 
+    priming_errors: dict[str, dict[str, str]] = {}
+    fixture["priming_errors"] = priming_errors
+
+    @contextmanager
+    def prime_group(name: str):
+        try:
+            yield
+        except Exception as error:
+            priming_errors[name] = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+
     # The code-index search surface publishes canonical code anchors, while the
     # legacy graph consumer requires a graph node id. Resolve the fixture's
     # known semantic name through the live qualified-name producer instead of
     # reconstructing either opaque identity in the harness.
-    ends_at = time.monotonic() + 30
-    node_id: str | None = None
-    while node_id is None:
-        resolved, elapsed_ms = client.call_tool(
-            "tracedecay_by_qualified_name", {"qualified_name": fixture["qualified_name"]}, deadline("tracedecay_by_qualified_name")
-        )
-        if resolved.get("error") is not None or (
-            isinstance(resolved.get("result"), dict) and resolved["result"].get("isError") is True
-        ):
-            _kind, code = response_problem_code(resolved)
-            retryable = any(
-                value.get("retryable") is True for value in _objects(resolved)
+    with prime_group("graph"):
+        ends_at = time.monotonic() + 30
+        node_id: str | None = None
+        while node_id is None:
+            resolved, elapsed_ms = client.call_tool(
+                "tracedecay_by_qualified_name",
+                {"qualified_name": fixture["qualified_name"]},
+                deadline("tracedecay_by_qualified_name"),
             )
-            if (
-                code == "code-graph-unavailable"
-                and retryable
-                and time.monotonic() < ends_at
+            if resolved.get("error") is not None or (
+                isinstance(resolved.get("result"), dict)
+                and resolved["result"].get("isError") is True
             ):
+                _kind, code = response_problem_code(resolved)
+                retryable = any(
+                    value.get("retryable") is True for value in _objects(resolved)
+                )
+                if (
+                    code == "code-graph-unavailable"
+                    and retryable
+                    and time.monotonic() < ends_at
+                ):
+                    time.sleep(MOUNT_RETRY_DELAY_S)
+                    continue
+                row = response_row(
+                    "tool",
+                    "tracedecay_by_qualified_name",
+                    resolved,
+                    elapsed_ms,
+                    deadline("tracedecay_by_qualified_name"),
+                )
+                raise SweepError(
+                    f"qualified-name producer failed: {row['problem_code'] or row['note']}"
+                )
+            if duration_us(resolved) is None:
+                raise SweepError(
+                    "qualified-name producer omitted the enabled _meta.duration_us receipt"
+                )
+            candidate = first_value(resolved, {"node_id"})
+            node_id = candidate if isinstance(candidate, str) and candidate else None
+            if node_id is None:
+                if time.monotonic() >= ends_at:
+                    break
                 time.sleep(MOUNT_RETRY_DELAY_S)
-                continue
-            row = response_row(
-                "tool", "tracedecay_by_qualified_name", resolved, elapsed_ms, deadline("tracedecay_by_qualified_name")
-            )
-            raise SweepError(f"qualified-name producer failed: {row['problem_code'] or row['note']}")
-        if duration_us(resolved) is None:
-            raise SweepError("qualified-name producer omitted the enabled _meta.duration_us receipt")
-        candidate = first_value(resolved, {"node_id"})
-        node_id = candidate if isinstance(candidate, str) and candidate else None
         if node_id is None:
-            if time.monotonic() >= ends_at:
-                break
-            time.sleep(MOUNT_RETRY_DELAY_S)
-    if node_id is None:
-        raise SweepError("qualified-name producer did not publish the fixture node id")
-    node = _producer_call(client, "tracedecay_node", {"node_id": node_id}, deadline("tracedecay_node"))
-    qualified_name = first_value(node, {"qualified_name"})
-    if not isinstance(qualified_name, str) or not qualified_name:
-        raise SweepError("node producer did not publish the qualified symbol identity")
-    node_kind = first_value(node, {"kind"})
-    if not isinstance(node_kind, str) or not node_kind:
-        raise SweepError("node producer did not publish the symbol kind")
-
-    read = _producer_call(client, "tracedecay_read", {"file": "docs/large.md"}, deadline("tracedecay_read"))
-    handle = response_handle(read)
-    if handle is None:
-        raise SweepError("read producer did not mint a retrieval handle")
-    retrieved = _producer_call(client, "tracedecay_retrieve", {"handle": handle}, deadline("tracedecay_retrieve"))
-    if not any("catalog sweep handle source" in text for text in text_blocks(retrieved)):
-        raise SweepError("retrieve consumer did not return the producer's exact large response")
-    fixture.update({"node_id": node_id, "qualified_name": qualified_name, "node_kind": node_kind, "handle": handle})
-
-    settings = _producer_call(
-        client, "tracedecay_configuration_list", {"format": "json"},
-        deadline("tracedecay_configuration_list"),
-    )
-    keys = {
-        value["key"]
-        for value in _objects(settings)
-        if isinstance(value.get("key"), str) and value["key"]
-    }
-    configuration_key = "work.topology_policy.v1"
-    if configuration_key not in keys:
-        raise SweepError("configuration list producer omitted work.topology_policy.v1")
-    setting = _producer_call(
-        client,
-        "tracedecay_configuration_get",
-        {"key": configuration_key, "format": "json"},
-        deadline("tracedecay_configuration_get"),
-    )
-    revision = first_value(setting, {"revision_id"})
-    effective_value = next(
-        (
-            value["effective_value"]
-            for value in _objects(setting)
-            if isinstance(value.get("effective_value"), dict)
-        ),
-        None,
-    )
-    if (
-        not isinstance(revision, str)
-        or not revision
-        or not isinstance(effective_value, dict)
-        or effective_value.get("kind") != "work_topology_policy"
-        or "value" not in effective_value
-    ):
-        raise SweepError("configuration get producer omitted topology value or revision")
-    fixture.update(
-        {
-            "configuration_key": configuration_key,
-            "configuration_revision": revision,
-            "configuration_topology_policy": effective_value["value"],
-        }
-    )
-
-    scalar_key = "diagnostics.prewarm.v1"
-    if scalar_key not in keys:
-        raise SweepError("configuration list producer omitted diagnostics.prewarm.v1")
-    scalar = _producer_call(
-        client,
-        "tracedecay_configuration_get",
-        {"key": scalar_key, "format": "json"},
-        deadline("tracedecay_configuration_get"),
-    )
-    scalar_setting = next(
-        (
-            value
-            for value in _objects(scalar)
-            if value.get("key") == scalar_key and isinstance(value.get("effective_value"), dict)
-        ),
-        None,
-    )
-    if (
-        scalar_setting is None
-        or scalar_setting["effective_value"].get("kind") != "boolean"
-        or not isinstance(scalar_setting["effective_value"].get("value"), bool)
-        or not isinstance(scalar_setting.get("revision_id"), str)
-    ):
-        raise SweepError("configuration get producer omitted the scalar value or revision")
-    fixture.update(
-        {
-            "configuration_scalar_key": scalar_key,
-            "configuration_scalar_value": scalar_setting["effective_value"],
-            "configuration_scalar_revision": scalar_setting["revision_id"],
-        }
-    )
-    active_project = _producer_call(
-        client,
-        "tracedecay_active_project",
-        {"format": "json"},
-        deadline("tracedecay_active_project"),
-    )
-    project_id = first_value(active_project, {"project_id"})
-    if not isinstance(project_id, str) or not project_id:
-        raise SweepError("active project producer omitted the fixture project id")
-    fixture["project_id"] = project_id
-    toggled = {
-        "kind": "boolean",
-        "value": not fixture["configuration_scalar_value"]["value"],
-    }
-    seed_key = f"tool-sweep-configuration-seed-{time.monotonic_ns()}"
-    seeded = _producer_call(
-        client,
-        "tracedecay_configuration_set",
-        {
-            "layer": {"kind": "project", "project_id": project_id},
-            "key": scalar_key,
-            "value": toggled,
-            "expected_revision": fixture["configuration_scalar_revision"],
-            "idempotency_key": seed_key,
-            "format": "json",
-        },
-        deadline("tracedecay_configuration_set"),
-    )
-    seeded_revision = first_value(seeded, {"result_revision_id"})
-    if not isinstance(seeded_revision, str) or not seeded_revision:
-        raise SweepError("configuration seed mutation omitted its result revision")
-    restored = _producer_call(
-        client,
-        "tracedecay_configuration_unset",
-        {
-            "layer": {"kind": "project", "project_id": project_id},
-            "key": scalar_key,
-            "expected_revision": seeded_revision,
-            "idempotency_key": f"{seed_key}-rollback",
-            "format": "json",
-        },
-        deadline("tracedecay_configuration_unset"),
-    )
-    restored_revision = first_value(restored, {"result_revision_id"})
-    if not isinstance(restored_revision, str) or not restored_revision:
-        raise SweepError("configuration seed rollback omitted its result revision")
-    fixture.update(
-        {
-            "configuration_revision": restored_revision,
-            "configuration_scalar_revision": restored_revision,
-            "configuration_rollback_target_revision": seeded_revision,
-        }
-    )
-
-    if effect_target is None:
-        ready_at = time.monotonic() + 10
-        while True:
-            runs = _producer_call(
-                client,
-                "tracedecay_automation_run_list",
-                {"limit": 1, "format": "json"},
-                deadline("tracedecay_automation_run_list"),
-            )
-            run_id = first_value(runs, {"run_id"})
-            if isinstance(run_id, str) and run_id:
-                fixture["automation_run_id"] = run_id
-                break
-            if time.monotonic() >= ready_at:
-                raise SweepError("automation run list producer returned no inspectable run identity")
-            time.sleep(MOUNT_RETRY_DELAY_S)
-
-        refresh_selectors = profile_refresh_selectors(fixture)
-        refresh_deadline_ms = deadline("tracedecay_session_refresh_begin")
-        begun_refresh, elapsed_ms = client.call_tool(
-            "tracedecay_session_refresh_begin",
-            refresh_selectors,
-            refresh_deadline_ms,
+            raise SweepError("qualified-name producer did not publish the fixture node id")
+        node = _producer_call(
+            client,
+            "tracedecay_node",
+            {"node_id": node_id},
+            deadline("tracedecay_node"),
         )
-        refresh_row = response_row(
-            "tool",
-            "tracedecay_session_refresh_begin",
-            begun_refresh,
-            elapsed_ms,
-            refresh_deadline_ms,
-        )
-        if refresh_row["verdict"] != "PASS":
-            raise SweepError(
-                "tracedecay_session_refresh_begin setup failed: "
-                f"{refresh_row['problem_code'] or refresh_row['note']}"
-            )
-        # This call only admits the captured rollout for the LCM journey. Its
-        # own effect row independently audits the timing receipt.
-        refresh_receipt = next(
-            (
-                value
-                for value in _objects(begun_refresh)
-                if isinstance(value.get("outcome"), str)
-                and value["outcome"] in {"started", "joined"}
-                and isinstance(value.get("handle"), str)
-                and value["handle"]
-                and isinstance(value.get("operation_id"), str)
-                and value["operation_id"]
-            ),
-            None,
-        )
-        if refresh_receipt is None:
-            raise SweepError("session refresh begin producer omitted its public status identity")
-        refresh_handle = refresh_receipt["handle"]
-        refresh_operation_id = refresh_receipt["operation_id"]
+        qualified_name = first_value(node, {"qualified_name"})
+        if not isinstance(qualified_name, str) or not qualified_name:
+            raise SweepError("node producer did not publish the qualified symbol identity")
+        node_kind = first_value(node, {"kind"})
+        if not isinstance(node_kind, str) or not node_kind:
+            raise SweepError("node producer did not publish the symbol kind")
         fixture.update(
             {
-                "session_refresh_handle": refresh_handle,
-                "session_refresh_operation_id": refresh_operation_id,
+                "node_id": node_id,
+                "qualified_name": qualified_name,
+                "node_kind": node_kind,
             }
         )
 
-        refresh_ready_at = time.monotonic() + 10
-        while True:
-            status_deadline_ms = deadline("tracedecay_session_refresh_status")
-            refresh_status, elapsed_ms = client.call_tool(
-                "tracedecay_session_refresh_status",
-                {"handle": refresh_handle, **refresh_selectors},
-                status_deadline_ms,
+    with prime_group("retrieval"):
+        read = _producer_call(
+            client,
+            "tracedecay_read",
+            {"file": "docs/large.md"},
+            deadline("tracedecay_read"),
+        )
+        handle = response_handle(read)
+        if handle is None:
+            raise SweepError("read producer did not mint a retrieval handle")
+        retrieved = _producer_call(
+            client,
+            "tracedecay_retrieve",
+            {"handle": handle},
+            deadline("tracedecay_retrieve"),
+        )
+        if not any(
+            "catalog sweep handle source" in text for text in text_blocks(retrieved)
+        ):
+            raise SweepError(
+                "retrieve consumer did not return the producer's exact large response"
             )
-            status_row = response_row(
-                "tool",
-                "tracedecay_session_refresh_status",
-                refresh_status,
-                elapsed_ms,
-                status_deadline_ms,
-            )
-            if status_row["verdict"] != "PASS":
-                problem_kind, _problem_code = response_problem_code(refresh_status)
-                if problem_kind == "unavailable" and time.monotonic() < refresh_ready_at:
-                    time.sleep(MOUNT_RETRY_DELAY_S)
-                    continue
-                raise SweepError(
-                    "tracedecay_session_refresh_status setup failed: "
-                    f"{status_row['problem_code'] or status_row['note']}"
+        fixture["handle"] = handle
+
+    with prime_group("configuration"):
+        settings = _producer_call(
+            client, "tracedecay_configuration_list", {"format": "json"},
+            deadline("tracedecay_configuration_list"),
+        )
+        keys = {
+            value["key"]
+            for value in _objects(settings)
+            if isinstance(value.get("key"), str) and value["key"]
+        }
+        configuration_key = "work.topology_policy.v1"
+        if configuration_key not in keys:
+            raise SweepError("configuration list producer omitted work.topology_policy.v1")
+        setting = _producer_call(
+            client,
+            "tracedecay_configuration_get",
+            {"key": configuration_key, "format": "json"},
+            deadline("tracedecay_configuration_get"),
+        )
+        revision = first_value(setting, {"revision_id"})
+        effective_value = next(
+            (
+                value["effective_value"]
+                for value in _objects(setting)
+                if isinstance(value.get("effective_value"), dict)
+            ),
+            None,
+        )
+        if (
+            not isinstance(revision, str)
+            or not revision
+            or not isinstance(effective_value, dict)
+            or effective_value.get("kind") != "work_topology_policy"
+            or "value" not in effective_value
+        ):
+            raise SweepError("configuration get producer omitted topology value or revision")
+        fixture.update(
+            {
+                "configuration_key": configuration_key,
+                "configuration_revision": revision,
+                "configuration_topology_policy": effective_value["value"],
+            }
+        )
+
+        scalar_key = "diagnostics.prewarm.v1"
+        if scalar_key not in keys:
+            raise SweepError("configuration list producer omitted diagnostics.prewarm.v1")
+        scalar = _producer_call(
+            client,
+            "tracedecay_configuration_get",
+            {"key": scalar_key, "format": "json"},
+            deadline("tracedecay_configuration_get"),
+        )
+        scalar_setting = next(
+            (
+                value
+                for value in _objects(scalar)
+                if value.get("key") == scalar_key and isinstance(value.get("effective_value"), dict)
+            ),
+            None,
+        )
+        if (
+            scalar_setting is None
+            or scalar_setting["effective_value"].get("kind") != "boolean"
+            or not isinstance(scalar_setting["effective_value"].get("value"), bool)
+            or not isinstance(scalar_setting.get("revision_id"), str)
+        ):
+            raise SweepError("configuration get producer omitted the scalar value or revision")
+        fixture.update(
+            {
+                "configuration_scalar_key": scalar_key,
+                "configuration_scalar_value": scalar_setting["effective_value"],
+                "configuration_scalar_revision": scalar_setting["revision_id"],
+            }
+        )
+        active_project = _producer_call(
+            client,
+            "tracedecay_active_project",
+            {"format": "json"},
+            deadline("tracedecay_active_project"),
+        )
+        project_id = first_value(active_project, {"project_id"})
+        if not isinstance(project_id, str) or not project_id:
+            raise SweepError("active project producer omitted the fixture project id")
+        fixture["project_id"] = project_id
+        toggled = {
+            "kind": "boolean",
+            "value": not fixture["configuration_scalar_value"]["value"],
+        }
+        seed_key = f"tool-sweep-configuration-seed-{time.monotonic_ns()}"
+        seeded = _producer_call(
+            client,
+            "tracedecay_configuration_set",
+            {
+                "layer": {"kind": "project", "project_id": project_id},
+                "key": scalar_key,
+                "value": toggled,
+                "expected_revision": fixture["configuration_scalar_revision"],
+                "idempotency_key": seed_key,
+                "format": "json",
+            },
+            deadline("tracedecay_configuration_set"),
+        )
+        seeded_revision = first_value(seeded, {"result_revision_id"})
+        if not isinstance(seeded_revision, str) or not seeded_revision:
+            raise SweepError("configuration seed mutation omitted its result revision")
+        restored = _producer_call(
+            client,
+            "tracedecay_configuration_unset",
+            {
+                "layer": {"kind": "project", "project_id": project_id},
+                "key": scalar_key,
+                "expected_revision": seeded_revision,
+                "idempotency_key": f"{seed_key}-rollback",
+                "format": "json",
+            },
+            deadline("tracedecay_configuration_unset"),
+        )
+        restored_revision = first_value(restored, {"result_revision_id"})
+        if not isinstance(restored_revision, str) or not restored_revision:
+            raise SweepError("configuration seed rollback omitted its result revision")
+        fixture.update(
+            {
+                "configuration_revision": restored_revision,
+                "configuration_scalar_revision": restored_revision,
+                "configuration_rollback_target_revision": seeded_revision,
+            }
+        )
+
+    if effect_target is None:
+        with prime_group("automation"):
+            ready_at = time.monotonic() + 10
+            while True:
+                runs = _producer_call(
+                    client,
+                    "tracedecay_automation_run_list",
+                    {"limit": 1, "format": "json"},
+                    deadline("tracedecay_automation_run_list"),
                 )
-            status_receipt = next(
+                run_id = first_value(runs, {"run_id"})
+                if isinstance(run_id, str) and run_id:
+                    fixture["automation_run_id"] = run_id
+                    break
+                if time.monotonic() >= ready_at:
+                    raise SweepError("automation run list producer returned no inspectable run identity")
+                time.sleep(MOUNT_RETRY_DELAY_S)
+
+        with prime_group("session_lcm"):
+            refresh_selectors = profile_refresh_selectors(fixture)
+            refresh_deadline_ms = deadline("tracedecay_session_refresh_begin")
+            begun_refresh, elapsed_ms = client.call_tool(
+                "tracedecay_session_refresh_begin",
+                refresh_selectors,
+                refresh_deadline_ms,
+            )
+            refresh_row = response_row(
+                "tool",
+                "tracedecay_session_refresh_begin",
+                begun_refresh,
+                elapsed_ms,
+                refresh_deadline_ms,
+            )
+            if refresh_row["verdict"] != "PASS":
+                raise SweepError(
+                    "tracedecay_session_refresh_begin setup failed: "
+                    f"{refresh_row['problem_code'] or refresh_row['note']}"
+                )
+            # This call only admits the captured rollout for the LCM journey. Its
+            # own effect row independently audits the timing receipt.
+            refresh_receipt = next(
                 (
                     value
-                    for value in _objects(refresh_status)
-                    if value.get("tool") == "tracedecay_session_refresh_status"
-                    and isinstance(value.get("outcome"), str)
+                    for value in _objects(begun_refresh)
+                    if isinstance(value.get("outcome"), str)
+                    and value["outcome"] in {"started", "joined"}
+                    and isinstance(value.get("handle"), str)
+                    and value["handle"]
+                    and isinstance(value.get("operation_id"), str)
+                    and value["operation_id"]
                 ),
                 None,
             )
-            refresh_state = status_receipt.get("outcome") if status_receipt else None
-            if refresh_state == "complete":
-                if first_value(refresh_status, {"operation_id"}) != refresh_operation_id:
-                    raise SweepError(
-                        "completed session refresh changed its durable operation identity"
-                    )
-                break
-            if refresh_state != "running" or time.monotonic() >= refresh_ready_at:
-                raise SweepError(
-                    "session refresh did not complete for the captured rollout "
-                    f"(state {refresh_state!r})"
-                )
-            time.sleep(MOUNT_RETRY_DELAY_S)
-
-        ready_at = time.monotonic() + 10
-        while True:
-            load_deadline_ms = deadline("tracedecay_lcm_load_session")
-            loaded, elapsed_ms = client.call_tool(
-                "tracedecay_lcm_load_session",
+            if refresh_receipt is None:
+                raise SweepError("session refresh begin producer omitted its public status identity")
+            refresh_handle = refresh_receipt["handle"]
+            refresh_operation_id = refresh_receipt["operation_id"]
+            fixture.update(
                 {
-                    "provider": "codex",
-                    "session_id": fixture["session_id"],
-                    "limit": 10,
-                    "format": "json",
-                },
-                load_deadline_ms,
+                    "session_refresh_handle": refresh_handle,
+                    "session_refresh_operation_id": refresh_operation_id,
+                }
             )
-            load_row = response_row(
-                "tool",
-                "tracedecay_lcm_load_session",
-                loaded,
-                elapsed_ms,
-                load_deadline_ms,
-            )
-            if load_row["verdict"] != "PASS":
-                problem_kind, _problem_code = response_problem_code(loaded)
-                if problem_kind != "unavailable" or time.monotonic() >= ready_at:
+
+            refresh_ready_at = time.monotonic() + 10
+            while True:
+                status_deadline_ms = deadline("tracedecay_session_refresh_status")
+                refresh_status, elapsed_ms = client.call_tool(
+                    "tracedecay_session_refresh_status",
+                    {"handle": refresh_handle, **refresh_selectors},
+                    status_deadline_ms,
+                )
+                status_row = response_row(
+                    "tool",
+                    "tracedecay_session_refresh_status",
+                    refresh_status,
+                    elapsed_ms,
+                    status_deadline_ms,
+                )
+                if status_row["verdict"] != "PASS":
+                    problem_kind, _problem_code = response_problem_code(refresh_status)
+                    if problem_kind == "unavailable" and time.monotonic() < refresh_ready_at:
+                        time.sleep(MOUNT_RETRY_DELAY_S)
+                        continue
                     raise SweepError(
-                        "tracedecay_lcm_load_session producer failed: "
-                        f"{load_row['problem_code'] or load_row['note']}"
+                        "tracedecay_session_refresh_status setup failed: "
+                        f"{status_row['problem_code'] or status_row['note']}"
+                    )
+                status_receipt = next(
+                    (
+                        value
+                        for value in _objects(refresh_status)
+                        if value.get("tool") == "tracedecay_session_refresh_status"
+                        and isinstance(value.get("outcome"), str)
+                    ),
+                    None,
+                )
+                refresh_state = status_receipt.get("outcome") if status_receipt else None
+                if refresh_state == "complete":
+                    if first_value(refresh_status, {"operation_id"}) != refresh_operation_id:
+                        raise SweepError(
+                            "completed session refresh changed its durable operation identity"
+                        )
+                    break
+                if refresh_state != "running" or time.monotonic() >= refresh_ready_at:
+                    raise SweepError(
+                        "session refresh did not complete for the captured rollout "
+                        f"(state {refresh_state!r})"
                     )
                 time.sleep(MOUNT_RETRY_DELAY_S)
-                continue
-            if duration_us(loaded) is None:
-                raise SweepError(
-                    "tracedecay_lcm_load_session producer omitted the enabled "
-                    "_meta.duration_us receipt"
+
+            ready_at = time.monotonic() + 10
+            while True:
+                load_deadline_ms = deadline("tracedecay_lcm_load_session")
+                loaded, elapsed_ms = client.call_tool(
+                    "tracedecay_lcm_load_session",
+                    {
+                        "provider": "codex",
+                        "session_id": fixture["session_id"],
+                        "limit": 10,
+                        "format": "json",
+                    },
+                    load_deadline_ms,
                 )
-            captured_message = next(
-                (
-                    value
-                    for value in _objects(loaded)
-                    if value.get("content") == fixture["lcm_message"]
-                ),
-                None,
-            )
-            if captured_message is not None:
-                store_id = captured_message.get("store_id")
-                if not isinstance(store_id, int) or isinstance(store_id, bool):
+                load_row = response_row(
+                    "tool",
+                    "tracedecay_lcm_load_session",
+                    loaded,
+                    elapsed_ms,
+                    load_deadline_ms,
+                )
+                if load_row["verdict"] != "PASS":
+                    problem_kind, _problem_code = response_problem_code(loaded)
+                    if problem_kind != "unavailable" or time.monotonic() >= ready_at:
+                        raise SweepError(
+                            "tracedecay_lcm_load_session producer failed: "
+                            f"{load_row['problem_code'] or load_row['note']}"
+                        )
+                    time.sleep(MOUNT_RETRY_DELAY_S)
+                    continue
+                if duration_us(loaded) is None:
                     raise SweepError(
-                        "LCM captured prompt has no expandable raw-message store identity"
+                        "tracedecay_lcm_load_session producer omitted the enabled "
+                        "_meta.duration_us receipt"
                     )
-                fixture["lcm_store_id"] = store_id
-                break
-            if time.monotonic() >= ready_at:
-                raise SweepError("LCM session producer omitted the captured prompt message")
-            time.sleep(MOUNT_RETRY_DELAY_S)
+                captured_message = next(
+                    (
+                        value
+                        for value in _objects(loaded)
+                        if value.get("content") == fixture["lcm_message"]
+                    ),
+                    None,
+                )
+                if captured_message is not None:
+                    store_id = captured_message.get("store_id")
+                    if not isinstance(store_id, int) or isinstance(store_id, bool):
+                        raise SweepError(
+                            "LCM captured prompt has no expandable raw-message store identity"
+                        )
+                    fixture["lcm_store_id"] = store_id
+                    break
+                if time.monotonic() >= ready_at:
+                    raise SweepError("LCM session producer omitted the captured prompt message")
+                time.sleep(MOUNT_RETRY_DELAY_S)
 
     # The callable code-query surface serves only complete immutable index
     # generations, and a cold fixture publishes its first generation
     # asynchronously after admission. Resolve the fixture symbol through the
     # live symbol-search producer so navigation consumers receive a real
     # code-query node identity instead of racing the first build.
-    ends_at = time.monotonic() + CODE_INDEX_READY_TIMEOUT_S
-    code_node_id: str | None = None
-    while code_node_id is None:
-        searched, _ = client.call_tool(
-            "tracedecay_code_symbol_search",
-            {
-                "query": fixture["symbol"],
-                "lazy_index_ignored_dependencies": False,
-                "scope": {},
-                "meta": {"projection": "summary", "order": "relevance"},
-                "format": "json",
-            },
-            deadline("tracedecay_code_symbol_search"),
-        )
-        candidate = first_value(searched, {"node_id"})
-        code_node_id = candidate if isinstance(candidate, str) and candidate else None
-        if code_node_id is None:
-            if time.monotonic() >= ends_at:
-                raise SweepError(
-                    "code symbol-search producer did not publish a complete generation identity"
-                )
-            time.sleep(0.5)
-    fixture["code_node_id"] = code_node_id
+    with prime_group("code_node"):
+        ends_at = time.monotonic() + CODE_INDEX_READY_TIMEOUT_S
+        code_node_id: str | None = None
+        while code_node_id is None:
+            searched, _ = client.call_tool(
+                "tracedecay_code_symbol_search",
+                {
+                    "query": fixture["symbol"],
+                    "lazy_index_ignored_dependencies": False,
+                    "scope": {},
+                    "meta": {"projection": "summary", "order": "relevance"},
+                    "format": "json",
+                },
+                deadline("tracedecay_code_symbol_search"),
+            )
+            candidate = first_value(searched, {"node_id"})
+            code_node_id = (
+                candidate if isinstance(candidate, str) and candidate else None
+            )
+            if code_node_id is None:
+                if time.monotonic() >= ends_at:
+                    raise SweepError(
+                        "code symbol-search producer did not publish a complete generation identity"
+                    )
+                time.sleep(0.5)
+        fixture["code_node_id"] = code_node_id
 
-    mint_preview_input(client, fixture, deadline("tracedecay_git_hunks"))
-    prime_work_lifecycle(
-        fixture,
-        lambda tool, arguments, deadline_ms: _producer_call(
-            client, tool, arguments, deadline_ms
-        ),
-        deadline,
-    )
-    if "tracedecay_workflow_validate_definition" in policies:
-        prime_workflow_lifecycle(
+    with prime_group("git_preview"):
+        mint_preview_input(client, fixture, deadline("tracedecay_git_hunks"))
+
+    with prime_group("work"):
+        prime_work_lifecycle(
             fixture,
             lambda tool, arguments, deadline_ms: _producer_call(
                 client, tool, arguments, deadline_ms
             ),
-            lambda tool, arguments, deadline_ms: _probe_call(
-                client, tool, arguments, deadline_ms
-            ),
             deadline,
-            effect_target,
         )
+
+    with prime_group("workflow"):
+        if "tracedecay_workflow_validate_definition" in policies:
+            prime_workflow_lifecycle(
+                fixture,
+                lambda tool, arguments, deadline_ms: _producer_call(
+                    client, tool, arguments, deadline_ms
+                ),
+                lambda tool, arguments, deadline_ms: _probe_call(
+                    client, tool, arguments, deadline_ms
+                ),
+                deadline,
+                effect_target,
+            )
 
 
 def mint_preview_input(client: McpClient, fixture: dict[str, str], deadline_ms: int) -> None:
@@ -1045,14 +1109,6 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(
 # - test_results reads daemon-retained managed test results that only a
 #   covered run_affected_tests execution retains; the fixture has no covered
 #   tests, and its zero-coverage journey verifies nothing is retained.
-# - branch_search's branch-scoped graph lane never activates hermetically:
-#   the persistent code-graph query owners stay uninstalled ("code graph
-#   projection has not completed activation") even after the code index
-#   publishes a complete generation and branch_diff serves real diffs from
-#   it (bounded 300s probe evidence). This is a documented product defect in
-#   the branch serving path, not a designed denial; the entry exists so the
-#   moment the branch runtime rework lands a hermetic success, this row FAILs
-#   with expected_denial_superseded and the entry must be deleted.
 # - multi_root mutations are daemon-owned and fail closed on every direct MCP
 #   transport: the multi-root invocation owner is only composed into
 #   daemon-internal project servers, so the hermetic stdio server has no
@@ -1078,7 +1134,6 @@ EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
     "tracedecay_automation_run_artifact_view": ("failed", "not_found"),
     "tracedecay_skill_view": ("failed", "not_found"),
     "tracedecay_test_results": ("unavailable", "application.retrieval.unavailable"),
-    "tracedecay_branch_search": ("unavailable", "search_failed"),
     "tracedecay_multi_root_scope_set_compare_and_swap": ("unavailable", "multi_root.daemon_unavailable"),
     "tracedecay_multi_root_execute": ("unavailable", "multi_root.daemon_unavailable"),
 }
@@ -1792,15 +1847,14 @@ def run_phase(args: argparse.Namespace) -> int:
                 name = definition.get("name") if isinstance(definition.get("name"), str) else "<invalid>"
                 report["entries"].append(_failure_row("tool", name, 0, "tool_sweep.dispatch_metadata_invalid", str(error)))
         policy_index = {policy.name: policy for _, policy in policies}
-        try:
-            prime_fixture_values(
-                client,
-                fixture,
-                policy_index,
-                args.effect if args.phase == "effect" else None,
-            )
-        except Exception as error:
-            fixture["priming_error"] = str(error)
+        prime_fixture_values(
+            client,
+            fixture,
+            policy_index,
+            args.effect if args.phase == "effect" else None,
+        )
+        if fixture["priming_errors"]:
+            report["priming_errors"] = fixture["priming_errors"]
         if args.phase == "reads":
             for definition, policy in policies:
                 if policy.availability == "unavailable":
