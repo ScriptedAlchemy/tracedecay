@@ -38,6 +38,9 @@ use tracedecay_sessions::observation::{
     ObservationApplication, ObservationApplicationError, ObservationCancellation,
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_sessions::runtime::git_correlation::{
+    canonical_observation_git_evidence, enqueue_git_evidence_publication,
+};
 
 mod discovery_queue;
 mod hotpath_observe;
@@ -748,7 +751,12 @@ impl<'a> HostAdmissionFacade<'a> {
             )
             .await
             .map_err(|error| classify_error(&error))?;
-        project_captured_outcome(database, outcome).await
+        project_captured_outcome(
+            database,
+            self.authorities.repository_provenance.as_ref(),
+            outcome,
+        )
+        .await
     }
 
     /// Sanitize then persist a bounded window through one store-owned batch.
@@ -791,7 +799,7 @@ impl<'a> HostAdmissionFacade<'a> {
             .capture_observations(requests)
             .await
             .map_err(|error| classify_error(&error))?;
-        project_captured_outcomes(database, outcomes).await
+        project_captured_outcomes(database, provenance.as_ref(), outcomes).await
     }
 
     /// Persist one sanitized write through the store the façade already holds.
@@ -1173,6 +1181,7 @@ fn classify_external_source_error(
 
 async fn project_captured_outcome(
     database: &RegisteredGlobalDb,
+    repository_provenance: Option<&RepositoryProvenanceAdmissionContext>,
     outcome: CaptureObservationOutcome,
 ) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
     let CaptureObservationOutcome::Persisted {
@@ -1181,6 +1190,12 @@ async fn project_captured_outcome(
     else {
         return Ok(outcome);
     };
+    publish_canonical_git_evidence(
+        database,
+        repository_provenance,
+        std::slice::from_ref(&outcome),
+    )
+    .await?;
     let projection =
         tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
             database.runtime_client(),
@@ -1198,6 +1213,7 @@ async fn project_captured_outcome(
 
 async fn project_captured_outcomes(
     database: &RegisteredGlobalDb,
+    repository_provenance: Option<&RepositoryProvenanceAdmissionContext>,
     outcomes: Vec<CaptureObservationOutcome>,
 ) -> Result<Vec<CaptureObservationOutcome>, HostAdmissionOutcome> {
     let mut receipts = Vec::new();
@@ -1214,6 +1230,7 @@ async fn project_captured_outcomes(
     if receipts.is_empty() {
         return Ok(outcomes);
     }
+    publish_canonical_git_evidence(database, repository_provenance, &outcomes).await?;
     let projections =
         tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
             database.runtime_client(),
@@ -1248,6 +1265,74 @@ async fn project_captured_outcomes(
         projected.push(outcome);
     }
     Ok(projected)
+}
+
+async fn publish_canonical_git_evidence(
+    database: &RegisteredGlobalDb,
+    repository_provenance: Option<&RepositoryProvenanceAdmissionContext>,
+    outcomes: &[CaptureObservationOutcome],
+) -> Result<(), HostAdmissionOutcome> {
+    let Some(repository_provenance) = repository_provenance else {
+        return Ok(());
+    };
+    let mut publications = Vec::new();
+    for outcome in outcomes {
+        let CaptureObservationOutcome::Persisted {
+            outcome: persisted,
+            sanitized_record,
+            ..
+        } = outcome
+        else {
+            continue;
+        };
+        let (commit_records, span_observations) = canonical_observation_git_evidence(
+            sanitized_record.payload(),
+            repository_provenance.admitted_project_root(),
+        )
+        .map_err(classify_git_evidence_error)?;
+        if commit_records.is_empty() && span_observations.is_empty() {
+            continue;
+        }
+        publications.push((
+            format!(
+                "canonical-observation:{}",
+                persisted.receipt().observation().observation_id().as_str()
+            ),
+            commit_records,
+            span_observations,
+        ));
+    }
+    if publications.is_empty() {
+        return Ok(());
+    }
+    let transaction = database.begin_write_transaction().await.map_err(|error| {
+        tracing::warn!(%error, "canonical Git evidence outbox transaction failed");
+        HostAdmissionOutcome::retained_unavailable("git_evidence_outbox_unavailable")
+    })?;
+    for (prefix, commit_records, span_observations) in &publications {
+        enqueue_git_evidence_publication(&transaction, prefix, commit_records, span_observations)
+            .await
+            .map_err(classify_git_evidence_error)?;
+    }
+    transaction.commit().await.map_err(|error| {
+        tracing::warn!(%error, "canonical Git evidence outbox commit failed");
+        HostAdmissionOutcome::retained_unavailable("git_evidence_outbox_unavailable")
+    })?;
+    database
+        .replay_pending_git_evidence_publications()
+        .await
+        .map_err(classify_git_evidence_error)?;
+    Ok(())
+}
+
+fn classify_git_evidence_error(
+    error: tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+) -> HostAdmissionOutcome {
+    tracing::warn!(%error, "canonical Git evidence publication failed");
+    let mut outcome =
+        HostAdmissionOutcome::retained_unavailable("git_evidence_publication_unavailable");
+    outcome.storage_cause = Some(error.to_string());
+    outcome
 }
 
 fn accepted_for_external_source_replay(
