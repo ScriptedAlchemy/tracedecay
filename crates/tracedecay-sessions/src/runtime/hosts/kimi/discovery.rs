@@ -66,8 +66,10 @@ impl KimiDiscoveryReport {
 pub(super) struct KimiSessionState {
     #[serde(default)]
     pub(super) id: Option<String>,
-    #[serde(alias = "workDir")]
-    pub(super) cwd: PathBuf,
+    #[serde(default)]
+    pub(super) cwd: Option<PathBuf>,
+    #[serde(default, rename = "workDir")]
+    pub(super) work_dir: Option<PathBuf>,
     #[serde(default)]
     pub(super) agents: BTreeMap<String, KimiAgentState>,
 }
@@ -81,6 +83,15 @@ pub(super) struct KimiAgentState {
 }
 
 impl KimiSessionState {
+    pub(super) fn working_directory(&self) -> Option<&Path> {
+        match (&self.cwd, &self.work_dir) {
+            (Some(cwd), Some(work_dir)) if cwd == work_dir => Some(cwd),
+            (Some(cwd), None) => Some(cwd),
+            (None, Some(work_dir)) => Some(work_dir),
+            (Some(_), Some(_)) | (None, None) => None,
+        }
+    }
+
     pub(super) fn session_id(&self, session_dir: &Path) -> Option<String> {
         let directory_id = session_dir.file_name()?.to_str()?;
         match self.id.as_deref() {
