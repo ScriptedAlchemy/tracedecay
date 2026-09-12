@@ -1,11 +1,16 @@
+use tracedecay_api as api;
+use tracedecay_contracts as contracts;
+use tracedecay_contracts::remote;
+use tracedecay_domain as domain;
 use tracedecay_sdk::operations::{
     ApplicationGitStatus, OperationTransport, TypedOperation, UNAVAILABLE_OPERATIONS, WorkCreate,
     WorkRetrieveEvidence, WorkflowRegisterDefinition,
 };
 use tracedecay_sdk::{
-    CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
-    contracts, domain, operation, remote, work, workflow,
+    CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, work,
+    workflow,
 };
+use tracedecay_tool_catalog as operation;
 
 #[test]
 fn canonical_contracts_are_available_without_sdk_copies() {
