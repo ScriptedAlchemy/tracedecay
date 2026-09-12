@@ -776,11 +776,9 @@ fn open_append_target(path: &Path) -> io::Result<(File, bool)> {
 }
 
 #[hotpath::measure(label = "private_fs.framed_log.truncate")]
-pub fn truncate_file(
-    path: &Path,
-    len: u64,
-    _directory_policy: DirectorySyncPolicy,
-) -> io::Result<()> {
+/// Truncation rewrites an existing inode's length; the directory entry is
+/// unchanged, so only the file itself needs a durability barrier.
+pub fn truncate_file(path: &Path, len: u64) -> io::Result<()> {
     tighten_existing_file(path)?;
     let output = OpenOptions::new().write(true).open(path)?;
     output.set_len(len)?;

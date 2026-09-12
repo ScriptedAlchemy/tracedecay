@@ -26,7 +26,7 @@ pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolErr
 
 pub(super) fn truncate_records(root: &Path, length: u64) -> Result<(), HookSpoolError> {
     hotpath::measure_block!("hooks.spool.fsync.truncate", {
-        shared_truncate_file(&records_path(root), length, DIRECTORY_POLICY)
+        shared_truncate_file(&records_path(root), length)
             .map_err(|_| HookSpoolError::Io)
     })
 }
