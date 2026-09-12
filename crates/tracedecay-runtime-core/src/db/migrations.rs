@@ -217,35 +217,110 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
             message: format!("failed to create handoff-open schema: {e}"),
             operation: "create_schema".to_string(),
         })?;
+    install_runtime_writer_ledger(conn, "create_schema").await?;
     final_shape::require_exact_final_shape(conn).await?;
     set_version(conn, SCHEMA_VERSION).await?;
     Ok(())
 }
-/// Reports whether the file already carries user schema objects.
-///
-/// A brand-new file has `user_version = 0` and no objects at all. That is not a
-/// store at an older shape; it is an empty file this binary may create into.
-async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master
-             WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
-             LIMIT 1",
-            (),
-        )
+
+/// Installs the runtime-writer ledger into the canonical store and folds the
+/// retired idempotency table into the current shape. Idempotent: a store that
+/// already carries the ledger is untouched.
+async fn install_runtime_writer_ledger(
+    conn: &(impl Executor + Sync),
+    operation: &str,
+) -> Result<()> {
+    conn.execute_batch(tracedecay_rusqlite_runtime::LEDGER_SCHEMA)
         .await
         .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to probe sqlite_master for existing schema: {e}"),
-            operation: "ensure_schema_current".to_string(),
+            message: format!("failed to create runtime-writer ledger schema: {e}"),
+            operation: operation.to_owned(),
+        })?;
+    if runtime_writer_ledger_retired_table_present(conn, operation).await? {
+        conn.execute_batch(tracedecay_rusqlite_runtime::MIGRATE_IDEMPOTENCY_V1)
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!(
+                    "failed to migrate retired runtime-writer idempotency ledger: {e}"
+                ),
+                operation: operation.to_owned(),
+            })?;
+    }
+    Ok(())
+}
+
+/// Runs a `SELECT 1 ... LIMIT 1`-shaped probe against `sqlite_master` and
+/// reports whether it matched anything.
+async fn sqlite_master_probe(
+    conn: &impl QueryExecutor,
+    sql: &str,
+    operation: &str,
+) -> Result<bool> {
+    let mut rows = conn
+        .query(sql, ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to probe sqlite_master: {e}"),
+            operation: operation.to_owned(),
         })?;
     Ok(rows
         .next()
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("failed to read sqlite_master probe row: {e}"),
-            operation: "ensure_schema_current".to_string(),
+            operation: operation.to_owned(),
         })?
         .is_some())
+}
+
+async fn runtime_writer_ledger_retired_table_present(
+    conn: &impl QueryExecutor,
+    operation: &str,
+) -> Result<bool> {
+    sqlite_master_probe(
+        conn,
+        tracedecay_rusqlite_runtime::RETIRED_IDEMPOTENCY_LEDGER_PRESENT,
+        operation,
+    )
+    .await
+}
+
+/// Reports whether an existing store still lacks any ledger object or carries
+/// the retired idempotency table, i.e. whether the sanctioned additive ledger
+/// install has work to do before the exact-shape check.
+async fn runtime_writer_ledger_pending(conn: &impl QueryExecutor, operation: &str) -> Result<bool> {
+    sqlite_master_probe(
+        conn,
+        "SELECT 1 WHERE EXISTS (
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'
+         ) OR (
+             SELECT count(*) FROM sqlite_master
+             WHERE type = 'table' AND name IN (
+                 'td_runtime_writer_checkpoint_v1',
+                 'td_runtime_writer_idempotency_v2',
+                 'td_runtime_writer_outbox_v1',
+                 'td_runtime_writer_inbox_v1'
+             )
+         ) < 4",
+        operation,
+    )
+    .await
+}
+
+/// Reports whether the file already carries user schema objects.
+///
+/// A brand-new file has `user_version = 0` and no objects at all. That is not a
+/// store at an older shape; it is an empty file this binary may create into.
+async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
+    sqlite_master_probe(
+        conn,
+        "SELECT 1 FROM sqlite_master
+         WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
+         LIMIT 1",
+        "ensure_schema_current",
+    )
+    .await
 }
 
 async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<Option<String>> {
@@ -345,7 +420,8 @@ pub(crate) async fn step_schema_if_pending(conn: &Connection) -> Result<bool> {
         step_payload_digests(conn).await?;
         return Ok(true);
     }
-    repair_shipped_v35_alias_trigger_connection(conn).await
+    let ledger_installed = install_runtime_writer_ledger_connection(conn).await?;
+    Ok(repair_shipped_v35_alias_trigger_connection(conn).await? || ledger_installed)
 }
 
 async fn ensure_schema_current_engine_connection(
@@ -358,8 +434,69 @@ async fn ensure_schema_current_engine_connection(
     if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
         step_payload_digests(conn).await?;
     }
+    install_runtime_writer_ledger_engine_connection(conn).await?;
     repair_shipped_v35_alias_trigger_engine_connection(conn).await?;
     verify_final_schema_connection(conn).await
+}
+
+const LEDGER_INSTALL_OPERATION: &str = "install runtime-writer ledger";
+
+/// Sanctioned additive step for a current-version store that predates the
+/// ledger being part of the canonical shape, or that still carries the retired
+/// idempotency table. Only ledger objects are touched; the exact-shape check
+/// that follows still refuses every other drift.
+async fn install_runtime_writer_ledger_engine_connection(
+    conn: &DatabaseEngineWriteConnection,
+) -> Result<()> {
+    if get_version(conn).await? != SCHEMA_VERSION
+        || !runtime_writer_ledger_pending(conn, LEDGER_INSTALL_OPERATION).await?
+    {
+        return Ok(());
+    }
+    let transaction = conn
+        .authorized_long_lease_transaction()
+        .await
+        .map_err(|error| ledger_install_failure(format!("failed to acquire lock: {error}")))?;
+    match install_runtime_writer_ledger(&transaction, LEDGER_INSTALL_OPERATION).await {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| ledger_install_failure(format!("failed to commit: {error}"))),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(trigger_repair_rollback_failure(error, rollback_error)),
+        },
+    }
+}
+
+async fn install_runtime_writer_ledger_connection(conn: &Connection) -> Result<bool> {
+    if get_version(conn).await? != SCHEMA_VERSION
+        || !runtime_writer_ledger_pending(conn, LEDGER_INSTALL_OPERATION).await?
+    {
+        return Ok(false);
+    }
+    let transaction = conn
+        .authorized_long_lease_transaction()
+        .await
+        .map_err(|error| ledger_install_failure(format!("failed to acquire lock: {error}")))?;
+    match install_runtime_writer_ledger(&transaction, LEDGER_INSTALL_OPERATION).await {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map(|()| true)
+            .map_err(|error| ledger_install_failure(format!("failed to commit: {error}"))),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(trigger_repair_rollback_failure(error, rollback_error)),
+        },
+    }
+}
+
+fn ledger_install_failure(message: String) -> TraceDecayError {
+    TraceDecayError::Database {
+        message,
+        operation: LEDGER_INSTALL_OPERATION.to_owned(),
+    }
 }
 
 async fn repair_shipped_v35_alias_trigger(conn: &(impl Executor + Sync)) -> Result<bool> {
