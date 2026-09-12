@@ -98,7 +98,7 @@ pub(super) fn build_projection(
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
     let (files, symbol_metadata, imports, bindings, retained_edges, occurrences) =
-        hotpath::measure_block!("code_index.graph.bind", {
+        hotpath::measure_block!("code_index.seal.collect.bind", {
             let files = production
                 .map(|inputs| {
                     inputs
@@ -224,7 +224,7 @@ pub(super) fn build_projection(
     // symbol and edge-evidence entities, and a symbol's binding already
     // names its chunk — so projecting one entity plus one relation per chunk
     // only multiplied every graph artifact by the chunk count.
-    hotpath::measure_block!("code_index.graph.emit", {
+    hotpath::measure_block!("code_index.seal.collect.emit", {
         let mut entities = Vec::with_capacity(
             files
                 .len()
