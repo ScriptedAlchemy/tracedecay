@@ -4,13 +4,15 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use super::attribution::{
     publish_graph_evidence, publish_graph_evidence_controlled, stable_backfill_span,
 };
+#[cfg(test)]
+use super::run_commit_attribution_sweep;
 use super::store::GitCorrelationSessionStore;
 
 use super::{
     AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation,
     CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GIT_HISTORY_ROWID_FRONTIER_KEY,
     GitCorrelationError, GitCorrelationWriteTxn, ScannedCommit, SpanOverlapKind, SpanScanTarget,
-    TargetScan, normalize_worktree, run_commit_attribution_sweep,
+    TargetScan, normalize_worktree,
 };
 
 mod bounded;
@@ -250,6 +252,10 @@ pub struct BackfillStats {
     pub skipped_no_window: usize,
     pub skipped_not_worktree: usize,
     pub skipped_git_error: usize,
+    /// Retained spans whose archived branch no longer resolves. Their observed
+    /// identity remains authoritative; only inferred historical attribution is
+    /// unavailable.
+    pub unavailable_attributions: usize,
     /// Whether this pass durably advanced the incremental session tuple.
     pub frontier_advanced: bool,
 }
@@ -265,7 +271,10 @@ impl BackfillStats {
 
     #[hotpath::skip]
     pub const fn skipped_total(&self) -> usize {
-        self.skipped_no_window + self.skipped_not_worktree + self.skipped_git_error
+        self.skipped_no_window
+            + self.skipped_not_worktree
+            + self.skipped_git_error
+            + self.unavailable_attributions
     }
 
     /// Whether this pass durably published evidence or advanced its source
@@ -315,6 +324,14 @@ pub trait GitReflogSource: Send + Sync {
     /// The branch `HEAD` currently points at in `worktree` (`None` = detached
     /// or unknown), used as the leading-segment floor.
     fn current_branch(&self, worktree: &std::path::Path) -> Option<String>;
+    /// Whether `reference` still resolves to a commit. Archived transcript
+    /// branches may have been deleted while their observed identity remains
+    /// valid evidence.
+    fn commit_reference_exists(
+        &self,
+        _worktree: &std::path::Path,
+        _reference: &str,
+    ) -> Result<bool, GitCorrelationError>;
     /// `git log <branch> --pretty=%H %ct --since=<since>` text for `worktree`,
     /// newest-first. `None` on error.
     fn commit_log(&self, worktree: &std::path::Path, branch: &str, since: i64) -> Option<String>;
@@ -327,6 +344,36 @@ impl SystemGit {
     fn output(worktree: &std::path::Path, args: &[&str]) -> Option<String> {
         let output = tracedecay_runtime_core::git::git_output(worktree, args)?;
         String::from_utf8(output.stdout).ok()
+    }
+}
+
+pub fn git_commit_reference_exists(
+    worktree: &std::path::Path,
+    reference: &str,
+) -> Result<bool, GitCorrelationError> {
+    let resolved = format!("{reference}^{{commit}}");
+    let output = tracedecay_runtime_core::git::bounded_git_output(
+        worktree,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &resolved,
+        ],
+        &tracedecay_runtime_core::git::GitCommandBounds::default(),
+    )
+    .map_err(|error| GitCorrelationError::Unavailable(error.to_string()))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            Err(GitCorrelationError::Unavailable(format!(
+                "cannot resolve Git commit reference {reference:?}: {}",
+                detail.trim()
+            )))
+        }
     }
 }
 
@@ -354,6 +401,14 @@ impl GitReflogSource for SystemGit {
         } else {
             Some(trimmed.to_string())
         }
+    }
+
+    fn commit_reference_exists(
+        &self,
+        worktree: &std::path::Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        git_commit_reference_exists(worktree, reference)
     }
 
     fn commit_log(&self, worktree: &std::path::Path, branch: &str, since: i64) -> Option<String> {
@@ -567,21 +622,25 @@ where
     // would stay unattributed until a transcript ingest happens to run. The
     // Graph publication is content-addressed and idempotent, so running it on
     // every pass (including passes with zero new session rows) is safe.
-    let later_failure =
-        match run_commit_attribution_sweep(session_store, opts.merge_gap_secs, |target| {
-            scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo)
-        })
-        .await
-        {
-            Ok(commits_attributed) => {
-                stats.commits_attributed += commits_attributed;
-                None
-            }
-            Err(error) => {
-                stats.skipped_git_error = stats.skipped_git_error.saturating_add(1);
-                Some(error)
-            }
-        };
+    let later_failure = match super::attribution::run_commit_attribution_sweep_outcome(
+        session_store,
+        opts.merge_gap_secs,
+        |target| scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo),
+    )
+    .await
+    {
+        Ok(attribution) => {
+            stats.commits_attributed += attribution.commits_attributed;
+            stats.unavailable_attributions = stats
+                .unavailable_attributions
+                .saturating_add(attribution.unavailable_references);
+            None
+        }
+        Err(error) => {
+            stats.skipped_git_error = stats.skipped_git_error.saturating_add(1);
+            Some(error)
+        }
+    };
     crate::runtime::pipeline_metrics::record_git_backfill(
         stats.sessions_scanned,
         stats.spans_written,
@@ -627,8 +686,9 @@ pub(super) async fn advance_history_frontier(
 /// Scans one span target's branch history through the backfill's git source,
 /// mirroring the ingest-time sweep's scanner: commits on the recorded branch
 /// (or `HEAD` for detached spans) inside the gap-widened span window. Reports
-/// [`TargetScan::Unavailable`] — not an empty list — when the worktree is gone
-/// or git fails, so the sweep holds its watermark and retries the target.
+/// [`TargetScan::MissingReference`] for an archived branch that no longer
+/// exists, and [`TargetScan::Unavailable`] for a missing worktree or Git
+/// failure that a later sweep may recover.
 fn scan_span_target<G: GitReflogSource + ?Sized>(
     git: &G,
     target: &SpanScanTarget,
@@ -646,6 +706,11 @@ fn scan_span_target<G: GitReflogSource + ?Sized>(
         .as_deref()
         .filter(|branch| !branch.is_empty())
         .unwrap_or("HEAD");
+    match git.commit_reference_exists(worktree, branch) {
+        Ok(true) => {}
+        Ok(false) => return TargetScan::MissingReference,
+        Err(_) => return TargetScan::Unavailable,
+    }
     let Some(log_text) = git.commit_log(worktree, branch, since) else {
         return TargetScan::Unavailable;
     };

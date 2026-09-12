@@ -154,11 +154,21 @@ pub struct ScannedCommit {
 pub enum TargetScan {
     /// The scan ran; these are the commits it found (possibly none).
     Scanned(Vec<ScannedCommit>),
+    /// The retained span names a branch that is no longer present in the
+    /// repository. Historical attribution is unavailable for this target,
+    /// but retrying cannot restore the archived ref.
+    MissingReference,
     /// The scan could not run — the worktree is gone, `git log` failed, or the
     /// repository was unreadable. Distinct from `Scanned(vec![])`: the target's
     /// commits are unknown, not absent, so the sweep watermark must not move
     /// past it or the target would never be revisited.
     Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitAttributionSweepOutcome {
+    pub commits_attributed: usize,
+    pub unavailable_references: usize,
 }
 
 pub fn stable_backfill_span(
@@ -548,8 +558,22 @@ fn merge_commit(commits: &mut Vec<CommitSessionRecord>, incoming: &CommitSession
 pub async fn run_commit_attribution_sweep<S, F>(
     session_store: &S,
     gap_secs: i64,
-    mut scan: F,
+    scan: F,
 ) -> Result<usize, GitCorrelationError>
+where
+    S: GitCorrelationSessionStore,
+    F: FnMut(&SpanScanTarget) -> TargetScan,
+{
+    run_commit_attribution_sweep_outcome(session_store, gap_secs, scan)
+        .await
+        .map(|outcome| outcome.commits_attributed)
+}
+
+pub async fn run_commit_attribution_sweep_outcome<S, F>(
+    session_store: &S,
+    gap_secs: i64,
+    mut scan: F,
+) -> Result<CommitAttributionSweepOutcome, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
     F: FnMut(&SpanScanTarget) -> TargetScan,
@@ -561,11 +585,12 @@ where
     // A never-published projection has no spans to attribute: the sweep is
     // truthfully a no-op, not a retryable failure.
     let Some(store) = recover_git_evidence_projection(runtime, &identity, cancelled)? else {
-        return Ok(0);
+        return Ok(CommitAttributionSweepOutcome::default());
     };
     let projection = store.projection().clone();
     let targets = scan_targets(projection.spans());
     let mut records = Vec::new();
+    let mut unavailable_references = 0_usize;
     for target in &targets {
         let spans = span_windows_for(
             projection.spans(),
@@ -575,11 +600,18 @@ where
         if spans.is_empty() {
             continue;
         }
-        let TargetScan::Scanned(commits) = scan(target) else {
-            return Err(GitCorrelationError::Unavailable(format!(
-                "cannot scan Git history for retained span target {}",
-                target.worktree
-            )));
+        let commits = match scan(target) {
+            TargetScan::Scanned(commits) => commits,
+            TargetScan::MissingReference => {
+                unavailable_references = unavailable_references.saturating_add(1);
+                continue;
+            }
+            TargetScan::Unavailable => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "cannot scan Git history for retained span target {}",
+                    target.worktree
+                )));
+            }
         };
         for commit in commits {
             records.extend(match_commit_to_spans(
@@ -593,12 +625,18 @@ where
         }
     }
     if records.is_empty() {
-        return Ok(0);
+        return Ok(CommitAttributionSweepOutcome {
+            commits_attributed: 0,
+            unavailable_references,
+        });
     }
     let (_, inserted) = session_store
         .publish_graph_evidence_owned("git-attribution".to_owned(), Vec::new(), records)
         .await?;
-    Ok(inserted)
+    Ok(CommitAttributionSweepOutcome {
+        commits_attributed: inserted,
+        unavailable_references,
+    })
 }
 
 #[cfg(test)]

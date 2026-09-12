@@ -1220,17 +1220,18 @@ mod store;
 #[cfg(test)]
 pub(crate) use attribution::publish_graph_evidence_controlled;
 pub use attribution::{
-    ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
-    graph_evidence_publication_key, match_commit_to_spans, publish_graph_evidence,
-    publish_transcript_graph_evidence, run_commit_attribution_sweep,
+    CommitAttributionSweepOutcome, ScannedCommit, SpanScanTarget, SpanWindow, TargetScan,
+    commit_overlap_kind, graph_evidence_publication_key, match_commit_to_spans,
+    publish_graph_evidence, publish_transcript_graph_evidence, run_commit_attribution_sweep,
+    run_commit_attribution_sweep_outcome,
 };
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
     BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry,
     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitHistoryIndexFrontier, GitReflogSource,
     IncrementalBackfillOutcome, SessionActivityRow, SystemGit, WindowBranchSegment,
-    branch_timeline_from_reflog, parse_commit_log, run_bounded_history_index_page,
-    run_incremental_backfill_outcome, window_branch_segments,
+    branch_timeline_from_reflog, git_commit_reference_exists, parse_commit_log,
+    run_bounded_history_index_page, run_incremental_backfill_outcome, window_branch_segments,
 };
 pub use backfill::{run_backfill, run_incremental_backfill};
 pub use publication_outbox::{

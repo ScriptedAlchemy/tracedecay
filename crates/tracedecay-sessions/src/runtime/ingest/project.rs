@@ -542,10 +542,10 @@ async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
 /// Reads commits on one span target's branch within its (gap-widened) window
 /// via `git log`.
 ///
-/// Reports [`TargetScan::Unavailable`] — not an empty commit list — when the
-/// recorded worktree is gone or `git log` fails, so the sweep holds its
-/// watermark and retries the target rather than treating "could not look" as
-/// "nothing there" and never revisiting those spans.
+/// Reports [`TargetScan::MissingReference`] when an archived branch is gone;
+/// its observed branch identity remains evidence, while historical commit
+/// attribution is unavailable. Repository and command failures remain
+/// [`TargetScan::Unavailable`] so the background sweep retries them.
 pub(super) fn git_scan_commits(
     target: &git_correlation::SpanScanTarget,
     gap_secs: i64,
@@ -569,6 +569,11 @@ pub(super) fn git_scan_commits(
     // Scope to the recorded branch when known; detached-HEAD spans scan HEAD.
     match target.branch.as_deref() {
         Some(branch) if !branch.is_empty() => {
+            match git_correlation::git_commit_reference_exists(worktree, branch) {
+                Ok(true) => {}
+                Ok(false) => return git_correlation::TargetScan::MissingReference,
+                Err(_) => return git_correlation::TargetScan::Unavailable,
+            }
             command.arg(branch);
         }
         _ => {}
