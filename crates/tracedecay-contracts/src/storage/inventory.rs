@@ -93,6 +93,25 @@ pub struct CodeGenerationRetentionRecordV1 {
     pub abandoned_sealed_staging_count: u64,
     #[serde(default = "zero_storage_bytes")]
     pub abandoned_sealed_staging_bytes: StorageByteSizeV1,
+    /// Bytes of the sealed artifacts every projection's verified head serves
+    /// from: the size the live staging container converges to once its
+    /// duplicate and superseded rows are gone.
+    #[serde(default = "zero_storage_bytes")]
+    pub sealed_head_generation_bytes: StorageByteSizeV1,
+    /// On-disk bytes of the live staging container (`tracedecay.grafeo` and
+    /// its WAL). Grafeo rewrites the container out of place on every
+    /// checkpoint and truncates the dead generation, so this shrinks on its
+    /// own once retired rows are deleted from the engine.
+    #[serde(default = "zero_storage_bytes")]
+    pub live_graph_container_bytes: StorageByteSizeV1,
+    /// Retirements the journal has already decided whose native rows are
+    /// still in the live container: retirement tombstones awaiting their
+    /// engine delete plus superseded replays behind an installed head. A
+    /// hibernated engine is never opened just to delete — opening a
+    /// multi-gigabyte LPG container costs about twice its size in RAM — so
+    /// these wait for the next publication, which holds the engine open.
+    #[serde(default)]
+    pub deferred_native_retirement_count: u64,
 }
 
 /// `serde(default)` needs a value, and `StorageByteSizeV1` deliberately has no
@@ -142,6 +161,16 @@ impl CodeGenerationRetentionRecordV1 {
     #[must_use]
     pub fn has_dead_sealed_artifacts(&self) -> bool {
         self.superseded_sealed_generation_count > 0 || self.abandoned_sealed_staging_count > 0
+    }
+
+    /// True when the live container is holding retired rows that cannot be
+    /// deleted until an engine open pays for it: retirements are deferred and
+    /// the container is more than twice the sealed heads it duplicates.
+    #[must_use]
+    pub fn live_container_awaits_deferred_retirement(&self) -> bool {
+        self.deferred_native_retirement_count > 0
+            && self.sealed_head_generation_bytes.get() > 0
+            && self.live_graph_container_bytes.get() > 2 * self.sealed_head_generation_bytes.get()
     }
 }
 
@@ -268,6 +297,9 @@ mod tests {
             superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
             abandoned_sealed_staging_count: 0,
             abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+            sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+            live_graph_container_bytes: StorageByteSizeV1::ZERO,
+            deferred_native_retirement_count: 0,
         };
 
         assert!(record.validate().is_err());
@@ -287,6 +319,9 @@ mod tests {
             superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
             abandoned_sealed_staging_count: 0,
             abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+            sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+            live_graph_container_bytes: StorageByteSizeV1::ZERO,
+            deferred_native_retirement_count: 0,
         };
 
         assert!(record.validate().is_err());
@@ -306,6 +341,9 @@ mod tests {
             superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
             abandoned_sealed_staging_count: 0,
             abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+            sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+            live_graph_container_bytes: StorageByteSizeV1::ZERO,
+            deferred_native_retirement_count: 0,
         };
 
         assert!(record.validate().is_err());
@@ -325,6 +363,9 @@ mod tests {
             superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
             abandoned_sealed_staging_count: 0,
             abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+            sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+            live_graph_container_bytes: StorageByteSizeV1::ZERO,
+            deferred_native_retirement_count: 0,
         };
 
         assert!(record.validate().is_ok());
