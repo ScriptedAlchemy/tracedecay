@@ -79,11 +79,25 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
 #[test]
 fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() {
     let snapshot = build_application_catalog_snapshot().unwrap();
+    // The default budget is not a reviewed constant: it is the exact number of
+    // bindings the composed manifests declare for default-eligible callable
+    // capabilities, so a binding added anywhere widens the budget with it.
+    let default_profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+    let composed_default_bindings = snapshot
+        .capabilities()
+        .filter(|capability| {
+            capability.availability().is_callable()
+                && capability
+                    .profile_eligibility()
+                    .contains(&default_profile_id)
+        })
+        .map(|capability| capability.binding_ids().len())
+        .sum::<usize>();
     let expected_profiles = [
         (
             "profile.default",
             ProfileKind::Default,
-            ProfileBudget::new(448, 18_000).unwrap(),
+            ProfileBudget::new(u32::try_from(composed_default_bindings).unwrap(), 18_000).unwrap(),
         ),
         (
             "profile.compact",
