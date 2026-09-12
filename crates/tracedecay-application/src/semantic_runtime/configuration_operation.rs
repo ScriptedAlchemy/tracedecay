@@ -29,7 +29,7 @@ use tracedecay_query::search_quality::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
     NativeQualificationExecutionResourceKeyV1, NativeQualificationExpectationsV1,
     NativeQualificationModelKeyV1, NativeQualificationPlatformV1, NativeQualificationRuntimeKeyV1,
-    PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1,
+    PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1, SEMANTIC_PROFILE,
     qualified_default_activation_candidate,
 };
 use tracedecay_semantic_contracts::SemanticProfileSelection;
@@ -424,18 +424,32 @@ impl ProductionSemanticConfigurationOperationV1 {
         repo_root: &Path,
         candidate: SemanticEvaluationProfileCandidateV1,
     ) -> Result<SemanticEvaluatedProfilePublicationV1, SemanticActivationCoordinationErrorV1> {
-        let before = snapshot_authority
-            .current()
-            .await
-            .map_err(|error| rejected_with_context("semantic snapshot preflight failed", error))?;
-        validate_evaluation_snapshot(repo_root, &before, &candidate)
-            .map_err(|error| rejected_with_context("semantic snapshot validation failed", error))?;
-        let candidate = validate_candidate_snapshot_runtime(candidate, &before)?;
-        let expectations = native_qualification_expectations(&before, &candidate)?;
-        let evidence = SemanticActivationPublicationEvidenceV1::Packaged(
-            qualified_default_activation_candidate(&expectations)
-                .map_err(map_packaged_qualification_error)?,
-        );
+        let (before, candidate, evidence) = if uses_packaged_activation(&candidate) {
+            let before = snapshot_authority.current().await.map_err(|error| {
+                rejected_with_context("semantic snapshot preflight failed", error)
+            })?;
+            validate_evaluation_snapshot(repo_root, &before, &candidate).map_err(|error| {
+                rejected_with_context("semantic snapshot validation failed", error)
+            })?;
+            let candidate = validate_candidate_snapshot_runtime(candidate, &before)?;
+            let expectations = native_qualification_expectations(&before, &candidate)?;
+            let evidence = SemanticActivationPublicationEvidenceV1::Packaged(
+                qualified_default_activation_candidate(&expectations)
+                    .map_err(map_packaged_qualification_error)?,
+            );
+            (before, candidate, evidence)
+        } else {
+            let qualification = Self::qualify_profile(snapshot_authority, repo_root, candidate)
+                .await
+                .map_err(|error| {
+                    rejected_with_context("semantic profile qualification failed", error)
+                })?;
+            let before = qualification.snapshot().clone();
+            let candidate = qualification.candidate().clone();
+            let evidence =
+                SemanticActivationPublicationEvidenceV1::Genuine(qualification.into_evaluation());
+            (before, candidate, evidence)
+        };
         let prepared = prepare_semantic_activation_publication(&before, &candidate, &evidence)
             .map_err(|error| {
                 rejected_with_context("semantic publication preparation failed", error)
@@ -746,6 +760,10 @@ fn validate_candidate_snapshot_runtime(
             "semantic evaluation candidate runtime does not match the verified snapshot".to_owned(),
         )),
     }
+}
+
+fn uses_packaged_activation(candidate: &SemanticEvaluationProfileCandidateV1) -> bool {
+    candidate.evaluated_profile_id == SEMANTIC_PROFILE
 }
 
 fn native_qualification_expectations(
@@ -1735,6 +1753,20 @@ mod tests {
             Err(SemanticActivationCoordinationErrorV1::RejectedDetail(detail))
                 if detail == "semantic evaluation candidate runtime does not match the verified snapshot"
         ));
+    }
+
+    #[test]
+    fn ordinary_activation_uses_only_the_matching_packaged_profile() {
+        let mut candidate = query_candidate();
+        candidate.evaluated_profile_id = tracedecay_query::search_quality::SEMANTIC_PROFILE.into();
+        assert!(uses_packaged_activation(&candidate));
+
+        candidate.evaluated_profile_id =
+            tracedecay_query::search_quality::QUERY_BASELINE_PROFILE.into();
+        assert!(!uses_packaged_activation(&candidate));
+
+        candidate.evaluated_profile_id = tracedecay_query::search_quality::RERANK_PROFILE.into();
+        assert!(!uses_packaged_activation(&candidate));
     }
 
     #[test]
