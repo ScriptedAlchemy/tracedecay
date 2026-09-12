@@ -606,8 +606,10 @@ impl CodeIndexSchedulerRegistryV1 {
             })?;
             *serving = Some(candidate.clone());
             swap_serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
-            *witness = scheduler
-                .source_currency_witness_for(&candidate.generation().manifest().generation_id);
+            *witness = scheduler.source_currency_witness_for(
+                &candidate.generation().manifest().generation_id,
+                &candidate.generation().snapshot().content_identity,
+            );
             drop(witness);
             drop(serving);
             let _ = scheduler.schedule_semantic_generation(candidate.generation_handle());
