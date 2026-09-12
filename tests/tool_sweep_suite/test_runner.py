@@ -1168,31 +1168,40 @@ class MutationJourneyTests(unittest.TestCase):
                 "node_id": "function:fixture",
             }
             accepted = {
-                "preview_id": "rename.preview.fixture",
+                "preview_id": "sha256:" + "0" * 64,
                 "preview_digest": "sha256:" + "1" * 64,
                 "plan_digest": "sha256:" + "2" * 64,
-                "graph_revision": "graph.fixture.v1",
+                "graph_revision": "sha256:" + "3" * 64,
                 "repository_revision": "repository.fixture.v1",
             }
+            calls = []
 
             def call(tool, arguments, _deadline_ms):
+                calls.append((tool, dict(arguments)))
                 if tool == "tracedecay_rename_preview":
                     return self.response(
                         '{"node":{"id":"function:fixture",'
                         '"qualified_name":"src/lib.rs::sweep_anchor","kind":"function",'
-                        '"file":"src/lib.rs","name":"sweep_anchor"},'
-                        f'"accepted_preview":{json.dumps(accepted)}}}'
+                        '"file":"src/lib.rs","name":"sweep_anchor"}}'
                     )
                 self.assertEqual(tool, "tracedecay_rename_symbol")
                 self.assertIs(arguments["dry_run"], True)
-                self.assertEqual(arguments["accepted_preview"], accepted)
-                return self.response('{"expected_state":"sha256:' + "3" * 64 + '"}')
+                self.assertNotIn("accepted_preview", arguments)
+                return self.response(json.dumps({
+                    **accepted,
+                    "expected_state": accepted["preview_digest"],
+                }))
 
             prepared = runner.prepare_journey(
                 "tracedecay_rename_symbol", object(), fixture, lambda _tool: 1_000, call
             )
 
         self.assertEqual(prepared.arguments["accepted_preview"], accepted)
+        self.assertEqual(prepared.arguments["expected_state"], accepted["preview_digest"])
+        self.assertTrue(prepared.arguments["verify"])
+        self.assertEqual([tool for tool, _ in calls], [
+            "tracedecay_rename_preview", "tracedecay_rename_symbol",
+        ])
 
     def test_source_edit_journey_replays_receipt_and_restores_exact_source(self) -> None:
         runner = load_runner()
@@ -1476,7 +1485,8 @@ class FixturePrimingRetryTests(unittest.TestCase):
         )
         self.assertEqual(fixture["node_id"], "function:fixture")
         self.assertEqual(fixture["code_node_id"], "sym:code")
-        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
+        self.assertNotIn("preview_input_id", fixture)
+        self.assertNotIn("tracedecay_git_hunks", [name for name, _ in client.calls])
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
         self.assertEqual(fixture["lcm_store_id"], 41)
         self.assertEqual(fixture["session_refresh_handle"], "srh_fixture")
@@ -1921,6 +1931,29 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(fixture["preview_input_id"], "preview.fresh")
         replayed = [arguments for tool, arguments in client.calls if tool == name]
         self.assertEqual(len(replayed), 2)
+
+    def test_git_preview_mints_its_input_immediately_before_consumption(self) -> None:
+        runner = load_runner()
+        name = "tracedecay_git_preview"
+        minted = self.text_response(
+            '{"preview_input_id":"preview.current","hunks":[{"digest":"d1","hunk":{}}]}'
+        )
+        success = self.text_response('{"operation":"stage_hunks","staged":1}')
+        client = self.scripted_client({name: [success], "tracedecay_git_hunks": [minted]})
+        policies = {
+            "tracedecay_git_hunks": self.policy(runner, "tracedecay_git_hunks"),
+            name: self.policy(runner, name),
+        }
+
+        row = runner._read_tool_row(
+            client, self.definition(name), self.policy(runner, name), fixture={}, policies=policies
+        )
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual([tool for tool, _ in client.calls], [
+            "tracedecay_git_hunks", "tracedecay_git_preview",
+        ])
+        self.assertEqual(client.calls[1][1]["preview_input_id"], "preview.current")
 
 
 if __name__ == "__main__":

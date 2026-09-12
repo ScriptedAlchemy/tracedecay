@@ -955,7 +955,6 @@ def prime_fixture_values(
             time.sleep(0.5)
     fixture["code_node_id"] = code_node_id
 
-    mint_preview_input(client, fixture, deadline("tracedecay_git_hunks"))
     prime_work_lifecycle(
         fixture,
         lambda tool, arguments, deadline_ms: _producer_call(
@@ -1688,6 +1687,11 @@ def _read_tool_row(
     policies: dict[str, ToolPolicy] | None = None,
 ) -> dict[str, Any]:
     try:
+        if policy.name == "tracedecay_git_preview":
+            hunks_policy = (policies or {}).get("tracedecay_git_hunks")
+            if hunks_policy is None:
+                raise SweepError("git preview consumer has no advertised git_hunks producer")
+            mint_preview_input(client, fixture, hunks_policy.deadline_ms)
         arguments = materialize_tool_arguments(definition, fixture)
     except Exception as error:
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.arguments_unmaterialized", str(error))
