@@ -109,8 +109,9 @@ fn parser_owned_tree_import_rows_do_not_disappear_from_parsed_artifact() {
     let tree = parser.parse(source, None).expect("parse TypeScript source");
     let extractor = TypeScriptExtractor;
 
-    let parsed = extractor.extract_parsed_artifact(
+    let parsed = extractor.extract_parsed_artifact_prepared(
         "src/parsed.ts",
+        source,
         source,
         &tree,
         ParsedExtractionScope::FullDocument,

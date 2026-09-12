@@ -2999,23 +2999,19 @@ mod tests {
             tracedecay_code_extraction::RustExtractor.language_name()
         }
 
-        fn extract(&self, file_path: &str, source: &str) -> tracedecay_domain::ExtractionResult {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            tracedecay_code_extraction::RustExtractor.extract(file_path, source)
-        }
-
-        fn extract_parsed(
+        fn extract_parsed_artifact_prepared(
             &self,
             file_path: &str,
             source: &str,
+            parsed_source: &str,
             tree: &tree_sitter::Tree,
             scope: tracedecay_code_extraction::parsed_extraction::ParsedExtractionScope<'_>,
-        ) -> tracedecay_code_extraction::parsed_extraction::ParsedExtraction {
+        ) -> tracedecay_code_extraction::parsed_extraction::ParsedExtractionArtifactV1 {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            tracedecay_code_extraction::LanguageExtractor::extract_parsed(
-                &tracedecay_code_extraction::RustExtractor,
+            tracedecay_code_extraction::RustExtractor.extract_parsed_artifact_prepared(
                 file_path,
                 source,
+                parsed_source,
                 tree,
                 scope,
             )

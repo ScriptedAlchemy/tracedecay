@@ -1,4 +1,4 @@
-use tracedecay_code_extraction::{LanguageRegistry, RustExtractor};
+use tracedecay_code_extraction::{LanguageExtractor, LanguageRegistry, RustExtractor};
 use tracedecay_domain::*;
 
 #[test]
@@ -9,7 +9,7 @@ pub fn add(a: i32, b: i32) -> i32 {
     a + b
 }
 "#;
-    let result = RustExtractor::extract("src/math.rs", source);
+    let result = RustExtractor.extract("src/math.rs", source);
     assert!(result.errors.is_empty());
     let fns: Vec<_> = result
         .nodes
@@ -37,7 +37,7 @@ pub struct Point {
     pub y: f64,
 }
 "#;
-    let result = RustExtractor::extract("src/geo.rs", source);
+    let result = RustExtractor.extract("src/geo.rs", source);
     let structs: Vec<_> = result
         .nodes
         .iter()
@@ -68,7 +68,7 @@ pub enum Color {
     Blue,
 }
 "#;
-    let result = RustExtractor::extract("src/color.rs", source);
+    let result = RustExtractor.extract("src/color.rs", source);
     let enums: Vec<_> = result
         .nodes
         .iter()
@@ -91,7 +91,7 @@ pub trait Drawable {
     fn area(&self) -> f64;
 }
 "#;
-    let result = RustExtractor::extract("src/draw.rs", source);
+    let result = RustExtractor.extract("src/draw.rs", source);
     let traits: Vec<_> = result
         .nodes
         .iter()
@@ -115,7 +115,7 @@ impl Circle {
     pub fn area(&self) -> f64 { std::f64::consts::PI * self.radius * self.radius }
 }
 "#;
-    let result = RustExtractor::extract("src/circle.rs", source);
+    let result = RustExtractor.extract("src/circle.rs", source);
     let impls: Vec<_> = result
         .nodes
         .iter()
@@ -139,7 +139,7 @@ impl Greet for Person {
     fn hello(&self) -> String { format!("Hello, {}", self.name) }
 }
 "#;
-    let result = RustExtractor::extract("src/greet.rs", source);
+    let result = RustExtractor.extract("src/greet.rs", source);
     // Should have an Implements unresolved ref or edge.
     let has_implements = result.edges.iter().any(|e| e.kind == EdgeKind::Implements)
         || result
@@ -155,7 +155,7 @@ fn test_extract_use_declarations() {
 use std::collections::HashMap;
 use crate::types::Node;
 "#;
-    let result = RustExtractor::extract("src/lib.rs", source);
+    let result = RustExtractor.extract("src/lib.rs", source);
     let uses: Vec<_> = result
         .nodes
         .iter()
@@ -173,7 +173,7 @@ fn main() {
     println!("{}", x);
 }
 "#;
-    let result = RustExtractor::extract("src/main.rs", source);
+    let result = RustExtractor.extract("src/main.rs", source);
     let call_refs: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -189,7 +189,7 @@ pub async fn fetch_data(url: &str) -> Result<String, Error> {
     Ok("data".to_string())
 }
 "#;
-    let result = RustExtractor::extract("src/http.rs", source);
+    let result = RustExtractor.extract("src/http.rs", source);
     let fns: Vec<_> = result
         .nodes
         .iter()
@@ -205,7 +205,7 @@ fn test_extract_const_and_static() {
 pub const MAX_SIZE: usize = 1024;
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 "#;
-    let result = RustExtractor::extract("src/globals.rs", source);
+    let result = RustExtractor.extract("src/globals.rs", source);
     let consts: Vec<_> = result
         .nodes
         .iter()
@@ -227,7 +227,7 @@ fn test_extract_type_alias() {
     let source = r#"
 pub type Result<T> = std::result::Result<T, Error>;
 "#;
-    let result = RustExtractor::extract("src/types.rs", source);
+    let result = RustExtractor.extract("src/types.rs", source);
     let aliases: Vec<_> = result
         .nodes
         .iter()
@@ -244,7 +244,7 @@ pub mod utils {
     pub fn helper() {}
 }
 "#;
-    let result = RustExtractor::extract("src/lib.rs", source);
+    let result = RustExtractor.extract("src/lib.rs", source);
     let modules: Vec<_> = result
         .nodes
         .iter()
@@ -260,7 +260,7 @@ fn test_extract_derive_macros() {
 #[derive(Debug, Clone, Serialize)]
 pub struct Config { pub name: String }
 "#;
-    let result = RustExtractor::extract("src/config.rs", source);
+    let result = RustExtractor.extract("src/config.rs", source);
     let derives: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -279,7 +279,7 @@ pub struct Config { pub name: String }
 #[test]
 fn test_file_node_is_root() {
     let source = "fn main() {}";
-    let result = RustExtractor::extract("src/main.rs", source);
+    let result = RustExtractor.extract("src/main.rs", source);
     let files: Vec<_> = result
         .nodes
         .iter()
@@ -296,7 +296,7 @@ mod server {
     pub fn handle_request() {}
 }
 "#;
-    let result = RustExtractor::extract("src/lib.rs", source);
+    let result = RustExtractor.extract("src/lib.rs", source);
     let fns: Vec<_> = result
         .nodes
         .iter()

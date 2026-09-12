@@ -2,7 +2,7 @@
 ///
 /// Parses TypeScript (.ts, .tsx) and JavaScript (.js, .jsx) source files and
 /// emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
@@ -49,10 +49,7 @@ struct ExtractionState<'s> {
 
 impl<'s> ExtractionState<'s> {
     fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -97,13 +94,6 @@ impl<'s> ExtractionState<'s> {
 }
 
 impl TypeScriptExtractor {
-    /// Extract code graph nodes and edges from a TypeScript/JavaScript source file.
-    ///
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_typescript(file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_typescript_artifact(file_path, source).result
-    }
-
     pub(crate) fn extract_typescript_artifact(
         file_path: &str,
         source: &str,
@@ -125,15 +115,6 @@ impl TypeScriptExtractor {
             crate::parsed_extraction::ParsedExtractionScope::FullDocument,
         )
         .artifact
-    }
-
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree_artifact(file_path, source, tree, scope).into_parsed()
     }
 
     fn extract_tree_artifact(
@@ -1714,10 +1695,6 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
         "TypeScript"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        TypeScriptExtractor::extract_typescript(file_path, source)
-    }
-
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
         crate::hotpath_observe::measure_extract_file(
             self.language_name(),
@@ -1727,20 +1704,11 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
         )
     }
 
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        TypeScriptExtractor::extract_tree(file_path, source, tree, scope)
-    }
-
-    fn extract_parsed_artifact(
-        &self,
-        file_path: &str,
-        source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {

@@ -1,14 +1,78 @@
 //! Helpers shared verbatim by multiple language extractors.
 //!
-//! Each extractor keeps its own private `ExtractionState`, so these helpers
-//! take the individual pieces of state they need (source bytes, file path,
-//! unresolved-ref sink) instead of the state struct itself. Bodies are moved
-//! here unchanged from the per-language copies so extraction output stays
-//! byte-identical.
+//! Extractors whose traversal state is exactly the common shape use
+//! [`ExtractionState`]; the rest keep a private state struct with their
+//! language-specific fields, so the helpers below take the individual pieces
+//! of state they need (source bytes, file path, unresolved-ref sink) instead
+//! of a state struct. Bodies are moved here unchanged from the per-language
+//! copies so extraction output stays byte-identical.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::types::{EdgeKind, NodeKind, UnresolvedRef, generate_node_id, generate_node_id_at};
+use crate::types::{
+    Edge, EdgeKind, Node, NodeKind, UnresolvedRef, generate_node_id, generate_node_id_at,
+};
+
+/// Seconds since the Unix epoch, stamped on every emitted node as `updated_at`.
+pub(crate) fn unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Traversal state for extractors that need nothing beyond the common shape.
+pub(crate) struct ExtractionState<'s> {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) edges: Vec<Edge>,
+    pub(crate) unresolved_refs: Vec<UnresolvedRef>,
+    pub(crate) errors: Vec<String>,
+    /// Stack of (name, `node_id`) for building qualified names and parent edges.
+    pub(crate) node_stack: Vec<(String, String)>,
+    pub(crate) file_path: String,
+    pub(crate) source: &'s [u8],
+    pub(crate) timestamp: u64,
+}
+
+impl<'s> ExtractionState<'s> {
+    pub(crate) fn new(file_path: &str, source: &'s str) -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            unresolved_refs: Vec::new(),
+            errors: Vec::new(),
+            node_stack: Vec::new(),
+            file_path: file_path.to_string(),
+            source: source.as_bytes(),
+            timestamp: unix_timestamp_secs(),
+        }
+    }
+
+    /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment.
+    pub(crate) fn qualified_prefix(&self) -> String {
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+
+    /// Returns the current parent node ID, or None if at file root level.
+    pub(crate) fn parent_node_id(&self) -> Option<&str> {
+        self.node_stack.last().map(|(_, id)| id.as_str())
+    }
+
+    /// Gets the text of a tree-sitter node from the source.
+    pub(crate) fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
+    }
+}
 
 /// Gets the text of a tree-sitter node from the source.
 fn node_text(source: &[u8], node: TsNode<'_>) -> String {

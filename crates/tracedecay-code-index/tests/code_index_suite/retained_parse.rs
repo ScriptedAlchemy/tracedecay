@@ -7,7 +7,9 @@ use std::{
 use tracedecay_code_extraction::{
     AstroExtractor, LanguageExtractor, RustExtractor,
     incremental::{ParseDocumentIdentity, ParseLimits, ParseReuse},
-    parsed_extraction::{ParsedExtraction, ParsedExtractionDisposition, ParsedExtractionScope},
+    parsed_extraction::{
+        ParsedExtractionArtifactV1, ParsedExtractionDisposition, ParsedExtractionScope,
+    },
 };
 use tracedecay_code_index::retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool};
 use tracedecay_domain::{
@@ -53,19 +55,22 @@ impl LanguageExtractor for RendezvousRustExtractor {
         RustExtractor.language_name()
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        RustExtractor.extract(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        parsed_source: &str,
         tree: &Tree,
         scope: ParsedExtractionScope<'_>,
-    ) -> ParsedExtraction {
+    ) -> ParsedExtractionArtifactV1 {
         self.rendezvous.wait();
-        RustExtractor.extract_parsed(file_path, source, tree, scope)
+        RustExtractor.extract_parsed_artifact_prepared(
+            file_path,
+            source,
+            parsed_source,
+            tree,
+            scope,
+        )
     }
 }
 

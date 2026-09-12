@@ -1,7 +1,7 @@
 //! Times a single-file extraction. Usage: `cargo run --release --example bench_extract <file>`.
 
 use std::time::Instant;
-use tracedecay_code_extraction::{CExtractor, CppExtractor};
+use tracedecay_code_extraction::{CExtractor, CppExtractor, LanguageExtractor};
 
 fn main() {
     let path = std::env::args()
@@ -21,9 +21,9 @@ fn main() {
         || path.ends_with(".hpp")
         || path.ends_with(".hh")
     {
-        CppExtractor::extract_source(&path, &source)
+        CppExtractor.extract(&path, &source)
     } else {
-        CExtractor::extract_source(&path, &source)
+        CExtractor.extract(&path, &source)
     };
     let elapsed = t0.elapsed();
     eprintln!(
