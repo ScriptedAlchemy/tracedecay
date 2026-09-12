@@ -2036,7 +2036,6 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
 /// The durable-data check covers the manifest-selected project graph and every
 /// registered project graph scope, and refuses to answer when the manifest
 /// that names them cannot be read.
-
 mod durable_inventory {
     use super::*;
 

@@ -208,145 +208,6 @@ pub struct CodexAppServerBackend {
     config: CodexAppServerSummaryConfig,
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use serde_json::json;
-
-    use super::*;
-
-    struct FlakyBackend {
-        failures: usize,
-        calls: AtomicUsize,
-        error: AgentTaskError,
-    }
-
-    impl FlakyBackend {
-        fn failing_with(failures: usize, error: AgentTaskError) -> Self {
-            Self {
-                failures,
-                calls: AtomicUsize::new(0),
-                error,
-            }
-        }
-    }
-
-    impl AgentTaskBackend for FlakyBackend {
-        fn run_task(
-            &self,
-            request: &AgentTaskRequest,
-        ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            if call < self.failures {
-                return Err(self.error.clone());
-            }
-            Ok(AgentTaskResponse {
-                run_id: request.run_id.clone(),
-                task: request.task,
-                output_text: "recovered".to_string(),
-                output_json: None,
-                model: None,
-                provider: None,
-                input_tokens: None,
-                output_tokens: None,
-            })
-        }
-    }
-
-    fn request() -> AgentTaskRequest {
-        AgentTaskRequest::new(
-            "run_retry".to_string(),
-            AgentTaskKind::MemoryCurator,
-            r#"{"ops":[]}"#.to_string(),
-            None,
-            json!({}),
-        )
-    }
-
-    #[tokio::test]
-    async fn denied_task_is_never_retried_and_surfaces_denial() {
-        let backend = FlakyBackend::failing_with(
-            usize::MAX,
-            AgentTaskError::Denied {
-                reason: "workspace write scope was denied".to_string(),
-            },
-        );
-        let policy = BackendRetryPolicy::new(3, vec![Duration::ZERO], Duration::from_secs(120));
-        let mut report = AgentTaskRetryReport::default();
-
-        let error = run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
-            .await
-            .unwrap_err();
-
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(report.attempt_count(), 1);
-        assert_eq!(
-            report.attempts()[0].failure_classification,
-            Some(AgentTaskFailureClass::Denied)
-        );
-        assert!(
-            error.to_string().contains("agent task denied"),
-            "denial must survive the retry boundary: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn disconnected_task_is_retried_and_classified_as_disconnect() {
-        let backend = FlakyBackend::failing_with(
-            1,
-            AgentTaskError::Disconnected {
-                reason: "connection reset by peer".to_string(),
-            },
-        );
-        let policy = BackendRetryPolicy::new(
-            3,
-            vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_secs(120),
-        );
-        let mut report = AgentTaskRetryReport::default();
-
-        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
-            .await
-            .unwrap();
-
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            report.attempts()[0].failure_classification,
-            Some(AgentTaskFailureClass::Disconnected)
-        );
-        assert!(report.attempts()[1].succeeded);
-    }
-
-    #[tokio::test]
-    async fn unavailable_task_is_retried_and_classified_as_unavailable() {
-        let backend = FlakyBackend::failing_with(
-            1,
-            AgentTaskError::Unavailable {
-                reason: "codex executable was not found".to_string(),
-            },
-        );
-        let policy = BackendRetryPolicy::new(
-            3,
-            vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_secs(120),
-        );
-        let mut report = AgentTaskRetryReport::default();
-
-        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
-            .await
-            .unwrap();
-
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            report.attempts()[0].failure_classification,
-            Some(AgentTaskFailureClass::Unavailable)
-        );
-        assert!(report.attempts()[1].succeeded);
-    }
-}
-
 impl CodexAppServerBackend {
     pub fn from_automation_config(config: &AutomationConfig) -> Self {
         Self::new(config.model_id.clone(), config.timeout_secs)
@@ -414,5 +275,144 @@ impl AgentTaskBackend for CodexAppServerBackend {
             input_tokens: None,
             output_tokens: None,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use serde_json::json;
+
+    use super::*;
+
+    struct FlakyBackend {
+        failures: usize,
+        calls: AtomicUsize,
+        error: AgentTaskError,
+    }
+
+    impl FlakyBackend {
+        fn failing_with(failures: usize, error: AgentTaskError) -> Self {
+            Self {
+                failures,
+                calls: AtomicUsize::new(0),
+                error,
+            }
+        }
+    }
+
+    impl AgentTaskBackend for FlakyBackend {
+        fn run_task(
+            &self,
+            request: &AgentTaskRequest,
+        ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.failures {
+                return Err(self.error.clone());
+            }
+            Ok(AgentTaskResponse {
+                run_id: request.run_id.clone(),
+                task: request.task,
+                output_text: "recovered".to_string(),
+                output_json: None,
+                model: None,
+                provider: None,
+                input_tokens: None,
+                output_tokens: None,
+            })
+        }
+    }
+
+    fn request() -> AgentTaskRequest {
+        AgentTaskRequest::new(
+            "run_retry".to_string(),
+            AgentTaskKind::MemoryCurator,
+            r#"{"ops":[]}"#.to_string(),
+            None,
+            json!({}),
+        )
+    }
+
+    #[tokio::test]
+    async fn denied_task_is_never_retried_and_surfaces_denial() {
+        let backend = FlakyBackend::failing_with(
+            usize::MAX,
+            AgentTaskError::Denied {
+                reason: "workspace write scope was denied".to_string(),
+            },
+        );
+        let policy = BackendRetryPolicy::new(3, vec![Duration::ZERO], Duration::from_mins(2));
+        let mut report = AgentTaskRetryReport::default();
+
+        let error = run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
+            .await
+            .unwrap_err();
+
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(report.attempt_count(), 1);
+        assert_eq!(
+            report.attempts()[0].failure_classification,
+            Some(AgentTaskFailureClass::Denied)
+        );
+        assert!(
+            error.to_string().contains("agent task denied"),
+            "denial must survive the retry boundary: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_task_is_retried_and_classified_as_disconnect() {
+        let backend = FlakyBackend::failing_with(
+            1,
+            AgentTaskError::Disconnected {
+                reason: "connection reset by peer".to_string(),
+            },
+        );
+        let policy = BackendRetryPolicy::new(
+            3,
+            vec![Duration::ZERO, Duration::ZERO],
+            Duration::from_mins(2),
+        );
+        let mut report = AgentTaskRetryReport::default();
+
+        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            report.attempts()[0].failure_classification,
+            Some(AgentTaskFailureClass::Disconnected)
+        );
+        assert!(report.attempts()[1].succeeded);
+    }
+
+    #[tokio::test]
+    async fn unavailable_task_is_retried_and_classified_as_unavailable() {
+        let backend = FlakyBackend::failing_with(
+            1,
+            AgentTaskError::Unavailable {
+                reason: "codex executable was not found".to_string(),
+            },
+        );
+        let policy = BackendRetryPolicy::new(
+            3,
+            vec![Duration::ZERO, Duration::ZERO],
+            Duration::from_mins(2),
+        );
+        let mut report = AgentTaskRetryReport::default();
+
+        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            report.attempts()[0].failure_classification,
+            Some(AgentTaskFailureClass::Unavailable)
+        );
+        assert!(report.attempts()[1].succeeded);
     }
 }
