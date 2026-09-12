@@ -6,17 +6,17 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tracedecay::query::temporal::context::{
+use tracedecay_temporal_query::context::{
     CompactContext, ContextBudget, TokenPolicy, VersionedTokenEstimator,
 };
-use tracedecay::query::temporal::cursor::CursorError;
-use tracedecay::query::temporal::ports::{
+use tracedecay_temporal_query::cursor::CursorError;
+use tracedecay_temporal_query::ports::{
     BindingDigest, ExecutionLimits, KernelVersions, TemporalExecutionSnapshot,
     TemporalRetrievalScope, TemporalWatermarks,
 };
-use tracedecay::query::temporal::ranking::DiversityLimits;
-use tracedecay::query::temporal::resolution::{SummaryLineageRejection, SummaryOmission};
-use tracedecay::query::temporal::{
+use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::resolution::{SummaryLineageRejection, SummaryOmission};
+use tracedecay_temporal_query::{
     TemporalKernelError, TemporalKernelRequest, TemporalKernelResult,
 };
 use tracedecay_contracts::{
@@ -293,8 +293,8 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
         if request.cursor() == Some("forged") {
             return Box::pin(async {
                 Err(SessionTemporalExecutionError::Kernel(
-                    tracedecay::query::temporal::TemporalKernelError::Cursor(
-                        tracedecay::query::temporal::cursor::CursorError::Tampered,
+                    tracedecay_temporal_query::TemporalKernelError::Cursor(
+                        tracedecay_temporal_query::cursor::CursorError::Tampered,
                     ),
                 ))
             });
@@ -475,12 +475,12 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
                     .unwrap(),
                 },
                 None,
-                tracedecay::query::temporal::resolution::ValidatedAuthorization::Authorized,
+                tracedecay_temporal_query::resolution::ValidatedAuthorization::Authorized,
             )
             .unwrap();
             let mut ranked = Vec::new();
             for index in 0..ranked_count {
-                ranked.push(tracedecay::query::temporal::ranking::RankedCandidate {
+                ranked.push(tracedecay_temporal_query::ranking::RankedCandidate {
                     stable_id: format!("candidate-{index}"),
                     anchor_id: tracedecay_domain::RetrievalAnchorId::new(format!("anchor-{index}"))
                         .unwrap(),
@@ -527,7 +527,7 @@ struct PendingExecutionPort {
 }
 
 struct PendingExecution {
-    control: tracedecay::query::temporal::ports::ExecutionControl,
+    control: tracedecay_temporal_query::ports::ExecutionControl,
     dropped_after_cancel: Arc<AtomicBool>,
 }
 
@@ -544,7 +544,7 @@ impl Drop for PendingExecution {
         self.dropped_after_cancel.store(
             matches!(
                 self.control.checkpoint(),
-                Err(tracedecay::query::temporal::ports::TemporalPortError::Cancelled)
+                Err(tracedecay_temporal_query::ports::TemporalPortError::Cancelled)
             ),
             Ordering::SeqCst,
         );
