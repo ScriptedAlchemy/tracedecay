@@ -185,19 +185,13 @@ fn source_read_failed(observed_at: UtcMicros) -> SourceReadPortOutcome {
 pub struct SymbolGraphCursorSnapshot {
     temporal: TemporalExecutionSnapshot,
     code_generation_id: CodeGenerationId,
-    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
 impl SymbolGraphCursorSnapshot {
-    pub fn new(
-        temporal: TemporalExecutionSnapshot,
-        code_generation_id: CodeGenerationId,
-        freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
-    ) -> Self {
+    pub fn new(temporal: TemporalExecutionSnapshot, code_generation_id: CodeGenerationId) -> Self {
         Self {
             temporal,
             code_generation_id,
-            freshness,
         }
     }
 
@@ -209,13 +203,7 @@ impl SymbolGraphCursorSnapshot {
         &self.code_generation_id
     }
 
-    pub const fn freshness(&self) -> tracedecay_graph_query::CodeGraphReadFreshnessV1 {
-        self.freshness
-    }
-
-    /// Whether two observations of this authority name the same served
-    /// generation. Identity only: the freshness verdict is re-resolved on
-    /// every read and moves independently of the generation it describes.
+    /// Whether two observations of this authority name the same served generation.
     pub fn identifies_same_generation(&self, other: &Self) -> bool {
         self.temporal == other.temporal && self.code_generation_id == other.code_generation_id
     }
@@ -325,11 +313,7 @@ where
                 // identity has moved since, the page in hand belongs to a
                 // generation that is no longer being served, so the caller is told
                 // it is stale instead of being handed a page-set that silently
-                // spans two generations. Freshness is deliberately excluded:
-                // `rebuild_in_flight` and the bounded source proof flip while a
-                // page is read without moving the served generation, and a page
-                // that outlived its currency witness is stale in its reported
-                // freshness, not in its identity.
+                // spans two generations.
                 if !snapshot.identifies_same_generation(&claim.snapshot) {
                     return Err(primitive_failure(
                         PrimitiveFailureKind::Stale,
@@ -771,11 +755,7 @@ mod tests {
             ValidatedAuthorization::Authorized,
         )
         .expect("execution snapshot");
-        SymbolGraphCursorSnapshot::new(
-            temporal,
-            code_generation_id,
-            tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
-        )
+        SymbolGraphCursorSnapshot::new(temporal, code_generation_id)
     }
 
     fn application_context(suffix: &str) -> (ResolvedScope, RequestContext, ApplicationOperation) {

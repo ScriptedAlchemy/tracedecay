@@ -400,6 +400,7 @@ pub(super) fn fixture_context_scout_evidence() -> ContextScoutEvidenceEnvelopeV1
                 requested_at: UtcMicros(1),
                 resolved_at: UtcMicros(2),
                 source_generation: Some(id("generation.scout")),
+                code_graph_freshness: None,
                 watermark_digest: Some(digest('e')),
                 freshness: FreshnessState::Current,
             },
