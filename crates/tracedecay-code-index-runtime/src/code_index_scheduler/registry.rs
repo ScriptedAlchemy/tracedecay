@@ -5594,6 +5594,94 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(())
     }
 
+    /// Mount the query authority already serving this project and repository
+    /// onto an explicitly published branch worktree.
+    ///
+    /// Manual branch publication mounts its retained worktree independently of
+    /// project-open query activation. An exact branch read may therefore reach
+    /// a sealed generation whose worktree has no query authority even though a
+    /// peer checkout of the same project already owns one. Reuse is allowed
+    /// only when the target and a unique peer both prove the same project and
+    /// repository through their sealed generations; disagreement fails closed.
+    pub async fn mount_query_authority_from_project_peer(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        scope
+            .validate()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let project_root = project_root.canonicalize()?;
+        let mut mounted = self.mounted.lock().await;
+        let target = mounted.get(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "cannot mount a branch query authority before its worktree".to_owned(),
+            )
+        })?;
+        if target.repository_id != scope.repository_id || target.worktree_id != scope.worktree_id {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "branch query authority scope does not match the mounted worktree".to_owned(),
+            ));
+        }
+        if target.query_authority.is_some() {
+            return Ok(true);
+        }
+        let target_project_matches = target
+            .serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|latest| latest.generation().manifest().project_id == scope.project_id);
+        if !target_project_matches {
+            return Ok(false);
+        }
+
+        let mut authority = None;
+        for (root, peer) in mounted.iter() {
+            if root == &project_root || peer.repository_id != scope.repository_id {
+                continue;
+            }
+            let peer_project_matches = peer
+                .serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|latest| {
+                    latest.generation().manifest().project_id == scope.project_id
+                });
+            if !peer_project_matches {
+                continue;
+            }
+            let Some((_, candidate)) = peer.query_authority.as_ref() else {
+                continue;
+            };
+            if authority
+                .as_ref()
+                .is_some_and(|existing| !Arc::ptr_eq(existing, candidate))
+            {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "multiple query authorities are mounted for this project repository".to_owned(),
+                ));
+            }
+            authority = Some(Arc::clone(candidate));
+        }
+        let Some(authority) = authority else {
+            return Ok(false);
+        };
+        let target = mounted.get_mut(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "branch query authority target disappeared during installation".to_owned(),
+            )
+        })?;
+        if target.query_activation_revision.is_some() {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "standalone query authority cannot replace a committed authority pair".to_owned(),
+            ));
+        }
+        target.query_authority = Some((scope.scope_digest.clone(), authority));
+        Ok(true)
+    }
+
     /// Seat the core query fallback while an exact committed semantic
     /// activation is still warming. Unlike a standalone mount, this preserves
     /// the committed revision fence and never replaces an already-usable query
