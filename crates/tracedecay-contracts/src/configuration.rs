@@ -411,13 +411,12 @@ pub fn configuration_surface_catalog_contribution()
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
 
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.configuration-surface")?,
-        depends_on: Vec::new(),
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
+        ContributionId::new("contribution.application.configuration-surface")?,
+        Vec::new(),
         capabilities,
-        retrieval_primitives: Vec::new(),
         bindings,
-    })?;
+    ))?;
     let schemas = configuration_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
 }

@@ -125,13 +125,14 @@ pub fn lsp_context_catalog_contribution() -> Result<CatalogContributionV1, Appli
             required_features: vec![feature],
         })?);
     }
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.lsp-context")?,
-        depends_on: Vec::new(),
-        capabilities,
-        retrieval_primitives: Vec::new(),
-        bindings,
-    })?)
+    Ok(CatalogContributionV1::new(
+        CatalogContributionInputV1::new(
+            ContributionId::new("contribution.application.lsp-context")?,
+            Vec::new(),
+            capabilities,
+            bindings,
+        ),
+    )?)
 }
 
 pub fn lsp_context_handler_descriptors()

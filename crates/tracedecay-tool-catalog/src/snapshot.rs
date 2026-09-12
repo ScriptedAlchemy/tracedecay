@@ -69,6 +69,31 @@ pub struct CatalogContributionInputV1 {
     pub bindings: Vec<SurfaceBindingV1>,
 }
 
+impl CatalogContributionInputV1 {
+    pub fn new(
+        contribution_id: ContributionId,
+        depends_on: Vec<ContributionId>,
+        capabilities: Vec<CapabilityManifestV1>,
+        bindings: Vec<SurfaceBindingV1>,
+    ) -> Self {
+        Self {
+            contribution_id,
+            depends_on,
+            capabilities,
+            retrieval_primitives: Vec::new(),
+            bindings,
+        }
+    }
+
+    pub fn with_retrieval_primitives(
+        mut self,
+        retrieval_primitives: Vec<RetrievalPrimitiveManifestV1>,
+    ) -> Self {
+        self.retrieval_primitives = retrieval_primitives;
+        self
+    }
+}
+
 /// A reviewed, application-owned set of inert catalog records.
 ///
 /// Contributions carry metadata only. `tracedecay-contracts` validates them

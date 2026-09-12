@@ -55,13 +55,14 @@ pub fn git_index_catalog_contribution() -> Result<CatalogContributionV1, Applica
         .iter()
         .map(capability)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.git-index-transactions")?,
-        depends_on: Vec::new(),
-        capabilities,
-        retrieval_primitives: Vec::new(),
-        bindings: Vec::new(),
-    })?)
+    Ok(CatalogContributionV1::new(
+        CatalogContributionInputV1::new(
+            ContributionId::new("contribution.application.git-index-transactions")?,
+            Vec::new(),
+            capabilities,
+            Vec::new(),
+        ),
+    )?)
 }
 
 pub fn git_index_handler_descriptors()
