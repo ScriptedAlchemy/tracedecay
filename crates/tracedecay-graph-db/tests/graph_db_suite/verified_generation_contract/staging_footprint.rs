@@ -1098,11 +1098,13 @@ fn sealed_artifact_container_is_byte_identical_across_reopens() {
 
 /// Retirement of a deleted code generation must not lazily open a hibernated
 /// staging engine; it returns `RetentionPending` and retries once a later
-/// lease has opened the engine.
+/// lease has opened the engine. The sealed artifact, which needs no engine,
+/// goes on the first pass.
 ///
 /// Fails if `retire_one_code_generation_replay` calls `read_guard` /
 /// `ensure_opened` on the hibernated engine (`staging_engine_is_open` becomes
-/// true) or if the deferred outcome is no longer `RetentionPending`.
+/// true), if the deferred outcome is no longer `RetentionPending`, or if the
+/// sealed directory outlives the deferral.
 #[test]
 fn hibernated_engine_defers_retirement_without_opening() {
     let temp = TempDir::new().unwrap();
@@ -1153,10 +1155,15 @@ fn hibernated_engine_defers_retirement_without_opening() {
         GraphReplayCollectionOutcome::RetentionPending
     );
     assert_engine_hibernated(&registered, temp.path());
+    // The rows wait for an open engine; the sealed artifact does not. A
+    // retired generation's directory is dead bytes the moment the journal
+    // linearizes the retirement, and an inactive project may never open its
+    // engine again to finish the row delete.
     assert!(
-        receipt_for_generation(temp.path(), "hibernate-retire-g1").is_some(),
-        "a deferred retirement must leave the sealed artifact queued"
+        receipt_for_generation(temp.path(), "hibernate-retire-g1").is_none(),
+        "a deferred retirement must still delete the sealed artifact without opening the engine"
     );
+    assert_engine_hibernated(&registered, temp.path());
 
     let opener = probe_lease(&registered, temp.path());
     let _opened = opener.snapshot().unwrap();
