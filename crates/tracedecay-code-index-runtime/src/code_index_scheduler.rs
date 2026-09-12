@@ -174,7 +174,6 @@ const TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1: Duration = Duration::from_m
 /// yields the same retryable warming error the caller already handles.
 /// Activation itself stays one bounded advance so graph warm and oversized
 /// hints never wait on the text projection.
-#[cfg(any(test, feature = "test-helpers"))]
 const TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
@@ -2924,6 +2923,21 @@ impl CodeIndexExecutionControlV1 for GenerationTextControlV1 {
     }
 }
 
+struct GenerationTextRequestControlV1<'a> {
+    generation: &'a GenerationTextControlV1,
+    request: &'a dyn CodeIndexExecutionControlV1,
+}
+
+impl CodeIndexExecutionControlV1 for GenerationTextRequestControlV1<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.generation.is_cancelled() || self.request.is_cancelled()
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        self.generation.is_deadline_exceeded() || self.request.is_deadline_exceeded()
+    }
+}
+
 #[derive(Default)]
 pub struct CodeIndexBuildProgressSlotStateV1 {
     generation_id: Option<CodeGenerationId>,
@@ -4130,6 +4144,27 @@ impl LatestCodeTextGenerationV1 {
         self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
     }
 
+    /// Finish the durable text projection for an explicitly selected sealed
+    /// generation while retaining both generation and request cancellation.
+    /// Historical branch generations have no scheduler-owned background wake,
+    /// so their first query owns this resumable completion.
+    fn finish_text_serving_for_request(
+        &self,
+        request_control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let mut advances = 0_usize;
+        while !self.advance_text_serving_for_request(
+            TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1,
+            request_control,
+        )? {
+            advances += 1;
+            if advances >= TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn production_query_owners_with_budget(
         &self,
         _build_budget: &RetrievalBudget,
@@ -4584,7 +4619,29 @@ impl LatestCodeTextGenerationV1 {
     /// gate for concurrent scheduler wakes; corpus-sized verified opens run
     /// under a claimed slot with the lock released.
     fn advance_text_serving(&self, maximum_work: usize) -> Result<bool, RetrievalPortError> {
-        let result = self.advance_text_serving_inner(maximum_work);
+        let control = self.text_execution_control();
+        self.advance_text_serving_with_control(maximum_work, &control)
+    }
+
+    fn advance_text_serving_for_request(
+        &self,
+        maximum_work: usize,
+        request_control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let generation = self.text_execution_control();
+        let control = GenerationTextRequestControlV1 {
+            generation: &generation,
+            request: request_control,
+        };
+        self.advance_text_serving_with_control(maximum_work, &control)
+    }
+
+    fn advance_text_serving_with_control(
+        &self,
+        maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let result = self.advance_text_serving_inner(maximum_work, control);
         if matches!(&result, Err(RetrievalPortError::Cancelled)) {
             #[cfg(feature = "hotpath")]
             match self.text_control.cancellation_source() {
@@ -4613,7 +4670,11 @@ impl LatestCodeTextGenerationV1 {
         result
     }
 
-    fn advance_text_serving_inner(&self, maximum_work: usize) -> Result<bool, RetrievalPortError> {
+    fn advance_text_serving_inner(
+        &self,
+        maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
         if let Some(binding) = self.publication_binding.as_ref() {
             let current = self
                 .text_artifact_store
@@ -4628,8 +4689,7 @@ impl LatestCodeTextGenerationV1 {
         if self.query_owners.get().is_some() {
             return Ok(true);
         }
-        let control = self.text_execution_control();
-        self.advance_artifact_text_serving(maximum_work, &control)
+        self.advance_artifact_text_serving(maximum_work, control)
     }
 
     fn text_execution_control(&self) -> GenerationTextControlV1 {
