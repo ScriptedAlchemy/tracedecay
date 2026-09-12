@@ -604,6 +604,7 @@ impl GraphGenerationManifest {
         Ok(digest)
     }
 
+    #[hotpath::measure(label = "code_index.seal.digest")]
     fn compute_expected_recovered_digest(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,

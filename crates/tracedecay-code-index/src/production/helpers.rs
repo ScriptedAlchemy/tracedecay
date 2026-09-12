@@ -245,10 +245,21 @@ where
 /// exactly one kind-compatible symbol. Other bare names have no cross-file
 /// authority and stay unresolved. Bound edges carry the `NameResolved`
 /// authority class, not `SyntaxExact`.
+#[hotpath::measure(label = "code_index.seal.resolve")]
 fn resolve_cross_file_references<T>(files: &[T]) -> Vec<CanonicalRelationEdgeV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("code_index.seal.resolve.effective_workers").set(1);
+        hotpath::gauge!("code_index.seal.resolve.unresolved_references").set(
+            files
+                .iter()
+                .map(|file| file.as_ref().artifacts.unresolved_references.len() as u64)
+                .sum::<u64>(),
+        );
+    }
     let (by_simple_name, rust_files) =
         hotpath::measure_block!("code_index.seal.reference_index", {
             let mut by_simple_name: BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> =
