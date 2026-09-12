@@ -1,8 +1,8 @@
-use tracedecay_code_extraction::ScalaExtractor;
+use tracedecay_code_extraction::{LanguageExtractor, ScalaExtractor};
 use tracedecay_domain::{EdgeKind, NodeKind};
 
 fn extract(source: &str) -> tracedecay_domain::ExtractionResult {
-    ScalaExtractor::extract_scala("test.scala", source)
+    ScalaExtractor.extract("test.scala", source)
 }
 
 #[test]

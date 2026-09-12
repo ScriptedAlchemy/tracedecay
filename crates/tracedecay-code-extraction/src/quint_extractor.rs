@@ -19,7 +19,7 @@
 /// sufficient to populate `Module` / `Function` / `Const` / `Static` /
 /// `TypeAlias` nodes and `Contains` edges from each definition to its
 /// enclosing scope.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
@@ -48,10 +48,7 @@ struct ExtractionState<'s> {
 
 impl<'s> ExtractionState<'s> {
     fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = crate::common::unix_timestamp_secs();
         let file_node_id = generate_node_id(file_path, &NodeKind::File, file_path, 0);
         Self {
             nodes: Vec::new(),
@@ -187,31 +184,6 @@ impl TokenWalker {
 }
 
 impl QuintExtractor {
-    pub fn extract_quint(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                // Parse failed; record the error and skip extraction rather
-                // than emitting bogus structure.
-                let start = Instant::now();
-                let mut state = Self::initialize_state(
-                    file_path,
-                    source,
-                    crate::common::unparsed_file_end_line(source),
-                );
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -275,10 +247,6 @@ impl QuintExtractor {
             .scope_stack
             .push((file_path.to_string(), state.file_node_id.clone(), 0));
         state
-    }
-
-    fn parse(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("quint", "Quint", source)
     }
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
@@ -404,17 +372,16 @@ impl crate::LanguageExtractor for QuintExtractor {
         "Quint"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_quint(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }
