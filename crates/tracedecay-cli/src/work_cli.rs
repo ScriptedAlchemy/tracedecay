@@ -15,15 +15,15 @@ use tracedecay_contracts::{
     AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,
     ApplicationProblemEnvelope, ApplicationResult, CancelWorkAttemptCommand, CancellationSignal,
     CreateWorkTaskRequestV1, Deadline, DecideWorkProposalRequestV1,
-    ExecutionTopologyMetricsRequestV1, GenerateProposalRequest, LegalAction, PauseWorkRunCommand,
+    ExecutionTopologyMetricsRequestV1, GenerateProposalRequest, PauseWorkRunCommand,
     PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
     ReleaseWorkPlacementCommand, ResultContractRef, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1, SafeDiagnostic,
-    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1,
-    WorkAttemptStatusRequestV1, WorkEvidenceRetrieveRequestV1, WorkExperienceRequestV1,
-    WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1,
-    WorkProductMutationRequestV1, WorkProposalComparisonRequestV1, WorkRunControlRequestV1,
-    WorkTopologyViewRequestV1, work_executable_binding_registry,
+    ResumeWorkRunCommand, RetryWorkAttemptCommandV1, SafeDiagnostic, StartWorkAttemptCommand,
+    WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
+    WorkEvidenceRetrieveRequestV1, WorkExperienceRequestV1, WorkGraphReadRequestV1,
+    WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1, WorkProductMutationRequestV1,
+    WorkProposalComparisonRequestV1, WorkRunControlRequestV1, WorkTopologyViewRequestV1,
+    work_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
@@ -34,10 +34,15 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationDelivery, InvocationCancellationPolicy, invocation_now_micros,
 };
 use tracedecay_daemon_protocol::{
-    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
+    DaemonInvocationOutcome, DaemonInvocationRequest, WorkApplicationInvocationV1,
+    WorkApplicationOutcomeV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+
+#[path = "application_cli.rs"]
+pub(crate) mod application_cli;
+
+use application_cli::{WORK, config_error};
 
 const WORK_CLI_DEADLINE_MICROS: i64 = 120_000_000;
 
@@ -365,7 +370,7 @@ pub async fn invoke_work_cli_with_delivery(
             return Ok(WorkCliResponse::without_delivery(Err(work_problem(
                 result_contract,
                 request_id,
-                invalid_work_request(),
+                WORK.invalid_request(),
             )?)));
         }
     };
@@ -423,7 +428,7 @@ pub async fn invoke_work_cli_with_delivery(
         DaemonInvocationOutcome::Problem { problem } => Err(work_problem(
             result_contract,
             request_id.clone(),
-            daemon_application_problem(problem),
+            WORK.daemon_problem(problem),
         )?),
         _ => Err(work_problem(
             result_contract,
@@ -523,65 +528,11 @@ fn work_problem(
     ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
-fn invalid_work_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "invalid_work_request".to_owned(),
-            message: "The Work request does not match its operation contract".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
-}
-
-fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
-    match problem {
-        DaemonInvocationProblem::InvalidRequest => invalid_work_request(),
-        DaemonInvocationProblem::UnsupportedRevision => ApplicationProblem::Unsupported {
-            diagnostic: SafeDiagnostic {
-                code: "unsupported_work_revision".to_owned(),
-                message: "The daemon does not support this Work revision".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
-        DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-        }
-        DaemonInvocationProblem::ResetRequired => ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic {
-                code: "work_authority_reset_required".to_owned(),
-                message: "The owning Work authority requires an explicit reset".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        },
-        DaemonInvocationProblem::ApplicationContractViolation => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "work_application_contract_violation".to_owned(),
-                message: "The Work result violated its canonical contract".to_owned(),
-            })
-        }
-        DaemonInvocationProblem::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work_authority_unavailable".to_owned(),
-            message: "The owning Work authority is unavailable".to_owned(),
-        }),
-    }
-}
-
 fn decode<T>(body: Value) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    serde_json::from_value(body).map_err(|error| TraceDecayError::Config {
-        message: format!("invalid typed Work request: {error}"),
-    })
-}
-
-fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: error.to_string(),
-    }
+    WORK.decode(body)
 }
 
 #[cfg(test)]
@@ -658,11 +609,11 @@ mod tests {
 
     #[test]
     fn daemon_work_reset_remains_a_typed_cli_problem() {
-        use super::daemon_application_problem;
+        use super::WORK;
         use tracedecay_contracts::ApplicationProblem;
         use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
-        let problem = daemon_application_problem(DaemonInvocationProblem::ResetRequired);
+        let problem = WORK.daemon_problem(DaemonInvocationProblem::ResetRequired);
         let ApplicationProblem::ResetRequired {
             diagnostic,
             retry,
