@@ -74,7 +74,7 @@ pub struct FactStoreRelatedRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactStoreReasonRequestV1 {
-    #[serde(default)]
+    #[schemars(length(min = 1))]
     pub entities: Vec<String>,
     #[serde(flatten)]
     pub options: FactReadOptionsV1,
@@ -172,7 +172,8 @@ pub struct FactStoreListRequestV1 {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use schemars::schema_for;
+    use serde_json::{Value, json};
 
     use super::{
         FactStoreAddRequestV1, FactStoreContradictRequestV1, FactStoreGetRequestV1,
@@ -237,6 +238,18 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn reason_request_schema_requires_a_nonempty_entity_set() {
+        assert!(serde_json::from_value::<FactStoreReasonRequestV1>(json!({})).is_err());
+
+        let schema = serde_json::to_value(schema_for!(FactStoreReasonRequestV1))
+            .expect("reason request schema serializes");
+        assert_eq!(schema["properties"]["entities"]["minItems"], json!(1));
+        assert!(schema["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&Value::String("entities".to_owned()))));
     }
 
     #[test]
