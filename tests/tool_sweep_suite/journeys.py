@@ -76,6 +76,306 @@ def _remove_seeded_fact(call: Call, deadline: Deadline, fact_id: str | int) -> N
         raise JourneyError("fact rollback did not confirm removal")
 
 
+def _git_hunk_input(response: dict[str, Any]) -> tuple[str, list[str]]:
+    preview_input_id = first_value(response, {"preview_input_id"})
+    digests = sorted(
+        {
+            value["digest"]
+            for value in objects(response)
+            if isinstance(value.get("digest"), str) and isinstance(value.get("hunk"), dict)
+        }
+    )
+    if not isinstance(preview_input_id, str) or not preview_input_id or not digests:
+        raise JourneyError("git hunks producer omitted its preview input or selected hunks")
+    return preview_input_id, digests
+
+
+def _git_preview(
+    call: Call, deadline: Deadline, scope: str, operation: str,
+) -> dict[str, Any]:
+    hunks = call(
+        "tracedecay_git_hunks",
+        {"scope": scope, "format": "json"},
+        deadline("tracedecay_git_hunks"),
+    )
+    preview_input_id, digests = _git_hunk_input(hunks)
+    return call(
+        "tracedecay_git_preview",
+        {
+            "operation": operation,
+            "preview_input_id": preview_input_id,
+            "selected_hunk_digests": digests,
+            "format": "json",
+        },
+        deadline("tracedecay_git_preview"),
+    )
+
+
+def _git_apply(call: Call, deadline: Deadline) -> PreparedJourney:
+    """Stage the real fixture hunk, verify it, then unstage through the same API."""
+    preview = _git_preview(call, deadline, "working_tree", "stage_hunks")
+    preview_id = first_value(preview, {"preview_id"})
+    preview_digest = first_value(preview, {"preview_digest"})
+    if not all(isinstance(value, str) and value for value in (preview_id, preview_digest)):
+        raise JourneyError("git preview omitted the immutable apply capability")
+    arguments = {
+        "preview_id": preview_id,
+        "preview_digest": preview_digest,
+        "idempotency_key": f"tool-sweep-git-apply-{time.monotonic_ns()}",
+        "format": "json",
+    }
+
+    def cleanup(response: dict[str, Any]) -> str:
+        effect_id = first_value(response, {"effect_id"})
+        if first_value(response, {"outcome"}) != "effect" or not isinstance(effect_id, str):
+            raise JourneyError("git apply omitted its tagged durable effect receipt")
+        staged = call(
+            "tracedecay_git_hunks",
+            {"scope": "staged", "format": "json"},
+            deadline("tracedecay_git_hunks"),
+        )
+        _git_hunk_input(staged)
+        replayed = call("tracedecay_git_apply", arguments, deadline("tracedecay_git_apply"))
+        if first_value(replayed, {"effect_id"}) != effect_id:
+            raise JourneyError("git apply retry changed its durable effect identity")
+
+        inverse_preview = _git_preview(call, deadline, "staged", "unstage_hunks")
+        inverse_id = first_value(inverse_preview, {"preview_id"})
+        inverse_digest = first_value(inverse_preview, {"preview_digest"})
+        if not all(isinstance(value, str) and value for value in (inverse_id, inverse_digest)):
+            raise JourneyError("git inverse preview omitted its immutable capability")
+        inverse = call(
+            "tracedecay_git_apply",
+            {
+                "preview_id": inverse_id,
+                "preview_digest": inverse_digest,
+                "idempotency_key": f"tool-sweep-git-rollback-{time.monotonic_ns()}",
+                "format": "json",
+            },
+            deadline("tracedecay_git_apply"),
+        )
+        if first_value(inverse, {"outcome"}) != "effect":
+            raise JourneyError("git inverse apply omitted its tagged effect receipt")
+        still_staged = call(
+            "tracedecay_git_hunks",
+            {"scope": "staged", "format": "json"},
+            deadline("tracedecay_git_hunks"),
+        )
+        if any(isinstance(value.get("hunk"), dict) for value in objects(still_staged)):
+            raise JourneyError("git inverse left the fixture hunk staged")
+        restored = call(
+            "tracedecay_git_hunks",
+            {"scope": "working_tree", "format": "json"},
+            deadline("tracedecay_git_hunks"),
+        )
+        _git_hunk_input(restored)
+        return "hunks/preview/apply/staged/replay/inverse verified"
+
+    return PreparedJourney(arguments, cleanup)
+
+
+def _configuration_setting(
+    call: Call, deadline: Deadline, key: str,
+) -> tuple[str, dict[str, Any]]:
+    response = call(
+        "tracedecay_configuration_get",
+        {"key": key, "format": "json"},
+        deadline("tracedecay_configuration_get"),
+    )
+    setting = next(
+        (
+            value
+            for value in objects(response)
+            if value.get("key") == key and isinstance(value.get("effective_value"), dict)
+        ),
+        None,
+    )
+    if setting is None or not isinstance(setting.get("revision_id"), str):
+        raise JourneyError(f"configuration get omitted {key}'s value or revision")
+    return setting["revision_id"], setting["effective_value"]
+
+
+def _configuration_receipt(response: dict[str, Any]) -> tuple[str, str]:
+    receipt_id = first_value(response, {"receipt_id"})
+    revision_id = first_value(response, {"result_revision_id"})
+    if (
+        first_value(response, {"outcome"}) != "effect"
+        or not isinstance(receipt_id, str)
+        or not isinstance(revision_id, str)
+    ):
+        raise JourneyError("configuration mutation omitted its tagged durable receipt")
+    return receipt_id, revision_id
+
+
+def _configuration_mutation(
+    name: str, fixture: dict[str, Any], call: Call, deadline: Deadline,
+) -> PreparedJourney:
+    key = fixture["configuration_scalar_key"]
+    baseline = fixture["configuration_scalar_value"]
+    layer = {"kind": "project", "project_id": fixture["project_id"]}
+    changed = {"kind": "boolean", "value": not baseline["value"]}
+
+    def effect_arguments(
+        tool: str, revision: str, value: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        common = {
+            "expected_revision": revision,
+            "idempotency_key": f"tool-sweep-{tool}-{time.monotonic_ns()}",
+            "format": "json",
+        }
+        if tool == "tracedecay_configuration_batch":
+            return {
+                **common,
+                "mutations": [{"operation": "set", "layer": layer, "key": key, "value": value}],
+            }
+        arguments = {**common, "layer": layer, "key": key}
+        if value is not None:
+            arguments["value"] = value
+        return arguments
+
+    baseline_revision, observed_baseline = _configuration_setting(call, deadline, key)
+    if observed_baseline != baseline:
+        raise JourneyError("configuration fixture baseline drifted before mutation")
+    if name == "tracedecay_configuration_unset":
+        seeded = effect_arguments("tracedecay_configuration_set", baseline_revision, changed)
+        seeded_response = call(
+            "tracedecay_configuration_set", seeded,
+            deadline("tracedecay_configuration_set"),
+        )
+        _, current_revision = _configuration_receipt(seeded_response)
+        arguments = effect_arguments(name, current_revision)
+        expected_after = baseline
+        rollback_value = changed
+    else:
+        arguments = effect_arguments(name, baseline_revision, changed)
+        expected_after = changed
+        rollback_value = None
+
+    def cleanup(response: dict[str, Any]) -> str:
+        receipt_id, result_revision = _configuration_receipt(response)
+        replayed = call(name, arguments, deadline(name))
+        if _configuration_receipt(replayed)[0] != receipt_id:
+            raise JourneyError(f"{name} retry changed its durable receipt identity")
+        observed_revision, observed = _configuration_setting(call, deadline, key)
+        if observed_revision != result_revision or observed != expected_after:
+            raise JourneyError(f"{name} consumer did not observe the committed value")
+        rollback_tool = (
+            "tracedecay_configuration_set"
+            if rollback_value is not None
+            else "tracedecay_configuration_unset"
+        )
+        rollback = effect_arguments(rollback_tool, result_revision, rollback_value)
+        rolled_back = call(rollback_tool, rollback, deadline(rollback_tool))
+        _, rollback_revision = _configuration_receipt(rolled_back)
+        final_revision, final = _configuration_setting(call, deadline, key)
+        expected_final = changed if rollback_value is not None else baseline
+        if final_revision != rollback_revision or final != expected_final:
+            raise JourneyError(f"{name} inverse did not restore its exact preimage")
+        return "read/mutate/replay/consumer/inverse verified"
+
+    return PreparedJourney(arguments, cleanup)
+
+
+def _changed_topology_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    changed = json.loads(json.dumps(policy))
+    allowed = changed.get("review_topology", {}).get("allowed")
+    if not isinstance(allowed, list) or len(allowed) < 2:
+        raise JourneyError("topology policy has no safely removable review mode")
+    allowed.pop()
+    return changed
+
+
+def _configuration_plan_arguments(response: dict[str, Any]) -> dict[str, Any]:
+    plan_id = first_value(response, {"plan_id"})
+    base_revision = first_value(response, {"base_revision_id"})
+    operation_digest = first_value(response, {"operation_digest"})
+    if not all(
+        isinstance(value, str) and value
+        for value in (plan_id, base_revision, operation_digest)
+    ):
+        raise JourneyError("configuration preview omitted its immutable plan capability")
+    return {
+        "plan_id": plan_id,
+        "expected_base_revision_id": base_revision,
+        "operation_digest": operation_digest,
+        "idempotency_key": f"tool-sweep-configuration-plan-{time.monotonic_ns()}",
+        "format": "json",
+    }
+
+
+def _configuration_protected(
+    name: str, fixture: dict[str, Any], call: Call, deadline: Deadline,
+) -> PreparedJourney:
+    key = fixture["configuration_key"]
+    baseline_revision, baseline = _configuration_setting(call, deadline, key)
+    changed = _changed_topology_policy(baseline["value"])
+    preview = call(
+        "tracedecay_configuration_protected_preview",
+        {
+            "change": {"kind": "replace_work_topology_policy", "value": changed},
+            "expected_revision": baseline_revision,
+            "format": "json",
+        },
+        deadline("tracedecay_configuration_protected_preview"),
+    )
+    apply_arguments = _configuration_plan_arguments(preview)
+    if name == "tracedecay_configuration_rollback_apply":
+        changed_response = call(
+            "tracedecay_configuration_protected_apply",
+            apply_arguments,
+            deadline("tracedecay_configuration_protected_apply"),
+        )
+        _, changed_revision = _configuration_receipt(changed_response)
+        rollback_preview = call(
+            "tracedecay_configuration_rollback_preview",
+            {
+                "target_revision_id": baseline_revision,
+                "mode": "all_or_nothing",
+                "format": "json",
+            },
+            deadline("tracedecay_configuration_rollback_preview"),
+        )
+        arguments = _configuration_plan_arguments(rollback_preview)
+        if arguments["expected_base_revision_id"] != changed_revision:
+            raise JourneyError("rollback preview did not bind the committed protected revision")
+        expected = baseline
+    else:
+        arguments = apply_arguments
+        expected = {"kind": "work_topology_policy", "value": changed}
+
+    def cleanup(response: dict[str, Any]) -> str:
+        receipt_id, result_revision = _configuration_receipt(response)
+        replayed = call(name, arguments, deadline(name))
+        if _configuration_receipt(replayed)[0] != receipt_id:
+            raise JourneyError(f"{name} retry changed its durable receipt identity")
+        current_revision, current = _configuration_setting(call, deadline, key)
+        if current_revision != result_revision or current != expected:
+            raise JourneyError(f"{name} consumer did not observe the committed policy")
+        if name == "tracedecay_configuration_protected_apply":
+            rollback_preview = call(
+                "tracedecay_configuration_rollback_preview",
+                {
+                    "target_revision_id": baseline_revision,
+                    "mode": "all_or_nothing",
+                    "format": "json",
+                },
+                deadline("tracedecay_configuration_rollback_preview"),
+            )
+            rollback = _configuration_plan_arguments(rollback_preview)
+            rolled_back = call(
+                "tracedecay_configuration_rollback_apply",
+                rollback,
+                deadline("tracedecay_configuration_rollback_apply"),
+            )
+            _, rollback_revision = _configuration_receipt(rolled_back)
+            final_revision, final = _configuration_setting(call, deadline, key)
+            if final_revision != rollback_revision or final != baseline:
+                raise JourneyError("protected configuration rollback did not restore the baseline")
+        return "preview/apply/replay/consumer/rollback verified"
+
+    return PreparedJourney(arguments, cleanup)
+
+
 def _source_apply(call: Call, tool: str, arguments: dict[str, Any], deadline: Deadline) -> dict[str, Any]:
     preview_arguments = {**arguments, "dry_run": True, "format": "json"}
     preview = call(tool, preview_arguments, deadline(tool))
@@ -543,6 +843,19 @@ def prepare(
             {"action": "start", "host": "127.0.0.1", "port": 0, "format": "json"},
             cleanup,
         )
+    if name == "tracedecay_git_apply":
+        return _git_apply(call, deadline)
+    if name in {
+        "tracedecay_configuration_set",
+        "tracedecay_configuration_unset",
+        "tracedecay_configuration_batch",
+    }:
+        return _configuration_mutation(name, fixture, call, deadline)
+    if name in {
+        "tracedecay_configuration_protected_apply",
+        "tracedecay_configuration_rollback_apply",
+    }:
+        return _configuration_protected(name, fixture, call, deadline)
     if name == "tracedecay_fact_store_add":
         content = "catalog sweep temporary isolated fact"
         def cleanup(response: dict[str, Any]) -> str:

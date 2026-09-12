@@ -467,6 +467,21 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
             }
         ),
     )
+    lcm_message = "catalog sweep captured LCM message"
+    _run_checked(
+        [str(binary), "hook-codex-user-prompt-submit"],
+        root,
+        "fixture Codex UserPromptSubmit producer",
+        timeout_s=60,
+        input_text=json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": str(root),
+                "session_id": session_id,
+                "prompt": lcm_message,
+            }
+        ),
+    )
     return root, {
         "file": "src/lib.rs",
         "path": "src/lib.rs",
@@ -486,6 +501,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         "prompt": "inspect sweep_anchor",
         "content": "catalog sweep isolated fact",
         "session_id": session_id,
+        "lcm_message": lcm_message,
         "root": str(root),
         "glob": "Cargo.toml",
         "key": "package.name",
@@ -612,6 +628,126 @@ def prime_fixture_values(
             "configuration_topology_policy": effective_value["value"],
         }
     )
+
+    scalar_key = "mcp.tool_timings"
+    if scalar_key not in keys:
+        raise SweepError("configuration list producer omitted mcp.tool_timings")
+    scalar = _producer_call(
+        client,
+        "tracedecay_configuration_get",
+        {"key": scalar_key, "format": "json"},
+        deadline("tracedecay_configuration_get"),
+    )
+    scalar_setting = next(
+        (
+            value
+            for value in _objects(scalar)
+            if value.get("key") == scalar_key and isinstance(value.get("effective_value"), dict)
+        ),
+        None,
+    )
+    if (
+        scalar_setting is None
+        or scalar_setting["effective_value"].get("kind") != "boolean"
+        or not isinstance(scalar_setting["effective_value"].get("value"), bool)
+        or not isinstance(scalar_setting.get("revision_id"), str)
+    ):
+        raise SweepError("configuration get producer omitted the scalar value or revision")
+    fixture.update(
+        {
+            "configuration_scalar_key": scalar_key,
+            "configuration_scalar_value": scalar_setting["effective_value"],
+            "configuration_scalar_revision": scalar_setting["revision_id"],
+        }
+    )
+    registry = _producer_call(
+        client,
+        "tracedecay_admin_cli",
+        {"action": "registry_context", "project_arg": fixture["root"]},
+        deadline("tracedecay_admin_cli"),
+    )
+    project_id = first_value(registry, {"project_id"})
+    if not isinstance(project_id, str) or not project_id:
+        raise SweepError("registry context omitted the fixture project id")
+    fixture["project_id"] = project_id
+    toggled = {
+        "kind": "boolean",
+        "value": not fixture["configuration_scalar_value"]["value"],
+    }
+    seed_key = f"tool-sweep-configuration-seed-{time.monotonic_ns()}"
+    seeded = _producer_call(
+        client,
+        "tracedecay_configuration_set",
+        {
+            "layer": {"kind": "project", "project_id": project_id},
+            "key": scalar_key,
+            "value": toggled,
+            "expected_revision": fixture["configuration_scalar_revision"],
+            "idempotency_key": seed_key,
+            "format": "json",
+        },
+        deadline("tracedecay_configuration_set"),
+    )
+    seeded_revision = first_value(seeded, {"result_revision_id"})
+    if not isinstance(seeded_revision, str) or not seeded_revision:
+        raise SweepError("configuration seed mutation omitted its result revision")
+    restored = _producer_call(
+        client,
+        "tracedecay_configuration_unset",
+        {
+            "layer": {"kind": "project", "project_id": project_id},
+            "key": scalar_key,
+            "expected_revision": seeded_revision,
+            "idempotency_key": f"{seed_key}-rollback",
+            "format": "json",
+        },
+        deadline("tracedecay_configuration_unset"),
+    )
+    restored_revision = first_value(restored, {"result_revision_id"})
+    if not isinstance(restored_revision, str) or not restored_revision:
+        raise SweepError("configuration seed rollback omitted its result revision")
+    fixture.update(
+        {
+            "configuration_revision": restored_revision,
+            "configuration_scalar_revision": restored_revision,
+            "configuration_rollback_target_revision": seeded_revision,
+        }
+    )
+
+    runs = _producer_call(
+        client,
+        "tracedecay_automation_run_list",
+        {"limit": 1, "format": "json"},
+        deadline("tracedecay_automation_run_list"),
+    )
+    run_id = first_value(runs, {"run_id"})
+    if not isinstance(run_id, str) or not run_id:
+        raise SweepError("automation run list producer returned no inspectable run identity")
+    fixture["automation_run_id"] = run_id
+
+    loaded = _producer_call(
+        client,
+        "tracedecay_lcm_load_session",
+        {
+            "provider": "codex",
+            "session_id": fixture["session_id"],
+            "limit": 10,
+            "format": "json",
+        },
+        deadline("tracedecay_lcm_load_session"),
+    )
+    raw_message = next(
+        (
+            value
+            for value in _objects(loaded)
+            if isinstance(value.get("store_id"), int)
+            and value.get("content") == fixture["lcm_message"]
+        ),
+        None,
+    )
+    if raw_message is None:
+        raise SweepError("LCM session producer omitted the captured prompt message")
+    fixture["lcm_store_id"] = raw_message["store_id"]
 
     # The callable code-query surface serves only complete immutable index
     # generations, and a cold fixture publishes its first generation
@@ -843,18 +979,39 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
     if name == "tracedecay_configuration_get":
         return {"key": fixture["configuration_key"], "format": "json"}
     if name == "tracedecay_configuration_protected_preview":
+        policy = json.loads(json.dumps(fixture["configuration_topology_policy"]))
+        allowed = policy.get("review_topology", {}).get("allowed")
+        if not isinstance(allowed, list) or len(allowed) < 2:
+            raise SweepError("topology policy has no safely removable review mode")
+        allowed.pop()
         return {
             "change": {
                 "kind": "replace_work_topology_policy",
-                "value": fixture["configuration_topology_policy"],
+                "value": policy,
             },
             "expected_revision": fixture["configuration_revision"],
             "format": "json",
         }
     if name == "tracedecay_configuration_rollback_preview":
         return {
-            "target_revision_id": fixture["configuration_revision"],
+            "target_revision_id": fixture["configuration_rollback_target_revision"],
             "mode": "all_or_nothing",
+            "format": "json",
+        }
+    if name == "tracedecay_automation_run_view":
+        return {"run_id": fixture["automation_run_id"], "format": "json"}
+    if name == "tracedecay_lcm_expand":
+        return {
+            "provider": "codex",
+            "session_id": fixture["session_id"],
+            "target": {"kind": "raw_message", "store_id": fixture["lcm_store_id"]},
+            "format": "json",
+        }
+    if name == "tracedecay_lcm_load_session":
+        return {
+            "provider": "codex",
+            "session_id": fixture["session_id"],
+            "limit": 10,
             "format": "json",
         }
     if name == "tracedecay_work_topology_metrics":
