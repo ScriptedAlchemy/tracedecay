@@ -387,6 +387,7 @@ mod tests {
             json!({
                 "kind": "unsupported",
                 "table_growth_evidence": [],
+                "schema_convergences": [],
             })
         );
     }
