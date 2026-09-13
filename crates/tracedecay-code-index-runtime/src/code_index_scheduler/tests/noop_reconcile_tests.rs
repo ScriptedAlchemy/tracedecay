@@ -21,6 +21,7 @@ async fn unchanged_reconcile_does_not_reactivate_the_serving_generation() {
         .await
         .expect("mount");
     let serving_generation = wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
