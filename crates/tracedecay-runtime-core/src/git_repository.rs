@@ -110,12 +110,12 @@ const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
 /// client, and it ran inline on the tokio workers that also poll the daemon's
 /// accept loop.
 ///
-/// Only a path that **is** its own worktree root is retained. For such a path
-/// the upward walk can never terminate anywhere else while `<root>/.git`
-/// exists, so probing that entry is a complete revalidation: no repository can
-/// appear between the path and the resolution. Every other path — a
-/// subdirectory, a bare repository, an unresolvable directory — is discovered
-/// live, so a repository created below it is observed immediately.
+/// Only a path that **is** its own worktree root is retained. The checkout's
+/// `.git` marker and linked-worktree `commondir` are revalidated before reuse,
+/// so replacing or retargeting that root cannot inherit its old identity.
+/// Every other path — a subdirectory, a bare repository, an unresolvable
+/// directory — is discovered live, so a repository created below it is
+/// observed immediately.
 pub fn repository_topology(
     path: &Path,
 ) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
@@ -196,16 +196,39 @@ fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
 
 /// Whether a retained checkout-root topology still describes the filesystem.
 ///
-/// `<root>/.git` is the entry the upward walk stopped at and the git directory
-/// is where the repository's own state lives; a checkout that was deleted,
-/// re-initialized elsewhere, or detached from its common directory fails one
-/// of the two probes and is resolved again.
+/// `<root>/.git` is the entry the upward walk stopped at. Its live target and
+/// the per-worktree `commondir` target must still equal the retained identity;
+/// existence alone would let a path replacement inherit stale authority.
 fn checkout_topology_is_live(topology: &GitRepositoryTopologyV1) -> bool {
-    topology
-        .worktree_root
-        .as_ref()
-        .is_some_and(|root| root.join(".git").try_exists().unwrap_or(false))
-        && topology.git_dir.try_exists().unwrap_or(false)
+    let Some(root) = topology.worktree_root.as_ref() else {
+        return false;
+    };
+    let dot_git = root.join(".git");
+    let live_git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let Ok(path) = gix::discover::path::from_gitdir_file(&dot_git) else {
+            return false;
+        };
+        path
+    };
+    let Ok(live_git_dir) = live_git_dir.canonicalize() else {
+        return false;
+    };
+    if live_git_dir != topology.git_dir {
+        return false;
+    }
+    let common_dir_file = live_git_dir.join("commondir");
+    let live_common_dir =
+        match gix::discover::path::from_plain_file_relative_to_file(&common_dir_file) {
+            Some(Ok(path)) => match path.canonicalize() {
+                Ok(path) => path,
+                Err(_) => return false,
+            },
+            Some(Err(_)) => return false,
+            None => live_git_dir,
+        };
+    live_common_dir == topology.common_dir
 }
 
 /// Counts live `gix` discoveries and injects discovery latency, per root.
