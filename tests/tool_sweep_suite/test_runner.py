@@ -836,6 +836,189 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertEqual(proposal["proposal_id"], "proposal.fixture")
         self.assertIsNone(snapshot)
 
+    def test_work_attempt_waits_accept_running_or_terminal_spawn_boundaries(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        responses = iter((
+            {"identity": {"attempt_id": "attempt.fixture"}, "state": "admitted"},
+            {"identity": {"attempt_id": "attempt.fixture"}, "state": "running"},
+            {"identity": {"attempt_id": "attempt.fixture"}, "state": "cancelled"},
+        ))
+
+        def call(tool, _arguments, _deadline_ms):
+            self.assertEqual(tool, "tracedecay_work_attempt_status")
+            return next(responses)
+
+        running = journeys._wait_work_attempt_spawn_boundary(
+            call, lambda _tool: 1_000, {}, "attempt.fixture"
+        )
+        terminal = journeys._wait_work_attempt_terminal(
+            call, lambda _tool: 1_000, {}, "attempt.fixture"
+        )
+
+        self.assertEqual(running["state"], "running")
+        self.assertEqual(terminal["state"], "cancelled")
+
+    def test_generic_work_mutation_consumes_fresh_request_before_replay(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        calls = []
+        fixture = {
+            "work_selection": {"selection": "profile_owned_no_git"},
+            "work_prepare_create_arguments": {
+                "selection": {"selection": "profile_owned_no_git"},
+                "change": {
+                    "initiative": {"id": "initiative.fixture"},
+                    "plan": {"id": "plan.fixture"},
+                    "milestone": {"id": "milestone.fixture"},
+                    "item": {"input": {"task_id": "task.fixture"}},
+                },
+            },
+        }
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_work_prepare_graph_mutation":
+                return {"request": {"mutation_id": "mutation.fresh"}}
+            if tool == "tracedecay_work_mutate_graph":
+                return {"replayed": True}
+            self.assertEqual(tool, "tracedecay_work_views")
+            return {"tasks": [{"task_id": prepared_task_id}]}
+
+        prepared = journeys._prepare_work_effect_journey(
+            "tracedecay_work_mutate_graph",
+            fixture,
+            call,
+            lambda _tool: 1_000,
+            {},
+            {},
+        )
+        prepared_task_id = next(
+            value["task_id"]
+            for value in journeys.objects(calls[0][1])
+            if isinstance(value.get("task_id"), str)
+        )
+        note = prepared.cleanup({"replayed": False})
+
+        self.assertEqual(prepared.arguments, {"mutation_id": "mutation.fresh"})
+        self.assertEqual(
+            [tool for tool, _arguments in calls],
+            [
+                "tracedecay_work_prepare_graph_mutation",
+                "tracedecay_work_mutate_graph",
+                "tracedecay_work_views",
+            ],
+        )
+        self.assertIn("replay and graph view", note)
+
+    def test_execution_admission_consumes_fresh_request_before_replay(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        calls = []
+        fixture = {
+            "work_selection": {"selection": "profile_owned_no_git"},
+            "work_prepare_create_arguments": {
+                "selection": {"selection": "profile_owned_no_git"},
+                "change": {
+                    "initiative": {"id": "initiative.fixture"},
+                    "plan": {"id": "plan.fixture"},
+                    "milestone": {"id": "milestone.fixture"},
+                    "item": {"input": {"task_id": "task.fixture"}},
+                },
+            },
+        }
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_work_prepare_graph_mutation":
+                change = arguments["change"]
+                if "initiative" in change:
+                    return {"request": {"mutation_id": "mutation.create"}}
+                if change["change"] == "decide_proposal":
+                    return {"request": {"mutation_id": "mutation.accept"}}
+                return {"request": {"mutation_id": "mutation.admit"}}
+            if tool == "tracedecay_work_create":
+                return {"replayed": False}
+            if tool == "tracedecay_work_generate_proposal":
+                return {"proposal": {"proposal_id": "proposal.fixture"}}
+            if tool == "tracedecay_work_accept_proposal":
+                return {"verified_graph_version": {"graph_version": 2}}
+            if tool == "tracedecay_work_admit_execution":
+                return {"replayed": True}
+            self.assertEqual(tool, "tracedecay_work_views")
+            return {"tasks": [{"task_id": admitted_task_id}]}
+
+        prepared = journeys._prepare_work_effect_journey(
+            "tracedecay_work_admit_execution",
+            fixture,
+            call,
+            lambda _tool: 1_000,
+            {},
+            {},
+        )
+        admitted_task_id = calls[1][1].get("task_id") or next(
+            value["task_id"]
+            for value in journeys.objects(calls[0][1])
+            if isinstance(value.get("task_id"), str)
+        )
+        note = prepared.cleanup({"replayed": False})
+
+        self.assertEqual(prepared.arguments, {"mutation_id": "mutation.admit"})
+        self.assertIn("exact replay/view", note)
+
+    def test_work_adjudication_receipts_select_the_matching_nested_command(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        started = {"attempt_id": "attempt.first"}
+        second = {"attempt_id": "attempt.second"}
+        calls = []
+
+        def duplicate_call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_work_prepare_duplicate_adjudication":
+                return {
+                    "first_attempt": second,
+                    "second_attempt": started,
+                    "command_id": "command.duplicate",
+                }
+            self.assertEqual(tool, "tracedecay_work_adjudicate_duplicate")
+            return {"receipt": {"command": {"command_id": "command.duplicate"}}}
+
+        duplicate = journeys._prepare_work_effect_journey(
+            "tracedecay_work_adjudicate_duplicate",
+            {
+                "work_duplicate_identity": second,
+                "work_duplicate_arguments": {"format": "json"},
+            },
+            duplicate_call,
+            lambda _tool: 1_000,
+            started,
+            {},
+        )
+        duplicate_note = duplicate.cleanup({
+            "receipt": {"command": {"command_id": "command.duplicate"}}
+        })
+
+        leak = journeys._prepare_work_effect_journey(
+            "tracedecay_work_adjudicate_leak",
+            {},
+            lambda _tool, arguments, _deadline_ms: {
+                "envelope": {"receipt": {"command": {"command_id": "generic"}}},
+                "receipt": {"command": {"command_id": arguments["command_id"]}},
+            },
+            lambda _tool: 1_000,
+            started,
+            {},
+        )
+        leak_note = leak.cleanup({
+            "envelope": {"receipt": {"command": {"command_id": "generic"}}},
+            "receipt": {"command": {"command_id": leak.arguments["command_id"]}},
+        })
+
+        self.assertEqual(duplicate.arguments["first_attempt"], second)
+        self.assertIn("adjudication replay", duplicate_note)
+        self.assertIn("exact replay", leak_note)
+
     def test_git_apply_consumes_preview_and_verifies_its_inverse(self) -> None:
         runner = load_runner()
         calls = []
@@ -1807,7 +1990,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 },
             ),
             "tracedecay_active_project": cls.response(
-                '{"project_id":"project.fixture"}'
+                '{"project_id":"project.fixture","repository_id":"repository.fixture"}'
             ),
             "tracedecay_configuration_set": cls.response(
                 '{"outcome":"effect","value":{"payload":'
@@ -1926,6 +2109,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_work_attempt_status",
             "tracedecay_work_cancel_attempt",
             "tracedecay_work_prepare_duplicate_adjudication",
+            "tracedecay_work_views",
         )
         return {
             name: runner.ToolPolicy(name, "available", "read", 1_000)
@@ -2004,7 +2188,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             next(
                 index
                 for index, (name, _arguments) in enumerate(client.calls)
-                if name == "tracedecay_work_cancel_attempt"
+                if name == "tracedecay_work_prepare_duplicate_adjudication"
             ),
         )
 
