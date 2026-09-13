@@ -330,14 +330,16 @@ pub(crate) async fn wait_for_current_graph(server: &McpServer) {
                 freshness["status"].as_str(),
                 serving["state"].as_str(),
                 serving["reason"].as_str(),
+                freshness["worktree"]["staleness_state"].as_str(),
             ) {
-                (Some("current"), Some("ready"), _) => break,
-                (Some("warming"), _, _)
-                | (_, Some("pending"), _)
-                | (_, Some("unavailable"), Some("generation_unavailable")) => {
+                (Some("current"), Some("ready"), _, _) => break,
+                (Some("warming"), _, _, _)
+                | (Some("stale"), Some("ready"), _, Some("verifying"))
+                | (_, Some("pending"), _, _)
+                | (_, Some("unavailable"), Some("generation_unavailable"), _) => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                (_, Some("refused"), _) | (_, _, Some("activation_disabled")) => {
+                (_, Some("refused"), _, _) | (_, _, Some("activation_disabled"), _) => {
                     panic!("graph readiness was refused: {status}");
                 }
                 actual => panic!("graph readiness became {actual:?}: {status}"),

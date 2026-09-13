@@ -304,12 +304,12 @@ async fn fact_store_large_json_list_response_uses_retrieve_handle() {
     .await;
     let markdown_text = extract_text(&markdown_list.value);
     assert!(
-        markdown_text.starts_with("## fact\\_store\\_list"),
-        "default fact-store output should remain the canonical compact human view: {markdown_text}"
+        markdown_text.starts_with("## fact\\_store\\_list\n\n### Payload\n\n"),
+        "default fact-store output should lead with the bounded evidence payload: {markdown_text}"
     );
-    assert!(markdown_text.contains("complete: --json"));
+    assert!(markdown_text.contains("use --json for the complete typed result"));
     assert!(!markdown_text.contains("# Truncated Response"));
-    assert!(!markdown_text.contains("LONG_FACT_MARKER_00"));
+    assert!(markdown_text.contains("\"content\": \"LONG_FACT_MARKER_"));
 
     let listed = call_production_tool(
         &fixture,
