@@ -470,21 +470,38 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             arguments, {"run_id": "automation.run.fixture", "format": "json"}
         )
 
-    def test_lcm_expand_consumes_the_canonical_message_identity(self) -> None:
+    def test_lcm_reads_consume_the_captured_session_identity(self) -> None:
+        """Neither LCM read may describe or expand an invented provider."""
         runner = load_runner()
-        arguments = runner.materialize_tool_arguments(
-            {
-                "name": "tracedecay_lcm_expand",
-                "inputSchema": {"type": "object", "properties": {}, "required": []},
-            },
-            {"session_id": "session.fixture", "lcm_message_id": "message.fixture"},
-        )
-        self.assertEqual(arguments["provider"], "codex")
-        self.assertEqual(arguments["session_id"], "session.fixture")
-        self.assertEqual(
-            arguments["target"],
-            {"kind": "canonical_occurrence", "message_id": "message.fixture"},
-        )
+        fixture = {"session_id": "session.fixture", "lcm_message_id": "message.fixture"}
+        for name, target in (
+            ("tracedecay_lcm_describe", {"kind": "session"}),
+            (
+                "tracedecay_lcm_expand",
+                {"kind": "canonical_occurrence", "message_id": "message.fixture"},
+            ),
+        ):
+            with self.subTest(name):
+                arguments = runner.materialize_tool_arguments(
+                    {
+                        "name": name,
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"provider": {"type": "string"}},
+                            "required": ["provider"],
+                        },
+                    },
+                    fixture,
+                )
+                self.assertEqual(
+                    arguments,
+                    {
+                        "provider": "codex",
+                        "session_id": "session.fixture",
+                        "target": target,
+                        "format": "json",
+                    },
+                )
 
     def test_session_refresh_status_consumes_the_begin_producer_handle(self) -> None:
         runner = load_runner()
@@ -2954,6 +2971,50 @@ class MountRetryTests(unittest.TestCase):
             [tool for tool, _arguments in client.calls],
             ["tracedecay_git_hunks", name],
         )
+
+    def payload(self, value):
+        return self.text_response(json.dumps({"payload": value}))
+
+    def test_lcm_reads_require_the_captured_message_evidence(self) -> None:
+        """A describe or expand payload without the captured message is not evidence."""
+        runner = load_runner()
+        runner.MOUNT_RETRY_BUDGET_S = 0
+        content = "catalog sweep captured LCM message"
+        fixture = {
+            "session_id": "session.fixture",
+            "lcm_message_id": "message.fixture",
+            "lcm_message": content,
+        }
+        captured = {
+            "message_id": "message.fixture",
+            "content_range": {"total_chars": len(content)},
+        }
+        describe, expand = "tracedecay_lcm_describe", "tracedecay_lcm_expand"
+        cases = (
+            (describe, [], "omitted the captured message"),
+            (describe, [{**captured, "content_range": {"total_chars": 7}}], "foreign length"),
+            (describe, [captured], None),
+            (expand, {"message_id": "message.other", "content": content}, "captured message identity"),
+            (expand, {"message_id": "message.fixture", "content": "other"}, "captured message identity"),
+            (expand, {"message_id": "message.fixture", "content": content}, None),
+        )
+        for name, value, expected_note in cases:
+            with self.subTest(name, note=expected_note):
+                body = (
+                    {"description": {"raw_message_count": len(value), "raw_messages": value}}
+                    if name == describe
+                    else {"expansion": value}
+                )
+                client = self.scripted_client({name: [self.payload(body)]})
+                row = runner._read_tool_row(
+                    client, self.definition(name), self.policy(runner, name), fixture
+                )
+                if expected_note is None:
+                    self.assertEqual(row["verdict"], "PASS")
+                    continue
+                self.assertEqual(row["verdict"], "FAIL")
+                self.assertEqual(row["problem_code"], "tool_sweep.consumer_unverified")
+                self.assertIn(expected_note, row["note"])
 
 
 if __name__ == "__main__":
