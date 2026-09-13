@@ -1230,6 +1230,43 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertEqual(prepared.settlement, "isolated")
         self.assertIn("retained terminal succeeded", note)
 
+    def test_fact_curate_journey_consumes_a_durable_failed_run(self) -> None:
+        """An admitted backend denial remains a passing, inspectable failed terminal."""
+        runner = load_runner()
+        request_id = "request.mcp.curator-denied"
+
+        def call(tool, arguments, _deadline_ms):
+            if tool == "tracedecay_fact_store_add":
+                return self.response(json.dumps({"fact": {"fact": {
+                    "fact_id": "fact.v1.curator-denied",
+                    "content": arguments["content"],
+                }}}))
+            self.assertEqual(tool, "tracedecay_automation_run_view")
+            self.assertEqual(arguments["run_id"], request_id)
+            return self.response(json.dumps({
+                "run_id": request_id,
+                "task": "memory_curator",
+                "status": "failed",
+            }))
+
+        prepared = runner.prepare_journey(
+            "tracedecay_fact_store_curate", object(), {}, lambda _tool: 1_000, call
+        )
+        denied = self.response(json.dumps({"problem": {
+            "kind": "execution_failed",
+            "code": "application.automation-run.execution-failed",
+            "terminality": "admitted_terminal",
+            "request_id": request_id,
+        }}))
+        denied["result"]["isError"] = True
+        note = prepared.cleanup(denied)
+
+        self.assertEqual(
+            prepared.accepted_terminal_problem,
+            ("execution_failed", "application.automation-run.execution-failed"),
+        )
+        self.assertIn("retained terminal failed", note)
+
     def test_memory_status_journey_counts_the_seeded_fact(self) -> None:
         """The repaired status must truthfully count the seeded fact before rollback."""
         runner = load_runner()
