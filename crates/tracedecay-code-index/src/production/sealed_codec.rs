@@ -670,10 +670,13 @@ pub(super) fn assemble_published_generation(
             ))
         })?;
     let published = CodeIndexPublishedGenerationV1 {
-        statistics: CodeIndexGenerationStatisticsV1::from_generation_parts(
-            &files,
-            symbols.symbols.len(),
-            edges.len(),
+        statistics: hotpath::measure_block!(
+            "code_index.sealed_decode.statistics",
+            CodeIndexGenerationStatisticsV1::from_generation_parts(
+                &files,
+                symbols.symbols.len(),
+                edges.len(),
+            )
         )?,
         manifest,
         snapshot,
