@@ -42,6 +42,13 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(args.read, "tracedecay_context_scout_status")
         self.assertIsNone(args.effect)
 
+    def test_scout_address_is_consumed_from_the_producer_output(self) -> None:
+        runner = load_runner()
+        address = {"project_id": "proj_fixture", "nonce": "nonce_fixture"}
+        output = f"notice\n{runner._SCOUT_ADDRESS_PREFIX}{json.dumps(address)}\n"
+
+        self.assertEqual(runner._scout_address(output), address)
+
 
 class ProblemCodeTests(unittest.TestCase):
     def test_problem_code_is_a_first_class_field_for_success_framed_unavailable(self) -> None:
@@ -149,6 +156,44 @@ class ProblemCodeTests(unittest.TestCase):
 
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "tool_sweep.success_framed_not_found")
+
+    def test_structured_diagnostic_not_found_text_is_not_an_empty_result(self) -> None:
+        """Compiler prose inside real evidence must not become a not-found verdict."""
+        runner = load_runner()
+        response = {
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "diagnostics_parsed": 1,
+                        "diagnostics": [{
+                            "message": "cannot find function `missing` in this scope: not found in this scope"
+                        }],
+                    }),
+                }]
+            }
+        }
+
+        row = runner.response_row("tool", "tracedecay_diagnose", response, 2, 30_000)
+
+        self.assertEqual(row["verdict"], "PASS")
+
+    def test_markdown_payload_objects_are_consumable(self) -> None:
+        runner = load_runner()
+        response = {
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "## context_scout_recent\n\n### Payload\n\n"
+                        "    {\n      \"pending\": [{\"work\": {\"generation\": 7}}]\n    }\n\n"
+                        "### Metadata\n\n    {\"duration_us\": 12}\n"
+                    ),
+                }]
+            }
+        }
+
+        self.assertEqual(runner.first_value(response, {"generation"}), 7)
 
     def test_markdown_fact_identity_is_consumable_by_rollback(self) -> None:
         """The default Markdown renderer remains a valid producer for fact removal."""

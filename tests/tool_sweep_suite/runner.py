@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from typing import Any
 from xml.sax.saxutils import escape
 
@@ -809,9 +810,8 @@ def prime_github_stack_signal(
 
 _SCOUT_ADDRESS_PREFIX = "TraceDecay Context Scout address for authorized operations: "
 # The Scout only has something to suggest once a real compiler diagnostic is
-# published against the current code generation, so the fixture grows one
-# genuine `E0308`: an `-> i32` body returning a `&str`.
-_SCOUT_DIAGNOSTIC_FN = 'pub fn scout_type_error() -> i32 { "not an integer" }'
+# published against the current code generation.
+_SCOUT_DIAGNOSTIC_FN = "pub fn scout_type_error() -> i32 { missing_spooled_symbol() }"
 
 
 def prime_context_scout(
@@ -871,30 +871,78 @@ def prime_context_scout(
         source.write_text(original)
 
 
-def _scout_compiler_output(source: Path, relative_path: str) -> str:
-    """Render the rustc stderr text for the defect this fixture actually carries.
+def _scout_compiler_output(source: Path, root: Path) -> str:
+    """Compile the written defect with the repository's pinned toolchain."""
+    rustup = shutil.which("rustup")
+    if rustup is None:
+        raise SweepError("Context Scout compiler producer requires rustup")
+    toolchain = tomllib.loads(
+        (SUITE_DIR.parents[1] / "rust-toolchain.toml").read_text()
+    )["toolchain"]["channel"]
+    environment = dict(os.environ)
+    environment["RUSTUP_HOME"] = str(
+        Path(rustup).resolve().parent.parent.parent / ".rustup"
+    )
+    compiler = subprocess.run(
+        [
+            rustup,
+            "run",
+            toolchain,
+            "rustc",
+            "--crate-type=lib",
+            "--edition=2024",
+            "--error-format=short",
+            str(source.relative_to(root)),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=environment,
+    )
+    if compiler.returncode == 0 or not compiler.stderr:
+        raise SweepError("Context Scout compiler producer emitted no real diagnostic")
+    return compiler.stderr
 
-    The sweep environment is hermetic: `HOME` is redirected, so no rustup
-    toolchain resolves and no real `cargo check` can run inside it. The span is
-    read back out of the written file instead of being hard-coded, so the
-    diagnostic can never name a location the source does not have.
-    """
-    line = next(
-        (
-            index
-            for index, text in enumerate(source.read_text().splitlines(), start=1)
-            if text == _SCOUT_DIAGNOSTIC_FN
-        ),
-        None,
-    )
-    if line is None:
-        raise SweepError("Context Scout diagnostic fixture is absent from the fixture source")
-    column = _SCOUT_DIAGNOSTIC_FN.index('"') + 1
-    return (
-        f"{relative_path}:{line}:{column}: error[E0308]: mismatched types: "
-        "expected `i32`, found `&str`\n"
-        "error: could not compile `tool-sweep-fixture` (lib) due to 1 previous error\n"
-    )
+
+def _wait_for_scout_code_generation(
+    client: McpClient, deadline: Callable[[str], int], started_at: float,
+) -> int:
+    """Wait until the code-query authority serves the diagnostic's generation."""
+    ready_at = time.monotonic() + 30
+    while True:
+        response, _elapsed_ms = client.call_tool(
+            "tracedecay_code_symbol_search",
+            {
+                "query": "scout_type_error",
+                "lazy_index_ignored_dependencies": False,
+                "scope": {},
+                "meta": {"projection": "summary", "order": "relevance"},
+                "format": "json",
+            },
+            deadline("tracedecay_code_symbol_search"),
+        )
+        if any(
+            value.get("name") == "scout_type_error"
+            and isinstance(value.get("node_id"), str)
+            for value in _objects(response)
+        ):
+            return round((time.monotonic() - started_at) * 1_000)
+        if time.monotonic() >= ready_at:
+            raise SweepError("Context Scout diagnostic symbol never reached the code index")
+        time.sleep(MOUNT_RETRY_DELAY_S)
+
+
+def _scout_address(output: str) -> dict[str, Any] | None:
+    for line in output.splitlines():
+        marker = line.find(_SCOUT_ADDRESS_PREFIX)
+        if marker < 0:
+            continue
+        candidate = json.loads(line[marker + len(_SCOUT_ADDRESS_PREFIX):].strip())
+        if isinstance(candidate, dict):
+            return candidate
+    return None
 
 
 def _prime_context_scout_diagnostic(
@@ -904,13 +952,17 @@ def _prime_context_scout_diagnostic(
     revision: str,
     source: Path,
 ) -> None:
+    refresh_started = time.monotonic()
     _run_checked(
-        [fixture["binary"], "sync"],
+        [fixture["binary"], "init", fixture["root"]],
         Path(fixture["root"]),
         "Context Scout diagnostic index producer",
         timeout_s=180,
     )
-    cargo_output = _scout_compiler_output(source, "src/lib.rs")
+    cargo_output = _scout_compiler_output(source, Path(fixture["root"]))
+    fixture["code_index_refresh_ms"] = _wait_for_scout_code_generation(
+        client, deadline, refresh_started
+    )
 
     diagnostic_at = time.monotonic() + 60
     while True:
@@ -934,11 +986,14 @@ def _prime_context_scout_diagnostic(
             ),
             None,
         )
+        mapped_to_node = first_value(diagnostic, {"mapped_to_node"})
         if (
             publication is not None
             and publication.get("status") == "published"
             and isinstance(publication.get("inserted"), int)
             and publication["inserted"] > 0
+            and isinstance(mapped_to_node, int)
+            and mapped_to_node > 0
         ):
             break
         reason = publication.get("reason") if publication is not None else None
@@ -953,72 +1008,66 @@ def _prime_context_scout_diagnostic(
         time.sleep(MOUNT_RETRY_DELAY_S)
 
     session_id = f"tool-sweep-scout-{os.getpid()}-{time.monotonic_ns()}"
-    payload = json.dumps(
-        {
-            "input": {
-                "tool": "apply_patch",
-                "sessionID": session_id,
-                "callID": "scout-producer",
-                "args": {"patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"},
+    payload = {
+        "input": {
+            "tool": "apply_patch",
+            "sessionID": session_id,
+            "callID": "scout-producer",
+            "args": {"patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"},
+        },
+        "output": {
+            "title": "Added Scout diagnostic fixture",
+            "metadata": {
+                "files": [
+                    {
+                        "filePath": str(source),
+                        "relativePath": "src/lib.rs",
+                        "type": "modify",
+                        "additions": 1,
+                        "deletions": 0,
+                    }
+                ],
+                "diagnostics": {},
+                "truncated": False,
             },
-            "output": {
-                "title": "Added Scout diagnostic fixture",
-                "metadata": {
-                    "files": [
-                        {
-                            "filePath": str(source),
-                            "relativePath": "src/lib.rs",
-                            "type": "modify",
-                            "additions": 1,
-                            "deletions": 0,
-                        }
-                    ],
-                    "diagnostics": {},
-                    "truncated": False,
-                },
-                "output": "Done",
-            },
-        }
-    )
+            "output": "Done",
+        },
+    }
     binary = Path(fixture["binary"])
-    _run_checked(
+    produced = _run_checked(
         [str(binary), "hook-opencode-tool-after"],
         Path(fixture["root"]),
         "Context Scout OpenCode producer",
         timeout_s=60,
-        input_text=payload,
+        input_text=json.dumps(payload),
     )
     ready_at = time.monotonic() + 60
-    address: dict[str, Any] | None = None
-    while time.monotonic() < ready_at:
+    address = _scout_address(produced.stdout)
+    last_hook = produced
+    while address is None and time.monotonic() < ready_at:
         time.sleep(MOUNT_RETRY_DELAY_S)
         replay = _run_checked(
             [str(binary), "hook-opencode-tool-after"],
             Path(fixture["root"]),
             "Context Scout OpenCode address replay",
             timeout_s=60,
-            input_text=payload,
+            input_text=json.dumps(payload),
         )
-        for line in replay.stdout.splitlines():
-            marker = line.find(_SCOUT_ADDRESS_PREFIX)
-            if marker < 0:
-                continue
-            encoded = line[marker + len(_SCOUT_ADDRESS_PREFIX):].strip()
-            candidate = json.loads(encoded)
-            if isinstance(candidate, dict):
-                address = candidate
-                break
-        if address is not None:
-            break
+        last_hook = replay
+        address = _scout_address(replay.stdout)
     if address is None:
-        raise SweepError("OpenCode producer never returned its mounted Context Scout address")
+        raise SweepError(
+            "OpenCode producer never returned its mounted Context Scout address: "
+            f"stdout={last_hook.stdout!r}, stderr={last_hook.stderr!r}"
+        )
 
     pending_at = time.monotonic() + 30
+    recent: dict[str, Any] = {}
     while True:
         recent = _producer_call(
             client,
             "tracedecay_context_scout_recent",
-            {"address": address, "limit": 8},
+            {"address": address, "limit": 8, "format": "json"},
             deadline("tracedecay_context_scout_recent"),
         )
         pending = next(
@@ -1820,9 +1869,9 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         "tracedecay_context_scout_capability",
         "tracedecay_context_scout_budget",
     }:
-        return {"address": fixture["context_scout_address"]}
+        return {"address": fixture["context_scout_address"], "format": "json"}
     if name in {"tracedecay_context_scout_recent", "tracedecay_context_scout_explain"}:
-        return {"address": fixture["context_scout_address"], "limit": 8}
+        return {"address": fixture["context_scout_address"], "limit": 8, "format": "json"}
     if isinstance(name, str) and name in fixture.get("fact_read_arguments", {}):
         return dict(fixture["fact_read_arguments"][name])
     if name == "tracedecay_api_migration_plan":
