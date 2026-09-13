@@ -56,6 +56,41 @@ class ArgumentTests(unittest.TestCase):
             arguments = runner.materialize_tool_arguments({"name": name}, fixture)
             self.assertEqual(arguments["format"], "json")
 
+    def test_context_scout_pending_requires_the_exact_claim_window(self) -> None:
+        runner = load_runner()
+        response = {
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "pending": [
+                                    {"delivery_window": "next_boundary", "work": {"generation": 1}},
+                                    {"delivery_window": "idle_window", "work": {"generation": 2}},
+                                ]
+                            }
+                        ),
+                    }
+                ]
+            }
+        }
+
+        pending = runner._context_scout_pending(response, "idle_window")
+
+        self.assertEqual(pending["work"]["generation"], 2)
+        self.assertIsNone(runner._context_scout_pending(response, "on_request"))
+
+    def test_context_scout_recent_rejects_internal_wire_shape(self) -> None:
+        runner = load_runner()
+        work = {"generation": 1}
+        response = {"pending": [{"work": work, "envelope": {"envelope_id": "hidden"}}]}
+
+        with self.assertRaisesRegex(runner.SweepError, "declared flat suggestion"):
+            runner.validate_context_scout_read_response(
+                "tracedecay_context_scout_recent", response, {"context_scout_work": work}
+            )
+
 
 class ProblemCodeTests(unittest.TestCase):
     def test_problem_code_is_a_first_class_field_for_success_framed_unavailable(self) -> None:
