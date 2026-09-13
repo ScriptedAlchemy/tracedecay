@@ -30,9 +30,7 @@ impl SchemaConvergenceStateV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PendingSchemaMigration => "pending_schema_migration",
-            Self::ReleasedShapeConvergenceInProgress => {
-                "released_shape_convergence_in_progress"
-            }
+            Self::ReleasedShapeConvergenceInProgress => "released_shape_convergence_in_progress",
             Self::Degraded => "degraded",
             Self::Completed => "completed",
         }

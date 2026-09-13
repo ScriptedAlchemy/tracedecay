@@ -515,9 +515,7 @@ impl ProjectOpenFailure {
             ),
             None => self.message.clone(),
         };
-        TraceDecayError::Config {
-            message,
-        }
+        TraceDecayError::Config { message }
     }
 }
 

@@ -480,7 +480,8 @@ fn cancellation_and_hook_budget_errors_propagate() {
 
     let mut hook = |_checkpoint: ResolutionCheckpoint| {
         Err(TemporalPortError::BudgetExceeded {
-            resource: "lineage traversal", accounting: None,
+            resource: "lineage traversal",
+            accounting: None,
         })
     };
     assert_eq!(
@@ -493,7 +494,8 @@ fn cancellation_and_hook_budget_errors_propagate() {
             &mut hook,
         ),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "lineage traversal", accounting: None,
+            resource: "lineage traversal",
+            accounting: None,
         })
     );
 }

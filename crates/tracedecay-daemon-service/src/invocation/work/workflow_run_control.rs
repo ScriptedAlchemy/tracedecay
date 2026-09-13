@@ -366,11 +366,13 @@ pub(super) fn admit_workflow_environment_pins(
     registered: &RegisteredWorkRuntime,
     definition: &tracedecay_domain::WorkflowDefinition,
 ) -> Result<(), SafeDiagnostic> {
-    let mismatch = |pin: &str, expected: &ManifestDigest, observed: &ManifestDigest| SafeDiagnostic {
-        code: format!("workflow.{pin}.pin_mismatch"),
-        message: format!(
-            "pinned_{pin}_digest expected {expected}, observed {observed}; register a new immutable definition version with the live registered {pin} digest"
-        ),
+    let mismatch = |pin: &str, expected: &ManifestDigest, observed: &ManifestDigest| {
+        SafeDiagnostic {
+            code: format!("workflow.{pin}.pin_mismatch"),
+            message: format!(
+                "pinned_{pin}_digest expected {expected}, observed {observed}; register a new immutable definition version with the live registered {pin} digest"
+            ),
+        }
     };
     if definition.pinned_policy_digest() != &registered.policy_digest {
         return Err(mismatch(

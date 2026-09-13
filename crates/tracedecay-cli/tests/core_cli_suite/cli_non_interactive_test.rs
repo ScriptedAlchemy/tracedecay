@@ -520,7 +520,6 @@ fn sessions_refresh_profile_scope_begins_reads_and_cancels_through_the_daemon() 
         "{settled}"
     );
     assert_eq!(settled["receipt"]["state"], terminal_state, "{settled}");
-
 }
 
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {

@@ -116,7 +116,9 @@ const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
 /// appear between the path and the resolution. Every other path — a
 /// subdirectory, a bare repository, an unresolvable directory — is discovered
 /// live, so a repository created below it is observed immediately.
-pub fn repository_topology(path: &Path) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
+pub fn repository_topology(
+    path: &Path,
+) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
     let slot = checkout_topology_slot(path);
     let mut resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(topology) = resolved.as_ref()

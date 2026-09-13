@@ -504,8 +504,7 @@ mod tests {
         assert!(earlier.revision < later.revision);
 
         for snapshot in [earlier.clone(), later.clone()] {
-            let path =
-                hook_configuration_path(&data_root.path, snapshot.binding.worktree_id, host);
+            let path = hook_configuration_path(&data_root.path, snapshot.binding.worktree_id, host);
             assert_eq!(
                 HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(path))
                     .publish(snapshot)
@@ -515,8 +514,7 @@ mod tests {
         }
 
         for expected in [earlier, later] {
-            let path =
-                hook_configuration_path(&data_root.path, expected.binding.worktree_id, host);
+            let path = hook_configuration_path(&data_root.path, expected.binding.worktree_id, host);
             assert_eq!(
                 HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(path))
                     .load_current(host, UtcMicros(2)),

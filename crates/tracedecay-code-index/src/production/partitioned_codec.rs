@@ -3979,15 +3979,14 @@ mod tests {
             padding: "p".repeat(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1 + 23),
         };
         let stream = serde_json::to_vec(&evidence).expect("reference evidence stream");
-        let descriptor: PartitionedGenerationEvidenceDescriptorV1 = serde_json::from_value(
-            serde_json::json!({
+        let descriptor: PartitionedGenerationEvidenceDescriptorV1 =
+            serde_json::from_value(serde_json::json!({
                 "segment_digest": ManifestDigest::from_sha256_bytes(&Sha256::digest(&stream))
                     .expect("stream digest")
                     .as_str(),
                 "segment_size_bytes": stream.len(),
-            }),
-        )
-        .expect("a manifest without a page table is the pre-paging format");
+            }))
+            .expect("a manifest without a page table is the pre-paging format");
         assert!(descriptor.legacy_unpaged);
 
         fn read_range(

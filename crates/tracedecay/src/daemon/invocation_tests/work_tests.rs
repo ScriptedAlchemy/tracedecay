@@ -502,8 +502,11 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     // proposal never recommended.
     let unrouted_task_id =
         tracedecay_domain::TaskId::new("task.work.core-invocation-unrouted").expect("task id");
-    let (initiative, plan, milestone, item) =
-        product_task("core-invocation-unrouted", unrouted_task_id.clone(), UtcMicros(10));
+    let (initiative, plan, milestone, item) = product_task(
+        "core-invocation-unrouted",
+        unrouted_task_id.clone(),
+        UtcMicros(10),
+    );
     let prepared_unrouted = invoke!(
         "request.work.prepare-create-unrouted",
         WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
@@ -622,9 +625,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
         )
     );
     let DaemonInvocationOutcome::ApplicationProblem { problem } = unrouted_admission else {
-        panic!(
-            "admitting an abstained proposal must be refused: {unrouted_admission:?}"
-        );
+        panic!("admitting an abstained proposal must be refused: {unrouted_admission:?}");
     };
     assert_eq!(
         problem,

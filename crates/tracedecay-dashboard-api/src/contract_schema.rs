@@ -7,10 +7,9 @@ use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
 };
 use tracedecay_contracts::{
-
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, AuthorizedScopeSet,
-    CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkTaskRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
+    AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkTaskRequestV1,
     ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
     GenerateProposalRequest, GeneratedWorkProposal, ListTaskHandoffsRequestV1,
     ListTaskHandoffsResultV1, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
@@ -21,7 +20,6 @@ use tracedecay_contracts::{
     StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
     WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
-
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
