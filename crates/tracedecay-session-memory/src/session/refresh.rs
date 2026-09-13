@@ -350,6 +350,12 @@ where
         if let Err(outcome) = self.authorize_handle(context, binding, handle) {
             return outcome;
         }
+        // Terminal receipts outlive mutable scheduler progress.
+        match self.read_receipt(context, binding, handle).await {
+            Ok(Some(receipt)) => return terminal_outcome(receipt),
+            Ok(None) => {}
+            Err(outcome) => return outcome,
+        }
         let progress = match await_with_request_controls(
             context,
             binding,
@@ -374,11 +380,6 @@ where
                 None => progress,
             }
         });
-        match self.read_receipt(context, binding, handle).await {
-            Ok(Some(receipt)) => return terminal_outcome(receipt),
-            Ok(None) => {}
-            Err(outcome) => return outcome,
-        }
         SessionRefreshOutcome::Running(progress)
     }
 
@@ -395,6 +396,12 @@ where
         if let Err(outcome) = self.authorize_handle(context, binding, handle) {
             return outcome;
         }
+        // Terminal receipts outlive mutable scheduler progress.
+        match self.read_receipt(context, binding, handle).await {
+            Ok(Some(receipt)) => return terminal_outcome(receipt),
+            Ok(None) => {}
+            Err(outcome) => return outcome,
+        }
         let progress = match await_with_request_controls(
             context,
             binding,
@@ -410,11 +417,6 @@ where
             Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
             Err(outcome) => return outcome,
         };
-        match self.read_receipt(context, binding, handle).await {
-            Ok(Some(receipt)) => return terminal_outcome(receipt),
-            Ok(None) => {}
-            Err(outcome) => return outcome,
-        }
         let (frontier, coverage) = progress.as_ref().map_or_else(
             || (handle.target.frozen_frontier(), empty_coverage()),
             |progress| (progress.frontier(), *progress.coverage()),

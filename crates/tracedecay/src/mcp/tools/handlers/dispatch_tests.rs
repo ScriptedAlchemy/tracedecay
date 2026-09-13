@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -2060,6 +2061,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
             profile_database.clone(),
         )
         .await;
+    let completion_wake = wake.clone();
     let refresh = tracedecay_daemon_service::DaemonSessionRefreshService::new(
         profile_database,
         std::sync::Arc::new(wake),
@@ -2131,6 +2133,13 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
         .to_owned();
     assert!(handle.starts_with("srh_"), "{handle}");
 
+    assert!(
+        completion_wake
+            .wake_and_wait_until_idle(Duration::from_secs(5))
+            .await,
+        "profile refresh must reach a durable terminal receipt"
+    );
+
     let mut status_arguments = selectors.clone();
     status_arguments["handle"] = json!(handle.clone());
     let observed = call("tracedecay_session_refresh_status", status_arguments, true).await;
@@ -2142,10 +2151,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
         panic!("status must be evidence: {observed}");
     };
     let status = packet.payload.expect("status payload");
-    assert!(
-        matches!(status["outcome"].as_str(), Some("running" | "complete")),
-        "{status}"
-    );
+    assert_eq!(status["outcome"], "complete", "{status}");
     assert_eq!(status["scope"], "profile");
 
     let mut cancel_arguments = selectors.clone();
@@ -2159,10 +2165,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
         panic!("cancel must be an effect: {cancelled}");
     };
     let cancel = effect.payload.expect("cancel payload");
-    assert!(
-        matches!(cancel["outcome"].as_str(), Some("cancelled" | "complete")),
-        "{cancel}"
-    );
+    assert_eq!(cancel["outcome"], "complete", "{cancel}");
     assert!(cancel["receipt"].is_object(), "{cancel}");
 
     let unmounted = call("tracedecay_session_refresh_begin", selectors, false).await;
