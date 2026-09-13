@@ -27,7 +27,10 @@ pub use retrieval::{
     SessionRetrievalConfiguration, SessionRetrievalService, SessionTemporalQuery,
     SessionTemporalQueryError, TaskSessionRetrievalOutcomeV1,
 };
-pub use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
+pub use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
+    SessionRetrievalBudgetStageV1,
+};
 pub use types::{
     AuthorizationGrantId, AuthorizedSessionScope, SessionAccess, SessionAuthorizationError,
     SessionAuthorizationGrant, SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,

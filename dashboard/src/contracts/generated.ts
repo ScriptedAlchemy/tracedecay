@@ -4452,6 +4452,34 @@ export type SensitivityV1 = z.infer<typeof SensitivityV1Schema>;
 export const SessionIdSchema = z.string();
 export type SessionId = z.infer<typeof SessionIdSchema>;
 
+/** The ceiling and count behind a budget refusal.
+
+`stage` names which budget refused; this is what tells an oversized request
+apart from a read whose cost was mis-sized for it. The ceiling value also
+distinguishes the resources inside one stage — a record read that stopped at
+1024 hit the item count, one that stopped at 16 MiB hit the byte total — so
+the kernel's resource spelling stays in the kernel instead of becoming a
+second wire vocabulary to keep in step. */
+export const SessionRetrievalBudgetAccountingV1Schema = z.object({
+  limit: z.number().int().safe().min(0),
+  observed: z.lazy(() => SessionRetrievalBudgetObservationV1Schema),
+}).strict();
+export type SessionRetrievalBudgetAccountingV1 = z.infer<typeof SessionRetrievalBudgetAccountingV1Schema>;
+
+/** What a refusing budget boundary had counted.
+
+Both variants are exact. A bounded read never counts the rows it declined to
+read, so an exhausted read reports what it consumed and that storage held
+more — never a total it would have to run the refused scan to learn. */
+export const SessionRetrievalBudgetObservationV1Schema = z.discriminatedUnion("observation", [z.object({
+  observation: z.literal("consumed_with_more_available"),
+  units: z.number().int().safe().min(0),
+}).strict(), z.object({
+  observation: z.literal("requested"),
+  units: z.number().int().safe().min(0),
+}).strict()]);
+export type SessionRetrievalBudgetObservationV1 = z.infer<typeof SessionRetrievalBudgetObservationV1Schema>;
+
 /** Structural budget boundary that rejected a session retrieval request.
 These causes are non-retryable request corrections; concurrent permit or
 queue pressure remains a separate capacity-saturation failure. */
@@ -4459,6 +4487,7 @@ export const SessionRetrievalBudgetStageV1Schema = z.enum(["candidate_read_exhau
 export type SessionRetrievalBudgetStageV1 = z.infer<typeof SessionRetrievalBudgetStageV1Schema>;
 
 export const SessionRetrievalStructuralRefusalV1Schema = z.discriminatedUnion("refusal", [z.object({
+  accounting: z.union([z.lazy(() => SessionRetrievalBudgetAccountingV1Schema), z.null()]),
   refusal: z.literal("budget_exhausted"),
   stage: z.lazy(() => SessionRetrievalBudgetStageV1Schema),
 }).strict(), z.object({

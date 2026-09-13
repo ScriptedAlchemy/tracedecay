@@ -24,8 +24,8 @@ use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, Temporal
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions, TemporalExecutionSnapshot,
-    TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
+    BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions, ReadBudgetAccounting,
+    TemporalExecutionSnapshot, TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
@@ -525,7 +525,8 @@ async fn work_budget_exhausted_during_file_proof_is_typed_and_emits_nothing() {
             .await,
         Err(HydrationError::Interrupted(
             TemporalPortError::BudgetExceeded {
-                resource: "work units"
+                resource: "work units",
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(8, 8)),
             }
         ))
     );

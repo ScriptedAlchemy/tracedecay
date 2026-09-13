@@ -1186,6 +1186,7 @@ async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
                 .await,
             SessionRetrievalServiceOutcome::BudgetExhausted {
                 stage: expected_stage,
+                accounting: None,
             },
         );
     }
@@ -1386,6 +1387,7 @@ async fn oversized_session_lookup_page_remains_a_typed_budget_refusal() {
         Err(TemporalRetrievalFailure::StructuralRefusal(
             SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                 stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
+                accounting: None,
             }
         ))
     );

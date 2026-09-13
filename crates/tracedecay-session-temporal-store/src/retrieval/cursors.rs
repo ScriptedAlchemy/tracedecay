@@ -34,6 +34,7 @@ pub(super) fn encode_cursor(
     if encoded.len() > cap {
         return Err(TemporalPortError::BudgetExceeded {
             resource: "continuation key bytes",
+            accounting: None,
         });
     }
     Ok(PageKey::new(encoded))
@@ -47,11 +48,13 @@ impl PageBounds {
         {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "continuation key bytes",
+                accounting: None,
             });
         }
         if request.max_key_bytes() < MIN_CURSOR_CAPACITY {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "continuation key capacity",
+                accounting: None,
             });
         }
         Ok(Self {

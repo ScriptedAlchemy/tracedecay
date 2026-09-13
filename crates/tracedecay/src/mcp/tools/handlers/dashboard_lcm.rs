@@ -193,7 +193,7 @@ impl DashboardLcmReadAdapter {
                     let (state, reason) = cursor_manifest_not_ready(kind);
                     return not_ready(state, reason);
                 }
-                SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, .. } => {
                     return not_ready(
                         DashboardLcmReadStateV1::BudgetExhausted,
                         session_budget_reason(stage),
@@ -587,7 +587,7 @@ impl DashboardLcmReadAdapter {
             LcmDescribeServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
                 Err(cursor_manifest_not_ready(kind))
             }
-            LcmDescribeServiceOutcome::BudgetExhausted { stage } => Err((
+            LcmDescribeServiceOutcome::BudgetExhausted { stage, .. } => Err((
                 DashboardLcmReadStateV1::BudgetExhausted,
                 session_budget_reason(stage),
             )),

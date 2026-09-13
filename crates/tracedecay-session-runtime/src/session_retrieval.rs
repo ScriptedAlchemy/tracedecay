@@ -633,8 +633,8 @@ impl DaemonSessionRetrievalService {
                 observed,
                 maximum,
             },
-            SessionRetrievalOutcome::BudgetExhausted { stage } => {
-                SessionRetrievalServiceOutcome::BudgetExhausted { stage }
+            SessionRetrievalOutcome::BudgetExhausted { stage, accounting } => {
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting }
             }
             SessionRetrievalOutcome::TimedOut => SessionRetrievalServiceOutcome::TimedOut,
             SessionRetrievalOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
@@ -663,12 +663,22 @@ impl DaemonSessionRetrievalService {
                     store_scope: self.root.store_scope,
                 }
             }
-            SessionTemporalExecutionError::BudgetExhausted { stage } => {
-                SessionRetrievalServiceOutcome::BudgetExhausted { stage }
+            SessionTemporalExecutionError::BudgetExhausted { stage, accounting } => {
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting }
             }
             SessionTemporalExecutionError::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
+            SessionTemporalExecutionError::DeadlineExceeded => {
+                SessionRetrievalServiceOutcome::TimedOut
+            }
             SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
                 SessionRetrievalServiceOutcome::TimedOut
+            }
+            SessionTemporalExecutionError::Storage { .. } => {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
+                    ),
+                )
             }
             SessionTemporalExecutionError::Stale { generation_lag } => {
                 SessionRetrievalServiceOutcome::Stale {

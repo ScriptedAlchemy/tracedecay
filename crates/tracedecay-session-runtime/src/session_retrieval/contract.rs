@@ -21,7 +21,8 @@ use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
 use tracedecay_session_memory::session::{
-    SessionDataFreshness, SessionRetrievalBudgetStageV1, SessionTemporalQuery,
+    SessionDataFreshness, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
+    SessionTemporalQuery,
 };
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
 use tracedecay_sessions::runtime::{
@@ -304,6 +305,10 @@ pub enum SessionRetrievalUnavailableReason {
     HistoricalRetry,
     HistoricalBlocked,
     TemporalStoreUnavailable,
+    /// A temporal store read failed. Distinct from `TemporalStoreUnavailable`:
+    /// the store is there and answered with an error, which is a different
+    /// operator problem from a store that is not present at all.
+    TemporalStoreReadFailed,
     HydrationUnavailable,
 }
 
@@ -398,6 +403,8 @@ pub enum LcmDescribeServiceOutcome {
     },
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
     TimedOut,
     Cancelled,
@@ -441,6 +448,8 @@ pub enum LcmExpandServiceOutcome {
     },
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
     TimedOut,
     Cancelled,
@@ -488,6 +497,8 @@ pub enum SessionRetrievalServiceOutcome {
     },
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
     TimedOut,
     Cancelled,

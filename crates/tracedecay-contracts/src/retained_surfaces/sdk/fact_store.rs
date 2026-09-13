@@ -247,9 +247,11 @@ mod tests {
         let schema = serde_json::to_value(schema_for!(FactStoreReasonRequestV1))
             .expect("reason request schema serializes");
         assert_eq!(schema["properties"]["entities"]["minItems"], json!(1));
-        assert!(schema["required"]
-            .as_array()
-            .is_some_and(|required| required.contains(&Value::String("entities".to_owned()))));
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&Value::String("entities".to_owned())))
+        );
     }
 
     #[test]
