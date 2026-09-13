@@ -2107,6 +2107,48 @@ class FixturePrimingRetryTests(unittest.TestCase):
         )
         self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
 
+    def test_work_effect_preparation_skips_unrelated_native_lifecycle(self) -> None:
+        runner = load_runner()
+        client = self.client([self.response('{"node_id":"function:fixture"}')])
+        fixture = {
+            "symbol": "sweep_anchor",
+            "qualified_name": "src/lib.rs::sweep_anchor",
+            "session_id": "session.fixture",
+            "lcm_message": "catalog sweep captured LCM message",
+            "root": "/fixture/root",
+            "commit": "a" * 40,
+        }
+        policies = self.policies(runner)
+        policies["tracedecay_multi_root_scope_set_compare_and_swap"] = runner.ToolPolicy(
+            "tracedecay_multi_root_scope_set_compare_and_swap",
+            "available",
+            "administrative",
+            1_000,
+        )
+        original_native = runner.prime_native_admin_lifecycle
+        original_work = runner.prime_work_lifecycle
+
+        def fail_if_called(*_args, **_kwargs):
+            self.fail("Work effect preparation invoked the native lifecycle")
+
+        def mark_work(*_args, **_kwargs):
+            fixture["work_lifecycle_reached"] = True
+
+        runner.prime_native_admin_lifecycle = fail_if_called
+        runner.prime_work_lifecycle = mark_work
+        try:
+            runner.prime_fixture_values(
+                client,
+                fixture,
+                policies,
+                "tracedecay_work_create",
+            )
+        finally:
+            runner.prime_native_admin_lifecycle = original_native
+            runner.prime_work_lifecycle = original_work
+
+        self.assertTrue(fixture["work_lifecycle_reached"])
+
     def test_code_navigation_failure_does_not_block_git_work_or_workflow_groups(self) -> None:
         runner = load_runner()
         runner.CODE_INDEX_READY_TIMEOUT_S = 0
