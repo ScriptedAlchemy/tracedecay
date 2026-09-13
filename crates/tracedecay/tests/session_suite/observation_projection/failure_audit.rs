@@ -483,7 +483,7 @@ async fn deterministic_sanitization_refusal_records_disposition_and_drains_rest(
         .await
         .expect_err("deterministic sanitization refusal must keep its typed class");
     match &error {
-        ProjectionStoreError::SanitizationRefused { reason } => assert!(
+        ProjectionStoreError::SanitizationRefused { reason, .. } => assert!(
             reason.contains("LCM privacy sanitization failed"),
             "refusal lost its content-failure detail: {reason}"
         ),

@@ -611,7 +611,14 @@ pub enum ProjectionStoreError {
     // succeed on retry: callers record a durable skip disposition and keep
     // draining instead of scheduling an environmental retry.
     #[error("projected content failed deterministic sanitization: {reason}")]
-    SanitizationRefused { reason: String },
+    SanitizationRefused {
+        reason: String,
+        /// Set when the sanitizer withheld content it proved it cannot serve,
+        /// rather than failing to run. Both converge to the same durable skip
+        /// on capture; only re-rendering an already-captured output treats the
+        /// verdict as the current rendering instead of a fault.
+        quarantined: bool,
+    },
     #[error(
         "projection retry is deferred after attempt {attempt_count} until {next_retry_at_micros}"
     )]

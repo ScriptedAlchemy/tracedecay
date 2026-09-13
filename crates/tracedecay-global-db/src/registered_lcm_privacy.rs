@@ -430,6 +430,7 @@ fn requires_remediation(text: &str, provider_metadata: Option<&str>) -> Result<b
     let sanitization =
         sanitize_lcm_payload_text(text).map_err(|error| LcmError::SanitizationRefused {
             reason: format!("at-rest LCM privacy rescan refused a stored payload: {error}"),
+            quarantined: error.is_quarantine_verdict(),
         })?;
     if sanitization.sanitized_text() != text {
         return Ok(true);
@@ -457,12 +458,14 @@ fn stored_provider_metadata(row: &RescanRow) -> Result<Option<String>, LcmError>
         serde_json::from_str::<serde_json::Value>(metadata_json).map_err(|error| {
             LcmError::SanitizationRefused {
                 reason: format!("stored LCM metadata is not valid JSON: {error}"),
+                quarantined: false,
             }
         })?;
     let object = metadata
         .as_object_mut()
         .ok_or_else(|| LcmError::SanitizationRefused {
             reason: "stored LCM metadata must be a JSON object".to_owned(),
+            quarantined: false,
         })?;
     object.remove("ingest_protection");
     if object.is_empty() {
