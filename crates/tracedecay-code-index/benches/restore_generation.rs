@@ -63,14 +63,13 @@ struct Measurement {
     /// below that width means the restore's serial stages, not the codec,
     /// decide how long a retained generation takes to come back.
     decode_cores_busy: f64,
-    /// How many restores ran at once, and how many the process ever let decode
-    /// simultaneously. Concurrent restores split one indexing pool and hold one
-    /// resident corpus each, so the second number is the bound under test.
+    /// How many restores ran at once. Several retained scope roots come back
+    /// together on a daemon restart, so this is what a restart costs, not what
+    /// one root costs.
     concurrent_restores: usize,
-    peak_admitted_restores: usize,
     /// Wall time from the batch starting to the first and to the last restore
-    /// completing. With restores queued the first equals a solo restore; with
-    /// them overlapped both approach the total.
+    /// completing. Both near the total means the restores overlapped freely;
+    /// the first well below the last means they queued behind each other.
     first_restore_ns: u64,
     last_restore_ns: u64,
 }
@@ -156,8 +155,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             / (decode_cpu_ns as f64 / 1e9),
         decode_cores_busy: decode_cpu_ns as f64 / decode_wall_ns as f64,
         concurrent_restores,
-        peak_admitted_restores: tracedecay_code_index::parallelism::generation_restore_admission()
-            .peak_admitted,
         first_restore_ns: completions.first().copied().unwrap_or(0),
         last_restore_ns: completions.last().copied().unwrap_or(0),
     };

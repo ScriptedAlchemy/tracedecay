@@ -1660,12 +1660,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
             };
         };
         // Decoded with NO cache lock held: unrelated readers and publishers keep
-        // making progress while this runs. Restore admission is taken here,
-        // ahead of the store read lock the decode acquires, so a queued root
-        // never parks a publisher behind it.
-        let matched = tracedecay_code_index::parallelism::with_generation_restore_admission(|| {
-            self.load_indexed_generation(generation_id, entry)
-        });
+        // making progress while this runs.
+        let matched = self.load_indexed_generation(generation_id, entry);
         if let Ok(Some(generation)) = matched.as_ref() {
             self.cache.remember(Arc::clone(generation))?;
         }
