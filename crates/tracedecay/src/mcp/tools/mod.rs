@@ -18,9 +18,6 @@ pub(crate) use handlers::retained_catalog::{
 pub use handlers::{
     ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry_options,
 };
-pub(crate) use handlers::{
-    handle_projectless_hook_runtime, replay_projectless_hermes_host_admission,
-};
 
 /// Explicit owner for advertised tools awaiting typed application contracts.
 ///

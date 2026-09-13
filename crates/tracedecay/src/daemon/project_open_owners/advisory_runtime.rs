@@ -75,7 +75,6 @@ use tracedecay_session_memory::context::MonotonicDeadline;
 
 use super::{DaemonInvocationState, POLICY_REVISION_V1, register_semantic_configuration_owners};
 use crate::mcp::McpServer;
-use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
 use tracedecay_agent_hosts::agents::context_scout::ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -100,6 +99,7 @@ use tracedecay_daemon_service::{
     register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 
 mod deferred;
 mod model;

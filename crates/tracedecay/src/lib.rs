@@ -33,7 +33,6 @@
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]
 
-pub mod bench;
 // The project handle, its configuration authority, and the product runtime
 // live in `tracedecay-project`, below the MCP and daemon layers; the root
 // keeps their historical paths.

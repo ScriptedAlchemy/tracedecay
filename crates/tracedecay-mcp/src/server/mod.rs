@@ -7,7 +7,6 @@ mod project_host_admission_replay;
 mod protocol;
 mod read_coalescing;
 mod rmcp;
-mod session_refresh;
 mod settlement;
 
 pub use crate::lifecycle::{
@@ -36,7 +35,6 @@ pub use rmcp::{
     RmcpWorkDeliverySettlement, await_dispatch_with_cancellation, project_server_retired_error,
     rmcp_response_result,
 };
-pub use session_refresh::DaemonSessionRefreshService;
 pub use settlement::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest, DispatchFailure,
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, RetainedDispatchAuthority,

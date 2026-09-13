@@ -1,6 +1,10 @@
 use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 /// Database authorities retained by the owning MCP server for its lifetime.
 /// Hook and LCM handlers borrow these capabilities; they never rediscover or
@@ -101,4 +105,14 @@ impl<'a> SessionAuthorities<'a> {
         self.profile_session_refresh = refresh;
         self
     }
+}
+
+/// The session authorities an MCP server retains for a registered test
+/// runtime's project and profile session stores.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn mcp_session_authorities(runtime: &HostAdmissionTestRuntimeV1) -> SessionAuthorities<'_> {
+    SessionAuthorities::new(
+        runtime.registered_database_lease(HostAdmissionScope::Project),
+        runtime.registered_database_lease(HostAdmissionScope::Profile),
+    )
 }

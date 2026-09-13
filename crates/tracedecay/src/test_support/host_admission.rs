@@ -22,16 +22,7 @@ pub use tracedecay_project::test_support::host_admission::{
 };
 
 use crate::project::TraceDecay;
-use tracedecay_mcp::handlers::SessionAuthorities;
-
-/// The session authorities an MCP server retains for this runtime's
-/// registered project and profile session stores.
-pub fn mcp_session_authorities(runtime: &HostAdmissionTestRuntimeV1) -> SessionAuthorities<'_> {
-    SessionAuthorities::new(
-        runtime.registered_database_lease(HostAdmissionScope::Project),
-        runtime.registered_database_lease(HostAdmissionScope::Profile),
-    )
-}
+use tracedecay_mcp::handlers::mcp_session_authorities;
 
 /// Calls one MCP tool through the registry-aware dispatcher with this
 /// runtime's registered databases as the tool's authorities.

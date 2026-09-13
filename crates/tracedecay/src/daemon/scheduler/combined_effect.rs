@@ -902,8 +902,8 @@ mod tests {
             .expect("combined admission retained grant");
             let engine = DaemonEngine::default();
             let invocation_service = engine.invocation.invocation_service();
-            let retained_ports = crate::daemon::retained_owner::retained_surface_ports(
-                crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
+            let retained_ports = tracedecay_daemon_service::retained_owner::retained_surface_ports(
+                tracedecay_daemon_service::retained_owner::ProductionRetainedAuthoritiesV1 {
                     cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(&memory))),
                     project_root: project_root.clone(),
                     project_id: project_id.clone(),
@@ -1164,7 +1164,7 @@ mod tests {
         let cancellation = CancellationSignal::active(format!("cancel.{run_id}"))
             .expect("combined recovery cancellation");
         let report =
-            crate::daemon::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
+            tracedecay_daemon_service::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
                 &fixture.dashboard_root,
                 &cancellation,
@@ -1185,7 +1185,7 @@ mod tests {
         assert!(!conflicting_journal.exists());
         assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
         let report =
-            crate::daemon::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
+            tracedecay_daemon_service::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
                 &fixture.dashboard_root,
                 &cancellation,

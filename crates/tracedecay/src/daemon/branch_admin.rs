@@ -24,7 +24,6 @@ use super::StoreOwnerKey;
 #[cfg(unix)]
 use super::scheduler::AutomationSchedulerHandle;
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
-use crate::mcp::tools::replay_projectless_hermes_host_admission;
 #[cfg(unix)]
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -34,6 +33,7 @@ use tracedecay_daemon_service::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayRegistry,
 };
+use tracedecay_mcp::handlers::hook_runtime::replay_projectless_hermes_host_admission;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use tracedecay_store_runtime::StoreWriterGates;
@@ -59,7 +59,9 @@ type HostAdmissionBrokers =
 /// same store (project MCP servers and the projectless client) must share the
 /// instance for `status`/`cancel` to resolve a `begin` handle.
 type ProfileSessionRefreshServices = Arc<
-    ProfiledTokioMutex<HashMap<PathBuf, Arc<tracedecay_mcp::server::DaemonSessionRefreshService>>>,
+    ProfiledTokioMutex<
+        HashMap<PathBuf, Arc<tracedecay_daemon_service::DaemonSessionRefreshService>>,
+    >,
 >;
 
 /// Resolves the writer scope for one store family.
@@ -1296,7 +1298,7 @@ impl StoreAdministration {
     pub(super) async fn profile_session_refresh_service(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    ) -> Arc<tracedecay_mcp::server::DaemonSessionRefreshService> {
+    ) -> Arc<tracedecay_daemon_service::DaemonSessionRefreshService> {
         let path = database.db_path().to_path_buf();
         let mut services = self.profile_session_refresh_services.lock().await;
         if let Some(service) = services.get(&path) {
@@ -1306,7 +1308,7 @@ impl StoreAdministration {
             .session_temporal_refresh_schedulers
             .ensure_profile(path.clone(), database.clone())
             .await;
-        let service = Arc::new(tracedecay_mcp::server::DaemonSessionRefreshService::new(
+        let service = Arc::new(tracedecay_daemon_service::DaemonSessionRefreshService::new(
             database.clone(),
             Arc::new(wake),
             None,

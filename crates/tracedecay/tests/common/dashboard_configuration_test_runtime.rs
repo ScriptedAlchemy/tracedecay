@@ -410,8 +410,8 @@ pub(crate) async fn register_dashboard_test_retained_runtime(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("dashboard test retained grant is invalid: {error}"),
             })?;
-    let retained_ports = super::retained_owner::retained_surface_ports(
-        super::retained_owner::ProductionRetainedAuthoritiesV1 {
+    let retained_ports = tracedecay_daemon_service::retained_owner::retained_surface_ports(
+        tracedecay_daemon_service::retained_owner::ProductionRetainedAuthoritiesV1 {
             cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(cg))),
             project_root: project_root.clone(),
             project_id,

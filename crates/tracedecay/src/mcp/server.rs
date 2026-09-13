@@ -67,13 +67,13 @@ pub(crate) use rmcp::RmcpInitializeResponseDecorator;
 #[cfg(test)]
 pub(crate) use rmcp::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
 pub(crate) use routing::*;
+use tracedecay_daemon_service::DaemonSessionRefreshService;
 use tracedecay_daemon_service::{DaemonProjectRegistryReadService, DaemonWorkflowIndexReadService};
 pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
 use tracedecay_mcp::server::{
-    DaemonSessionRefreshService, IdenticalReadCoalescer, McpBackgroundTaskOwner,
-    McpDispatchRequest, ProjectHostAdmissionReplayTask, RetainedDispatchAuthority,
-    StartupCatchUpMachineV1, ToolCallParams, join_required_live_transcript_refresh,
-    needs_lazy_sync_before_dispatch,
+    IdenticalReadCoalescer, McpBackgroundTaskOwner, McpDispatchRequest,
+    ProjectHostAdmissionReplayTask, RetainedDispatchAuthority, StartupCatchUpMachineV1,
+    ToolCallParams, join_required_live_transcript_refresh, needs_lazy_sync_before_dispatch,
 };
 pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 
@@ -1343,8 +1343,8 @@ impl McpServer {
             Arc::new(DaemonWorkflowIndexReadService::new(database.clone()))
                 as Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>
         });
-        crate::daemon::retained_owner::retained_surface_ports(
-            crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
+        tracedecay_daemon_service::retained_owner::retained_surface_ports(
+            tracedecay_daemon_service::retained_owner::ProductionRetainedAuthoritiesV1 {
                 cg: Arc::clone(&self.cg),
                 project_root: project_root.to_path_buf(),
                 project_id,
