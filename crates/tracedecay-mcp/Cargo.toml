@@ -23,6 +23,9 @@ hotpath = ["hotpath/hotpath"]
 # Gates in-memory ChannelTransport. ReplayTransport stays on the default
 # graph because production initialize-root replay uses it.
 test-transport = []
+# Cross-crate fixture surface: the session-authority composition over the
+# registered host-admission test runtime. Production code is never gated by it.
+test-helpers = ["tracedecay-project/test-helpers"]
 # Source-parsing analysis (field receiver typing, the unmounted-files
 # handler) needs the canonical Rust and TypeScript grammar tier. The
 # composition root mounts this production feature where that tier is already

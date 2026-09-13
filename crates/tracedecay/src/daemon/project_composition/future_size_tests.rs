@@ -191,7 +191,7 @@ fn shared_owner_futures_stay_below_large_future_threshold() {
     let owners = [
         ("source edit", future_size(tracedecay_daemon_service::project_owner_registration::ProjectSourceEditOwnerV1::execute)),
         ("production owner registration", future_size(crate::daemon::project_open_owners::register_project_open_production_owners)),
-        ("automation admission", future_size(crate::daemon::automation_effect::prepare)),
+        ("automation admission", future_size(tracedecay_daemon_service::automation_effect::prepare)),
         ("invocation admission", future_size(tracedecay_daemon_service::DaemonInvocationService::invoke_with_project_admission)),
         ("Work dispatch", future_size(tracedecay_daemon_service::invocation::execute_work_application)),
         ("observation persistence", future_size(<tracedecay_global_db::GlobalDbObservationStore as tracedecay_store::ObservationStore>::persist_observation)),

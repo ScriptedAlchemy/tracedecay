@@ -2061,7 +2061,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
             profile_database.clone(),
         )
         .await;
-    let refresh = tracedecay_mcp::server::DaemonSessionRefreshService::new(
+    let refresh = tracedecay_daemon_service::DaemonSessionRefreshService::new(
         profile_database,
         std::sync::Arc::new(wake),
         None,

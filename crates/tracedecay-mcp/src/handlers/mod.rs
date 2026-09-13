@@ -7,7 +7,9 @@
 //! authorization.
 
 pub mod admin_cli;
+pub mod admin_project;
 pub mod analysis;
+pub mod analytics;
 pub mod ast_grep;
 pub mod automation_runs;
 mod bounded_search;
@@ -20,6 +22,7 @@ pub mod git;
 pub mod graph;
 pub mod grep;
 pub mod health;
+pub mod hook_runtime;
 pub mod info;
 mod multi_root;
 pub mod redundancy;
@@ -39,6 +42,8 @@ pub use retained_response::{
     retained_problem_envelope, retained_safe_diagnostic, validated_retained_response,
 };
 pub use session_authorities::SessionAuthorities;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use session_authorities::mcp_session_authorities;
 pub use support::{
     CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, effective_path, generic_tool_result,
     json_result, rendered_tool_result, require_node_id, require_object_args,

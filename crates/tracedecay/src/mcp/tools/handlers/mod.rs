@@ -4,13 +4,6 @@
 //! the JSON arguments, calls the appropriate `TraceDecay` method, and
 //! formats the result.
 
-pub(crate) use hook_runtime::{
-    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
-    admit_hook_v2_replayed_envelope_with_lifecycle, handle_projectless_hook_runtime,
-    hook_v2_pending_work_envelopes, replay_projectless_hermes_host_admission,
-};
-mod admin_project;
-mod analytics;
 mod application_surface;
 #[cfg(test)]
 #[allow(
@@ -60,7 +53,6 @@ mod dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod graph_search_dispatch_tests;
-pub mod hook_runtime;
 pub mod info;
 pub(crate) mod retained_catalog;
 #[cfg(test)]
@@ -133,7 +125,6 @@ use std::path::Path;
 use std::sync::Arc;
 pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
 pub(super) use tool_call_support::text_tool_result;
-pub(super) use tracedecay_mcp::handlers::json_result;
 
 use serde_json::{Value, json};
 use tracedecay_contracts::RetainedSurfaceOperation;

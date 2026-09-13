@@ -17,7 +17,7 @@ use tracedecay_hooks::{
     hook_v2_spool_root, published_hook_scope_binding,
 };
 
-use crate::mcp::tools::handlers::{
+use tracedecay_mcp::handlers::hook_runtime::{
     HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
     admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_pending_work_envelopes,
 };

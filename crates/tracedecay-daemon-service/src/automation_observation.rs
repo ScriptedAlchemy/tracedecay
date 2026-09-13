@@ -64,3 +64,15 @@ pub fn record_run_with_producer(
         ],
     );
 }
+
+/// A run-ledger observer that records each automation run for `surface`
+/// against the project's observability producer.
+pub fn automation_run_observer(
+    producer: std::sync::Arc<BoundedObservabilityProducerV1>,
+    project_root: std::path::PathBuf,
+    surface: &'static str,
+) -> Box<dyn FnOnce(&AutomationRunLedgerRecord) + Send + 'static> {
+    Box::new(move |ledger_record| {
+        record_project_run(producer.as_ref(), &project_root, ledger_record, surface);
+    })
+}

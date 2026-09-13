@@ -399,20 +399,22 @@ async fn projectless_hook_runtime_response(
             ),
     )
     .await;
-    match boxed_projectless_phase(crate::mcp::tools::handle_projectless_hook_runtime(
-        arguments.clone(),
-        &connection.client_identity.profile_root,
-        session_runtime_registry,
-        global_db.as_ref(),
-        tracedecay_mcp::handlers::SessionAuthorities::new(None, Some(&user_session_db))
-            .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
-            .with_background_cpu(
-                store_administration
-                    .session_temporal_refresh_schedulers()
-                    .background_cpu(),
-            ),
-        host_admission_broker,
-    ))
+    match boxed_projectless_phase(
+        tracedecay_mcp::handlers::hook_runtime::handle_projectless_hook_runtime(
+            arguments.clone(),
+            &connection.client_identity.profile_root,
+            session_runtime_registry,
+            global_db.as_ref(),
+            tracedecay_mcp::handlers::SessionAuthorities::new(None, Some(&user_session_db))
+                .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
+                .with_background_cpu(
+                    store_administration
+                        .session_temporal_refresh_schedulers()
+                        .background_cpu(),
+                ),
+            host_admission_broker,
+        ),
+    )
     .await
     {
         Ok(result) if tool_result_has_semantic_error(&result) => {

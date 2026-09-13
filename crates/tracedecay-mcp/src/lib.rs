@@ -44,6 +44,7 @@
 
 pub mod analysis;
 pub mod application_output;
+pub mod bench;
 mod broker_stream_transport;
 pub mod context_headings;
 pub mod handlers;

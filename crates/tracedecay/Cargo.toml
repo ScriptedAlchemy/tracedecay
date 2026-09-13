@@ -207,6 +207,7 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 # or when a consumer asks for them explicitly.
 test-helpers = [
     "tracedecay-project/test-helpers",
+    "tracedecay-mcp/test-helpers",
     "tracedecay-automation-runtime/test-helpers",
     "tracedecay-code-index-runtime/test-helpers",
     "tracedecay-daemon-service/test-helpers",
@@ -431,7 +432,7 @@ tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.
 # ChannelTransport used to be cfg(test) in this crate. After the move it lives
 # behind tracedecay-mcp's test-transport feature, so root unit tests must
 # enable that feature without putting it on the production CLI lane.
-tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["test-transport"] }
+tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["test-helpers", "test-transport"] }
 # The registered host-admission test runtime and the explicit
 # `TraceDecay::*_for_test` constructors root unit tests open projects through.
 # Only `test-helpers`: the project crate's `test-transport` reroutes the plain

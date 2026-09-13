@@ -12,10 +12,12 @@ use super::{
     maybe_run_global_retention, run_user_jobs_scheduler_pass, scheduler_run_observer,
     settle_scheduler_retained_automation,
 };
-use crate::daemon::automation_effect::prepare as prepare_automation_effect;
 use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority,
+};
+use tracedecay_daemon_service::automation_effect::{
+    prepare as prepare_automation_effect, scheduler_automation_request_id,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -725,37 +727,6 @@ fn run_automation_scheduler_tick_inner<'a>(
             None => Ok(()),
         }
     })
-}
-
-pub(crate) fn scheduler_automation_request_id(
-    requested_run_id: Option<&str>,
-) -> Result<tracedecay_contracts::RequestId> {
-    match requested_run_id {
-        Some(run_id) => {
-            let digest = tracedecay_domain::canonical_sha256(&(
-                "tracedecay.automation-scheduler.request-id.v1",
-                run_id,
-            ))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("automation scheduler stable request digest is invalid: {error}"),
-            })?;
-            tracedecay_contracts::RequestId::new(format!(
-                "request.automation-scheduler.{}",
-                digest.as_str().trim_start_matches("sha256:")
-            ))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "automation scheduler stable request identity is invalid: {error}"
-                ),
-            })
-        }
-        None => tracedecay_contracts::request_identity::mint_global_request_id(
-            tracedecay_contracts::request_identity::GlobalRequestSurface::AutomationScheduler,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("automation scheduler request identity is unavailable: {error}"),
-        }),
-    }
 }
 
 #[cfg(test)]

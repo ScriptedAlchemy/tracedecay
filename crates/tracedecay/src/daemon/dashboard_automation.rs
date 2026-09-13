@@ -17,9 +17,7 @@ use tracedecay_automation_runtime::automation::managed_skills::{
     load_managed_skill, managed_skill_dir, preview_managed_skill_update, restore_managed_skill,
     save_managed_skill,
 };
-use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationTrigger,
-};
+use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
 use tracedecay_contracts::now_micros;
 #[cfg(feature = "test-transport")]
@@ -38,9 +36,6 @@ use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectServerResol
 use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-mod retained_curator;
-pub(crate) use retained_curator::execute_retained_memory_curator;
-
 type DashboardAutomationResult<T> = std::result::Result<T, DashboardAutomationAuthorityErrorV1>;
 type DashboardAutomationProjectFuture = std::pin::Pin<
     Box<dyn Future<Output = DashboardAutomationResult<Arc<TraceDecay>>> + Send + 'static>,
@@ -49,21 +44,6 @@ type DashboardAutomationProjectResolver =
     Arc<dyn Fn(PathBuf) -> DashboardAutomationProjectFuture + Send + Sync + 'static>;
 
 const USER_JOB_REQUEST_TIMEOUT_SECS: u64 = 120;
-
-fn automation_run_observer(
-    producer: Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
-    project_root: PathBuf,
-    surface: &'static str,
-) -> Box<dyn FnOnce(&AutomationRunLedgerRecord) + Send + 'static> {
-    Box::new(move |ledger_record| {
-        crate::daemon::record_project_automation_run(
-            producer.as_ref(),
-            &project_root,
-            ledger_record,
-            surface,
-        );
-    })
-}
 
 struct DashboardAutomationRequestRuntime {
     config: AutomationConfig,
@@ -408,7 +388,7 @@ async fn execute_dashboard_automation_run(
             .ok_or_else(|| DashboardAutomationAuthorityErrorV1::NotFound {
                 detail: format!("automation job '{job_id}' was not found"),
             })?;
-            let admission = crate::daemon::automation_effect::prepare(
+            let admission = tracedecay_daemon_service::automation_effect::prepare(
                 invocation_service,
                 cg,
                 cg.project_root(),
@@ -437,11 +417,12 @@ async fn execute_dashboard_automation_run(
                     return Err(automation_admission_conflict());
                 }
             };
-            let observer = automation_run_observer(
-                Arc::clone(&producer),
-                cg.project_root().to_path_buf(),
-                "dashboard_user_job",
-            );
+            let observer =
+                tracedecay_daemon_service::automation_observation::automation_run_observer(
+                    Arc::clone(&producer),
+                    cg.project_root().to_path_buf(),
+                    "dashboard_user_job",
+                );
             let retained_run = tracedecay_automation_runtime::automation::jobs::
                 run_user_job_with_backend_for_retained_settlement(
                     &cg.store_layout().dashboard_root,

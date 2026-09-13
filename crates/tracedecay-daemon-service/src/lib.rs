@@ -58,6 +58,7 @@ pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLI
 
 pub mod adoption_observation;
 pub mod application_surface;
+pub mod automation_effect;
 pub mod automation_observation;
 pub mod callable_code_authorization;
 pub mod context_scout_lifecycle;
@@ -74,6 +75,8 @@ pub mod query_mcp_admission;
 pub mod remote_http_transport;
 mod remote_protocol;
 pub mod request_cancellation;
+pub mod retained_owner;
+pub mod session_refresh;
 pub mod shutdown;
 mod shutdown_coordination;
 
@@ -141,6 +144,7 @@ pub use query_mcp_admission::{
 };
 pub use remote_protocol::build_daemon_remote_protocol_router;
 pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
+pub use session_refresh::DaemonSessionRefreshService;
 pub use shutdown_coordination::ShutdownCoordinatorV1;
 pub use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonFeedbackResult,
