@@ -549,19 +549,39 @@ pub(super) async fn bounded_repository_identity(
 /// unresolved and the caller retries within its own budget, exactly like a
 /// warming project open. Spawn and probe failures are terminal because retrying
 /// them until the caller's budget expires only hides the actionable error.
+///
+/// A deferral names when to come back and, when one is still running, that a
+/// resolution is in progress — the difference between "this root is being
+/// resolved" and "this root is unresolved", which is what a client staring at
+/// a repeated deferral cannot otherwise tell.
 pub(super) fn repository_discovery_deferred(
     path: &Path,
     reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
 ) -> TraceDecayError {
-    let retry_hint = matches!(
+    let deferred = matches!(
         reason,
         tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded
-    )
-    .then_some(PROJECT_WARMING_RETRY_HINT)
-    .unwrap_or("cannot be resolved");
+    );
+    let retry_hint = if deferred {
+        PROJECT_WARMING_RETRY_HINT
+    } else {
+        "cannot be resolved"
+    };
+    let progress = if deferred {
+        let retry_after_ms = super::REPOSITORY_DISCOVERY_DEADLINE.as_millis();
+        match tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(path) {
+            Some(elapsed) => format!(
+                "; resolution in progress for {:.1}s and publishing its result, retry after {retry_after_ms}ms",
+                elapsed.as_secs_f64()
+            ),
+            None => format!("; retry after {retry_after_ms}ms"),
+        }
+    } else {
+        String::new()
+    };
     TraceDecayError::Config {
         message: format!(
-            "repository discovery for '{}' is deferred ({reason:?}); the project route {retry_hint}",
+            "repository discovery for '{}' is deferred ({reason:?}){progress}; the project route {retry_hint}",
             path.display()
         ),
     }
