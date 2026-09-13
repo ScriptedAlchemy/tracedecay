@@ -22,6 +22,10 @@ use super::map_control_error;
 use super::sql::TemporalSqlRead;
 use super::sql::TemporalSqlRows;
 
+// Keep a full root window from becoming one long exact-SQL materialization.
+// This matches the existing frozen-participant read batch in `retrieval`.
+const PREPARED_PARTICIPANT_BATCH: usize = 64;
+
 /// Decides what a request is actually allowed to see of one participant source.
 ///
 /// The session-scoped query does not filter on `project_key`, so a session
@@ -118,7 +122,7 @@ pub(super) async fn freeze_participants(
         .await
         .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
 
-    collect_participant_rows(read, rows, request, None).await
+    collect_participant_rows(read, vec![rows], request, None).await
 }
 
 #[hotpath::measure(future = true, label = "session_temporal.freeze.prepared_candidates")]
@@ -174,22 +178,30 @@ pub(super) async fn freeze_prepared_candidate_participants(
             }),
         });
     }
-    let encoded_keys = serde_json::to_string(
-        &keys
-            .iter()
-            .map(|(session_id, provider, generation)| {
-                serde_json::json!({
-                    "session_id": session_id,
-                    "provider": provider,
-                    "generation": generation,
+    let expected_count = keys.len();
+    let keys = keys.into_iter().collect::<Vec<_>>();
+    let mut row_batches = Vec::with_capacity(keys.len().div_ceil(PREPARED_PARTICIPANT_BATCH));
+    for keys in keys.chunks(PREPARED_PARTICIPANT_BATCH) {
+        snapshot_request
+            .execution_control()
+            .checkpoint()
+            .map_err(map_control_error)?;
+        let encoded_keys = serde_json::to_string(
+            &keys
+                .iter()
+                .map(|(session_id, provider, generation)| {
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "provider": provider,
+                        "generation": generation,
+                    })
                 })
-            })
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-    let rows = read
-        .query(
-            "WITH requested AS (
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        row_batches.push(
+            read.query(
+                "WITH requested AS (
                  SELECT json_extract(value, '$.session_id') AS session_id,
                         json_extract(value, '$.provider') AS provider,
                         CAST(json_extract(value, '$.generation') AS INTEGER) AS generation
@@ -215,20 +227,22 @@ pub(super) async fn freeze_prepared_candidate_participants(
              WHERE (?3 IS NULL OR source.provider = ?3)
              ORDER BY generation.session_id, source.provider
              LIMIT 257",
-            params![
-                encoded_keys,
-                root.project_key(),
-                snapshot_request.provider_scope()
-            ],
-        )
-        .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-    collect_participant_rows(read, rows, request, Some(keys.len())).await
+                params![
+                    encoded_keys,
+                    root.project_key(),
+                    snapshot_request.provider_scope()
+                ],
+            )
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        );
+    }
+    collect_participant_rows(read, row_batches, request, Some(expected_count)).await
 }
 
 async fn collect_participant_rows(
     read: &TemporalSqlRead<'_>,
-    mut rows: TemporalSqlRows,
+    row_batches: Vec<TemporalSqlRows>,
     request: &AuthorizedTemporalExecutionRequest,
     expected_count: Option<usize>,
 ) -> Result<
@@ -252,91 +266,95 @@ async fn collect_participant_rows(
         summary: 0,
     };
     let mut shared_cursor_key = None::<Option<SignedCursorKeyRefV1>>;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
-    {
-        snapshot_request
-            .execution_control()
-            .checkpoint()
-            .map_err(map_control_error)?;
-        let session_id = row
-            .get::<String>(0)
-            .ok()
-            .and_then(|value| SessionId::new(value).ok())
-            .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let source_id = row
-            .get::<String>(1)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let generation = row
-            .get::<i64>(2)
-            .ok()
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let encoded = row
-            .get::<String>(3)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let participant_project_key = row
-            .get::<String>(4)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let participant_metadata = row
-            .get::<Option<String>>(5)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let snapshot_time = row
-            .get::<i64>(6)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let graph_generation = row
-            .get::<i64>(7)
-            .ok()
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let mut authorization =
-            participant_authorization(snapshot_request.authorized_root(), &participant_project_key);
-        let access = participant_source_access(participant_metadata.as_deref(), snapshot_time)
-            .unwrap_or_else(|| {
-                authorization = TemporalParticipantAuthorization::Denied;
-                TemporalSourceAccess::Available
-            });
-        let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        if frozen.active_generation > generation {
-            return Err(SessionTemporalExecutionError::Unavailable);
-        }
-        let watermarks = TemporalWatermarks {
-            generation,
-            source: frozen.source_frontier,
-            projection: frozen.projection_frontier,
-            index: frozen.projection_frontier,
-            summary: frozen.summary_frontier,
-        };
-        aggregate.generation = aggregate.generation.max(watermarks.generation);
-        aggregate.source = aggregate.source.max(watermarks.source);
-        aggregate.projection = aggregate.projection.max(watermarks.projection);
-        aggregate.index = aggregate.index.max(watermarks.index);
-        aggregate.summary = aggregate.summary.max(watermarks.summary);
-        match &shared_cursor_key {
-            Some(expected) if expected != &frozen.cursor_key => {
+    for mut rows in row_batches {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?
+        {
+            snapshot_request
+                .execution_control()
+                .checkpoint()
+                .map_err(map_control_error)?;
+            let session_id = row
+                .get::<String>(0)
+                .ok()
+                .and_then(|value| SessionId::new(value).ok())
+                .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            let source_id = row
+                .get::<String>(1)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let generation = row
+                .get::<i64>(2)
+                .ok()
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            let encoded = row
+                .get::<String>(3)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let participant_project_key = row
+                .get::<String>(4)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let participant_metadata = row
+                .get::<Option<String>>(5)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let snapshot_time = row
+                .get::<i64>(6)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let graph_generation = row
+                .get::<i64>(7)
+                .ok()
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            let mut authorization = participant_authorization(
+                snapshot_request.authorized_root(),
+                &participant_project_key,
+            );
+            let access = participant_source_access(participant_metadata.as_deref(), snapshot_time)
+                .unwrap_or_else(|| {
+                    authorization = TemporalParticipantAuthorization::Denied;
+                    TemporalSourceAccess::Available
+                });
+            let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            if frozen.active_generation > generation {
                 return Err(SessionTemporalExecutionError::Unavailable);
             }
-            None => shared_cursor_key = Some(frozen.cursor_key.clone()),
-            Some(_) => {}
+            let watermarks = TemporalWatermarks {
+                generation,
+                source: frozen.source_frontier,
+                projection: frozen.projection_frontier,
+                index: frozen.projection_frontier,
+                summary: frozen.summary_frontier,
+            };
+            aggregate.generation = aggregate.generation.max(watermarks.generation);
+            aggregate.source = aggregate.source.max(watermarks.source);
+            aggregate.projection = aggregate.projection.max(watermarks.projection);
+            aggregate.index = aggregate.index.max(watermarks.index);
+            aggregate.summary = aggregate.summary.max(watermarks.summary);
+            match &shared_cursor_key {
+                Some(expected) if expected != &frozen.cursor_key => {
+                    return Err(SessionTemporalExecutionError::Unavailable);
+                }
+                None => shared_cursor_key = Some(frozen.cursor_key.clone()),
+                Some(_) => {}
+            }
+            entries.push(
+                TemporalParticipantGeneration::new(
+                    session_id,
+                    source_id,
+                    watermarks,
+                    graph_generation,
+                    &configuration_digest,
+                    snapshot_request.access_digest(),
+                    authorization,
+                    access,
+                )
+                .map_err(map_control_error)?,
+            );
         }
-        entries.push(
-            TemporalParticipantGeneration::new(
-                session_id,
-                source_id,
-                watermarks,
-                graph_generation,
-                &configuration_digest,
-                snapshot_request.access_digest(),
-                authorization,
-                access,
-            )
-            .map_err(map_control_error)?,
-        );
+        drop(rows);
     }
-    drop(rows);
     if expected_count.is_some_and(|expected| entries.len() != expected) {
         return Err(SessionTemporalExecutionError::Stale { generation_lag: 1 });
     }
