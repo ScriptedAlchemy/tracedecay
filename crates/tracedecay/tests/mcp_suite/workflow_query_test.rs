@@ -362,19 +362,17 @@ async fn workflows_query_surface_end_to_end() {
         "{by_run}"
     );
 
-    // Retained markdown is the canonical compact evidence view. The detailed
-    // phases and agents remain available through `--json`, which the assertions
-    // above exercise directly, rather than being duplicated into markdown.
+    // Retained markdown leads with a bounded evidence payload before status and
+    // provenance; `--json` remains the complete typed result.
     let run_md = call_md(&cg, "tracedecay_workflows", json!({ "run_id": RUN_ID })).await;
-    assert!(run_md.starts_with("## workflows\n"), "{run_md}");
-    assert!(run_md.contains("- Operation: `workflows`"), "{run_md}");
     assert!(
-        run_md.lines().any(|line| {
-            line.starts_with("- Payload: object(") && line.ends_with("complete: --json")
-        }),
+        run_md.starts_with("## workflows\n\n### Payload\n\n"),
         "{run_md}"
     );
-    assert!(!run_md.contains("\"result_summary\""), "{run_md}");
+    assert!(run_md.contains("\"result_summary\""), "{run_md}");
+    assert!(run_md.contains("- Status: `success`"), "{run_md}");
+    assert!(run_md.contains("- Evidence: `"), "{run_md}");
+    assert!(run_md.contains("- Provenance: `"), "{run_md}");
 
     // (c) agent drill: one agent surfaces its transcript path + replay hint. The
     // mine agent had a real transcript, so ingest recorded its transcript_path.
