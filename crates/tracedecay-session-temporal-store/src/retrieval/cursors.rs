@@ -33,7 +33,8 @@ pub(super) fn encode_cursor(
     let encoded = serde_json::to_string(cursor).map_err(|error| read_error(operation, error))?;
     if encoded.len() > cap {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "continuation key bytes", accounting: None,
+            resource: "continuation key bytes",
+            accounting: None,
         });
     }
     Ok(PageKey::new(encoded))
@@ -46,12 +47,14 @@ impl PageBounds {
             .is_some_and(|key| key.as_str().len() > request.max_key_bytes())
         {
             return Err(TemporalPortError::BudgetExceeded {
-                resource: "continuation key bytes", accounting: None,
+                resource: "continuation key bytes",
+                accounting: None,
             });
         }
         if request.max_key_bytes() < MIN_CURSOR_CAPACITY {
             return Err(TemporalPortError::BudgetExceeded {
-                resource: "continuation key capacity", accounting: None,
+                resource: "continuation key capacity",
+                accounting: None,
             });
         }
         Ok(Self {

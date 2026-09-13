@@ -3112,7 +3112,7 @@ async fn changelog_filters_deleted_directory_entries() {
 /// .toml/.yaml/.json config file) into one symbol per `[name]`,
 /// `[version]`, `[dependencies]` key. A Cargo.toml change with ~30
 /// dependency lines produced ~70 entries that pushed the response past
-/// 760k tokens. Config files should collapse to a single summary symbol.
+/// 760k tokens. Config keys should collapse to one summary per change class.
 #[tokio::test]
 async fn pr_context_collapses_cargo_toml_keys() {
     let dir = test_temp_dir();
@@ -3131,6 +3131,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     fs::write(project.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
     git_run(project, &["add", "."]);
     git_run(project, &["commit", "-m", "init"]);
+    git_run(project, &["branch", "base"]);
     // Second commit: bloat Cargo.toml with many deps.
     let mut bloated = String::from(
         "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
@@ -3147,7 +3148,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_pr_context",
-        json!({"base_ref": "HEAD~1", "head_ref": "HEAD"}),
+        json!({"base_ref": "base", "head_ref": "HEAD"}),
         None,
         None,
     )
@@ -3155,30 +3156,13 @@ async fn pr_context_collapses_cargo_toml_keys() {
     .unwrap();
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).unwrap();
-    let added = output["added"].as_array().unwrap();
-    let modified = output["modified"].as_array().unwrap();
-    let count_cargo = |arr: &[Value]| -> usize {
-        arr.iter()
-            .filter(|v| v["file"].as_str() == Some("Cargo.toml"))
-            .count()
-    };
-    let cargo_total = count_cargo(added) + count_cargo(modified);
-    assert!(
-        cargo_total <= 1,
-        "Cargo.toml should collapse to at most one summary symbol; got {cargo_total} entries. added={added:?}, modified={modified:?}"
-    );
-    // And the surviving entry must be a config summary, not a regular key.
-    let summary = modified
-        .iter()
-        .find(|v| v["file"].as_str() == Some("Cargo.toml"));
-    assert!(
-        summary.is_some(),
-        "expected one config_summary entry for Cargo.toml in modified; got {modified:?}"
+    assert_eq!(
+        output["added"],
+        json!([{"file": "Cargo.toml", "kind": "config_summary", "config_keys": 50}])
     );
     assert_eq!(
-        summary.unwrap()["kind"].as_str(),
-        Some("config_summary"),
-        "Cargo.toml entry should be kind=config_summary"
+        output["modified"],
+        json!([{"file": "Cargo.toml", "kind": "config_summary", "config_keys": 1}])
     );
 }
 

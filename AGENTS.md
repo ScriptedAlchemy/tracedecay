@@ -57,26 +57,16 @@ unauthorized external action after completing independent, authorized work.
   reason to ossify CI or test names. Otherwise pass the full path
   (`module::path::test_name`) and confirm the reported count is non-zero before
   treating a run as evidence.
-- `dashboard/app-dist/` is gitignored build output for `rsbuild dev`, CI,
-  and release packaging. The CLI build script (`crates/tracedecay-cli/build.rs`)
-  is the only embedder and never embeds `app-dist` itself: it builds the
-  frontend into an immutable, digest-named bundle under its own `OUT_DIR`
-  (`dashboard-bundle/<digest>`), rebuilding only when the content fingerprint
-  of the frontend inputs changes and running `npm ci` only when
-  `dashboard/node_modules` lacks the marker for the current
-  `package-lock.json`. A Rust-only edit never reruns npm, and a concurrent
-  `rsbuild dev` cannot wipe compiler inputs; ordinary builds need no
-  environment. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` stages a prebuilt
-  `dashboard/app-dist` instead of building (CI artifacts, seeded worktrees)
-  and requires `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` to carry that bundle's
-  digest (`python3 scripts/check-dashboard-bundle.py dashboard/app-dist
-  --print-digest`); a missing or mismatched digest fails the build.
-  Create linked worktrees with `scripts/agent-worktree.sh`
-  (it locks the lane). Clean up only via `scripts/worktree-gc.sh` or by the
-  owning lane unlocking and removing its own exact absolute path; never
-  `git worktree remove` / `git branch -D` another lane's tree or any path
-  you did not create, and never use name prefixes. A clean tree at the
-  integration tip may be a FRESH lane, not garbage.
+- The CLI build script is the sole dashboard embedder and stages an immutable
+  bundle under its `OUT_DIR`; ordinary builds need no environment. When using
+  prebuilt `dashboard/app-dist`, set `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` and the
+  digest from `scripts/check-dashboard-bundle.py` in
+  `TRACEDECAY_DASHBOARD_BUNDLE_SHA256`; missing or stale digests fail closed.
+- Create linked worktrees with `scripts/agent-worktree.sh`, which locks the
+  lane and prints its build environment. Clean up through `scripts/worktree-gc.sh`
+  or by unlocking and removing only your exact path. Never remove another lane,
+  select cleanup targets by name prefix, or treat a clean integration-tip lane
+  as abandoned.
 - Never re-run tests that are known-red under another active lane; cite the
   owner instead.
 
@@ -92,22 +82,15 @@ unauthorized external action after completing independent, authorized work.
   lives in `.github/workflows` (hidden — search with `rg --hidden`).
 - `.github/`, `.githooks/`, and nested `AGENTS.md` files may carry more
   specific guidance; the deeper file wins.
-- Keep changes minimal and scoped; match surrounding style; run the checks
-  that cover your change before calling it done.
 
 ## Engineering Hygiene
 
-- Limits are symptoms, not knobs. When an operation trips a deadline,
-  admission limit, memory budget, or backoff ceiling, do not raise, remove, or
-  env-override the limit as the fix. Instrument the operation with Hotpath
-  (see the `using-hotpath` skill), decompose where the time or memory actually
-  goes, and compare against what the operation should cost for its inputs. If
-  the cost is mis-sized — an N+1 query pattern, an unbatched writer, a serial
-  phase that should use every core, an inlined mega-future — fix that defect
-  and keep the limit. Change a budget only when the measured cost is genuinely
-  irreducible, in its own commit, with the measurement attached. A temporary
-  override that keeps an investigation moving is scaffolding: label it and
-  remove it before the work merges. Keep the observability layers distinct:
+- Limits are symptoms, not knobs. For a deadline, admission, memory, or backoff
+  failure, use the `using-hotpath` skill to measure the operation and fix
+  mis-sized work such as N+1 queries, unbatched writes, or accidental
+  serialization. Change a budget only when measurement shows the cost is
+  irreducible, in its own commit with the evidence. Remove investigative
+  overrides before merge. Keep the observability layers distinct:
   `tracing` events are the always-compiled operator log surface, Hotpath
   macros the compile-to-no-op measurement surface (tracing bridges exist only
   for third-party emitters like sqlx — see the skill), and `eprintln!`
@@ -157,25 +140,16 @@ unauthorized external action after completing independent, authorized work.
   cancellation, and rollback where relevant, without duplicating the same
   substrate across every host × OS combination.
 
-## Learned User Preferences
+## Shared work
 
-- In shared checkouts, honor active file ownership: re-read before editing,
-  commit only self-consistent owned paths, and never sweep in peer work.
-- Require measured, falsifiable verification and root-cause fixes; preserve
-  byte-exact identity contracts, and never weaken assertions, raise timeouts,
-  ignore tests, or mask gate failures.
-- Audit all supported host integrations when changing shared host behavior;
-  do not treat one host as representative of the complete integration set.
-- Parallelize independent work aggressively, but inspect active agents first,
-  keep file ownership disjoint, and coordinate shared integration centrally.
-- Commit coherent completed fixes incrementally with explanatory conventional
-  messages instead of holding a large mixed working tree.
-- Resolve conflicts and integrate parallel work from relevant transcripts,
-  plans, and Git history so intent—not whichever side is newer—wins.
-- When integrating divergent development lanes, checkpoint the lane, merge the
-  latest explicit clean-main floor, and compare patch IDs plus owned paths. Drop
-  duplicate or superseded work instead of carrying parallel implementations; regenerate canonical
-  outputs after the merge rather than hand-merging generated files.
+- Honor active file ownership, preserve peer edits, and stage only coherent
+  owned paths. Coordinate overlap with the owner.
+- For shared host behavior, audit every supported integration. For divergent
+  lanes, recover intent from relevant transcripts, plans, and history; compare
+  patch identities and owned paths, discard superseded duplicates, and
+  regenerate canonical outputs after integration.
+- Preserve byte-exact identity contracts. Do not weaken assertions, raise
+  timeouts, ignore tests, or mask gate failures.
 
 ## Learned Workspace Facts
 

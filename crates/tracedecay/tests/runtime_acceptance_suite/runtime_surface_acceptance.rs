@@ -1207,6 +1207,20 @@ async fn dashboard_user_settings_replay_through_application_restart() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
     let fixture = runtime_fixture().await;
+    let active_project = call_default_tool(
+        &fixture.handshake,
+        "tracedecay_active_project",
+        serde_json::json!({ "format": "json" }),
+    )
+    .await
+    .expect("public active-project read");
+    let active_project =
+        tracedecay::daemon::tool_json_payload(&active_project, "tracedecay_active_project")
+            .expect("active-project payload");
+    let project_id = active_project["project_id"]
+        .as_str()
+        .expect("active-project read must expose its project identity")
+        .to_owned();
     let observed = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::ConfigurationObservedState,
         RequestId::new("request.configuration.mcp-observed").unwrap(),
@@ -1224,13 +1238,6 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
         .as_str()
         .expect("initial configuration revision")
         .to_owned();
-    let project_id = observed
-        .result
-        .as_ref()
-        .expect("observed-state application result")
-        .scope
-        .project_id
-        .clone();
     let get_arguments = serde_json::json!({ "key": "diagnostics.prewarm.v1" });
     let current = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::ConfigurationGet,
@@ -1331,6 +1338,58 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
         .expect_err("a stale MCP configuration write must conflict");
     assert_eq!(problem.problem.kind(), ApplicationProblemKind::Conflict);
     assert_eq!(problem.problem.code, "configuration.conflict");
+
+    let current_revision = successful_application(&reloaded)["revision_id"]
+        .as_str()
+        .expect("configuration re-read revision")
+        .to_owned();
+    let unset = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationUnset,
+        RequestId::new("request.configuration.mcp-unset").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationUnset,
+            serde_json::json!({
+                "layer": {
+                    "kind": "project",
+                    "project_id": project_id,
+                },
+                "key": "diagnostics.prewarm.v1",
+                "expected_revision": current_revision,
+                "idempotency_key": "configuration.idempotency.mcp-unset",
+            }),
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP configuration unset");
+    assert!(
+        matches!(
+            &unset.result.as_ref().expect("successful MCP unset").outcome,
+            ApplicationOutcome::Effect(_)
+        ),
+        "configuration unset must return an effect receipt"
+    );
+
+    let restored = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationGet,
+        RequestId::new("request.configuration.mcp-get-restored").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationGet,
+            serde_json::json!({ "key": "diagnostics.prewarm.v1" }),
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP configuration read after unset");
+    assert_eq!(
+        successful_application(&restored)["effective_value"]["value"],
+        initial_value,
+        "unsetting the project override must restore the prior effective value"
+    );
 }
 
 /// Starts the dashboard inside the running daemon and returns its base URL.

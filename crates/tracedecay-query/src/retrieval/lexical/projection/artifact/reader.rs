@@ -1173,7 +1173,7 @@ fn ensure_sqlite_bound_value_bytes<'a>(
     Ok(())
 }
 
-/// The first fixed number of distinct n-grams forms a selective, bounded
+/// The rarest fixed number of distinct n-grams forms a selective, bounded
 /// prefilter. It may admit a superset for a very long phrase; the row-level
 /// substring check remains the correctness authority before scoring.
 fn ngram_document_query(
@@ -1184,10 +1184,7 @@ fn ngram_document_query(
     metrics: &ArtifactQueryMetricsV1,
 ) -> Result<DocumentQueryV1, RetrievalPortError> {
     hotpath::measure_block!("query.artifact.ngram.bitmap_query", {
-        let ngrams = query_ngrams(bytes)
-            .into_iter()
-            .take(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1)
-            .collect::<Vec<_>>();
+        let ngrams = query_ngrams(bytes).into_iter().collect::<Vec<_>>();
         if ngrams.is_empty() {
             return Ok(DocumentQueryV1::empty());
         }
@@ -1289,6 +1286,7 @@ fn ngram_bitmap_candidates(
     }
     drop(selectivity_statement);
     selectivities.sort_unstable_by_key(|selectivity| (selectivity.cardinality, selectivity.ngram));
+    selectivities.truncate(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1);
     if let Some(selectivity) = selectivities.first() {
         ensure_ngram_candidate_cardinality(selectivity.cardinality)?;
     }
@@ -3430,7 +3428,7 @@ mod tests {
     }
 
     #[test]
-    fn phrase_ngram_stream_intersects_a_fixed_number_of_predicates() {
+    fn phrase_ngram_stream_selects_the_rarest_fixed_predicates_from_the_whole_phrase() {
         let connection = Connection::open_in_memory().expect("in-memory SQLite");
         connection
             .execute_batch(
@@ -3452,15 +3450,14 @@ mod tests {
             )
             .expect("ngram fixture schema");
         let phrase = b"abcdefghijklmnopqrstuvw";
-        let ngrams = query_ngrams(phrase)
-            .into_iter()
-            .take(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1)
-            .collect::<Vec<_>>();
-        assert_eq!(ngrams.len(), ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1);
+        let ngrams = query_ngrams(phrase).into_iter().collect::<Vec<_>>();
+        assert!(ngrams.len() > ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1);
         for (ordinal, ngram) in ngrams.iter().enumerate() {
             let documents = if ordinal + 1 < ngrams.len() {
                 RoaringBitmap::from_iter([1, 2])
             } else {
+                // The only selective predicate sorts beyond the fixed
+                // intersection count in packed-ngram order.
                 RoaringBitmap::from_iter([1])
             };
             let encoded = encode_ngram_bitmap(LexicalArtifactLayoutV1::V11, &documents)
@@ -3491,6 +3488,11 @@ mod tests {
 
         assert_eq!(query.parameters.len(), 1);
         assert_eq!(streamed_documents(&connection, &query), vec![1]);
+        assert_eq!(
+            metrics.ngram_decoded_shards.get(),
+            ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1 as u64,
+            "selectivity must not increase the fixed shard-work bound"
+        );
     }
 
     #[test]

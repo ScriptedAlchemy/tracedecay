@@ -27,7 +27,8 @@ pub(super) fn validate_clause(
     );
     if clause.value.len() > request.max_item_bytes() || clause.value.len() > metadata_cap {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "candidate clause bytes", accounting: None,
+            resource: "candidate clause bytes",
+            accounting: None,
         });
     }
     Ok(())
@@ -806,12 +807,14 @@ pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortErro
     let start = start_seconds
         .checked_mul(1_000_000)
         .ok_or(TemporalPortError::BudgetExceeded {
-            resource: "time range", accounting: None,
+            resource: "time range",
+            accounting: None,
         })?;
     let end = start
         .checked_add(86_400_000_000)
         .ok_or(TemporalPortError::BudgetExceeded {
-            resource: "time range", accounting: None,
+            resource: "time range",
+            accounting: None,
         })?;
     Ok((start, end))
 }

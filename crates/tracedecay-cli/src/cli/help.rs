@@ -484,8 +484,8 @@ without waiting for historical convergence. It owns no parallel temporal writer 
 and is never invoked by a read. `sessions refresh` \
 is the separate explicit, daemon-owned path for one exact temporal session scope; it \
 never defaults to the current directory. `--project-id`/`--project-path` bind the \
-refresh to that registered project's session store; `--profile-id` binds it to the \
-profile's own user-scope store and never consults a project. Refresh maps \
+refresh to that registered project's session store; `--profile` binds it to the \
+authenticated profile's user-scope store and never consults a project. Refresh maps \
 `--provider` to the source scope, `--source`/`--target` to committed/observed \
 frontiers, and uses the application defaults temporal mode=current and \
 grain=logical_message.";
@@ -499,8 +499,8 @@ Examples:
   tracedecay sessions search \"bug\" --limit 5 --provider cursor
   tracedecay sessions search \"plan\" --project-path /path/to/repo
   tracedecay sessions refresh begin --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
-  tracedecay sessions refresh begin --profile-id profile.id --session-id session.id --provider claude --source 4 --target 9
-  tracedecay sessions refresh status --profile-id profile.id --session-id session.id --provider claude --source 4 --target 9 --handle opaque.handle
+  tracedecay sessions refresh begin --profile --session-id session.id --provider claude --source 4 --target 9
+  tracedecay sessions refresh status --profile --session-id session.id --provider claude --source 4 --target 9 --handle opaque.handle
   tracedecay sessions refresh cancel --project-path /path/to/repo --session-id session.id --provider cursor --source 4 --target 9 --handle opaque.handle --json
 
 `--handle` is the opaque daemon-local capability returned by begin; an internal \

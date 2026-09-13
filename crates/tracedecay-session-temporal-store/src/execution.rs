@@ -233,7 +233,9 @@ pub fn port_budget_accounting(
 #[derive(Debug)]
 pub enum SessionTemporalExecutionError {
     WrongScope,
-    Stale { generation_lag: u64 },
+    Stale {
+        generation_lag: u64,
+    },
     Locked,
     Redacted,
     Deleted,
@@ -249,7 +251,9 @@ pub enum SessionTemporalExecutionError {
         detail: String,
     },
     ResetRequired,
-    Empty { freshness: SessionDataFreshness },
+    Empty {
+        freshness: SessionDataFreshness,
+    },
     /// The bounded budget boundary that refused, with the ceiling and count the
     /// boundary kept. Dropping these left every refusal indistinguishable from
     /// an oversized request at the application surface.

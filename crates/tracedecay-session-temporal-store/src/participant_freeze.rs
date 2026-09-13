@@ -493,11 +493,11 @@ mod tests {
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1, TemporalModeV1, UtcMicros,
     };
-    use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
     use tracedecay_global_db::tests::harness::{
         bind_test_session_relation_graph, open_registered_test_database_fixture,
         publish_test_session_relation_projection,
     };
+    use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
     use tracedecay_temporal_query::candidates::CandidateChannel;
@@ -1134,8 +1134,12 @@ mod tests {
         seed_root_sessions(&connection, 300, 8, 1).await;
         seed_root_cursor_key(&connection).await;
         for index in 0..8 {
-            publish_root_relation_projection(&database, &connection, &format!("session.{index:03}"))
-                .await;
+            publish_root_relation_projection(
+                &database,
+                &connection,
+                &format!("session.{index:03}"),
+            )
+            .await;
         }
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -1159,10 +1163,9 @@ mod tests {
                     accounting,
                     Some(SessionRetrievalBudgetAccountingV1 {
                         limit: 4,
-                        observed:
-                            SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
-                                units: 4,
-                            },
+                        observed: SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                            units: 4,
+                        },
                     }),
                     "the refusal reports the ceiling it hit and what it consumed"
                 );

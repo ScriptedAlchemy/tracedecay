@@ -33,6 +33,8 @@ pub enum WorkProductContractError {
     InvalidText,
     #[error("Work product score or estimate is invalid")]
     InvalidScore,
+    #[error("Work product digest is invalid")]
+    InvalidDigest,
     #[error("Work product hierarchy is missing or inconsistent")]
     UnknownHierarchy,
     #[error("Work product graph repeats an identity")]
@@ -649,6 +651,7 @@ pub struct WorkProposalV1 {
     route: WorkRouteDecisionV1,
     explanation: String,
     evidence_digest: ManifestDigest,
+    configuration_digest: ManifestDigest,
 }
 
 impl WorkProposalV1 {
@@ -663,8 +666,12 @@ impl WorkProposalV1 {
         route: WorkRouteDecisionV1,
         explanation: String,
         evidence_digest: ManifestDigest,
+        configuration_digest: ManifestDigest,
     ) -> Result<Self, WorkProductContractError> {
         validate_text(&explanation)?;
+        configuration_digest
+            .validate()
+            .map_err(|_| WorkProductContractError::InvalidDigest)?;
         children.sort_by(|left, right| left.task_id.cmp(&right.task_id));
         if children
             .windows(2)
@@ -683,6 +690,7 @@ impl WorkProposalV1 {
             route,
             explanation,
             evidence_digest,
+            configuration_digest,
         })
     }
 
@@ -696,6 +704,14 @@ impl WorkProposalV1 {
 
     pub const fn based_on_version(&self) -> WorkGraphVersionV1 {
         self.based_on_version
+    }
+
+    pub const fn route(&self) -> &WorkRouteDecisionV1 {
+        &self.route
+    }
+
+    pub const fn configuration_digest(&self) -> &ManifestDigest {
+        &self.configuration_digest
     }
 }
 

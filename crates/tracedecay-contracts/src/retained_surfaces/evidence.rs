@@ -11,7 +11,8 @@ use crate::{
 
 use super::{
     HydrationStateResultV1, LcmRetrievalOutcomeV1, LcmTemporalFieldsV1, RetainedOutcomeStatusV1,
-    RetainedSurfaceResultV1, SessionCoverageModeV1, SessionSourceCoverageV1, TemporalFreshnessV1,
+    RetainedSurfaceResultV1, SessionCoverageModeV1, SessionRefreshStatusResultV1,
+    SessionRefreshTerminalStateResultV1, SessionSourceCoverageV1, TemporalFreshnessV1,
     TemporalMetadataV1, TemporalWatermarksV1,
 };
 
@@ -163,6 +164,25 @@ impl RetainedSurfaceEvidenceFactsV1 {
             RetainedOutcomeStatusV1::Error | RetainedOutcomeStatusV1::Failed => {
                 Err(RetainedSurfaceEvidenceTerminalV1::Failed)
             }
+        }
+    }
+
+    fn apply_session_refresh_status(
+        &mut self,
+        result: &SessionRefreshStatusResultV1,
+    ) -> Result<(), RetainedSurfaceEvidenceTerminalV1> {
+        if result.outcome != RetainedOutcomeStatusV1::Cancelled {
+            return self.apply_status(result.outcome);
+        }
+        let valid_receipt = result.receipt.as_ref().is_some_and(|receipt| {
+            receipt.state == SessionRefreshTerminalStateResultV1::Cancelled
+                && !receipt.operation_id.trim().is_empty()
+                && !receipt.session_id.trim().is_empty()
+        });
+        if valid_receipt && result.progress.is_none() && result.error.is_none() {
+            Ok(())
+        } else {
+            Err(RetainedSurfaceEvidenceTerminalV1::InvalidOutput)
         }
     }
 
@@ -326,7 +346,7 @@ impl RetainedSurfaceResultV1 {
                     EvidenceDomain::Temporal,
                     true,
                 )?;
-                facts.apply_status(value.outcome)?;
+                facts.apply_session_refresh_status(value)?;
                 Ok(facts)
             }
             Self::MessageSearch(value) => {
@@ -556,6 +576,7 @@ mod tests {
     use crate::retained_surfaces::{
         FactCommitOwnerV1, FactStoreListResultV1, FactStoreSearchResultV1, MessageSearchHitV1,
         MessageSearchResultV1, RetainedNextActionV1, RetrievalWorkerStatusV1,
+        SessionRefreshFrontierResultV1, SessionRefreshReceiptV1, TemporalCoverageV1,
     };
     use tracedecay_domain::{FactId, UtcMicros};
 
@@ -627,6 +648,40 @@ mod tests {
         }
     }
 
+    fn cancelled_refresh_status(
+        receipt: Option<SessionRefreshReceiptV1>,
+    ) -> RetainedSurfaceResultV1 {
+        RetainedSurfaceResultV1::SessionRefreshStatus(SessionRefreshStatusResultV1 {
+            outcome: RetainedOutcomeStatusV1::Cancelled,
+            scope: "profile".to_owned(),
+            tool: "tracedecay_session_refresh_status".to_owned(),
+            progress: None,
+            receipt,
+            error: None,
+        })
+    }
+
+    fn refresh_receipt(state: SessionRefreshTerminalStateResultV1) -> SessionRefreshReceiptV1 {
+        SessionRefreshReceiptV1 {
+            operation_id: "refresh.terminal".to_owned(),
+            session_id: "session.terminal".to_owned(),
+            frontier: SessionRefreshFrontierResultV1 {
+                observed_through: 5,
+                committed_through: 3,
+            },
+            coverage: TemporalCoverageV1 {
+                visible: 3,
+                hidden: 0,
+                unknown: 0,
+                redacted: 0,
+            },
+            source_coverage: Vec::new(),
+            state,
+            failure_code: None,
+            terminal_at: 7,
+        }
+    }
+
     #[test]
     fn fact_collection_keeps_unproved_coverage_unknown() {
         let facts = fact_collection(3).expect("bounded fact collection");
@@ -679,6 +734,32 @@ mod tests {
         assert_eq!(
             result.evidence_facts(),
             Err(RetainedSurfaceEvidenceTerminalV1::Denied)
+        );
+    }
+
+    #[test]
+    fn cancelled_refresh_receipt_remains_status_evidence() {
+        let facts = cancelled_refresh_status(Some(refresh_receipt(
+            SessionRefreshTerminalStateResultV1::Cancelled,
+        )))
+        .evidence_facts()
+        .expect("a cancelled operation receipt is successful status evidence");
+
+        assert_eq!(facts.returned, 1);
+    }
+
+    #[test]
+    fn cancelled_refresh_status_requires_its_exact_terminal_receipt() {
+        assert_eq!(
+            cancelled_refresh_status(None).evidence_facts(),
+            Err(RetainedSurfaceEvidenceTerminalV1::InvalidOutput)
+        );
+        assert_eq!(
+            cancelled_refresh_status(Some(refresh_receipt(
+                SessionRefreshTerminalStateResultV1::Complete,
+            )))
+            .evidence_facts(),
+            Err(RetainedSurfaceEvidenceTerminalV1::InvalidOutput)
         );
     }
 

@@ -146,6 +146,27 @@ fn production_tool_payload(response: serde_json::Value) -> Value {
         .unwrap_or(envelope)
 }
 
+#[cfg(feature = "test-transport")]
+async fn call_production_tool(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    tool: &str,
+    arguments: Value,
+) -> Value {
+    let response = harness
+        .call_tool(project, tool, arguments)
+        .await
+        .unwrap_or_else(|error| panic!("{tool} invocation failed: {error}"));
+    let result = response
+        .result
+        .unwrap_or_else(|| panic!("{tool} returned transport error: {:?}", response.error));
+    assert_ne!(
+        result["isError"], true,
+        "{tool} returned an error: {result}"
+    );
+    production_tool_payload(result)
+}
+
 /// Same contract for `tracedecay_message_search`: invalid scope values fail
 /// closed instead of broadening the search to every session.
 #[tokio::test]
@@ -530,6 +551,97 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
             .as_array()
             .is_some_and(|results| !results.is_empty()),
         "production Codex retrieval was empty: {initial}"
+    );
+
+    let session_id = "production-codex-reopen-000";
+    let selectors = json!({
+        "scope": {"kind": "profile"},
+        "session": {"id": session_id},
+        "source": {"scope": "codex"},
+        "target": {
+            "temporal_mode": {"kind": "current"},
+            "grain": "session",
+            "frontier": {"observed_through": 0, "committed_through": 0}
+        },
+        "format": "json"
+    });
+    let begun = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_session_refresh_begin",
+        selectors.clone(),
+    )
+    .await;
+    assert!(
+        matches!(begun["outcome"].as_str(), Some("started" | "joined")),
+        "{begun}"
+    );
+    let handle = begun["handle"].as_str().expect("opaque refresh handle");
+    let operation_id = begun["operation_id"]
+        .as_str()
+        .expect("durable refresh operation id");
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let mut arguments = selectors.clone();
+            arguments["handle"] = json!(handle);
+            let status = call_production_tool(
+                &harness,
+                &project,
+                "tracedecay_session_refresh_status",
+                arguments,
+            )
+            .await;
+            if status["outcome"] == "complete" {
+                break status["receipt"].clone();
+            }
+            assert_eq!(status["outcome"], "running", "{status}");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session refresh completion deadline");
+    assert_eq!(receipt["operation_id"], operation_id, "{receipt}");
+    assert_eq!(receipt["state"], "complete", "{receipt}");
+
+    let loaded = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_lcm_load_session",
+        json!({"provider": "codex", "session_id": session_id, "limit": 10, "format": "json"}),
+    )
+    .await;
+    let message = loaded["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["content"] == "Find the cobalt orchard scheduler migration")
+        })
+        .expect("lossless canonical Codex prompt");
+    assert_eq!(message["storage_kind"], "canonical_occurrence", "{message}");
+    assert!(message["store_id"].is_null(), "{message}");
+    let message_id = message["message_id"]
+        .as_str()
+        .expect("canonical message identity");
+    let expanded = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "codex",
+            "session_id": session_id,
+            "target": {"kind": "canonical_occurrence", "message_id": message_id},
+            "format": "json"
+        }),
+    )
+    .await;
+    assert_eq!(
+        expanded["expansion"]["content"], "Find the cobalt orchard scheduler migration",
+        "{expanded}"
+    );
+    assert_eq!(
+        expanded["expansion"]["raw_message"]["message_id"], message_id,
+        "{expanded}"
     );
 
     harness.shutdown().await;

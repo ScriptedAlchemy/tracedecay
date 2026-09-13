@@ -166,25 +166,23 @@ pub(super) async fn dispatch_work_application(
             hotpath::measure_block!("daemon.service.work.review_proposal", {
                 let proposal_ref = request.proposal.proposal_id().as_str().to_owned();
                 let command_ref = request.mutation.command_id.as_str().to_owned();
-                let disposition = request.disposition.clone();
+                let disposition = request.disposition;
                 let occurred_at = request.mutation.occurred_at;
                 let result = preparation::decide_product_proposal(
                     &registered,
                     &context,
                     capability,
                     &use_case,
-                    request,
-                    false,
+                    request.into(),
                 );
                 if result.is_ok() {
                     let disposition = match disposition {
-                        tracedecay_domain::WorkProposalDispositionV1::Rejected => {
+                        tracedecay_contracts::ReviewWorkProposalDispositionV1::Rejected => {
                             Some(tracedecay_contracts::ReviewProposalDispositionV1::Rejected)
                         }
-                        tracedecay_domain::WorkProposalDispositionV1::Superseded => {
+                        tracedecay_contracts::ReviewWorkProposalDispositionV1::Superseded => {
                             Some(tracedecay_contracts::ReviewProposalDispositionV1::Superseded)
                         }
-                        tracedecay_domain::WorkProposalDispositionV1::Accepted => None,
                     };
                     let _ = tracedecay_application::observability::record_reliance_decision(
                         observability_producer.as_deref(),
@@ -219,8 +217,7 @@ pub(super) async fn dispatch_work_application(
                     &context,
                     capability,
                     &use_case,
-                    command,
-                    true,
+                    command.into(),
                 );
                 if result.is_ok() {
                     let _ = tracedecay_application::observability::record_reliance_decision(
@@ -276,10 +273,20 @@ pub(super) async fn dispatch_work_application(
                                     tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
                                 ));
                             }
-                            product
+                            let execution_snapshot = preparation::prepare_execution_snapshot(
+                                &registered,
+                                &context,
+                                &binding,
+                                &command,
+                            )?;
+                            let mutation = product
                                 .mutations()
                                 .admit_execution(&context, &binding, command)
-                                .map_err(work_product_problem)
+                                .map_err(work_product_problem)?;
+                            Ok(tracedecay_contracts::AdmittedWorkExecutionV1 {
+                                mutation,
+                                execution_snapshot,
+                            })
                         })
                 });
                 complete_work_effect(

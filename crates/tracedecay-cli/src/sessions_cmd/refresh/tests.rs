@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{
     RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
     SessionRefreshActionRequestV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
-    SessionRefreshScopeV1, SessionRefreshStatusResultV1,
+    SessionRefreshStatusResultV1,
 };
 use tracedecay_contracts::{
     ApplicationEnvelope, AuthorityReceipt, CancellationContext, CancellationSignal,
@@ -222,7 +222,7 @@ fn project_selectors() -> SessionRefreshSelectors {
     SessionRefreshSelectors {
         project_id: None,
         project_path: Some("registered-alias".to_owned()),
-        profile_id: None,
+        profile: false,
         session_id: "session.refresh".to_owned(),
         provider: "cursor".to_owned(),
         source: 4,
@@ -234,7 +234,7 @@ fn profile_selectors() -> SessionRefreshSelectors {
     SessionRefreshSelectors {
         project_id: None,
         project_path: None,
-        profile_id: Some(PROFILE_ID.to_owned()),
+        profile: true,
         session_id: "session.profile".to_owned(),
         provider: "claude".to_owned(),
         source: 2,
@@ -300,20 +300,6 @@ fn registry_context(project_root: &Path, git_common_dir: &Path) -> Value {
     })
 }
 
-fn active_project_context(project_root: &Path) -> Value {
-    json!({
-        "project_root": project_root.to_string_lossy(),
-        "resolution_source": "active_project",
-        "branch": {
-            "current_branch": "feature/selected",
-            "open_active_branch": "feature/selected",
-            "serving_branch": "feature/selected",
-            "branch_drifted": false,
-            "is_fallback": false
-        }
-    })
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct RecordedCall {
     project_root: Option<PathBuf>,
@@ -375,11 +361,8 @@ fn assert_canonical(operation: RetainedSurfaceOperation, payload: &Value) {
 #[tokio::test]
 async fn project_refresh_uses_registered_authorities_and_the_canonical_payload() {
     let (project_root, git_common_dir) = project_fixture_authorities();
-    let project_root_text = project_root.to_string_lossy().into_owned();
-    let repository_id = git_common_dir.to_string_lossy().into_owned();
     let transport = FakeDaemonTransport::new([
         registry_context(&project_root, &git_common_dir),
-        active_project_context(&project_root),
         effect_reply(
             RetainedSurfaceOperation::SessionRefreshBegin,
             begin_result(RetainedOutcomeStatusV1::Started, "opaque-refresh-handle"),
@@ -401,42 +384,21 @@ async fn project_refresh_uses_registered_authorities_and_the_canonical_payload()
         calls[0],
         RecordedCall {
             project_root: None,
-            tool_name: "tracedecay_admin_cli".to_owned(),
+            tool_name: "tracedecay_project_context".to_owned(),
             arguments: json!({
-                "action": "registry_context",
-                "project_arg": "registered-alias"
+                "path": "registered-alias",
+                "format": "json"
             }),
         }
     );
     assert_eq!(
         calls[1],
         RecordedCall {
-            project_root: Some(project_root.clone()),
-            tool_name: "tracedecay_active_project".to_owned(),
-            arguments: json!({ "format": "json" }),
-        }
-    );
-    assert_eq!(
-        calls[2],
-        RecordedCall {
             project_root: Some(project_root),
             tool_name: "tracedecay_session_refresh_begin".to_owned(),
             arguments: json!({
-                "scope": {
-                    "kind": "project",
-                    "project": {
-                        "id": "project.registered",
-                        "profile_id": PROFILE_ID,
-                        "repository_id": repository_id,
-                        "worktree_id": project_root_text,
-                        "branch_id": "scope.selected"
-                    }
-                },
-                "session": {
-                    "id": "session.refresh",
-                    "store_id": "store.authoritative",
-                    "root_id": "scope.selected"
-                },
+                "scope": { "kind": "project" },
+                "session": { "id": "session.refresh" },
                 "source": { "scope": "cursor" },
                 "target": {
                     "temporal_mode": { "kind": "current" },
@@ -453,7 +415,7 @@ async fn project_refresh_uses_registered_authorities_and_the_canonical_payload()
     );
     assert_canonical(
         RetainedSurfaceOperation::SessionRefreshBegin,
-        &calls[2].arguments,
+        &calls[1].arguments,
     );
 }
 
@@ -509,7 +471,6 @@ async fn profile_refresh_stays_projectless_and_roundtrips_only_the_opaque_handle
             "tracedecay_session_refresh_cancel",
         ]
     );
-    let suffix = PROFILE_ID.strip_prefix("profile.").unwrap();
     for (call, operation) in calls.iter().zip([
         RetainedSurfaceOperation::SessionRefreshBegin,
         RetainedSurfaceOperation::SessionRefreshStatus,
@@ -519,17 +480,10 @@ async fn profile_refresh_stays_projectless_and_roundtrips_only_the_opaque_handle
             call.project_root, None,
             "profile refresh never names a project"
         );
+        assert_eq!(call.arguments["scope"], json!({ "kind": "profile" }));
         assert_eq!(
-            call.arguments["scope"],
-            json!({ "kind": "profile", "profile_id": PROFILE_ID })
-        );
-        assert_eq!(
-            call.arguments["session"]["store_id"],
-            format!("store.profile.{suffix}")
-        );
-        assert_eq!(
-            call.arguments["session"]["root_id"],
-            format!("root.profile.{suffix}")
+            call.arguments["session"],
+            json!({ "id": "session.profile" })
         );
         assert!(call.arguments.get("project").is_none());
         assert!(call.arguments.get("profile").is_none());
@@ -559,24 +513,6 @@ async fn refresh_without_explicit_scope_never_calls_daemon_or_discovers_cwd() {
 
     assert!(error.to_string().contains("never falls back"));
     assert!(transport.calls().is_empty());
-}
-
-#[test]
-fn profile_selector_must_be_the_typed_profile_identity() {
-    for invalid in ["primary", "profile.", ""] {
-        let error = super::profile_refresh_scope(invalid).expect_err("untyped profile id");
-        assert!(error.to_string().contains("profile.<id>"), "{invalid:?}");
-    }
-    let resolved = super::profile_refresh_scope("profile.primary").unwrap();
-    assert_eq!(
-        resolved.scope,
-        SessionRefreshScopeV1::Profile {
-            profile_id: "profile.primary".to_owned()
-        }
-    );
-    assert_eq!(resolved.store_id, "store.profile.primary");
-    assert_eq!(resolved.root_id, "root.profile.primary");
-    assert_eq!(resolved.project_root, None);
 }
 
 #[tokio::test]
@@ -755,8 +691,7 @@ fn a_cancelled_outcome_without_a_receipt_is_not_durable() {
 #[test]
 fn refresh_cli_accepts_begin_status_cancel_only() {
     let selectors = [
-        "--profile-id",
-        PROFILE_ID,
+        "--profile",
         "--session-id",
         "session.profile",
         "--provider",

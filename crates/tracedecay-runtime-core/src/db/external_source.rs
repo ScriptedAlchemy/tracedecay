@@ -3,21 +3,9 @@
 
 use crate::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_rusqlite_runtime::repository::RETIRED_MUTATION_COPY_TABLES;
-
-/// Rows moved per migration write.
-///
-/// Each chunk is its own transaction, so it stays well inside the ordinary
-/// per-statement execution limit — the limit keeps working as the safety
-/// bound it is — and the writer is released between chunks so ordinary
-/// mutations are never queued behind a whole-table rewrite.
-///
-/// Sized against the costliest of these moves measured on a real store: the
-/// projection publications rewrite ran 283 s over 189 k rows, so a chunk of
-/// this many of them is a few seconds of work, well under the limit, while
-/// still amortizing the per-transaction cost over enough rows that a
-/// multi-million-row table finishes in bounded time.
-const RETIRED_MUTATION_COPY_CHUNK_ROWS: i64 = 5_000;
+use tracedecay_rusqlite_runtime::repository::{
+    RETIRED_MUTATION_COPY_CHUNK_ROWS, RETIRED_MUTATION_COPY_TABLES,
+};
 
 /// Installs the external-source state shape. Cheap idempotent DDL only, so it
 /// belongs inside a caller's leased schema transaction.
@@ -130,9 +118,7 @@ pub(super) async fn retire_mutation_copies_in_transaction(
         }
         conn.execute_batch(&format!("DROP TABLE {retired_table}"))
             .await
-            .map_err(|error| {
-                migration_failure(format!("failed to drop {retired_table}"), error)
-            })?;
+            .map_err(|error| migration_failure(format!("failed to drop {retired_table}"), error))?;
     }
     Ok(())
 }

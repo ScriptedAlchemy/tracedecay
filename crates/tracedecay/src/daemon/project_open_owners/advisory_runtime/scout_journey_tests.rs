@@ -28,6 +28,20 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
+#[test]
+fn scout_observation_requires_the_publication_authority_to_exist_first() {
+    let publication_revalidated_at = UtcMicros(105);
+
+    assert_eq!(
+        admit_context_scout_observed_at(UtcMicros(104), Some(publication_revalidated_at)),
+        None,
+    );
+    assert_eq!(
+        admit_context_scout_observed_at(UtcMicros(106), Some(publication_revalidated_at)),
+        Some(UtcMicros(106)),
+    );
+}
+
 fn typed_id<T>(value: &str) -> T
 where
     T: TryFrom<String>,

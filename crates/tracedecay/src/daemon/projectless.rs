@@ -116,6 +116,7 @@ fn admit_projectless_connection(
 pub(super) async fn serve_projectless_client(
     transport: &mut (impl McpTransport + Send),
     client_identity: &DaemonClientIdentity,
+    timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
     store_administration: &StoreAdministration,
 ) -> Result<()> {
@@ -136,6 +137,7 @@ pub(super) async fn serve_projectless_client(
                 boxed_projectless_phase(projectless_response(
                     &request,
                     &connection,
+                    timings_enabled,
                     store_administration,
                 ))
                 .await
@@ -155,6 +157,7 @@ pub(super) async fn serve_projectless_client(
 async fn projectless_response(
     request: &tracedecay_mcp::JsonRpcRequest,
     connection: &ProjectlessConnectionStateV1,
+    timings_enabled: bool,
     store_administration: &StoreAdministration,
 ) -> Option<tracedecay_mcp::JsonRpcResponse> {
     let id = request.id.clone()?;
@@ -177,21 +180,51 @@ async fn projectless_response(
             ),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         }),
-        "tools/call" => Some(
-            boxed_projectless_phase(projectless_tools_call_response_with_connection(
-                id,
-                request.params.as_ref(),
-                connection,
-                store_administration,
-            ))
-            .await,
-        ),
+        "tools/call" => {
+            let started = timings_enabled.then(std::time::Instant::now);
+            let mut response =
+                boxed_projectless_phase(projectless_tools_call_response_with_connection(
+                    id,
+                    request.params.as_ref(),
+                    connection,
+                    store_administration,
+                ))
+                .await;
+            attach_projectless_tool_timing(
+                &mut response,
+                started.map(|started| started.elapsed().as_micros() as u64),
+            );
+            Some(response)
+        }
         "ping" | "logging/setLevel" => Some(JsonRpcResponse::success(id, json!({}))),
         _ => Some(JsonRpcResponse::error(
             id,
             ErrorCode::MethodNotFound,
             format!("Method not found: {}", request.method),
         )),
+    }
+}
+
+fn attach_projectless_tool_timing(response: &mut JsonRpcResponse, duration_us: Option<u64>) {
+    let Some(duration_us) = duration_us else {
+        return;
+    };
+    let Some(result) = response
+        .result
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let meta = result
+        .entry("_meta")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if meta.is_null() {
+        *meta = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(meta) = meta.as_object_mut() {
+        meta.entry("duration_us")
+            .or_insert_with(|| serde_json::json!(duration_us));
     }
 }
 

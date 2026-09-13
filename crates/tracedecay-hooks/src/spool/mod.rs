@@ -250,13 +250,10 @@ impl HookSpoolV1 {
             .as_ref()
             .map_or(0, |checkpoint| checkpoint.bytes);
         let mut checkpoint_records = 0u32;
-        let mut checkpoint_highest_sequence = None;
         let (mut scan, reusable_checkpoint) = match cached_checkpoint {
             Some(checkpoint) if checkpoint.records_revision == current_revision => {
                 checkpoint_records = u32::try_from(checkpoint.records.len())
                     .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-                checkpoint_highest_sequence =
-                    checkpoint.records.last().map(|record| record.sequence);
                 let validated_end = checkpoint
                     .records_revision
                     .as_ref()
@@ -285,8 +282,6 @@ impl HookSpoolV1 {
                 if transition_matches {
                     checkpoint_records = u32::try_from(checkpoint.records.len())
                         .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-                    checkpoint_highest_sequence =
-                        checkpoint.records.last().map(|record| record.sequence);
                     let anchor = CheckpointAnchorV1 {
                         records_revision: checkpoint.records_revision.clone(),
                         checksum: checkpoint.checksum,
@@ -338,25 +333,16 @@ impl HookSpoolV1 {
             || checkpoint_suffix_bytes >= CHECKPOINT_REWRITE_BYTE_THRESHOLD;
         let mut checkpoint_rewritten = false;
         let checkpoint = if matches!(meta.integrity, SpoolIntegrityV1::Healthy) {
-            let unreconciled_meta = meta.clone();
-            if meta.append_intent.as_ref().is_some_and(|intent| {
-                checkpoint_highest_sequence.is_some_and(|highest| intent.sequence <= highest)
-            }) {
-                return Err(HookSpoolError::MetadataCorrupted);
-            }
-            let suffix_at = usize::try_from(checkpoint_records)
-                .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-            let suffix_records = scan
-                .records
-                .get(suffix_at..)
-                .ok_or(HookSpoolError::MetadataCorrupted)?;
-            reconcile_append_intent(&mut meta, suffix_records, config.host)?;
+            // A completed append deliberately leaves its durable intent in
+            // place. The referenced frame can already be inside a rewritten
+            // checkpoint, so reconcile against the whole bounded index.
+            reconcile_append_intent(&mut meta, &scan.records, config.host)?;
             validate_meta_against_records(
                 &meta,
                 scan.records.iter().map(|record| record.sequence),
                 config.limits,
             )?;
-            if meta_was_missing || meta != unreconciled_meta {
+            if meta_was_missing {
                 write_meta(&root, &meta)?;
             }
             Some(match (reusable_checkpoint, rewrite_checkpoint) {
@@ -536,16 +522,15 @@ impl HookSpoolV1 {
             return Err(error);
         }
         let record = decode_complete_frame(&frame, self.physical_len, self.config.host)?;
-        let mut committed_meta = self.meta.clone();
-        committed_meta.next_sequence = sequence
+        // The durable intent names the exact frame bytes, and the frame itself
+        // was flushed before append returned. Reopen reconciles that pair, so
+        // persisting the derived next sequence here would be a redundant third
+        // barrier in every contended hook append. The next mutation persists
+        // the reconciled state as part of its own write.
+        self.meta.next_sequence = sequence
             .checked_add(1)
             .ok_or(HookSpoolError::MetadataCorrupted)?;
-        committed_meta.append_intent = None;
-        if let Err(error) = write_meta(&self.root, &committed_meta) {
-            self.recovery_required = true;
-            return Err(error);
-        }
-        self.meta = committed_meta;
+        self.meta.append_intent = None;
         self.physical_len = self.physical_len.saturating_add(frame_len);
         self.note_pending(&record, self.physical_len.saturating_sub(frame_len))?;
         let Some(checkpoint) = self.checkpoint.as_ref() else {

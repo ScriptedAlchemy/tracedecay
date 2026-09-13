@@ -181,6 +181,7 @@ fn fan_out_input(identity: &str, graph_version: u64) -> WorkflowFanOutInput {
             .expect("fan-out proposal route"),
         format!("Execute fan-out child {identity}"),
         input_digest.clone(),
+        input_digest.clone(),
     )
     .expect("fan-out proposal");
     WorkflowFanOutInput {

@@ -550,8 +550,8 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .active_session_summary_relations(session_id, summary_ids, MAX_RELATIONS, cancellation)
             .await;
         control.checkpoint().map_err(map_control_error)?;
-        let (_, relations) = read
-            .map_err(|error| SessionTemporalExecutionError::storage(operation, error))?;
+        let (_, relations) =
+            read.map_err(|error| SessionTemporalExecutionError::storage(operation, error))?;
         Ok(relations)
     }
 
@@ -865,7 +865,10 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             SessionTemporalCursorKeyProvider::from_registered_snapshot(&read, snapshot)
                 .await
                 .map_err(|error| {
-                    SessionTemporalExecutionError::storage("resolve cursor signing authority", error)
+                    SessionTemporalExecutionError::storage(
+                        "resolve cursor signing authority",
+                        error,
+                    )
                 })?;
         encode_cursor(
             snapshot,
@@ -887,7 +890,10 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             SessionTemporalCursorKeyProvider::from_registered_snapshot(&read, snapshot)
                 .await
                 .map_err(|error| {
-                    SessionTemporalExecutionError::storage("resolve cursor signing authority", error)
+                    SessionTemporalExecutionError::storage(
+                        "resolve cursor signing authority",
+                        error,
+                    )
                 })?;
         let sort_key =
             verify_cursor(encoded, snapshot, &authenticator).map_err(map_lcm_cursor_error)?;
@@ -898,8 +904,10 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     /// state rather than an absent authority.
     async fn open_read_snapshot(
         &self,
-    ) -> Result<tracedecay_runtime_core::db::DatabaseEngineReadSnapshot, SessionTemporalExecutionError>
-    {
+    ) -> Result<
+        tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+        SessionTemporalExecutionError,
+    > {
         self.db
             .read_snapshot()
             .await
@@ -1009,7 +1017,10 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             SessionTemporalCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
                 .await
                 .map_err(|error| {
-                    SessionTemporalExecutionError::storage("resolve cursor signing authority", error)
+                    SessionTemporalExecutionError::storage(
+                        "resolve cursor signing authority",
+                        error,
+                    )
                 })?;
         let storage_root = self.payload_storage_root()?;
         let (relation_scope, relation_store) = self.relation_authority()?;
@@ -1037,15 +1048,9 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         if let Some(readiness) = root_readiness {
             Ok(SessionTemporalExecutionReport::new(result, readiness))
         } else {
-            let source_coverage = result
-                .snapshot
-                .source_coverage()
-                .map_err(|error| {
-                    SessionTemporalExecutionError::storage(
-                        "derive source coverage receipt",
-                        error,
-                    )
-                })?;
+            let source_coverage = result.snapshot.source_coverage().map_err(|error| {
+                SessionTemporalExecutionError::storage("derive source coverage receipt", error)
+            })?;
             Ok(SessionTemporalExecutionReport::from_source_coverage(
                 result,
                 source_coverage,
@@ -1194,15 +1199,9 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
             )
             .await
             .map_err(map_kernel_execution_error)?;
-            let source_coverage = result
-                .snapshot
-                .source_coverage()
-                .map_err(|error| {
-                    SessionTemporalExecutionError::storage(
-                        "derive source coverage receipt",
-                        error,
-                    )
-                })?;
+            let source_coverage = result.snapshot.source_coverage().map_err(|error| {
+                SessionTemporalExecutionError::storage("derive source coverage receipt", error)
+            })?;
             Ok(TaskSessionTemporalExecutionOutcomeV1::Complete(Box::new(
                 TaskSessionTemporalExecutionReportV1 {
                     binding: request.binding().clone(),
@@ -1264,9 +1263,7 @@ fn map_kernel_execution_error(
     match error {
         TemporalKernelError::Port(port)
         | TemporalKernelError::Hydration(HydrationError::Interrupted(port))
-        | TemporalKernelError::Context(ContextError::Interrupted(port)) => {
-            map_control_error(port)
-        }
+        | TemporalKernelError::Context(ContextError::Interrupted(port)) => map_control_error(port),
         TemporalKernelError::Hydration(HydrationError::ResetRequired { .. }) => {
             SessionTemporalExecutionError::ResetRequired
         }
