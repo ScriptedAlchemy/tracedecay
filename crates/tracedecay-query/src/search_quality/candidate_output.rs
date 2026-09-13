@@ -41,6 +41,15 @@ pub const REQUIRED_CANCELLATION: &str = "bounded_typed_cancelled";
 pub const REQUIRED_OFFLINE: &str = "no_network_and_query_fallback_available";
 pub const EVALUATION_SEED: &str = "not_applicable_deterministic_no_rng";
 pub const EVALUATION_CACHE_STATE: &str = "cold_empty_in_memory_publication";
+/// Qualification methodology this build implements.
+///
+/// Version 1 required a one-part-per-million gain in the natural-language
+/// stratum *mean*, on a stratum two queries wide. Version 2 requires a
+/// predeclared practical effect plus a paired confidence interval whose lower
+/// bound clears zero, over a floor of independently sourced needs. Bump this
+/// whenever the decision rule changes so retained evidence cannot be reread
+/// under a rule it was never scored against.
+pub const QUALIFICATION_METHODOLOGY_VERSION: u32 = 2;
 const CORPUS_DIGEST_DOMAIN: &str = "tracedecay.search-eval.corpus-content.v1";
 
 #[derive(Debug, Error)]
@@ -76,8 +85,79 @@ pub struct CandidateWorkloadV1 {
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
     pub decision_policy: DecisionPolicySliceV1,
+    pub qualification_methodology: QualificationMethodologyV1,
     pub expected_query_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
+}
+
+/// Predeclared decision rule for semantic qualification.
+///
+/// Every parameter that decides whether a candidate profile qualifies lives
+/// here, inside the digest-bound workload, so the rule is fixed before the
+/// held-out partition is measured. [`QUALIFICATION_METHODOLOGY_VERSION`] is the
+/// build's own version: a workload declaring anything else is refused rather
+/// than scored under a rule this binary does not implement.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationMethodologyV1 {
+    pub methodology_version: u32,
+    /// Per-query metric whose paired difference carries the effect.
+    pub effect_metric: String,
+    /// Stratum the effect is measured on.
+    pub effect_stratum: String,
+    /// Partition that decides qualification. Never used for tuning.
+    pub held_out_partition: String,
+    /// Partition available for tuning before the freeze.
+    pub tuning_partition: String,
+    /// Floor on independently sourced needs per partition. A floor is workload
+    /// fitness, not statistical proof: the interval below still decides.
+    pub minimum_effect_queries_per_partition: u64,
+    /// Smallest mean paired difference that counts as a practical effect.
+    pub practical_effect_threshold_ppm: u32,
+    /// Two-sided confidence level for the paired interval.
+    pub confidence_level_ppm: u32,
+    pub baseline_profile_id: String,
+    pub candidate_profile_ids: Vec<String>,
+    pub policy_freeze: QualificationPolicyFreezeV1,
+}
+
+/// Evidence that the policy and profile material were fixed before the
+/// held-out partition was measured.
+///
+/// Retuning any profile changes its canonical material digest, so a candidate
+/// tuned after the freeze cannot be scored until the freeze is re-declared in
+/// its own visible change.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationPolicyFreezeV1 {
+    pub frozen_at_commit: String,
+    pub frozen_profile_material_digests: BTreeMap<String, String>,
+    pub rationale: String,
+}
+
+/// Where one natural-language need came from, and why its labelled targets
+/// answer it.
+///
+/// The quote is verified verbatim against the cited corpus document, so a
+/// fabricated citation fails workload validation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NeedProvenanceV1 {
+    pub source_kind: NeedProvenanceKindV1,
+    pub source_document_id: String,
+    pub source_quote: String,
+    pub judgment_rationale: String,
+}
+
+/// Artifact classes that may source a natural-language need. Each one is prose
+/// written for the corpus itself, not for this evaluator.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeedProvenanceKindV1 {
+    /// A doc comment stating what a capability is for.
+    CorpusDocumentation,
+    /// A user-visible error string stating a rule.
+    CorpusErrorContract,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -220,6 +300,7 @@ pub struct DecisionPolicySliceV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct WorkloadQueryV1 {
     pub query_id: String,
     pub partition: String,
@@ -230,6 +311,10 @@ pub struct WorkloadQueryV1 {
     pub historical_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<serde_json::Value>,
+    /// Required on every query in the effect stratum: the measured effect is
+    /// only as good as the needs it is measured on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub need_provenance: Option<NeedProvenanceV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -489,6 +574,78 @@ pub fn compute_corpus_digest_from_embedded_bytes(
                 ))
             })
     })
+}
+
+/// Verify every effect-stratum need's provenance quote against the corpus bytes
+/// this build carries.
+///
+/// Provenance that cannot be found in the document it cites is not provenance,
+/// so this refuses a fabricated citation instead of trusting the workload's own
+/// claim about itself. Comment markers and line wrapping are normalized away:
+/// the quote is prose, not a byte-exact source line.
+pub fn validate_need_provenance_against_embedded_corpus(
+    workload: &CandidateWorkloadV1,
+    files: &[(&str, &[u8])],
+) -> Result<(), CandidateOutputError> {
+    let stratum = workload.qualification_methodology.effect_stratum.as_str();
+    for query in &workload.queries {
+        if !query.strata.iter().any(|name| name == stratum) {
+            continue;
+        }
+        let Some(provenance) = &query.need_provenance else {
+            continue;
+        };
+        let document = workload
+            .corpus
+            .iter()
+            .find(|document| document.document_id == provenance.source_document_id)
+            .ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "need {} cites document {} which is outside the corpus",
+                    query.query_id, provenance.source_document_id
+                ))
+            })?;
+        let bytes = files
+            .iter()
+            .find_map(|(path, bytes)| (*path == document.path).then_some(*bytes))
+            .ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "packaged evaluator corpus is missing {}",
+                    document.path
+                ))
+            })?;
+        let prose = normalized_document_prose(bytes);
+        if !prose.contains(&collapse_whitespace(&provenance.source_quote)) {
+            return Err(CandidateOutputError::Contract(format!(
+                "need {} quotes text that does not appear in {}",
+                query.query_id, document.source_path
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// One whitespace-collapsed line of prose per document, comment markers removed.
+fn normalized_document_prose(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let joined = text
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            line.strip_prefix("///")
+                .or_else(|| line.strip_prefix("//!"))
+                .or_else(|| line.strip_prefix("//"))
+                .or_else(|| line.strip_prefix('#'))
+                .unwrap_or(line)
+                .trim()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    collapse_whitespace(&joined)
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn compute_corpus_digest_from_document_bytes<'a>(
@@ -822,17 +979,200 @@ pub fn validate_workload_for_tuning(
     if workload
         .expected_query_fallback_digests
         .values()
-        .any(|digest| {
-            digest.len() != 71
-                || !digest.starts_with("sha256:")
-                || !digest[7..]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        .any(|digest| !is_canonical_sha256(digest))
     {
         return Err(CandidateOutputError::Contract(
             "expected query fallback digest is not canonical".to_owned(),
         ));
+    }
+    validate_qualification_methodology(workload)?;
+    Ok(())
+}
+
+fn is_canonical_sha256(digest: &str) -> bool {
+    digest.len() == 71
+        && digest.starts_with("sha256:")
+        && digest[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Refuse a workload whose predeclared decision rule this build does not
+/// implement, whose effect stratum is too thin to measure, whose needs carry no
+/// provenance, or whose profile material has moved since the freeze.
+fn validate_qualification_methodology(
+    workload: &CandidateWorkloadV1,
+) -> Result<(), CandidateOutputError> {
+    let methodology = &workload.qualification_methodology;
+    if methodology.methodology_version != QUALIFICATION_METHODOLOGY_VERSION {
+        return Err(CandidateOutputError::Contract(format!(
+            "qualification methodology version {} is not the version {QUALIFICATION_METHODOLOGY_VERSION} this build implements",
+            methodology.methodology_version
+        )));
+    }
+    if methodology.effect_metric != "ndcg_at_10_ppm" {
+        return Err(CandidateOutputError::Contract(format!(
+            "qualification methodology effect metric {} is not measured per query",
+            methodology.effect_metric
+        )));
+    }
+    if methodology.held_out_partition == methodology.tuning_partition {
+        return Err(CandidateOutputError::Contract(
+            "qualification methodology must hold out a partition it does not tune on".to_owned(),
+        ));
+    }
+    for partition in [
+        methodology.held_out_partition.as_str(),
+        methodology.tuning_partition.as_str(),
+    ] {
+        if partition != "train" && partition != "validation" {
+            return Err(CandidateOutputError::Contract(format!(
+                "qualification methodology names unknown partition {partition}"
+            )));
+        }
+    }
+    if methodology.practical_effect_threshold_ppm == 0 {
+        return Err(CandidateOutputError::Contract(
+            "qualification methodology must predeclare a nonzero practical effect".to_owned(),
+        ));
+    }
+    if methodology.confidence_level_ppm != 950_000 {
+        return Err(CandidateOutputError::Contract(format!(
+            "qualification methodology confidence level {} ppm is not the two-sided 95% interval this build computes",
+            methodology.confidence_level_ppm
+        )));
+    }
+    if methodology.baseline_profile_id != super::evaluate::QUERY_BASELINE_PROFILE
+        || methodology.candidate_profile_ids
+            != [
+                super::evaluate::SEMANTIC_PROFILE,
+                super::evaluate::RERANK_PROFILE,
+            ]
+    {
+        return Err(CandidateOutputError::Contract(
+            "qualification methodology does not name the checked-in baseline and candidate profiles"
+                .to_owned(),
+        ));
+    }
+    validate_policy_freeze(workload)?;
+    validate_effect_stratum_fitness(workload)
+}
+
+fn validate_policy_freeze(workload: &CandidateWorkloadV1) -> Result<(), CandidateOutputError> {
+    let freeze = &workload.qualification_methodology.policy_freeze;
+    if freeze.frozen_at_commit.len() != 40
+        || !freeze
+            .frozen_at_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CandidateOutputError::Contract(
+            "policy freeze must name the commit it was declared at".to_owned(),
+        ));
+    }
+    if freeze.rationale.trim().is_empty() {
+        return Err(CandidateOutputError::Contract(
+            "policy freeze must record why the policy was frozen".to_owned(),
+        ));
+    }
+    if freeze.frozen_profile_material_digests.len() != workload.profile_matrix.len() {
+        return Err(CandidateOutputError::Contract(
+            "policy freeze must pin every profile in the matrix".to_owned(),
+        ));
+    }
+    for profile in &workload.profile_matrix {
+        let frozen = freeze
+            .frozen_profile_material_digests
+            .get(&profile.profile_id)
+            .ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "policy freeze does not pin profile {}",
+                    profile.profile_id
+                ))
+            })?;
+        let observed = compute_profile_material_digest(profile)?;
+        if *frozen != observed {
+            return Err(CandidateOutputError::Contract(format!(
+                "profile {} was retuned after the policy freeze: frozen {frozen}, observed {observed}",
+                profile.profile_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The effect stratum must carry at least the declared floor of needs in both
+/// partitions, and every one of those needs must document where it came from.
+fn validate_effect_stratum_fitness(
+    workload: &CandidateWorkloadV1,
+) -> Result<(), CandidateOutputError> {
+    let methodology = &workload.qualification_methodology;
+    let stratum = methodology.effect_stratum.as_str();
+    for partition in ["train", "validation"] {
+        let needs = workload
+            .queries
+            .iter()
+            .filter(|query| {
+                query.partition == partition && query.strata.iter().any(|name| name == stratum)
+            })
+            .collect::<Vec<_>>();
+        if (needs.len() as u64) < methodology.minimum_effect_queries_per_partition {
+            return Err(CandidateOutputError::Contract(format!(
+                "partition {partition} carries {} {stratum} needs, below the declared floor of {}",
+                needs.len(),
+                methodology.minimum_effect_queries_per_partition
+            )));
+        }
+        for need in needs {
+            validate_need_fitness(workload, need, stratum)?;
+        }
+    }
+    Ok(())
+}
+
+/// One effect-stratum need must say where it came from and what answers it.
+///
+/// A measured effect is only as good as the needs it is measured on, so a need
+/// without a verifiable source or a relevance judgment is refused rather than
+/// scored.
+fn validate_need_fitness(
+    workload: &CandidateWorkloadV1,
+    need: &WorkloadQueryV1,
+    stratum: &str,
+) -> Result<(), CandidateOutputError> {
+    let provenance = need.need_provenance.as_ref().ok_or_else(|| {
+        CandidateOutputError::Contract(format!(
+            "{stratum} need {} has no documented provenance",
+            need.query_id
+        ))
+    })?;
+    if provenance.source_quote.trim().is_empty() || provenance.judgment_rationale.trim().is_empty() {
+        return Err(CandidateOutputError::Contract(format!(
+            "{stratum} need {} has an empty provenance quote or rationale",
+            need.query_id
+        )));
+    }
+    if !workload
+        .corpus
+        .iter()
+        .any(|document| document.document_id == provenance.source_document_id)
+    {
+        return Err(CandidateOutputError::Contract(format!(
+            "{stratum} need {} cites document {} which is outside the corpus",
+            need.query_id, provenance.source_document_id
+        )));
+    }
+    let labelled_targets = need
+        .label
+        .as_ref()
+        .and_then(|label| label.get("anchors"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    if labelled_targets == 0 {
+        return Err(CandidateOutputError::Contract(format!(
+            "{stratum} need {} has no relevance judgment",
+            need.query_id
+        )));
     }
     Ok(())
 }
@@ -1066,5 +1406,231 @@ pub fn sort_value(value: serde_json::Value) -> serde_json::Value {
             serde_json::Value::Array(items.into_iter().map(sort_value).collect())
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod qualification_methodology_tests {
+    use super::{
+        CandidateWorkloadV1, QUALIFICATION_METHODOLOGY_VERSION,
+        validate_need_provenance_against_embedded_corpus, validate_workload_for_tuning,
+    };
+    use crate::search_quality::evaluate::load_authoritative_default_workload_metadata;
+    use crate::search_quality::packaged;
+
+    fn workload() -> CandidateWorkloadV1 {
+        load_authoritative_default_workload_metadata().expect("authoritative workload")
+    }
+
+    fn refusal(workload: &CandidateWorkloadV1) -> String {
+        validate_workload_for_tuning(workload)
+            .expect_err("an unfit workload is refused")
+            .to_string()
+    }
+
+    /// Positive control: the checked-in workload is the shape this build's
+    /// methodology requires, so every denial below is a real change and not a
+    /// pre-existing failure.
+    #[test]
+    fn checked_in_workload_satisfies_the_declared_methodology() {
+        let workload = workload();
+
+        assert_eq!(
+            workload.qualification_methodology.methodology_version,
+            QUALIFICATION_METHODOLOGY_VERSION
+        );
+        assert_eq!(validate_workload_for_tuning(&workload).map_err(|error| error.to_string()), Ok(()));
+        for partition in ["train", "validation"] {
+            let needs = workload
+                .queries
+                .iter()
+                .filter(|query| {
+                    query.partition == partition
+                        && query.strata.iter().any(|stratum| stratum == "natural_language")
+                })
+                .count() as u64;
+            assert!(
+                needs >= workload
+                    .qualification_methodology
+                    .minimum_effect_queries_per_partition,
+                "{partition} carries {needs} needs"
+            );
+        }
+    }
+
+    #[test]
+    fn a_methodology_this_build_does_not_implement_is_refused() {
+        let mut workload = workload();
+        workload.qualification_methodology.methodology_version =
+            QUALIFICATION_METHODOLOGY_VERSION + 1;
+
+        assert!(
+            refusal(&workload).contains("is not the version"),
+            "{}",
+            refusal(&workload)
+        );
+    }
+
+    #[test]
+    fn a_zero_practical_effect_threshold_is_refused() {
+        let mut workload = workload();
+        workload
+            .qualification_methodology
+            .practical_effect_threshold_ppm = 0;
+
+        assert!(refusal(&workload).contains("nonzero practical effect"));
+    }
+
+    #[test]
+    fn a_confidence_level_this_build_does_not_compute_is_refused() {
+        let mut workload = workload();
+        workload.qualification_methodology.confidence_level_ppm = 900_000;
+
+        assert!(refusal(&workload).contains("two-sided 95% interval"));
+    }
+
+    #[test]
+    fn deciding_on_the_partition_the_profile_was_tuned_on_is_refused() {
+        let mut workload = workload();
+        workload.qualification_methodology.held_out_partition =
+            workload.qualification_methodology.tuning_partition.clone();
+
+        assert!(refusal(&workload).contains("must hold out a partition"));
+    }
+
+    #[test]
+    fn an_effect_stratum_below_the_declared_need_floor_is_refused() {
+        let mut workload = workload();
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
+        let doomed = workload
+            .queries
+            .iter()
+            .find(|query| {
+                query.partition == held_out
+                    && query.strata.iter().any(|stratum| stratum == "natural_language")
+            })
+            .map(|query| query.query_id.clone())
+            .expect("a held-out need");
+        workload.queries.retain(|query| query.query_id != doomed);
+        workload.execution_contract.exact_query_count = workload.queries.len() as u64;
+
+        assert!(
+            refusal(&workload).contains("below the declared floor"),
+            "{}",
+            refusal(&workload)
+        );
+    }
+
+    #[test]
+    fn a_need_without_documented_provenance_is_refused() {
+        let mut workload = workload();
+        let stratum = workload.qualification_methodology.effect_stratum.clone();
+        for query in &mut workload.queries {
+            if query.strata.contains(&stratum) {
+                query.need_provenance = None;
+                break;
+            }
+        }
+
+        assert!(refusal(&workload).contains("has no documented provenance"));
+    }
+
+    #[test]
+    fn a_need_without_a_relevance_judgment_is_refused() {
+        let mut workload = workload();
+        let stratum = workload.qualification_methodology.effect_stratum.clone();
+        for query in &mut workload.queries {
+            if query.strata.contains(&stratum) {
+                query.label = Some(serde_json::json!({ "anchors": [] }));
+                break;
+            }
+        }
+
+        assert!(refusal(&workload).contains("has no relevance judgment"));
+    }
+
+    #[test]
+    fn a_need_citing_a_document_outside_the_corpus_is_refused() {
+        let mut workload = workload();
+        let stratum = workload.qualification_methodology.effect_stratum.clone();
+        for query in &mut workload.queries {
+            if query.strata.contains(&stratum)
+                && let Some(provenance) = &mut query.need_provenance
+            {
+                provenance.source_document_id = "not-in-the-corpus".to_owned();
+                break;
+            }
+        }
+
+        assert!(refusal(&workload).contains("outside the corpus"));
+    }
+
+    /// A rationale alone is not provenance: the quote has to be findable in the
+    /// document it claims to come from, or a need can cite anything.
+    #[test]
+    fn a_need_quoting_text_absent_from_its_document_is_refused() {
+        let mut workload = workload();
+        let stratum = workload.qualification_methodology.effect_stratum.clone();
+        for query in &mut workload.queries {
+            if query.strata.contains(&stratum)
+                && let Some(provenance) = &mut query.need_provenance
+            {
+                provenance.source_quote = "text no corpus document contains".to_owned();
+                break;
+            }
+        }
+
+        let error = validate_need_provenance_against_embedded_corpus(
+            &workload,
+            packaged::packaged_evaluator_files(),
+        )
+        .expect_err("an unfounded quote is refused")
+        .to_string();
+        assert!(error.contains("quotes text that does not appear in"), "{error}");
+    }
+
+    /// Every checked-in quote resolves in the bytes the package actually ships,
+    /// so provenance is verified against the evaluated corpus rather than a
+    /// working-tree copy.
+    #[test]
+    fn every_checked_in_need_quote_resolves_in_the_embedded_corpus() {
+        assert_eq!(
+            validate_need_provenance_against_embedded_corpus(
+                &workload(),
+                packaged::packaged_evaluator_files(),
+            )
+            .map_err(|error| error.to_string()),
+            Ok(())
+        );
+    }
+
+    /// A profile retuned after the freeze breaks the pin, so the policy cannot
+    /// be adjusted to fit the held-out result it produces.
+    #[test]
+    fn retuning_a_profile_after_the_policy_freeze_is_refused() {
+        let mut workload = workload();
+        let profile = workload
+            .profile_matrix
+            .iter_mut()
+            .find(|profile| profile.profile_id == "hybrid-conservative")
+            .expect("candidate profile");
+        profile.calibration_threshold_ppm = profile.calibration_threshold_ppm.saturating_sub(1);
+
+        assert!(
+            refusal(&workload).contains("was retuned after the policy freeze"),
+            "{}",
+            refusal(&workload)
+        );
+    }
+
+    #[test]
+    fn a_policy_freeze_without_a_commit_is_refused() {
+        let mut workload = workload();
+        workload
+            .qualification_methodology
+            .policy_freeze
+            .frozen_at_commit = "not-a-commit".to_owned();
+
+        assert!(refusal(&workload).contains("must name the commit"));
     }
 }

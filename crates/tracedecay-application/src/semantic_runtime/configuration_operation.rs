@@ -1764,13 +1764,15 @@ mod tests {
         assert!(!uses_packaged_activation(&candidate));
     }
 
+    /// A semantic pass certifies the exact query baseline it was measured
+    /// against, so the fallback stays activatable on the report alone. The
+    /// report here is scored under the methodology this build implements —
+    /// evidence written under any other version is refused before reaching
+    /// this path.
     #[test]
-    fn packaged_semantic_pass_prepares_the_exact_query_fallback() {
-        let qualification: tracedecay_query::search_quality::PackagedNativeQualificationV1 =
-            serde_json::from_slice(
-                tracedecay_query::search_quality::packaged_native_qualification_bytes(),
-            )
-            .expect("reviewed packaged qualification");
+    fn a_semantic_pass_prepares_the_exact_query_fallback() {
+        let report =
+            crate::semantic_runtime::config_inventory::tests::passing_report(EVALUATED_PROFILE_ID);
         let material = tracedecay_query::search_quality::load_default_evaluated_profile_material(
             EVALUATED_PROFILE_ID,
         )
@@ -1783,11 +1785,8 @@ mod tests {
             rerank_ceiling: None,
         };
 
-        let prepared = prepare_query_fallback_publication(
-            &qualification.portable_evidence.report,
-            &observed_runtime,
-        )
-        .expect("the reviewed semantic pass also certifies its query baseline");
+        let prepared = prepare_query_fallback_publication(&report, &observed_runtime)
+            .expect("the semantic pass also certifies its query baseline");
 
         assert!(prepared.accepted_profile.is_exact_query_fallback());
         assert_eq!(prepared.accepted_runtime.semantic, None);

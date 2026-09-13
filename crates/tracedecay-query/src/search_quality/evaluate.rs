@@ -19,7 +19,7 @@ use super::report;
 use super::report::{
     DirectEvaluationReportV1, DirectProfileEvaluationV1, DirectQualityMetricsV1,
     DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1, DirectStratumQualityV1,
-    DirectWorstStratumV1,
+    DirectWorstStratumV1, PairedEffectMeasurementV1,
 };
 use super::semantic_native;
 
@@ -39,8 +39,33 @@ pub const QUERY_BASELINE_PROFILE: &str = "query-fallback";
 pub const SEMANTIC_PROFILE: &str = "hybrid-conservative";
 pub const RERANK_PROFILE: &str = "hybrid-reranked";
 const METRIC_SCALE_PPM: u64 = 1_000_000;
-pub(super) const REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM: u32 = 1;
 const MAX_PROTECTED_QUALITY_REGRESSION_PPM: u32 = 0;
+/// Two-sided 95% Student-t critical values by degrees of freedom.
+///
+/// A degree of freedom between two rows reads the lower row, which is the
+/// larger critical value and therefore the wider, more conservative interval.
+/// Beyond the last row the interval stays at the 120-degree value rather than
+/// narrowing to the normal limit, for the same reason.
+const T_CRITICAL_95_BY_DEGREES_OF_FREEDOM: &[(u64, f64)] = &[
+    (1, 12.706),
+    (2, 4.303),
+    (3, 3.182),
+    (4, 2.776),
+    (5, 2.571),
+    (6, 2.447),
+    (7, 2.365),
+    (8, 2.306),
+    (9, 2.262),
+    (10, 2.228),
+    (12, 2.179),
+    (15, 2.131),
+    (20, 2.086),
+    (25, 2.060),
+    (30, 2.042),
+    (40, 2.021),
+    (60, 2.000),
+    (120, 1.980),
+];
 const PROTECTED_STRATA: &[&str] = &[
     "config_key",
     "exact_error",
@@ -210,9 +235,12 @@ pub fn evaluate_generated_outputs_against_corpus(
     profiles.sort_by(|left, right| {
         (&left.profile_id, &left.partition).cmp(&(&right.profile_id, &right.partition))
     });
+    let effects = evaluate_paired_effects(workload, &profiles);
     Ok(DirectEvaluationReportV1 {
         command: "compare".to_owned(),
-        status: aggregate_profile_status(&profiles),
+        status: aggregate_profile_status(&profiles, &effects),
+        methodology_version: candidate_output::QUALIFICATION_METHODOLOGY_VERSION,
+        paired_effects: effects.measurements,
         workload_digest: digest,
         corpus_digest: corpus_digest.to_owned(),
         fixture_source_repository_commit: workload.source_repository_commit.clone(),
@@ -1015,7 +1043,18 @@ const fn optional_stages_pending(stages: OptionalStageMeasurementsV1) -> bool {
         || matches!(stages.rerank, OptionalStageMeasurementV1::Pending)
 }
 
-fn aggregate_profile_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEvaluationStatusV1 {
+/// Complete verdict for the paired-effect gate, with the retained measurements
+/// the report publishes and the first failure's operator diagnostic.
+pub(super) struct PairedEffectEvaluationV1 {
+    pub(super) status: DirectEvaluationStatusV1,
+    pub(super) measurements: Vec<PairedEffectMeasurementV1>,
+    pub(super) diagnostic: Option<String>,
+}
+
+fn aggregate_profile_status(
+    profiles: &[DirectProfileEvaluationV1],
+    effects: &PairedEffectEvaluationV1,
+) -> DirectEvaluationStatusV1 {
     if profiles
         .iter()
         .any(|profile| profile.status == DirectEvaluationStatusV1::Fail)
@@ -1027,153 +1066,295 @@ fn aggregate_profile_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEva
     {
         DirectEvaluationStatusV1::Pending
     } else {
-        pairwise_candidate_status(profiles)
+        effects.status
     }
 }
 
-fn pairwise_candidate_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEvaluationStatusV1 {
-    pairwise_candidate_evaluation(profiles).0
-}
-
-pub(super) fn pairwise_candidate_failure_diagnostic(
+/// Score every candidate profile against its partition baseline under the
+/// workload's predeclared methodology.
+///
+/// Qualification is decided on the held-out partition alone. The tuning
+/// partition is measured with the same rule and reported as evidence, so a
+/// profile that only works where it was tuned is visible rather than silent.
+pub(super) fn evaluate_paired_effects(
+    workload: &CandidateWorkloadV1,
     profiles: &[DirectProfileEvaluationV1],
-) -> Option<String> {
-    pairwise_candidate_evaluation(profiles).1
-}
-
-fn pairwise_candidate_evaluation(
-    profiles: &[DirectProfileEvaluationV1],
-) -> (DirectEvaluationStatusV1, Option<String>) {
+) -> PairedEffectEvaluationV1 {
+    let methodology = &workload.qualification_methodology;
+    let mut measurements = Vec::new();
+    let mut diagnostic = None;
     let mut unavailable = false;
     for candidate in profiles.iter().filter(|profile| {
-        profile.profile_id == SEMANTIC_PROFILE || profile.profile_id == RERANK_PROFILE
+        methodology
+            .candidate_profile_ids
+            .contains(&profile.profile_id)
     }) {
         let Some(baseline) = profiles.iter().find(|profile| {
-            profile.profile_id == QUERY_BASELINE_PROFILE && profile.partition == candidate.partition
+            profile.profile_id == methodology.baseline_profile_id
+                && profile.partition == candidate.partition
         }) else {
             unavailable = true;
             continue;
         };
-        let (Some(baseline_natural), Some(candidate_natural)) = (
-            baseline
-                .quality
-                .strata
-                .iter()
-                .find(|stratum| stratum.stratum == "natural_language"),
-            candidate
-                .quality
-                .strata
-                .iter()
-                .find(|stratum| stratum.stratum == "natural_language"),
-        ) else {
-            unavailable = true;
-            continue;
-        };
-        // The compared stratum is not protected, so `MAX_PROTECTED_QUALITY_
-        // REGRESSION_PPM` never guards it and the only other requirement is a
-        // gain in its *mean*. A mean hides a per-query loss: the last packaged
-        // qualification raised the stratum mean while dropping one of
-        // `validation-006`'s labelled targets out of the ranking entirely
-        // (recall 2/3 to 1/3), because fusion admits a bounded number of
-        // approximate candidates per file and a semantic candidate displaced
-        // the labelled one. Losing labelled evidence the baseline already
-        // retrieved is a regression whatever the mean does.
-        if let Some(diagnostic) = dropped_relevant_label(candidate, baseline) {
-            return (DirectEvaluationStatusV1::Fail, Some(diagnostic));
-        }
-        if candidate_natural
-            .ndcg_at_10_ppm
-            .saturating_sub(baseline_natural.ndcg_at_10_ppm)
-            < REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
-        {
-            // A lexical baseline already at the metric ceiling leaves no
-            // room to demonstrate gain; name that so a small corpus is not
-            // mistaken for a semantic quality regression.
-            let saturated = if u64::from(baseline_natural.ndcg_at_10_ppm) >= METRIC_SCALE_PPM {
-                " (lexical baseline is saturated on this corpus; semantic gain cannot be demonstrated here)"
-            } else {
-                ""
-            };
-            return (
-                DirectEvaluationStatusV1::Fail,
-                Some(format!(
-                    "pairwise candidate quality failed: profile={} partition={} stratum=natural_language metric=ndcg_at_10_ppm baseline={} candidate={} required_gain={}{saturated}",
-                    candidate.profile_id,
-                    candidate.partition,
-                    baseline_natural.ndcg_at_10_ppm,
-                    candidate_natural.ndcg_at_10_ppm,
-                    REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM,
-                )),
-            );
-        }
-        for baseline_stratum in baseline
-            .quality
-            .strata
-            .iter()
-            .filter(|stratum| stratum.protected)
-        {
-            let Some(candidate_stratum) = candidate
-                .quality
-                .strata
-                .iter()
-                .find(|stratum| stratum.stratum == baseline_stratum.stratum)
-            else {
+        // Losing labelled evidence the baseline already retrieved is a
+        // regression whatever the mean does, and a protected stratum may not
+        // pay for the effect either. Both are floors on the measurement rather
+        // than terms in it, so they refuse outright.
+        let refusal = match compare_protected_strata(candidate, baseline) {
+            ProtectedStratumComparisonV1::Regressed(refusal) => Some(refusal),
+            ProtectedStratumComparisonV1::Unmeasured => {
                 unavailable = true;
-                continue;
-            };
-            let comparisons = [
-                (
-                    "recall_at_10_ppm",
-                    baseline_stratum.recall_at_10.ppm,
-                    candidate_stratum.recall_at_10.ppm,
-                ),
-                (
-                    "mean_reciprocal_rank_ppm",
-                    baseline_stratum.mean_reciprocal_rank_ppm,
-                    candidate_stratum.mean_reciprocal_rank_ppm,
-                ),
-                (
-                    "ndcg_at_10_ppm",
-                    baseline_stratum.ndcg_at_10_ppm,
-                    candidate_stratum.ndcg_at_10_ppm,
-                ),
-            ];
-            for (metric, baseline_value, candidate_value) in comparisons {
-                if baseline_value.saturating_sub(candidate_value)
-                    > MAX_PROTECTED_QUALITY_REGRESSION_PPM
-                {
-                    return (
-                        DirectEvaluationStatusV1::Fail,
-                        Some(format!(
-                            "pairwise candidate quality failed: profile={} partition={} stratum={} metric={} baseline={} candidate={} maximum_regression={}",
-                            candidate.profile_id,
-                            candidate.partition,
-                            baseline_stratum.stratum,
-                            metric,
-                            baseline_value,
-                            candidate_value,
-                            MAX_PROTECTED_QUALITY_REGRESSION_PPM,
-                        )),
-                    );
-                }
+                None
             }
+            ProtectedStratumComparisonV1::Held => None,
+        };
+        if let Some(refusal) = dropped_relevant_label(workload, candidate, baseline).or(refusal) {
+            return PairedEffectEvaluationV1 {
+                status: DirectEvaluationStatusV1::Fail,
+                measurements,
+                diagnostic: diagnostic.or(Some(refusal)),
+            };
         }
+        let measurement = measure_paired_effect(workload, candidate, baseline);
+        if measurement.status != DirectEvaluationStatusV1::Pass && measurement.held_out {
+            diagnostic = diagnostic.or_else(|| Some(paired_effect_diagnostic(&measurement)));
+        }
+        measurements.push(measurement);
     }
-    if unavailable {
-        (DirectEvaluationStatusV1::Pending, None)
+    let held_out = measurements
+        .iter()
+        .filter(|measurement| measurement.held_out)
+        .collect::<Vec<_>>();
+    let status = if unavailable
+        || held_out.is_empty()
+        || held_out
+            .iter()
+            .any(|measurement| measurement.status == DirectEvaluationStatusV1::Pending)
+    {
+        DirectEvaluationStatusV1::Pending
+    } else if held_out
+        .iter()
+        .all(|measurement| measurement.status == DirectEvaluationStatusV1::Pass)
+    {
+        DirectEvaluationStatusV1::Pass
     } else {
-        (DirectEvaluationStatusV1::Pass, None)
+        DirectEvaluationStatusV1::Fail
+    };
+    PairedEffectEvaluationV1 {
+        status,
+        measurements,
+        diagnostic,
     }
 }
 
-/// The first compared query whose candidate retrieves fewer labelled targets
+/// Whether every protected stratum the baseline scored survived in the
+/// candidate.
+enum ProtectedStratumComparisonV1 {
+    Held,
+    Regressed(String),
+    /// The candidate did not score a protected stratum the baseline did, so the
+    /// comparison is unmeasured rather than passed or failed.
+    Unmeasured,
+}
+
+/// Compare every protected stratum before the effect is measured at all.
+///
+/// A protected stratum is exact retrieval an agent already relies on. Semantic
+/// gain elsewhere never buys the right to erode it.
+fn compare_protected_strata(
+    candidate: &DirectProfileEvaluationV1,
+    baseline: &DirectProfileEvaluationV1,
+) -> ProtectedStratumComparisonV1 {
+    for baseline_stratum in baseline
+        .quality
+        .strata
+        .iter()
+        .filter(|stratum| stratum.protected)
+    {
+        let Some(candidate_stratum) = candidate
+            .quality
+            .strata
+            .iter()
+            .find(|stratum| stratum.stratum == baseline_stratum.stratum)
+        else {
+            return ProtectedStratumComparisonV1::Unmeasured;
+        };
+        let regressed = [
+            (
+                "recall_at_10_ppm",
+                baseline_stratum.recall_at_10.ppm,
+                candidate_stratum.recall_at_10.ppm,
+            ),
+            (
+                "mean_reciprocal_rank_ppm",
+                baseline_stratum.mean_reciprocal_rank_ppm,
+                candidate_stratum.mean_reciprocal_rank_ppm,
+            ),
+            (
+                "ndcg_at_10_ppm",
+                baseline_stratum.ndcg_at_10_ppm,
+                candidate_stratum.ndcg_at_10_ppm,
+            ),
+        ]
+        .into_iter()
+        .find(|(_, baseline_value, candidate_value)| {
+            baseline_value.saturating_sub(*candidate_value) > MAX_PROTECTED_QUALITY_REGRESSION_PPM
+        });
+        if let Some((metric, baseline_value, candidate_value)) = regressed {
+            return ProtectedStratumComparisonV1::Regressed(format!(
+                "protected stratum regressed: profile={} partition={} stratum={} metric={metric} baseline={baseline_value} candidate={candidate_value} maximum_regression={MAX_PROTECTED_QUALITY_REGRESSION_PPM}",
+                candidate.profile_id, candidate.partition, baseline_stratum.stratum,
+            ));
+        }
+    }
+    ProtectedStratumComparisonV1::Held
+}
+
+/// Measure one candidate profile's paired effect against its partition baseline.
+fn measure_paired_effect(
+    workload: &CandidateWorkloadV1,
+    candidate: &DirectProfileEvaluationV1,
+    baseline: &DirectProfileEvaluationV1,
+) -> PairedEffectMeasurementV1 {
+    let methodology = &workload.qualification_methodology;
+    let differences = paired_metric_differences(workload, candidate, baseline);
+    let interval = paired_interval_95(&differences);
+    let held_out = candidate.partition == methodology.held_out_partition;
+    let paired_query_count = differences.len() as u64;
+    let sufficient = paired_query_count >= methodology.minimum_effect_queries_per_partition;
+    let status = match &interval {
+        Some(interval)
+            if sufficient
+                && interval.mean_ppm
+                    >= i64::from(methodology.practical_effect_threshold_ppm)
+                && interval.lower_ppm > 0 =>
+        {
+            DirectEvaluationStatusV1::Pass
+        }
+        Some(_) => DirectEvaluationStatusV1::Fail,
+        // Fewer than two paired needs cannot produce an interval at all. That
+        // is an unmeasurable workload, not a measured tie.
+        None => DirectEvaluationStatusV1::Pending,
+    };
+    PairedEffectMeasurementV1 {
+        profile_id: candidate.profile_id.clone(),
+        partition: candidate.partition.clone(),
+        held_out,
+        stratum: methodology.effect_stratum.clone(),
+        metric: methodology.effect_metric.clone(),
+        paired_query_count,
+        minimum_paired_query_count: methodology.minimum_effect_queries_per_partition,
+        mean_difference_ppm: interval.as_ref().map_or(0, |interval| interval.mean_ppm),
+        practical_effect_threshold_ppm: methodology.practical_effect_threshold_ppm,
+        confidence_level_ppm: methodology.confidence_level_ppm,
+        confidence_interval_lower_ppm: interval.as_ref().map_or(0, |interval| interval.lower_ppm),
+        confidence_interval_upper_ppm: interval.as_ref().map_or(0, |interval| interval.upper_ppm),
+        status,
+    }
+}
+
+fn paired_effect_diagnostic(measurement: &PairedEffectMeasurementV1) -> String {
+    format!(
+        "held-out effect failed: {}",
+        paired_effect_summary(measurement)
+    )
+}
+
+/// The exact numbers a qualification decision was made on, so a refusal can be
+/// re-derived by hand from the operator log alone.
+pub(super) fn paired_effect_summary(measurement: &PairedEffectMeasurementV1) -> String {
+    format!(
+        "profile={} partition={} stratum={} metric={} needs={}/{} mean_difference_ppm={} confidence_interval_ppm=[{},{}] confidence_level_ppm={} practical_effect_threshold_ppm={}",
+        measurement.profile_id,
+        measurement.partition,
+        measurement.stratum,
+        measurement.metric,
+        measurement.paired_query_count,
+        measurement.minimum_paired_query_count,
+        measurement.mean_difference_ppm,
+        measurement.confidence_interval_lower_ppm,
+        measurement.confidence_interval_upper_ppm,
+        measurement.confidence_level_ppm,
+        measurement.practical_effect_threshold_ppm,
+    )
+}
+
+/// `d(query)` for every effect-stratum need both profiles scored.
+fn paired_metric_differences(
+    workload: &CandidateWorkloadV1,
+    candidate: &DirectProfileEvaluationV1,
+    baseline: &DirectProfileEvaluationV1,
+) -> Vec<i64> {
+    let mut pairs = report::pairwise_query_pairs(
+        &candidate.queries,
+        &baseline.queries,
+        &workload.qualification_methodology.effect_stratum,
+    );
+    pairs.sort_by(|left, right| left.0.query_id.cmp(&right.0.query_id));
+    pairs
+        .into_iter()
+        .map(|(candidate_query, baseline_query)| {
+            i64::from(candidate_query.quality.ndcg_at_10_ppm)
+                - i64::from(baseline_query.quality.ndcg_at_10_ppm)
+        })
+        .collect()
+}
+
+struct PairedIntervalV1 {
+    mean_ppm: i64,
+    lower_ppm: i64,
+    upper_ppm: i64,
+}
+
+/// Two-sided 95% Student-t interval on the mean paired difference.
+///
+/// The bounds round outward so a reported interval never claims precision the
+/// sample does not support, and a zero-variance sample keeps a degenerate
+/// interval at its own mean rather than a fabricated width.
+fn paired_interval_95(differences: &[i64]) -> Option<PairedIntervalV1> {
+    let count = differences.len();
+    if count < 2 {
+        return None;
+    }
+    let population = count as f64;
+    let mean = differences.iter().map(|value| *value as f64).sum::<f64>() / population;
+    let variance = differences
+        .iter()
+        .map(|value| (*value as f64 - mean).powi(2))
+        .sum::<f64>()
+        / (population - 1.0);
+    let half_width =
+        t_critical_95(count as u64 - 1) * (variance / population).sqrt();
+    Some(PairedIntervalV1 {
+        mean_ppm: clamp_ppm(mean.round()),
+        lower_ppm: clamp_ppm((mean - half_width).floor()),
+        upper_ppm: clamp_ppm((mean + half_width).ceil()),
+    })
+}
+
+fn clamp_ppm(value: f64) -> i64 {
+    let scale = METRIC_SCALE_PPM as f64;
+    value.clamp(-scale, scale) as i64
+}
+
+fn t_critical_95(degrees_of_freedom: u64) -> f64 {
+    T_CRITICAL_95_BY_DEGREES_OF_FREEDOM
+        .iter()
+        .rev()
+        .find(|(tabulated, _)| *tabulated <= degrees_of_freedom)
+        .map_or(T_CRITICAL_95_BY_DEGREES_OF_FREEDOM[0].1, |(_, value)| *value)
+}
+
+/// The first compared need whose candidate retrieves fewer labelled targets
 /// than the baseline. Both sides score the same checked-in label set, so the
 /// recall numerators compare directly.
 fn dropped_relevant_label(
+    workload: &CandidateWorkloadV1,
     candidate: &DirectProfileEvaluationV1,
     baseline: &DirectProfileEvaluationV1,
 ) -> Option<String> {
-    report::pairwise_query_pairs(&candidate.queries, &baseline.queries)
+    let stratum = &workload.qualification_methodology.effect_stratum;
+    report::pairwise_query_pairs(&candidate.queries, &baseline.queries, stratum)
         .into_iter()
         .find(|(candidate_query, baseline_query)| {
             candidate_query.quality.recall_at_10.numerator
@@ -1181,7 +1362,7 @@ fn dropped_relevant_label(
         })
         .map(|(candidate_query, baseline_query)| {
             format!(
-                "pairwise candidate quality failed: profile={} partition={} stratum=natural_language query={} metric=recall_at_10 baseline={}/{} candidate={}/{} (the candidate dropped a labelled target the baseline retrieved)",
+                "candidate dropped a labelled target the baseline retrieved: profile={} partition={} stratum={stratum} query={} metric=recall_at_10 baseline={}/{} candidate={}/{}",
                 candidate.profile_id,
                 candidate.partition,
                 candidate_query.query_id,
@@ -1196,9 +1377,10 @@ fn dropped_relevant_label(
 #[cfg(test)]
 mod tests {
     use super::{
-        QUERY_BASELINE_PROFILE, RERANK_PROFILE, SEMANTIC_PROFILE, activation_profile_chain,
-        aggregate_profile_status, aggregate_quality, evaluate_query,
-        load_authoritative_default_workload_metadata, ratio_metric,
+        CandidateWorkloadV1, QUERY_BASELINE_PROFILE, RERANK_PROFILE, SEMANTIC_PROFILE,
+        activation_profile_chain, aggregate_profile_status, aggregate_quality,
+        evaluate_paired_effects, evaluate_query, load_authoritative_default_workload_metadata,
+        ratio_metric,
     };
     use crate::search_quality::candidate_output::{
         HistoricalQueryExecutionV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
@@ -1229,6 +1411,7 @@ mod tests {
             allowed_scopes: vec!["research".to_owned()],
             historical_commit: None,
             label: Some(serde_json::json!({ "anchors": anchors })),
+            need_provenance: None,
         }
     }
 
@@ -1454,39 +1637,211 @@ mod tests {
         assert_eq!(multiple.quality.ndcg_at_10_ppm, 938_557);
     }
 
-    #[test]
-    fn candidate_without_pairwise_natural_language_gain_fails() {
-        for profile_id in [SEMANTIC_PROFILE, RERANK_PROFILE] {
-            let baseline = passing_profile(QUERY_BASELINE_PROFILE, 500_000, 1_000_000);
-            let candidate = passing_profile(profile_id, 500_000, 1_000_000);
+    /// One evaluated effect-stratum need at an exact per-need nDCG. Recall is
+    /// held at full so these fixtures exercise the effect gate and not the
+    /// dropped-label floor.
+    fn effect_need(query_id: &str, ndcg_at_10_ppm: u32) -> DirectQueryEvaluationV1 {
+        DirectQueryEvaluationV1 {
+            query_id: query_id.to_owned(),
+            strata: vec!["natural_language".to_owned()],
+            protected: false,
+            first_useful_rank: Some(1),
+            returned_candidates: 1,
+            wrong_scope_hits: 0,
+            forbidden_hits: 0,
+            expected_no_result: false,
+            quality: super::DirectQueryQualityV1 {
+                recall_at_10: ratio_metric(1, 1),
+                precision_at_10: ratio_metric(1, 1),
+                reciprocal_rank_ppm: 1_000_000,
+                ndcg_at_10_ppm,
+                duplicate_rate: ratio_metric(0, 1),
+            },
+            status: super::DirectEvaluationStatusV1::Pass,
+        }
+    }
 
+    fn profile_with_effect_needs(
+        profile_id: &str,
+        partition: &str,
+        per_need_ndcg_at_10_ppm: &[u32],
+        protected_mrr_ppm: u32,
+    ) -> DirectProfileEvaluationV1 {
+        let mean = u32::try_from(
+            per_need_ndcg_at_10_ppm
+                .iter()
+                .map(|value| u64::from(*value))
+                .sum::<u64>()
+                / per_need_ndcg_at_10_ppm.len() as u64,
+        )
+        .expect("stratum mean fits a ppm");
+        let mut profile = passing_profile(profile_id, mean, protected_mrr_ppm);
+        profile.partition = partition.to_owned();
+        profile.queries = per_need_ndcg_at_10_ppm
+            .iter()
+            .enumerate()
+            .map(|(index, ndcg)| effect_need(&format!("need-{index:03}"), *ndcg))
+            .collect();
+        profile
+    }
+
+    /// The methodology this build implements, with the need floor relaxed so a
+    /// fixture can express a specific effect shape in a handful of needs. The
+    /// floor itself is exercised by `effect_below_the_need_floor_is_pending`.
+    fn small_sample_methodology_workload(minimum_needs: u64) -> CandidateWorkloadV1 {
+        let mut workload =
+            load_authoritative_default_workload_metadata().expect("authoritative workload");
+        workload
+            .qualification_methodology
+            .minimum_effect_queries_per_partition = minimum_needs;
+        workload
+    }
+
+    #[test]
+    fn held_out_effect_below_the_practical_threshold_fails() {
+        let workload = small_sample_methodology_workload(4);
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
+        let threshold = workload
+            .qualification_methodology
+            .practical_effect_threshold_ppm;
+        for profile_id in [SEMANTIC_PROFILE, RERANK_PROFILE] {
+            // A consistent, tiny gain: the interval clears zero, so only the
+            // predeclared practical-effect threshold refuses it.
+            let baseline =
+                profile_with_effect_needs(QUERY_BASELINE_PROFILE, &held_out, &[500_000; 4], 1_000_000);
+            let candidate = profile_with_effect_needs(
+                profile_id,
+                &held_out,
+                &[500_001, 500_002, 500_001, 500_002],
+                1_000_000,
+            );
+            let effects = evaluate_paired_effects(&workload, &[baseline.clone(), candidate.clone()]);
+
+            assert_eq!(effects.status, super::DirectEvaluationStatusV1::Fail);
             assert_eq!(
-                aggregate_profile_status(&[baseline.clone(), candidate.clone()]),
+                aggregate_profile_status(&[baseline, candidate], &effects),
                 super::DirectEvaluationStatusV1::Fail
             );
-            let expected = format!(
-                "pairwise candidate quality failed: profile={profile_id} partition=validation stratum=natural_language metric=ndcg_at_10_ppm baseline=500000 candidate=500000 required_gain=1"
-            );
-            assert_eq!(
-                super::pairwise_candidate_failure_diagnostic(&[baseline, candidate]).as_deref(),
-                Some(expected.as_str())
+            let diagnostic = effects.diagnostic.expect("a refused effect names itself");
+            assert!(diagnostic.contains("mean_difference_ppm=2"), "{diagnostic}");
+            assert!(
+                diagnostic.contains(&format!("practical_effect_threshold_ppm={threshold}")),
+                "{diagnostic}"
             );
         }
     }
 
+    /// A large mean built from a few needs that disagree is exactly the shape
+    /// the old stratum-mean bar could not see: the interval covers zero, so the
+    /// measurement does not support the claim.
     #[test]
-    fn saturated_baseline_names_why_gain_cannot_be_demonstrated() {
-        let baseline = passing_profile(QUERY_BASELINE_PROFILE, 1_000_000, 1_000_000);
-        let candidate = passing_profile(SEMANTIC_PROFILE, 1_000_000, 1_000_000);
+    fn held_out_effect_whose_interval_covers_zero_fails() {
+        let workload = small_sample_methodology_workload(4);
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
+        let baseline =
+            profile_with_effect_needs(QUERY_BASELINE_PROFILE, &held_out, &[500_000; 4], 1_000_000);
+        let candidate = profile_with_effect_needs(
+            SEMANTIC_PROFILE,
+            &held_out,
+            &[900_000, 100_000, 900_000, 700_000],
+            1_000_000,
+        );
+        let effects = evaluate_paired_effects(&workload, &[baseline, candidate]);
+
+        let measurement = effects
+            .measurements
+            .first()
+            .expect("the held-out effect is measured");
+        assert!(measurement.mean_difference_ppm > 0, "{measurement:?}");
+        assert!(
+            measurement.confidence_interval_lower_ppm < 0,
+            "{measurement:?}"
+        );
+        assert_eq!(effects.status, super::DirectEvaluationStatusV1::Fail);
+    }
+
+    #[test]
+    fn saturated_baseline_cannot_reach_the_practical_threshold() {
+        let workload = small_sample_methodology_workload(4);
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
+        let baseline =
+            profile_with_effect_needs(QUERY_BASELINE_PROFILE, &held_out, &[1_000_000; 4], 1_000_000);
+        let candidate =
+            profile_with_effect_needs(SEMANTIC_PROFILE, &held_out, &[1_000_000; 4], 1_000_000);
+        let effects = evaluate_paired_effects(&workload, &[baseline, candidate]);
+
+        assert_eq!(effects.status, super::DirectEvaluationStatusV1::Fail);
+        let measurement = &effects.measurements[0];
+        assert_eq!(measurement.mean_difference_ppm, 0);
+        assert_eq!(measurement.confidence_interval_lower_ppm, 0);
+        assert_eq!(measurement.confidence_interval_upper_ppm, 0);
+    }
+
+    /// Fewer paired needs than the predeclared floor is an unmeasured
+    /// workload, not a measured tie, so it can neither pass nor be reported as
+    /// a genuine loss.
+    #[test]
+    fn effect_below_the_need_floor_cannot_qualify() {
+        let workload = small_sample_methodology_workload(20);
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
+        let baseline =
+            profile_with_effect_needs(QUERY_BASELINE_PROFILE, &held_out, &[500_000; 4], 1_000_000);
+        let candidate =
+            profile_with_effect_needs(SEMANTIC_PROFILE, &held_out, &[900_000; 4], 1_000_000);
+        let effects = evaluate_paired_effects(&workload, &[baseline, candidate]);
+
+        let measurement = &effects.measurements[0];
+        assert_eq!(measurement.paired_query_count, 4);
+        assert_eq!(measurement.minimum_paired_query_count, 20);
+        assert_eq!(measurement.status, super::DirectEvaluationStatusV1::Fail);
+        assert_eq!(effects.status, super::DirectEvaluationStatusV1::Fail);
+    }
+
+    /// A single paired need cannot produce an interval at all. That is an
+    /// unmeasurable workload rather than a decided one.
+    #[test]
+    fn a_single_paired_need_cannot_qualify_or_refuse() {
+        let workload = small_sample_methodology_workload(1);
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
+        let baseline =
+            profile_with_effect_needs(QUERY_BASELINE_PROFILE, &held_out, &[500_000], 1_000_000);
+        let candidate =
+            profile_with_effect_needs(SEMANTIC_PROFILE, &held_out, &[1_000_000], 1_000_000);
+        let effects = evaluate_paired_effects(&workload, &[baseline, candidate]);
 
         assert_eq!(
-            aggregate_profile_status(&[baseline.clone(), candidate.clone()]),
-            super::DirectEvaluationStatusV1::Fail
+            effects.measurements[0].status,
+            super::DirectEvaluationStatusV1::Pending
         );
-        let diagnostic = super::pairwise_candidate_failure_diagnostic(&[baseline, candidate])
-            .expect("saturated baseline still refuses activation");
-        assert!(diagnostic.contains("baseline=1000000 candidate=1000000 required_gain=1"));
-        assert!(diagnostic.contains("lexical baseline is saturated"));
+        assert_eq!(effects.status, super::DirectEvaluationStatusV1::Pending);
+    }
+
+    /// Winning only where the profile was tuned is a reported measurement, not
+    /// a qualification: the held-out partition alone decides.
+    #[test]
+    fn tuning_partition_gain_alone_does_not_qualify() {
+        let workload = small_sample_methodology_workload(4);
+        let methodology = &workload.qualification_methodology;
+        let tuning = methodology.tuning_partition.clone();
+        let held_out = methodology.held_out_partition.clone();
+        let profiles = vec![
+            profile_with_effect_needs(QUERY_BASELINE_PROFILE, &tuning, &[500_000; 4], 1_000_000),
+            profile_with_effect_needs(SEMANTIC_PROFILE, &tuning, &[900_000; 4], 1_000_000),
+            profile_with_effect_needs(QUERY_BASELINE_PROFILE, &held_out, &[500_000; 4], 1_000_000),
+            profile_with_effect_needs(SEMANTIC_PROFILE, &held_out, &[500_000; 4], 1_000_000),
+        ];
+        let effects = evaluate_paired_effects(&workload, &profiles);
+
+        let tuning_measurement = effects
+            .measurements
+            .iter()
+            .find(|measurement| !measurement.held_out)
+            .expect("the tuning partition is measured as evidence");
+        assert_eq!(
+            tuning_measurement.status,
+            super::DirectEvaluationStatusV1::Pass
+        );
+        assert_eq!(effects.status, super::DirectEvaluationStatusV1::Fail);
     }
 
     /// A stratum mean must not buy a candidate the right to lose labelled
@@ -1494,7 +1849,9 @@ mod tests {
     /// where semantic gain on one natural-language query paid for a labelled
     /// target dropped out of another query's ranking.
     #[test]
-    fn candidate_that_drops_a_labelled_target_fails_despite_a_stratum_mean_gain() {
+    fn candidate_that_drops_a_labelled_target_fails_despite_a_mean_gain() {
+        let workload = small_sample_methodology_workload(2);
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
         let labels = query("nl-lost", "natural_language", &["a", "b", "c"]);
         let baseline_query = evaluate_query(
             &labels,
@@ -1512,23 +1869,23 @@ mod tests {
         assert_eq!(baseline_query.quality.recall_at_10.numerator, 2);
         assert_eq!(candidate_query.quality.recall_at_10.numerator, 1);
 
-        let profile_with = |profile_id: &str,
-                            natural_language_ndcg_at_10_ppm: u32,
-                            evaluated: DirectQueryEvaluationV1| {
+        let profile_with = |profile_id: &str, gain: u32, evaluated: DirectQueryEvaluationV1| {
             let mut profile =
-                passing_profile(profile_id, natural_language_ndcg_at_10_ppm, 1_000_000);
-            profile.queries = vec![evaluated];
+                profile_with_effect_needs(profile_id, &held_out, &[gain, gain], 1_000_000);
+            profile.queries.push(evaluated);
             profile
         };
 
         let baseline = profile_with(QUERY_BASELINE_PROFILE, 500_000, baseline_query.clone());
         let candidate = profile_with(SEMANTIC_PROFILE, 900_000, candidate_query);
+        let effects = evaluate_paired_effects(&workload, &[baseline.clone(), candidate.clone()]);
 
         assert_eq!(
-            aggregate_profile_status(&[baseline.clone(), candidate.clone()]),
+            aggregate_profile_status(&[baseline, candidate], &effects),
             super::DirectEvaluationStatusV1::Fail
         );
-        let diagnostic = super::pairwise_candidate_failure_diagnostic(&[baseline, candidate])
+        let diagnostic = effects
+            .diagnostic
             .expect("a dropped labelled target refuses activation");
         assert!(diagnostic.contains("query=nl-lost"), "{diagnostic}");
         assert!(
@@ -1536,45 +1893,88 @@ mod tests {
             "{diagnostic}"
         );
 
-        // Retaining the baseline's labelled evidence keeps the same gain
+        // The same gain measured without losing a labelled target is
         // admissible, so the floor refuses the loss and not the gain.
-        assert_eq!(
-            aggregate_profile_status(&[
-                profile_with(QUERY_BASELINE_PROFILE, 500_000, baseline_query.clone()),
-                profile_with(SEMANTIC_PROFILE, 900_000, baseline_query),
-            ]),
-            super::DirectEvaluationStatusV1::Pass
+        let retained = evaluate_paired_effects(
+            &workload,
+            &[
+                profile_with_effect_needs(
+                    QUERY_BASELINE_PROFILE,
+                    &held_out,
+                    &[500_000, 500_000],
+                    1_000_000,
+                ),
+                profile_with_effect_needs(
+                    SEMANTIC_PROFILE,
+                    &held_out,
+                    &[900_000, 900_000],
+                    1_000_000,
+                ),
+            ],
         );
+        assert_eq!(retained.status, super::DirectEvaluationStatusV1::Pass);
     }
 
     #[test]
     fn candidate_with_protected_quality_regression_fails() {
-        let baseline = passing_profile(QUERY_BASELINE_PROFILE, 500_000, 1_000_000);
-        let candidate = passing_profile(SEMANTIC_PROFILE, 600_000, 900_000);
+        let workload = small_sample_methodology_workload(4);
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
+        let baseline =
+            profile_with_effect_needs(QUERY_BASELINE_PROFILE, &held_out, &[500_000; 4], 1_000_000);
+        let candidate =
+            profile_with_effect_needs(SEMANTIC_PROFILE, &held_out, &[900_000; 4], 900_000);
+        let effects = evaluate_paired_effects(&workload, &[baseline.clone(), candidate.clone()]);
 
         assert_eq!(
-            aggregate_profile_status(&[baseline, candidate]),
+            aggregate_profile_status(&[baseline, candidate], &effects),
             super::DirectEvaluationStatusV1::Fail
+        );
+        assert!(
+            effects
+                .diagnostic
+                .is_some_and(|diagnostic| diagnostic.contains("protected stratum regressed")),
         );
     }
 
     #[test]
     fn candidate_without_pairwise_baseline_remains_pending() {
-        let candidate = passing_profile(SEMANTIC_PROFILE, 600_000, 1_000_000);
+        let workload = small_sample_methodology_workload(4);
+        let held_out = workload.qualification_methodology.held_out_partition.clone();
+        let candidate =
+            profile_with_effect_needs(SEMANTIC_PROFILE, &held_out, &[900_000; 4], 1_000_000);
+        let effects = evaluate_paired_effects(&workload, std::slice::from_ref(&candidate));
 
         assert_eq!(
-            aggregate_profile_status(&[candidate]),
+            aggregate_profile_status(std::slice::from_ref(&candidate), &effects),
             super::DirectEvaluationStatusV1::Pending
         );
     }
 
+    /// Positive control: a consistent effect above the predeclared threshold on
+    /// the held-out partition still qualifies.
     #[test]
-    fn candidate_with_pairwise_gain_and_no_regression_passes() {
-        let baseline = passing_profile(QUERY_BASELINE_PROFILE, 500_000, 1_000_000);
-        let candidate = passing_profile(SEMANTIC_PROFILE, 500_001, 1_000_000);
+    fn consistent_held_out_effect_above_the_threshold_passes() {
+        let workload = small_sample_methodology_workload(4);
+        let methodology = &workload.qualification_methodology;
+        let held_out = methodology.held_out_partition.clone();
+        let candidate_needs = [700_000, 690_000, 710_000, 700_000];
+        let baseline =
+            profile_with_effect_needs(QUERY_BASELINE_PROFILE, &held_out, &[500_000; 4], 1_000_000);
+        let candidate =
+            profile_with_effect_needs(SEMANTIC_PROFILE, &held_out, &candidate_needs, 1_000_000);
+        let effects = evaluate_paired_effects(&workload, &[baseline.clone(), candidate.clone()]);
 
+        let measurement = &effects.measurements[0];
+        assert!(measurement.held_out);
+        assert_eq!(measurement.paired_query_count, 4);
+        assert_eq!(measurement.mean_difference_ppm, 200_000);
+        assert!(
+            measurement.confidence_interval_lower_ppm > 0,
+            "{measurement:?}"
+        );
+        assert_eq!(effects.status, super::DirectEvaluationStatusV1::Pass);
         assert_eq!(
-            aggregate_profile_status(&[baseline, candidate]),
+            aggregate_profile_status(&[baseline, candidate], &effects),
             super::DirectEvaluationStatusV1::Pass
         );
     }

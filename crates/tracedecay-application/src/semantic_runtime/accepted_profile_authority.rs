@@ -269,6 +269,15 @@ fn validate_publication_authority(
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
     let evidence_kind = validate_report_authority(report, &workload)?;
     let evaluated_profile_id = accepted_profile.evaluation().evaluated_profile_id();
+    // The report's aggregate status is not enough: activation re-derives the
+    // held-out decision from the retained measurement against the workload's
+    // predeclared threshold, confidence level, and methodology version, so
+    // evidence scored under a superseded rule cannot serve retrieval.
+    report
+        .validate_held_out_effect(&workload, evaluated_profile_id)
+        .map_err(|error| {
+            SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(error.to_string())
+        })?;
     let evaluation = PassingRetrievalEvaluationV1::from_report(report, evaluated_profile_id)
         .map_err(|error| {
             SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(format!(
@@ -751,49 +760,172 @@ mod tests {
     use super::*;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_query::search_quality::{
-        PackagedNativeQualificationV1, compute_workload_digest, packaged_native_qualification_bytes,
+        PackagedNativeQualificationV1, PairedEffectMeasurementV1,
+        QUALIFICATION_METHODOLOGY_VERSION, compute_workload_digest,
+        packaged_native_qualification_bytes,
     };
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
     }
 
-    /// Report authority is bound to the workload the daemon is running now,
-    /// not to whatever workload the retained evidence was measured against.
-    ///
-    /// The checked-in qualification is currently bound to a superseded
-    /// workload: the evaluated query-fallback digests have been re-pinned
-    /// several times since it was produced, and `ed2f329b8` changed how nDCG
-    /// credits aliased labels, so its retained aggregates no longer
-    /// reconstruct either. It is therefore refused, and rebinding only its
-    /// digest field does not buy it back — the reconstruction still disagrees.
-    /// Restoring an accepted claim needs a genuine `qualify-native` run on a
-    /// host with the pinned Jina fixture, which cannot happen while the
-    /// candidate ties the lexical baseline on `validation/natural_language`.
+    /// A report carrying exactly the held-out measurement the workload's
+    /// methodology asks for, so each denial below changes one declared term.
+    fn effect_report(workload: &CandidateWorkloadV1, profile_id: &str) -> DirectEvaluationReportV1 {
+        let methodology = &workload.qualification_methodology;
+        let mean = i64::from(methodology.practical_effect_threshold_ppm) * 4;
+        let mut report = crate::semantic_runtime::config_inventory::tests::passing_report(profile_id);
+        report.paired_effects = vec![PairedEffectMeasurementV1 {
+            profile_id: profile_id.to_owned(),
+            partition: methodology.held_out_partition.clone(),
+            held_out: true,
+            stratum: methodology.effect_stratum.clone(),
+            metric: methodology.effect_metric.clone(),
+            paired_query_count: methodology.minimum_effect_queries_per_partition,
+            minimum_paired_query_count: methodology.minimum_effect_queries_per_partition,
+            mean_difference_ppm: mean,
+            practical_effect_threshold_ppm: methodology.practical_effect_threshold_ppm,
+            confidence_level_ppm: methodology.confidence_level_ppm,
+            confidence_interval_lower_ppm: mean / 2,
+            confidence_interval_upper_ppm: mean * 2,
+            status: tracedecay_query::search_quality::DirectEvaluationStatusV1::Pass,
+        }];
+        report
+    }
+
+    /// A packaged asset only becomes activation authority when it was scored
+    /// under the methodology this build implements. The checked-in bytes were
+    /// written under packaged schema 1, whose reports carry no methodology
+    /// version and no paired effect measurements, so they cannot even be read
+    /// as current evidence — let alone rebound to the current workload digest.
     #[test]
-    fn portable_report_requires_the_current_workload_digest() {
-        let qualification: PackagedNativeQualificationV1 =
-            serde_json::from_slice(packaged_native_qualification_bytes())
-                .expect("reviewed packaged qualification");
+    fn packaged_evidence_from_a_superseded_methodology_is_not_activation_authority() {
+        assert!(
+            serde_json::from_slice::<PackagedNativeQualificationV1>(
+                packaged_native_qualification_bytes()
+            )
+            .is_err(),
+            "schema 1 evidence must not decode as current-methodology evidence"
+        );
+    }
+
+    /// A fresh workload digest is not a qualification. The held-out effect is
+    /// re-derived here from the retained measurement against the workload's own
+    /// declared threshold, so evidence that merely names the current workload
+    /// still cannot activate retrieval.
+    #[test]
+    fn a_current_workload_digest_without_a_held_out_effect_cannot_activate() {
         let workload: CandidateWorkloadV1 =
             serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
-        let current_digest = compute_workload_digest(&workload).expect("current workload digest");
+        let candidate = workload
+            .qualification_methodology
+            .candidate_profile_ids
+            .first()
+            .expect("a candidate profile")
+            .clone();
+        let mut report = effect_report(&workload, &candidate);
+        report.workload_digest =
+            compute_workload_digest(&workload).expect("current workload digest");
+        report.paired_effects.clear();
 
-        let mut report = qualification.portable_evidence.report;
-        assert_ne!(
-            report.workload_digest, current_digest,
-            "the packaged report is bound to a superseded workload"
+        let error = report
+            .validate_held_out_effect(&workload, &candidate)
+            .expect_err("a report with no measured effect cannot activate");
+        assert!(
+            error.to_string().contains("carries no held-out"),
+            "{error}"
         );
-        assert_eq!(
-            validate_report_authority(&report, &workload),
-            Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
-        );
+    }
 
-        report.workload_digest = current_digest;
+    #[test]
+    fn a_held_out_effect_below_the_declared_threshold_cannot_activate() {
+        let workload: CandidateWorkloadV1 =
+            serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
+        let candidate = workload
+            .qualification_methodology
+            .candidate_profile_ids
+            .first()
+            .expect("a candidate profile")
+            .clone();
+        let mut report = effect_report(&workload, &candidate);
+        let threshold = workload
+            .qualification_methodology
+            .practical_effect_threshold_ppm;
+        report.paired_effects[0].mean_difference_ppm = i64::from(threshold) - 1;
+
+        assert!(
+            report
+                .validate_held_out_effect(&workload, &candidate)
+                .is_err()
+        );
+    }
+
+    /// An interval that includes zero is a tie the sample cannot resolve, so it
+    /// does not activate however large the mean looks.
+    #[test]
+    fn a_held_out_interval_through_zero_cannot_activate() {
+        let workload: CandidateWorkloadV1 =
+            serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
+        let candidate = workload
+            .qualification_methodology
+            .candidate_profile_ids
+            .first()
+            .expect("a candidate profile")
+            .clone();
+        let mut report = effect_report(&workload, &candidate);
+        report.paired_effects[0].confidence_interval_lower_ppm = 0;
+
+        assert!(
+            report
+                .validate_held_out_effect(&workload, &candidate)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_report_scored_under_another_methodology_version_cannot_activate() {
+        let workload: CandidateWorkloadV1 =
+            serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
+        let candidate = workload
+            .qualification_methodology
+            .candidate_profile_ids
+            .first()
+            .expect("a candidate profile")
+            .clone();
+        let mut report = effect_report(&workload, &candidate);
+        report.methodology_version = QUALIFICATION_METHODOLOGY_VERSION - 1;
+
+        let error = report
+            .validate_held_out_effect(&workload, &candidate)
+            .expect_err("evidence from another rule cannot activate");
+        assert!(error.to_string().contains("scored under"), "{error}");
+    }
+
+    /// Positive control: a qualifying held-out effect still activates, so the
+    /// denials above are not simply refusing everything.
+    #[test]
+    fn a_qualifying_held_out_effect_activates() {
+        let workload: CandidateWorkloadV1 =
+            serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
+        for candidate in &workload.qualification_methodology.candidate_profile_ids {
+            let report = effect_report(&workload, candidate);
+
+            assert_eq!(
+                report
+                    .validate_held_out_effect(&workload, candidate)
+                    .map_err(|error| error.to_string()),
+                Ok(())
+            );
+        }
+        // The lexical baseline is not a candidate, so it proves no effect.
         assert_eq!(
-            validate_report_authority(&report, &workload),
-            Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected),
-            "a rebound digest is not requalification"
+            effect_report(&workload, "query-fallback")
+                .validate_held_out_effect(
+                    &workload,
+                    &workload.qualification_methodology.baseline_profile_id,
+                )
+                .map_err(|error| error.to_string()),
+            Ok(())
         );
     }
 

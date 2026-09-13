@@ -32,7 +32,9 @@ where
     T::try_from(value.to_owned()).expect("typed fixture identity")
 }
 
-fn passing_report(profile_id: &str) -> DirectEvaluationReportV1 {
+pub(in crate::semantic_runtime) fn passing_report(
+    profile_id: &str,
+) -> DirectEvaluationReportV1 {
     let empty_ratio = || DirectRatioMetricV1 {
         numerator: 0,
         denominator: 0,
@@ -69,6 +71,11 @@ fn passing_report(profile_id: &str) -> DirectEvaluationReportV1 {
     DirectEvaluationReportV1 {
         command: "compare".to_owned(),
         status: DirectEvaluationStatusV1::Pass,
+        methodology_version:
+            tracedecay_query::search_quality::QUALIFICATION_METHODOLOGY_VERSION,
+        // This fixture profile is not one the methodology names as a candidate,
+        // so it has no held-out effect to prove.
+        paired_effects: Vec::new(),
         workload_digest: "workload.inventory-test".to_owned(),
         corpus_digest: "corpus.inventory-test".to_owned(),
         fixture_source_repository_commit: "commit.inventory-test".to_owned(),

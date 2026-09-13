@@ -13,7 +13,9 @@ pub mod semantic_native;
 
 pub use candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, DirectEvaluatedProfileMaterialV1,
-    EvaluationConcurrencyContractV1, EvaluationExecutionContractV1,
+    EvaluationConcurrencyContractV1, EvaluationExecutionContractV1, NeedProvenanceKindV1,
+    NeedProvenanceV1, QUALIFICATION_METHODOLOGY_VERSION, QualificationMethodologyV1,
+    QualificationPolicyFreezeV1,
     GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
     ProductionCandidateNativeExecutionAuthorityV1, ProductionCandidateNativeGenerationResourcesV1,
     ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
@@ -45,5 +47,5 @@ pub use native_qualification::{
 pub use report::{
     DirectEvaluationReportV1, DirectProfileEvaluationV1, DirectQualityMetricsV1,
     DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1, DirectStratumQualityV1,
-    DirectWorstStratumV1,
+    DirectWorstStratumV1, PairedEffectMeasurementV1,
 };

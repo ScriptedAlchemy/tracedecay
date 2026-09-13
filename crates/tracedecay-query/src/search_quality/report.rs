@@ -33,15 +33,11 @@ pub struct DirectQueryEvaluationV1 {
 pub(crate) fn pairwise_query_pairs<'a>(
     candidate: &'a [DirectQueryEvaluationV1],
     baseline: &'a [DirectQueryEvaluationV1],
+    stratum: &str,
 ) -> Vec<(&'a DirectQueryEvaluationV1, &'a DirectQueryEvaluationV1)> {
     let mut pairs = candidate
         .iter()
-        .filter(|query| {
-            query
-                .strata
-                .iter()
-                .any(|stratum| stratum == "natural_language")
-        })
+        .filter(|query| query.strata.iter().any(|name| name == stratum))
         .filter_map(|query| {
             baseline
                 .iter()
@@ -149,11 +145,43 @@ pub struct DirectProfileEvaluationV1 {
     pub queries: Vec<DirectQueryEvaluationV1>,
 }
 
+/// One candidate profile's paired effect over the workload's effect stratum.
+///
+/// `d(query) = candidate ndcg_at_10_ppm - baseline ndcg_at_10_ppm` for each
+/// need both profiles scored. The interval is the two-sided Student-t interval
+/// on the mean of those differences; a tie leaves it straddling zero, which is
+/// not a qualification.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PairedEffectMeasurementV1 {
+    pub profile_id: String,
+    pub partition: String,
+    /// True for the partition the methodology decides on. Only this row gates;
+    /// the tuning partition's row is reported as comparison evidence.
+    pub held_out: bool,
+    pub stratum: String,
+    pub metric: String,
+    pub paired_query_count: u64,
+    pub minimum_paired_query_count: u64,
+    pub mean_difference_ppm: i64,
+    pub practical_effect_threshold_ppm: u32,
+    pub confidence_level_ppm: u32,
+    pub confidence_interval_lower_ppm: i64,
+    pub confidence_interval_upper_ppm: i64,
+    pub status: DirectEvaluationStatusV1,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DirectEvaluationReportV1 {
     pub command: String,
     pub status: DirectEvaluationStatusV1,
+    /// Decision rule this report was scored under. Evidence measured against
+    /// one methodology is never reread under another.
+    pub methodology_version: u32,
+    /// Paired effect per candidate profile and partition, retained beside the
+    /// aggregate so the qualification decision can be re-derived by hand.
+    pub paired_effects: Vec<PairedEffectMeasurementV1>,
     pub workload_digest: String,
     pub corpus_digest: String,
     pub fixture_source_repository_commit: String,
@@ -290,6 +318,65 @@ impl DirectEvaluationReportV1 {
             .map_err(|_| PortableNativeQualificationValidationErrorV1::NativeEvidence)
     }
 
+    /// Re-derive the held-out qualification decision for one evaluated profile
+    /// from the retained measurement and the authoritative workload's declared
+    /// methodology.
+    ///
+    /// A passing report status is not a substitute: this is what stops evidence
+    /// scored under a looser or differently versioned rule from activating or
+    /// being packaged. A profile the methodology does not name as a candidate —
+    /// the lexical baseline itself — has no effect to prove.
+    pub fn validate_held_out_effect(
+        &self,
+        workload: &CandidateWorkloadV1,
+        evaluated_profile_id: &str,
+    ) -> Result<(), SearchEvalError> {
+        let methodology = &workload.qualification_methodology;
+        if self.methodology_version != methodology.methodology_version
+            || self.methodology_version != super::candidate_output::QUALIFICATION_METHODOLOGY_VERSION
+        {
+            return Err(SearchEvalError::Contract(format!(
+                "report was scored under qualification methodology {} rather than the declared {}",
+                self.methodology_version, methodology.methodology_version
+            )));
+        }
+        if !methodology
+            .candidate_profile_ids
+            .iter()
+            .any(|profile_id| profile_id == evaluated_profile_id)
+        {
+            return Ok(());
+        }
+        let effect = self
+            .paired_effects
+            .iter()
+            .find(|effect| {
+                effect.profile_id == evaluated_profile_id
+                    && effect.partition == methodology.held_out_partition
+                    && effect.stratum == methodology.effect_stratum
+            })
+            .ok_or_else(|| {
+                SearchEvalError::Contract(format!(
+                    "report carries no held-out {} effect for profile {evaluated_profile_id}",
+                    methodology.effect_stratum
+                ))
+            })?;
+        if effect.status != DirectEvaluationStatusV1::Pass
+            || effect.metric != methodology.effect_metric
+            || effect.paired_query_count < methodology.minimum_effect_queries_per_partition
+            || effect.confidence_level_ppm != methodology.confidence_level_ppm
+            || effect.practical_effect_threshold_ppm != methodology.practical_effect_threshold_ppm
+            || effect.mean_difference_ppm < i64::from(methodology.practical_effect_threshold_ppm)
+            || effect.confidence_interval_lower_ppm <= 0
+        {
+            return Err(SearchEvalError::Contract(format!(
+                "held-out effect does not qualify profile {evaluated_profile_id}: {}",
+                super::evaluate::paired_effect_summary(effect)
+            )));
+        }
+        Ok(())
+    }
+
     fn validate_native_evidence(
         &self,
         workload: &CandidateWorkloadV1,
@@ -298,7 +385,7 @@ impl DirectEvaluationReportV1 {
         if self.status == DirectEvaluationStatusV1::Fail {
             return Err(SearchEvalError::Contract(format!(
                 "native activation direct evaluation report failed: {}",
-                self.failure_diagnostic()
+                self.failure_diagnostic(workload)
             )));
         }
         if self.status != DirectEvaluationStatusV1::Pass {
@@ -450,7 +537,7 @@ impl DirectEvaluationReportV1 {
         )
     }
 
-    fn failure_diagnostic(&self) -> String {
+    fn failure_diagnostic(&self, workload: &CandidateWorkloadV1) -> String {
         if let Some(profile) = self
             .profiles
             .iter()
@@ -565,44 +652,34 @@ impl DirectEvaluationReportV1 {
                 profile.quality.duplicate_rate.denominator,
             );
         }
-        let diagnostic = super::evaluate::pairwise_candidate_failure_diagnostic(&self.profiles)
-            .unwrap_or_else(|| "pairwise candidate quality failed".to_owned());
+        let diagnostic = super::evaluate::evaluate_paired_effects(workload, &self.profiles)
+            .diagnostic
+            .unwrap_or_else(|| "paired candidate effect failed".to_owned());
         self.pairwise_query_diagnostic()
             .map_or(diagnostic.clone(), |queries| {
                 format!("{diagnostic} queries=[{queries}]")
             })
     }
 
+    /// Per-need native evidence for the first candidate whose measured effect
+    /// did not qualify. The effect measurement decides; this only explains it.
     fn pairwise_query_diagnostic(&self) -> Option<String> {
-        for candidate in self.profiles.iter().filter(|profile| {
-            profile.profile_id == super::evaluate::SEMANTIC_PROFILE
-                || profile.profile_id == super::evaluate::RERANK_PROFILE
-        }) {
+        for effect in self
+            .paired_effects
+            .iter()
+            .filter(|effect| effect.status != DirectEvaluationStatusV1::Pass)
+        {
+            let candidate = self.profiles.iter().find(|profile| {
+                profile.profile_id == effect.profile_id && profile.partition == effect.partition
+            })?;
             let baseline = self.profiles.iter().find(|profile| {
                 profile.profile_id == super::evaluate::QUERY_BASELINE_PROFILE
                     && profile.partition == candidate.partition
             })?;
-            let baseline_natural = baseline
-                .quality
-                .strata
-                .iter()
-                .find(|stratum| stratum.stratum == "natural_language")?;
-            let candidate_natural = candidate
-                .quality
-                .strata
-                .iter()
-                .find(|stratum| stratum.stratum == "natural_language")?;
-            if candidate_natural
-                .ndcg_at_10_ppm
-                .saturating_sub(baseline_natural.ndcg_at_10_ppm)
-                >= super::evaluate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
-            {
-                continue;
-            }
             let output = self.raw_outputs.iter().find(|output| {
                 output.profile_id == candidate.profile_id && output.partition == candidate.partition
             })?;
-            let details = pairwise_query_pairs(&candidate.queries, &baseline.queries)
+            let details = pairwise_query_pairs(&candidate.queries, &baseline.queries, &effect.stratum)
                 .into_iter()
                 .filter_map(|(query, baseline_query)| {
                     let raw = output
@@ -881,7 +958,7 @@ mod pairwise_and_native_method_tests {
         ];
         let baseline = candidate.clone();
 
-        let ordered = pairwise_query_pairs(&candidate, &baseline);
+        let ordered = pairwise_query_pairs(&candidate, &baseline, "natural_language");
 
         assert_eq!(ordered.len(), 2);
         assert_eq!(ordered[0].0.query_id, "can-improve");

@@ -76,6 +76,11 @@ fn passing_report(evaluated_profile_id: &str) -> DirectEvaluationReportV1 {
     DirectEvaluationReportV1 {
         command: "compare".to_owned(),
         status: DirectEvaluationStatusV1::Pass,
+        methodology_version:
+            tracedecay_query::search_quality::QUALIFICATION_METHODOLOGY_VERSION,
+        // This fixture profile is not one the methodology names as a candidate,
+        // so it has no held-out effect to prove.
+        paired_effects: Vec::new(),
         workload_digest: "workload".to_owned(),
         corpus_digest: "corpus".to_owned(),
         fixture_source_repository_commit: "commit".to_owned(),
