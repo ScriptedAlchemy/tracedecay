@@ -1856,7 +1856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invariant_receipt_probes_have_covering_indexes() {
+    async fn observation_point_reads_have_covering_indexes() {
         let directory = TempDir::new().unwrap();
         let connection = open_registered_test_fixture(
             &directory.path().join("sessions.db"),
@@ -1870,6 +1870,7 @@ mod tests {
                 "SELECT name FROM sqlite_master
                  WHERE type = 'index'
                    AND name IN (
+                       'idx_observations_session_sequence',
                        'idx_observations_identity_receipt',
                        'idx_projection_dispositions_observation_receipt'
                    )
@@ -1887,8 +1888,34 @@ mod tests {
             indexes,
             [
                 "idx_observations_identity_receipt",
+                "idx_observations_session_sequence",
                 "idx_projection_dispositions_observation_receipt"
             ]
+        );
+        let mut rows = connection
+            .query(
+                "EXPLAIN QUERY PLAN
+                 SELECT observation_json
+                 FROM observations
+                 WHERE json_extract(observation_json, '$.__retention_released') IS NULL
+                   AND json_extract(
+                        observation_json,
+                        '$.identity.source.session_id'
+                   ) = ?1
+                 ORDER BY sequence DESC
+                 LIMIT ?2",
+                tracedecay_runtime_core::db::engine::params!["session.missing", 65_i64],
+            )
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            plan.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_observations_session_sequence")),
+            "lifecycle admission must seek by session instead of scanning observations: {plan:?}"
         );
     }
 

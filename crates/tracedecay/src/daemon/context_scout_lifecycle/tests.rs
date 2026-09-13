@@ -506,6 +506,48 @@ async fn registered_lifecycle_lookup_resolves_the_authoritative_tuple() {
 }
 
 #[tokio::test]
+async fn registered_lifecycle_lookup_does_not_wait_for_writer() {
+    let temporary = TempDir::new().unwrap();
+    let project_id = id::<ProjectId>("project.native.reader-only-lookup");
+    let worktree_id = id::<WorktreeId>("worktree.native.reader-only-lookup");
+    let runtime = project_runtime(&temporary, &project_id).await;
+    let sessions = runtime
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    sessions
+        .observation_store()
+        .persist_observation(durable_native_observation(&project_id))
+        .await
+        .unwrap();
+    assert_eq!(
+        register_context_scout_lifecycle_authority(
+            [23; 16],
+            [24; 16],
+            project_id,
+            worktree_id,
+            &sessions,
+        ),
+        AuthorityRegistrationV1::Registered
+    );
+    let writer = sessions.begin_write_transaction().await.unwrap();
+
+    let lifecycle = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        lookup_registered_context_scout_lifecycle(
+            [23; 16],
+            [24; 16],
+            &id::<SessionId>("session.native.codex"),
+        ),
+    )
+    .await
+    .expect("reader-only lifecycle lookup must not queue behind the writer")
+    .expect("durable lifecycle must resolve");
+
+    assert_eq!(lifecycle.provider_id.as_str(), "codex");
+    writer.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn lookup_rejects_a_binding_that_does_not_match_the_requested_identity() {
     let temporary = TempDir::new().unwrap();
     let project_id = id::<ProjectId>("project.native.binding");

@@ -1826,6 +1826,7 @@ pub(super) struct Index {
 
 pub(super) const INDEX_DESCENDING_COLUMNS: &[(&str, &[&str])] =
     &[("idx_code_projects_last_seen_project", &["last_seen_at"])];
+pub(super) const INDEX_EXPRESSION_COLUMN: &str = "<expression>";
 
 pub(super) const INDEXES: &[Index] = &[
     Index {
@@ -1876,6 +1877,13 @@ pub(super) const INDEXES: &[Index] = &[
         unique: true,
         origin: "u",
         columns: &["observation_id"],
+    },
+    Index {
+        table: "observations",
+        name: Some("idx_observations_session_sequence"),
+        unique: false,
+        origin: "c",
+        columns: &[INDEX_EXPRESSION_COLUMN, "sequence"],
     },
     Index {
         table: "observations",
