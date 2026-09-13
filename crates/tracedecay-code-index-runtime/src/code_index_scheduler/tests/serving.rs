@@ -30,8 +30,6 @@ use tracedecay_domain::{
     RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
     TemporalModeV1, UtcMicros, VectorWatermark, encode_lowercase_hex, sha256_hex_suffix,
 };
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use tracedecay_graph_db::NeverCancelled;
 use tracedecay_query::retrieval::{
     exact::{CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest},
     lexical::{
