@@ -194,6 +194,56 @@ def prime_fact_read_lifecycle(
     )
 
 
+LCM_READ_TOOLS = frozenset(
+    {
+        "tracedecay_lcm_describe",
+        "tracedecay_lcm_expand",
+    }
+)
+
+
+def validate_lcm_read_response(
+    name: str, response: dict[str, Any], fixture: dict[str, Any]
+) -> None:
+    """Require each LCM read to consume the captured rollout's own message."""
+    if name not in LCM_READ_TOOLS:
+        return
+    message_id = fixture.get("lcm_message_id")
+    content = fixture.get("lcm_message")
+    if not isinstance(message_id, str) or not message_id or not isinstance(content, str) or not content:
+        raise JourneyError(f"{name} has no captured LCM message input")
+    if name == "tracedecay_lcm_expand":
+        if not any(
+            value.get("message_id") == message_id and value.get("content") == content
+            for value in objects(response)
+        ):
+            raise JourneyError("lcm expand did not return the captured message identity and content")
+        return
+    description = _object_field(response, "description")
+    overview = next(
+        (
+            value
+            for value in objects(description.get("raw_messages"))
+            if value.get("message_id") == message_id
+        ),
+        None,
+    )
+    if overview is None:
+        raise JourneyError("lcm describe omitted the captured message from the session shape")
+    count = description.get("raw_message_count")
+    if not isinstance(count, int) or count < 1:
+        raise JourneyError(f"lcm describe counted no raw message: {count!r}")
+    # Describe withholds payload bodies by contract, so the message's own total
+    # length is the evidence that it describes the captured prompt, not a stub.
+    content_range = overview.get("content_range")
+    total_chars = content_range.get("total_chars") if isinstance(content_range, dict) else None
+    if total_chars != len(content):
+        raise JourneyError(
+            "lcm describe reported a foreign length for the captured message: "
+            f"{total_chars!r} != {len(content)}"
+        )
+
+
 def validate_fact_read_response(
     name: str, response: dict[str, Any], fixture: dict[str, Any]
 ) -> None:
