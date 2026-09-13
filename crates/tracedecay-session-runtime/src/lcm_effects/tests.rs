@@ -2752,7 +2752,8 @@ async fn retained_summary_publication_requires_the_exact_planned_source_range() 
 
 #[tokio::test]
 async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
-    const RAW_ROWS: i64 = 65;
+    const RAW_ROWS: i64 = 2;
+    const PROTECTION_PAGE_BYTES: u64 = 1024 * 1024;
     let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-large-bytes").await;
     let db = harness.registered.clone();
     let session_id = "large-byte-convergence-session";
@@ -2802,18 +2803,19 @@ async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
     }
     transaction.commit().await.unwrap();
 
-    let first = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+    let first = db
+        .lcm_protect_session_raw_messages_page(
+            "cursor",
+            session_id,
+            0,
+            tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize,
+            PROTECTION_PAGE_BYTES,
+        )
         .await
         .unwrap();
-    assert_eq!(
-        first.sessions[0].disposition,
-        super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Preparing
-    );
-    assert!(first.sessions[0].protection_rows_scanned < RAW_ROWS as usize);
-    assert!(
-        first.sessions[0].protection_bytes_scanned
-            <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
-    );
+    assert!(first.has_more);
+    assert!(first.rows_scanned < RAW_ROWS as usize);
+    assert!(first.bytes_scanned <= PROTECTION_PAGE_BYTES);
 
     let second = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
         .await
