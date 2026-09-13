@@ -1,6 +1,6 @@
 ---
 name: fixing-build-and-type-errors
-description: 'Interpret compiler diagnostics with TraceDecay symbol and dependency evidence, especially signature, field, trait, or module failures spanning files.'
+description: Diagnose build and type errors that span symbols or files with TraceDecay dependency evidence.
 ---
 
 # Fixing build and type errors

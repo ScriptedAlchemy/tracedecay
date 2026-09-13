@@ -17,8 +17,7 @@ use tracedecay_contracts::{
     DisclosureClass, RequestContext, retained_surface_application_operation,
 };
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1,
-    UserProfileId, UtcMicros, WorktreeId,
+    ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1, UserProfileId, UtcMicros,
 };
 use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
@@ -38,7 +37,7 @@ const REQUEST_MAX_WORK_UNITS: u64 = 10_000;
 const SESSION_REFRESH_LIFECYCLE_CAPABILITY: &[u8] =
     b"application.retained.session-refresh-lifecycle.v1";
 
-/// The exact mounted owner a refresh request must name before it is admitted.
+/// The exact mounted owner selected by a public refresh request.
 ///
 /// `policy_digest` is the stable admission authority the opaque handle is
 /// bound to: the project-open capability grant for a project owner, and the
@@ -84,25 +83,12 @@ fn session_refresh_command(
     if cancellation_signal.context().token_id != context.cancellation().token_id {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
-    if request.request.scope.profile_id() != mounted.profile_id.as_str() {
-        return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
-    }
-    if request.request.session.store_id != mounted.session_store_id.as_str()
-        || request.request.session.root_id != mounted.session_root_id.as_str()
-    {
-        return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
-    }
-    if !request_matches_mounted_project_scope(request, context) {
-        return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
-    }
-
     let selectors = &request.request;
     let action = admitted_action(request.action, selectors.handle.as_deref())?;
 
-    // A profile-owned identity resolves to the synthetic profile-session scope,
-    // so this equality is what binds a profile refresh to the profile
-    // authority's own admitted context rather than to any project.
-    let identity = admitted_identity(selectors)?;
+    // Identity is daemon-owned: the public request selects a mounted owner but
+    // never repeats its profile, project, Git-route, store, or root ids.
+    let identity = admitted_identity(&selectors.scope, context, mounted)?;
     let resolved_scope = identity
         .session_request_scope()
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
@@ -203,56 +189,41 @@ fn admitted_action(
     }
 }
 
-/// Project-scoped requests must name the exact mounted project route. A
-/// profile-scoped request names no project; its binding to the admitted
-/// profile-session scope is checked through the resolved identity instead.
-fn request_matches_mounted_project_scope(
-    request: &SessionRefreshRequestV1,
-    context: &RequestContext,
-) -> bool {
-    let SessionRefreshScopeV1::Project { project } = &request.request.scope else {
-        return true;
-    };
-    let scope = context.scope();
-    let branch_matches = scope
-        .reference
-        .as_ref()
-        .and_then(|reference| reference.as_str().strip_prefix("refs/heads/"))
-        .is_some_and(|branch| branch == project.branch_id);
-    project.id == scope.project_id.as_str()
-        && project.repository_id == scope.repository_id.as_str()
-        && project.worktree_id == scope.worktree_id.as_str()
-        && branch_matches
-}
-
 fn admitted_identity(
-    request: &SessionRefreshActionRequestV1,
+    scope: &SessionRefreshScopeV1,
+    context: &RequestContext,
+    mounted: &MountedSessionRefreshAuthorityV1<'_>,
 ) -> Result<ResolvedSessionIdentity, RetainedSurfaceExecutionErrorV1> {
-    let profile_id = ProfileId::new(request.scope.profile_id().to_owned())
+    let profile_id = ProfileId::new(mounted.profile_id.as_str().to_owned())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
-    let store_id = SessionStoreId::new(request.session.store_id.clone())
+    let store_id = SessionStoreId::new(mounted.session_store_id.as_str().to_owned())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
-    let root_id = SessionRootId::new(request.session.root_id.clone())
+    let root_id = SessionRootId::new(mounted.session_root_id.as_str().to_owned())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
-    match &request.scope {
-        SessionRefreshScopeV1::Profile { .. } => Ok(ResolvedSessionIdentity::for_profile(
+    match scope {
+        SessionRefreshScopeV1::Profile {} => Ok(ResolvedSessionIdentity::for_profile(
             profile_id, store_id, root_id,
         )),
-        SessionRefreshScopeV1::Project { project } => Ok(ResolvedSessionIdentity::for_project(
-            profile_id,
-            ProjectId::new(project.id.clone())
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-            store_id,
-            root_id,
-            ResolvedGitRoute::new(
-                RepositoryId::new(project.repository_id.clone())
-                    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-                WorktreeId::new(project.worktree_id.clone())
-                    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-                BranchId::new(project.branch_id.clone())
-                    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-            ),
-        )),
+        SessionRefreshScopeV1::Project {} => {
+            let request_scope = context.scope();
+            let branch = request_scope
+                .reference
+                .as_ref()
+                .and_then(|reference| reference.as_str().strip_prefix("refs/heads/"))
+                .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+            Ok(ResolvedSessionIdentity::for_project(
+                profile_id,
+                request_scope.project_id.clone(),
+                store_id,
+                root_id,
+                ResolvedGitRoute::new(
+                    request_scope.repository_id.clone(),
+                    request_scope.worktree_id.clone(),
+                    BranchId::new(branch.to_owned())
+                        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+                ),
+            ))
+        }
     }
 }
 

@@ -29,7 +29,7 @@ pub(super) struct ActualForeignKey {
 #[derive(Debug)]
 pub(super) struct ActualIndexColumn {
     pub(super) cid: i64,
-    pub(super) name: String,
+    pub(super) name: Option<String>,
     pub(super) descending: bool,
     pub(super) collation: String,
 }

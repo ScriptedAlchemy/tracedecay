@@ -96,7 +96,15 @@ command -v python3 >/dev/null 2>&1 || {
 }
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-daemon.XXXXXX")"
-export TRACEDECAY_DATA_DIR="$run_dir/profile"
+if [[ -n "${TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR:-}" ]]; then
+  [[ "$TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR" == /* ]] || {
+    echo "error: TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR must be absolute" >&2
+    exit 2
+  }
+  export TRACEDECAY_DATA_DIR="$TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR"
+else
+  export TRACEDECAY_DATA_DIR="$run_dir/profile"
+fi
 export TRACEDECAY_DAEMON_SOCKET="$run_dir/daemon.sock"
 export TRACEDECAY_DAEMON_HARNESS_ACTIVE=1
 # Keep explicit caller overrides inside the elected daemon's isolated profile.

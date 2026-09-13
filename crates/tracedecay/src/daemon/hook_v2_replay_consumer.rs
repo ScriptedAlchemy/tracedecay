@@ -28,7 +28,9 @@ const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmissionOutcomeV1 {
     match outcome {
         HookV2AdmissionOutcomeV1::Admitted { .. } => HookReplayAdmissionOutcomeV1::Admitted,
-        HookV2AdmissionOutcomeV1::ExactDuplicate => HookReplayAdmissionOutcomeV1::ExactDuplicate,
+        HookV2AdmissionOutcomeV1::ExactDuplicate { .. } => {
+            HookReplayAdmissionOutcomeV1::ExactDuplicate
+        }
         HookV2AdmissionOutcomeV1::Conflict => HookReplayAdmissionOutcomeV1::Conflict,
         HookV2AdmissionOutcomeV1::CatchupRequired => HookReplayAdmissionOutcomeV1::CatchupRequired,
         HookV2AdmissionOutcomeV1::Backpressured => HookReplayAdmissionOutcomeV1::Backpressured,

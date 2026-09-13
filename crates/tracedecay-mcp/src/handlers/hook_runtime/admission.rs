@@ -249,8 +249,12 @@ pub enum HookV2AdmissionOutcomeV1 {
         feedback_notice: Value,
         github_stack_signal_available: bool,
     },
-    /// This exact envelope was already admitted; no work is repeated.
-    ExactDuplicate,
+    /// This exact envelope was already admitted; no work is repeated. A retry
+    /// may receive the Scout address mounted by completed producer work.
+    ExactDuplicate {
+        context_scout_address:
+            Option<Box<tracedecay_contracts::context_scout::ContextScoutAddressV1>>,
+    },
     /// The same event identity previously carried different bytes.
     Conflict,
     /// The binding no longer authorizes this envelope.
@@ -371,7 +375,9 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
         && !requires_producer_work
     {
-        return HookV2AdmissionOutcomeV1::ExactDuplicate;
+        return HookV2AdmissionOutcomeV1::ExactDuplicate {
+            context_scout_address: None,
+        };
     }
     if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
         && receipt.work_completed
@@ -386,7 +392,22 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             return HookV2AdmissionOutcomeV1::Backpressured;
         };
         cleanup();
-        return HookV2AdmissionOutcomeV1::ExactDuplicate;
+        let context_scout_address = if host_response_available {
+            let lifecycle =
+                hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
+            match lifecycle.as_ref() {
+                Some(lifecycle) => cg
+                    .resolve_mounted_context_scout_claim_authority(lifecycle)
+                    .await
+                    .map(|(address, _)| Box::new(address)),
+                None => None,
+            }
+        } else {
+            None
+        };
+        return HookV2AdmissionOutcomeV1::ExactDuplicate {
+            context_scout_address,
+        };
     }
     let completion = if requires_producer_work {
         let Some(completion) = retain_hook_v2_pending_work(
@@ -573,10 +594,13 @@ pub(super) async fn hook_v2_admit(
                 "feedback_notice": feedback_notice,
                 "github_stack_signal_available": github_stack_signal_available,
             }),
-            HookV2AdmissionOutcomeV1::ExactDuplicate => json!({
+            HookV2AdmissionOutcomeV1::ExactDuplicate {
+                context_scout_address,
+            } => json!({
                 "action": action,
                 "status": "exact_duplicate",
                 "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+                "context_scout_address": context_scout_address,
             }),
             HookV2AdmissionOutcomeV1::Conflict => json!({
                 "action": action,

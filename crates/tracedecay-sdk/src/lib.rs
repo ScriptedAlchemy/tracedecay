@@ -17,15 +17,17 @@ pub use tracedecay_contracts::{
 /// Canonical Work commands, projections, and executable capability inventory.
 pub mod work {
     pub use tracedecay_contracts::{
-        AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand,
-        CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, PauseWorkRunCommand,
-        ReleaseWorkPlacementCommand, ResumeWorkRunCommand, WorkArtifactHydrationRequestV1,
-        WorkArtifactHydrationV1, WorkAttemptArtifactsV1, WorkAttemptEvidenceStateV1,
-        WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-        WorkProductMutationReceiptV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
-        WorkSynthesisAdmissionV1, WorkSynthesisAttemptV1, WorkSynthesisEvidenceGroupV1,
-        WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
-        WorkSynthesisSourceSetV1, work_executable_binding_registry as executable_binding_registry,
+        AcceptWorkProposalDispositionV1, AcceptWorkProposalRequestV1, AdmitWorkExecutionRequestV1,
+        AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, CreateWorkTaskRequestV1,
+        DecideWorkProposalRequestV1, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
+        ResumeWorkRunCommand, ReviewWorkProposalDispositionV1, ReviewWorkProposalRequestV1,
+        WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptArtifactsV1,
+        WorkAttemptEvidenceStateV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
+        WorkPlacementStatusRequestV1, WorkProductMutationReceiptV1, WorkRunControlReadingV1,
+        WorkRunControlRequestV1, WorkSynthesisAdmissionV1, WorkSynthesisAttemptV1,
+        WorkSynthesisEvidenceGroupV1, WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1,
+        WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1,
+        work_executable_binding_registry as executable_binding_registry,
     };
     pub use tracedecay_domain::{
         WorkPlacementBlockerV1, WorkPlacementKindV1, WorkPlacementPreflightV1,

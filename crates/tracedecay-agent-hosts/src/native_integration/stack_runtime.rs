@@ -31,8 +31,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, NativeIntegrationApprovalV1, NativeIntegrationSelectionV1,
-    NativeIntegrationTerminalOutcomeV1, ProjectId, StackDeliveryWatermarkId, StackSignalId,
-    StackSignalKindV1, UtcMicros, canonical_sha256,
+    NativeIntegrationTerminalOutcomeV1, NativeIntegrationUnavailabilityV1, ProjectId,
+    StackDeliveryWatermarkId, StackSignalId, StackSignalKindV1, UtcMicros, canonical_sha256,
 };
 
 use tracedecay_global_db::{
@@ -741,6 +741,24 @@ impl StackDeliveryPort for StackRuntimePortsV1 {
     }
 }
 
+fn map_native_preflight_error(error: NativeIntegrationContractError) -> StackCoordinatorErrorV1 {
+    match error {
+        NativeIntegrationContractError::Port(NativeIntegrationPortError::Cancelled) => {
+            StackCoordinatorErrorV1::Cancelled
+        }
+        NativeIntegrationContractError::Port(NativeIntegrationPortError::Stale) => {
+            StackCoordinatorErrorV1::Stale
+        }
+        NativeIntegrationContractError::Port(NativeIntegrationPortError::Denied) => {
+            StackCoordinatorErrorV1::Denied
+        }
+        NativeIntegrationContractError::Port(_) => StackCoordinatorErrorV1::Unavailable,
+        NativeIntegrationContractError::Contract(error) => {
+            StackCoordinatorErrorV1::Invalid(error.to_string())
+        }
+    }
+}
+
 impl OptionalStackPreflightPort for StackRuntimePortsV1 {
     fn preflight(
         &self,
@@ -752,21 +770,7 @@ impl OptionalStackPreflightPort for StackRuntimePortsV1 {
         let outcome = self
             .native_service
             .preflight(request.clone(), cancellation)
-            .map_err(|error| match error {
-                NativeIntegrationContractError::Port(NativeIntegrationPortError::Cancelled) => {
-                    StackCoordinatorErrorV1::Cancelled
-                }
-                NativeIntegrationContractError::Port(NativeIntegrationPortError::Stale) => {
-                    StackCoordinatorErrorV1::Stale
-                }
-                NativeIntegrationContractError::Port(NativeIntegrationPortError::Denied) => {
-                    StackCoordinatorErrorV1::Denied
-                }
-                NativeIntegrationContractError::Port(_) => StackCoordinatorErrorV1::Unavailable,
-                NativeIntegrationContractError::Contract(error) => {
-                    StackCoordinatorErrorV1::Invalid(error.to_string())
-                }
-            })?;
+            .map_err(map_native_preflight_error)?;
         self.preflight_outcomes
             .lock()
             .map_err(|_| StackCoordinatorErrorV1::Unavailable)?
@@ -913,6 +917,16 @@ impl DaemonGitHubStackRuntimeV1 {
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
+        if matches!(
+            request.topology.selection,
+            tracedecay_contracts::NativeIntegrationSelectionBindingV1::IndependentBranch { .. }
+        ) {
+            return self
+                .ports
+                .native_service
+                .preflight(request.clone(), cancellation)
+                .map_err(map_native_preflight_error);
+        }
         let request_digest = canonical_sha256(request)
             .map_err(|error| StackCoordinatorErrorV1::Invalid(error.to_string()))?;
         let disposition = self.coordinator.optional_preflight(
@@ -1076,6 +1090,11 @@ impl DaemonGitHubStackRuntimeV1 {
                         (
                             StackSignalKindV1::DependencyReady,
                             tracedecay_domain::NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
+                        ) | (
+                            StackSignalKindV1::DependencyReady,
+                            tracedecay_domain::NativeIntegrationPreviewDispositionV1::Partial {
+                                reason: NativeIntegrationUnavailabilityV1::DestinationOccupied,
+                            }
                         ) | (
                             StackSignalKindV1::ActualConflict,
                             tracedecay_domain::NativeIntegrationPreviewDispositionV1::NativeConflict { .. }

@@ -35,7 +35,6 @@ REQUIRED_CLI_FEATURE_MEMBERS = {
         "tracedecay/hotpath",
         "hotpath/hotpath",
         "hotpath/tokio",
-        "hotpath/axum-0-8",
         "hotpath/ureq-3",
     },
     "hotpath-alloc": {
@@ -250,11 +249,18 @@ def validate(
             "distribution acceptance: tracedecay-semantic semantic-fastembed must enable "
             "dep:fastembed and fastembed/ort-download-binaries-rustls-tls"
         )
-    fastembed_dependency = semantic_packaged.get("dependencies", {}).get("fastembed")
+    fastembed_dependencies = [
+        dependencies["fastembed"]
+        for table in [semantic_packaged, *semantic_packaged.get("target", {}).values()]
+        if isinstance(table, dict)
+        and isinstance(dependencies := table.get("dependencies"), dict)
+        and "fastembed" in dependencies
+    ]
     if (
-        not isinstance(fastembed_dependency, dict)
-        or fastembed_dependency.get("optional") is not True
-        or fastembed_dependency.get("default-features") is not False
+        len(fastembed_dependencies) != 1
+        or not isinstance(fastembed_dependencies[0], dict)
+        or fastembed_dependencies[0].get("optional") is not True
+        or fastembed_dependencies[0].get("default-features") is not False
     ):
         raise SystemExit(
             "distribution acceptance: tracedecay-semantic fastembed must remain optional "

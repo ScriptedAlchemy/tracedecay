@@ -12,7 +12,7 @@ Full documentation: [`docs/memory-evals.md`](../../docs/memory-evals.md).
 | Layer | Driver | Cost | Where it runs |
 | --- | --- | --- | --- |
 | Deterministic | scripted tool-call sequences (no LLM) | free | `cargo nextest run -E 'binary(=memory_suite)'` (part of normal CI) |
-| Real-model | Hermes (or `cursor-agent`) driving the generated tracedecay plugin | model credits | `evals/memory/run_real_model.py`, cost-gated, never in CI |
+| Real-model | Hermes or Cursor Composer (`cursor-agent`) driving the generated tracedecay plugin | model credits | `evals/memory/run_real_model.py`, cost-gated, never in CI |
 
 The real-model layer is gated behind **both** `--agent-turn` and
 `--i-understand-model-cost` (pattern adopted from mnemon). Without both flags it

@@ -22,10 +22,12 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ActorId, InitiativeId, ManifestDigest, MilestoneId, ProjectId, ProjectionGenerationId,
-    ProposalId, RepositoryId, TaskId, UtcMicros, WorkGraphVersionV1, WorkHierarchyV1,
-    WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
-    WorkProductGraphV1, WorkProductProjectionBundleV1, WorkProductSourceWatermarkV1,
-    WorkProjectionSequenceV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorktreeId,
+    ProposalId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy, WorkEgressPolicy,
+    WorkExecutionLimits, WorkFallbackTopology, WorkFilesystemPolicy, WorkGraphVersionV1,
+    WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId,
+    WorkPlanV1, WorkProductGraphV1, WorkProductProjectionBundleV1, WorkProductSourceWatermarkV1,
+    WorkProjectionSequenceV1, WorkRouteExecutionProfileV1, WorkRuntimeProjectionCoverageV1,
+    WorkRuntimeProjectionV1, WorkSandboxPolicy, WorktreeId,
 };
 use tracedecay_policy::{
     WORK_CALIBRATION_SUPPORT_FLOOR, WorkBudgetEnvelopeV1, WorkContentLocationClassV1,
@@ -290,6 +292,17 @@ fn route(route_id: &str, correctness: WorkOrdinalBandV1) -> WorkRouteCandidateV1
         cost: WorkOrdinalBandV1::Moderate,
         autonomy: WorkOrdinalBandV1::Moderate,
         evidence_quality: WorkOrdinalBandV1::Moderate,
+        execution: WorkRouteExecutionProfileV1 {
+            sandbox: WorkSandboxPolicy::Required,
+            approval: WorkApprovalPolicy::Never,
+            filesystem: WorkFilesystemPolicy::ReadOnly,
+            egress: WorkEgressPolicy::Deny,
+            environment_allowlist: BTreeSet::new(),
+            credential_references: BTreeSet::new(),
+            limits: WorkExecutionLimits::new(1, 1, 1, 1, 1, 1).unwrap(),
+            maximum_duration_micros: 1,
+            fallback: WorkFallbackTopology::Disabled,
+        },
     }
 }
 

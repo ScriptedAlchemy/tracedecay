@@ -1005,7 +1005,7 @@ fn session_structural_refusal_problem(
             "application.retrieval.session-cursor-manifest-canonical-bytes-limit-exceeded",
             "The authorized session scope exceeds the cursor manifest byte limit.",
         ),
-        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage } => (
+        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, .. } => (
             session_budget_diagnostic_code(stage),
             "The request exceeds its admitted session retrieval budget.",
         ),
@@ -1043,8 +1043,17 @@ const fn session_budget_diagnostic_code(stage: SessionRetrievalBudgetStageV1) ->
         SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
             "application.retrieval.session-budget-execution-work-exhausted"
         }
+        SessionRetrievalBudgetStageV1::CandidateReadExhausted => {
+            "application.retrieval.session-budget-candidate-read-exhausted"
+        }
+        SessionRetrievalBudgetStageV1::RecordReadExhausted => {
+            "application.retrieval.session-budget-record-read-exhausted"
+        }
         SessionRetrievalBudgetStageV1::KernelResultLimit => {
             "application.retrieval.session-budget-kernel-result-limit"
+        }
+        SessionRetrievalBudgetStageV1::CursorManifestLimit => {
+            "application.retrieval.session-budget-cursor-manifest-limit"
         }
         SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
             "application.retrieval.session-budget-participant-manifest-participants"
@@ -2129,6 +2138,7 @@ mod tests {
             (
                 SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                     stage: SessionRetrievalBudgetStageV1::ContextTokens,
+                    accounting: None,
                 },
                 "application.retrieval.session-budget-context-tokens",
             ),

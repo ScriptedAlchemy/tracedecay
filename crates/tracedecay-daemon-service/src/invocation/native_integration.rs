@@ -46,6 +46,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{
     NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
+    NativeIntegrationTransactionId,
 };
 use tracedecay_store::NativeIntegrationStore;
 
@@ -439,6 +440,10 @@ async fn execute_with_owner(
                 "approval.native-integration.{wire_request_id}"
             ))
             .map_err(|_| invalid())?;
+            let transaction_id = NativeIntegrationTransactionId::new(format!(
+                "transaction.native-integration.{wire_request_id}"
+            ))
+            .map_err(|_| invalid())?;
             let apply_operation =
                 native_integration_surface_operation(NATIVE_INTEGRATION_APPLY_OPERATION)
                     .map_err(|_| invalid())?
@@ -503,7 +508,10 @@ async fn execute_with_owner(
                     .map_err(|_| invalid_native_integration_request())?;
                     match store.save_approval(approval.clone()) {
                         Ok(()) => Ok(NativeIntegrationSurfaceResultV1::Approval(
-                            NativeIntegrationApprovalProjectionV1::project(&approval),
+                            NativeIntegrationApprovalProjectionV1::project(
+                                &approval,
+                                transaction_id,
+                            ),
                         )),
                         Err(tracedecay_store::NativeIntegrationStoreError::ApprovalConflict) => {
                             Ok(NativeIntegrationSurfaceResultV1::unavailable(

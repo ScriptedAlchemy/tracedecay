@@ -5,7 +5,10 @@
 //! invents a point estimate it did not earn, collapses the separate ordinal
 //! dimensions into a score, or lets a human override outrank an exclusion.
 
-use tracedecay_domain::{ManifestDigest, TaskId, UtcMicros};
+use tracedecay_domain::{
+    ManifestDigest, TaskId, UtcMicros, WorkApprovalPolicy, WorkEgressPolicy, WorkExecutionLimits,
+    WorkFallbackTopology, WorkFilesystemPolicy, WorkRouteExecutionProfileV1, WorkSandboxPolicy,
+};
 use tracedecay_policy::work_loop::{
     WORK_CALIBRATION_SUPPORT_FLOOR, WorkBudgetEnvelopeV1, WorkContentLocationClassV1,
     WorkContentLocationLimitV1, WorkEffortClassV1, WorkEvidenceFrontierV1, WorkOrdinalBandV1,
@@ -70,6 +73,17 @@ fn route(route_id: &str, band: WorkOrdinalBandV1) -> WorkRouteCandidateV1 {
         cost: band,
         autonomy: band,
         evidence_quality: band,
+        execution: WorkRouteExecutionProfileV1 {
+            sandbox: WorkSandboxPolicy::Required,
+            approval: WorkApprovalPolicy::Never,
+            filesystem: WorkFilesystemPolicy::ReadOnly,
+            egress: WorkEgressPolicy::Deny,
+            environment_allowlist: Default::default(),
+            credential_references: Default::default(),
+            limits: WorkExecutionLimits::new(1, 1, 1, 1, 1, 1).unwrap(),
+            maximum_duration_micros: 1,
+            fallback: WorkFallbackTopology::Disabled,
+        },
     }
 }
 

@@ -40,7 +40,6 @@ fn profile_retrieval_root(
 fn refresh_request(
     action: SessionRefreshActionV1,
     scope: SessionRefreshScopeV1,
-    identity: &ResolvedSessionIdentity,
     handle: Option<String>,
 ) -> RetainedSurfaceRequestV1 {
     RetainedSurfaceRequestV1::SessionRefresh(SessionRefreshRequestV1::with_action(
@@ -49,8 +48,6 @@ fn refresh_request(
             scope,
             session: SessionRefreshSessionV1 {
                 id: "session.profile-refresh".to_owned(),
-                store_id: identity.store_id().as_str().to_owned(),
-                root_id: identity.root_id().as_str().to_owned(),
             },
             source: SessionRefreshSourceV1 {
                 scope: "codex".to_owned(),
@@ -69,10 +66,8 @@ fn refresh_request(
     ))
 }
 
-fn profile_scope(identity: &ResolvedSessionIdentity) -> SessionRefreshScopeV1 {
-    SessionRefreshScopeV1::Profile {
-        profile_id: identity.profile_id().as_str().to_owned(),
-    }
+fn profile_scope() -> SessionRefreshScopeV1 {
+    SessionRefreshScopeV1::Profile {}
 }
 
 async fn execute_refresh(
@@ -147,12 +142,7 @@ async fn profile_retained_session_refresh_begins_reads_and_cancels_in_the_profil
         &session_identity,
         &connection,
         Some(&refresh),
-        refresh_request(
-            SessionRefreshActionV1::Begin,
-            profile_scope(&session_identity),
-            &session_identity,
-            None,
-        ),
+        refresh_request(SessionRefreshActionV1::Begin, profile_scope(), None),
         "begin",
     )
     .await
@@ -181,8 +171,7 @@ async fn profile_retained_session_refresh_begins_reads_and_cancels_in_the_profil
         Some(&refresh),
         refresh_request(
             SessionRefreshActionV1::Status,
-            profile_scope(&session_identity),
-            &session_identity,
+            profile_scope(),
             Some(handle.clone()),
         ),
         "status",
@@ -212,8 +201,7 @@ async fn profile_retained_session_refresh_begins_reads_and_cancels_in_the_profil
         Some(&refresh),
         refresh_request(
             SessionRefreshActionV1::Cancel,
-            profile_scope(&session_identity),
-            &session_identity,
+            profile_scope(),
             Some(handle.clone()),
         ),
         "cancel",
@@ -281,16 +269,7 @@ async fn profile_retained_session_refresh_refuses_foreign_owners_and_unmounted_s
         Some(&refresh),
         refresh_request(
             SessionRefreshActionV1::Begin,
-            SessionRefreshScopeV1::Project {
-                project: tracedecay_contracts::retained_surfaces::SessionRefreshProjectV1 {
-                    id: "project.foreign".to_owned(),
-                    profile_id: session_identity.profile_id().as_str().to_owned(),
-                    repository_id: "repository.foreign".to_owned(),
-                    worktree_id: "worktree.foreign".to_owned(),
-                    branch_id: "branch.foreign".to_owned(),
-                },
-            },
-            &session_identity,
+            SessionRefreshScopeV1::Project {},
             None,
         ),
         "project-scoped",
@@ -302,39 +281,12 @@ async fn profile_retained_session_refresh_refuses_foreign_owners_and_unmounted_s
         ApplicationProblemKind::NotFoundOrNotAuthorized
     );
 
-    let foreign_profile = execute_refresh(
-        profile_database.clone(),
-        &session_identity,
-        &connection,
-        Some(&refresh),
-        refresh_request(
-            SessionRefreshActionV1::Begin,
-            SessionRefreshScopeV1::Profile {
-                profile_id: "profile.someone-else".to_owned(),
-            },
-            &session_identity,
-            None,
-        ),
-        "foreign-profile",
-    )
-    .await
-    .expect_err("another profile's refresh must be refused");
-    assert_eq!(
-        foreign_profile.problem.kind,
-        ApplicationProblemKind::NotFoundOrNotAuthorized
-    );
-
     let unmounted = execute_refresh(
         profile_database,
         &session_identity,
         &connection,
         None,
-        refresh_request(
-            SessionRefreshActionV1::Begin,
-            profile_scope(&session_identity),
-            &session_identity,
-            None,
-        ),
+        refresh_request(SessionRefreshActionV1::Begin, profile_scope(), None),
         "unmounted",
     )
     .await

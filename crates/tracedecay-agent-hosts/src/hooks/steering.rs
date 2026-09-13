@@ -5,17 +5,14 @@ pub use crate::agents::cursor::CURSOR_PLUGIN_SKILLS;
 
 pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
     s.push_str(
-        "TraceDecay project hint: use graph tools when code context is needed; \
-         deferred tools may require ToolSearch. Route literal or regex text -> \
-         tracedecay_grep; symbol names -> tracedecay_search or \
-         tracedecay_find_exact_symbol; concepts -> tracedecay_context; call \
-         questions -> tracedecay_callers/callees; impact/tests -> \
-         tracedecay_impact, tracedecay_affected, or tracedecay_test_map. Use \
-         tracedecay_message_search or \
-         tracedecay_lcm_expand_query for prior-session context, and \
-         tracedecay_fact_store_add only for durable non-secret facts. If workflow \
-         details are needed, open the bundled tracedecay skill for that task \
-         instead of relying on repeated session-start instructions.\n",
+        "TraceDecay project hint: use the graph when the task needs unfamiliar code \
+         structure or relationships. Use tracedecay_context for concepts, \
+         tracedecay_search for symbols, tracedecay_grep for literal or regex text, and \
+         tracedecay_callers/callees or tracedecay_impact for relationships. Use native \
+         reads and edits for known files. Use tracedecay_message_search or \
+         tracedecay_lcm_expand_query when prior-session context matters, and \
+         tracedecay_fact_store_add only for durable non-secret facts. Load a bundled \
+         tracedecay skill when its specific workflow matches the task.\n",
     );
 }
 
@@ -108,20 +105,14 @@ pub fn build_codex_session_context_for_workspace(
                 append_tracedecay_bootstrap_context(&mut s);
             } else {
                 s.push_str(
-                    "After initialization, use tracedecay MCP tools (tracedecay_context, \
-                     tracedecay_grep, tracedecay_search, tracedecay_callers, \
-                     tracedecay_callees, tracedecay_impact, tracedecay_files, \
-                     tracedecay_affected) before broad file reads or shell search for codebase \
-                     exploration, symbol lookup, call graphs, and impact analysis. Route \
-                     searches by target: literal or regex text -> tracedecay_grep; symbol name \
-                     -> tracedecay_search; concept -> tracedecay_context; files by role/path \
-                     -> tracedecay_files.\n",
+                    "TraceDecay graph tools are unavailable until this workspace is initialized. \
+                     If the task needs graph-backed code context, run `tracedecay init`; known-file \
+                     work can continue with native tools.\n",
                 );
             }
             s.push_str(
-                "Before `cargo check`/tsc/clippy or after compile errors, use \
-                 tracedecay_diagnostics for fresh errors or pass captured output to \
-                 tracedecay_diagnose; both map errors to symbols and callers.\n",
+                "For compiler failures, tracedecay_diagnostics or tracedecay_diagnose can map \
+                 errors to affected symbols and callers.\n",
             );
             s.push_str(
                 "Agents: tracedecay-code-explorer,tracedecay-code-health-auditor,\
@@ -150,37 +141,31 @@ pub fn build_codex_session_context_for_workspace(
         }
         HookWorkspaceStatus::Generic => {
             s.push_str(
-                "TraceDecay session context is available via MCP. For prior conversation \
-                 recovery, use tracedecay_lcm_expand_query, tracedecay_message_search, and \
-                 tracedecay_lcm_describe before asking the user to repeat themselves. When \
-                 a durable preference, decision, correction, or pitfall surfaces, store it \
-                 proactively with tracedecay_fact_store_add and \
-                 memory_scope \"user\". The CLI fallback supports this user scope even \
-                 without an initialized project. Do NOT store \
-                 secrets or credentials, transient errors, environment-specific failures, \
-                 one-off narratives, task progress, or soon-stale session outcomes; \
-                 recover those from transcripts instead.\n",
+                "TraceDecay session context is available via MCP. When prior conversation \
+                 context matters, use tracedecay_lcm_expand_query or \
+                 tracedecay_message_search. Store durable user preferences, decisions, \
+                 corrections, or recurring pitfalls with tracedecay_fact_store_add and \
+                 memory_scope \"user\". Do not store secrets, credentials, transient \
+                 failures, task progress, or soon-stale outcomes.\n",
             );
             s.push_str("Workspace status: no active project workspace; no setup guidance needed for this prompt.\n");
         }
     }
+    s.push_str(
+        "Continue authorized work through the requested outcome and relevant verification; \
+         pause for a missing decision or an external or destructive action outside that authority.\n",
+    );
     s
 }
 
 fn append_codex_recall_and_registry_guidance(s: &mut String) {
     s.push_str(
-        "For other registered projects or sibling workspaces, check \
-         tracedecay_project_list or tracedecay_project_search first; use \
-         tracedecay_project_context to confirm the target and pass project_id or \
-         project_path to tracedecay_context/search for cross-project code context before \
-         scanning parent directories. When the user references prior conversation or \
-         missing context, use tracedecay_message_search or tracedecay_lcm_expand_query \
-         before asking the user to repeat themselves. When a durable decision, user \
-         preference, correction, or pitfall surfaces, store it proactively with \
-         tracedecay_fact_store_add with calibrated trust — do not wait \
-         to be asked. Do NOT store secrets or credentials, transient errors, \
-         environment-specific failures, one-off narratives, task progress, or \
-         soon-stale session outcomes; recover those from transcripts instead.\n",
+        "For cross-project context, resolve the registered target with \
+         tracedecay_project_search or tracedecay_project_context and preserve its project \
+         selector. When prior conversation context matters, use tracedecay_message_search \
+         or tracedecay_lcm_expand_query. Store durable decisions, preferences, corrections, \
+         or recurring pitfalls with tracedecay_fact_store_add. Do not store secrets, \
+         credentials, transient failures, task progress, or soon-stale outcomes.\n",
     );
 }
 

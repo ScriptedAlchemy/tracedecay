@@ -418,7 +418,7 @@ impl AgentTaskBackend for JsonBackend {
     {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::MemoryCurator);
-        assert_request_contract(request, "memory_curator", "memory_curator:v1", "ops");
+        assert_request_contract(request, "memory_curator", "memory_curator:v2", "ops");
         assert!(
             request.prompt.contains("canonical current facts"),
             "runner should build a task prompt from the curation messages"
@@ -537,7 +537,7 @@ impl AgentTaskBackend for SkillJsonBackend {
     {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v3", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v4", "skills");
         assert!(
             request
                 .prompt
@@ -620,7 +620,7 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
     ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
     {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v3", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v4", "skills");
         let summaries = request.context["skill_writer_evidence"]["skill_usage_summaries"]
             .as_array()
             .expect("skill usage summaries should be present");
@@ -673,7 +673,7 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
     ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
     {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v3", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v4", "skills");
         let families = request.context["skill_writer_evidence"]["underused_tool_families"]
             .as_array()
             .expect("underused tool family evidence should be present");
@@ -793,12 +793,12 @@ impl AgentTaskBackend for MalformedTextBackend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, self.task);
         let (task_key, prompt_version, required_property) = match self.task {
-            AgentTaskKind::MemoryCurator => ("memory_curator", "memory_curator:v1", "ops"),
+            AgentTaskKind::MemoryCurator => ("memory_curator", "memory_curator:v2", "ops"),
             AgentTaskKind::SessionReflector => {
                 ("session_reflector", "session_reflector:v2", "facts")
             }
-            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v3", "skills"),
-            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v2", "facts"),
+            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v4", "skills"),
+            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v3", "facts"),
             AgentTaskKind::UserJob => unreachable!("user jobs are not strict-JSON tasks"),
         };
         assert_request_contract(request, task_key, prompt_version, required_property);
@@ -897,7 +897,7 @@ impl AgentTaskBackend for CombinedJsonBackend {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::CombinedReview);
         assert_eq!(request.contract.task_key, "combined_review");
-        assert_eq!(request.contract.prompt_version, "combined_review:v2");
+        assert_eq!(request.contract.prompt_version, "combined_review:v3");
         assert!(request.contract.strict_json);
         assert_eq!(
             request.contract.response_schema["required"],
@@ -1090,7 +1090,7 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
     ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
     {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v3", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v4", "skills");
         let evidence = &request.context["skill_writer_evidence"];
         assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
         assert_eq!(
@@ -1321,11 +1321,11 @@ pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
 
 pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
-        AgentTaskKind::MemoryCurator => "memory_curator:v1",
+        AgentTaskKind::MemoryCurator => "memory_curator:v2",
         AgentTaskKind::SessionReflector => "session_reflector:v2",
-        AgentTaskKind::SkillWriter => "skill_writer:v3",
-        AgentTaskKind::CombinedReview => "combined_review:v2",
-        AgentTaskKind::UserJob => "user_job:v1",
+        AgentTaskKind::SkillWriter => "skill_writer:v4",
+        AgentTaskKind::CombinedReview => "combined_review:v3",
+        AgentTaskKind::UserJob => "user_job:v2",
     }
 }
 

@@ -764,9 +764,12 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
     LIMIT ?8"
 );
 
-// Fresh stores have no planner statistics. CROSS JOIN pins authorized sessions
-// as the outer loop so SQLite probes evidence by session/generation/kind instead
-// of scanning every evidence row before applying the root boundary.
+// The FTS match is the selective end of this join, so it drives. Probing the
+// root's evidence rows and testing each one for a matching member instead ran
+// the correlated FTS subquery once per evidence row in the whole root — and the
+// keyset ORDER BY needs a temp b-tree, so LIMIT could not stop that scan early.
+// Fresh stores have no planner statistics, so CROSS JOIN pins the match as the
+// outer loop; GROUP BY collapses an evidence row several matching members reach.
 pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
@@ -775,44 +778,43 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
                 THEN first_occurrence.message_id ELSE NULL END,
            NULL, evidence.session_id, evidence.evidence_kind,
            authority_session.provider, frozen.generation
-    FROM sessions AS authority_session
-    CROSS JOIN session_temporal_generations AS frozen
+    FROM session_occurrences_fts
+    CROSS JOIN session_occurrences AS member_occurrence
+      ON member_occurrence.rowid = session_occurrences_fts.rowid
+    CROSS JOIN session_derived_evidence_members AS member
+      ON member.session_id = member_occurrence.session_id
+     AND member.generation = member_occurrence.generation
+     AND member.occurrence_id = member_occurrence.occurrence_id
+     AND member.evidence_kind = ?2
     CROSS JOIN session_derived_evidence AS evidence
+      ON evidence.session_id = member.session_id
+     AND evidence.generation = member.generation
+     AND evidence.evidence_kind = member.evidence_kind
+     AND evidence.evidence_id = member.evidence_id
+    CROSS JOIN session_temporal_generations AS frozen
+      ON frozen.session_id = evidence.session_id
+     AND frozen.generation = evidence.generation
+     AND frozen.state = 'active'
     CROSS JOIN session_occurrences AS first_occurrence
+      ON first_occurrence.session_id = evidence.session_id
+     AND first_occurrence.generation = evidence.generation
+     AND first_occurrence.occurrence_id = evidence.first_occurrence_id
     CROSS JOIN retrieval_anchors AS authority_anchor
-    WHERE authority_session.project_key = ?1
+      ON authority_anchor.anchor_id = evidence.retrieval_anchor_id
+    CROSS JOIN sessions AS authority_session
+      ON authority_session.session_id = evidence.session_id
+     AND authority_session.provider = first_occurrence.source_provider
+     AND authority_session.project_key = ?1
+    WHERE session_occurrences_fts MATCH ?4
       AND (?3 IS NULL OR authority_session.provider = ?3)
-      AND frozen.session_id = authority_session.session_id
-      AND frozen.state = 'active'
-      AND evidence.session_id = frozen.session_id
-      AND evidence.generation = frozen.generation
-      AND evidence.evidence_kind = ?2
-      AND first_occurrence.session_id = evidence.session_id
-      AND first_occurrence.generation = evidence.generation
-      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-      AND authority_anchor.anchor_id = evidence.retrieval_anchor_id
-      AND authority_session.provider = first_occurrence.source_provider
-      AND EXISTS (
-          SELECT 1
-          FROM session_derived_evidence_members AS member
-          JOIN session_occurrences AS member_occurrence
-            ON member_occurrence.session_id = member.session_id
-           AND member_occurrence.generation = member.generation
-           AND member_occurrence.occurrence_id = member.occurrence_id
-          JOIN session_occurrences_fts
-            ON session_occurrences_fts.rowid = member_occurrence.rowid
-          WHERE member.session_id = evidence.session_id
-            AND member.generation = evidence.generation
-            AND member.evidence_kind = evidence.evidence_kind
-            AND member.evidence_id = evidence.evidence_id
-            AND session_occurrences_fts MATCH ?4
-      )
       AND ",
     anchor_owner_authority_predicate!(),
     "
       ",
     derived_root_keyset!("?5", "?6", "?7"),
     "
+    GROUP BY evidence.session_id, evidence.generation,
+             evidence.evidence_kind, evidence.evidence_id
     ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
     LIMIT ?8"
 );

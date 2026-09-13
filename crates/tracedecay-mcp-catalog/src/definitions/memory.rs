@@ -27,7 +27,7 @@ pub(super) fn def_fact_store_search(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_search",
         "Fact Store Search",
-        "Search holographic memory facts by text and trust. Search durable project or user memory before guessing or repeating external research.",
+        "Search durable project or user memory facts by text and trust.",
         input_schema,
     )
 }
@@ -117,7 +117,7 @@ pub(super) fn def_fact_feedback(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_fact_feedback",
         "Fact Feedback",
-        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score. Call this on fact_id values surfaced in tracedecay_context's Memory Matches or tracedecay_fact_store_search whenever a recalled fact materially helped or misled you -- feedback is how trust is earned, and recalled facts are almost never rated.",
+        "Record whether an active-project memory fact materially helped or misled the current work, and adjust its trust score.",
         input_schema,
     )
 }

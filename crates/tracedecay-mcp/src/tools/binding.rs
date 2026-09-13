@@ -815,9 +815,21 @@ fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract 
 
 fn idempotency_for_tool(
     tool_name: &str,
-    application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+    idempotency: Option<tracedecay_tool_catalog::IdempotencyContract>,
 ) -> McpIdempotencyContract {
-    match application_capability.map(tracedecay_tool_catalog::CapabilityManifestV1::idempotency) {
+    // These effect requests already name their replay target in the public
+    // schema: approval is bound to an exact preview, while apply and cancel
+    // are bound to one durable transaction. `key_required` would advertise a
+    // caller field that the transport deliberately does not accept.
+    if matches!(
+        tool_name,
+        "tracedecay_approve_native_integration"
+            | "tracedecay_apply_native_integration"
+            | "tracedecay_cancel_native_integration"
+    ) {
+        return McpIdempotencyContract::Idempotent;
+    }
+    match idempotency {
         Some(tracedecay_tool_catalog::IdempotencyContract::Required) => {
             McpIdempotencyContract::KeyRequired
         }
@@ -855,10 +867,6 @@ fn cancellation_for_tool(
     CancellationContract::cooperative(points)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Dispatch catalog construction lists every retained tool as one discovery payload."
-)]
 fn build_mcp_dispatch_catalog()
 -> Result<McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     let mut contracts = Vec::new();
@@ -939,25 +947,20 @@ fn build_mcp_dispatch_catalog()
             idempotency: multi_root_capability.as_ref().map_or_else(
                 || {
                     executable_binding.map_or_else(
-                        || idempotency_for_tool(&binding.name, application_capability),
-                        |binding| match binding.idempotency() {
-                            tracedecay_tool_catalog::IdempotencyContract::Required => {
-                                McpIdempotencyContract::KeyRequired
-                            }
-                            tracedecay_tool_catalog::IdempotencyContract::NotRequired => {
-                                McpIdempotencyContract::NotProvided
-                            }
+                        || {
+                            idempotency_for_tool(
+                                &binding.name,
+                                application_capability.map(
+                                    tracedecay_tool_catalog::CapabilityManifestV1::idempotency,
+                                ),
+                            )
+                        },
+                        |executable| {
+                            idempotency_for_tool(&binding.name, Some(executable.idempotency()))
                         },
                     )
                 },
-                |capability| match capability.idempotency() {
-                    tracedecay_tool_catalog::IdempotencyContract::Required => {
-                        McpIdempotencyContract::KeyRequired
-                    }
-                    tracedecay_tool_catalog::IdempotencyContract::NotRequired => {
-                        McpIdempotencyContract::NotProvided
-                    }
-                },
+                |capability| idempotency_for_tool(&binding.name, Some(capability.idempotency())),
             ),
             inverse: inverse_for_tool(&binding.name, effect),
             cancellation,

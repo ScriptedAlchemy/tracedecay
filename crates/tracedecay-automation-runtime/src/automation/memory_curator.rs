@@ -680,7 +680,7 @@ async fn skipped_run(
 
 fn build_memory_curator_prompt() -> String {
     format!(
-        "Review only the canonical current facts in context.llm_review. Return {{\"ops\":[]}} with at most {CURATION_MAX_OPERATIONS} operations. Never invent or rewrite a fact id.\n{}",
+        "Complete the review of only the canonical current facts in context.llm_review. Propose only operations supported by those exact snapshots and current relations; absence or unavailable facts are not evidence. Return {{\"ops\":[]}} when no change is warranted, with at most {CURATION_MAX_OPERATIONS} operations. Never invent or rewrite a fact id.\n{}",
         wire::MODEL_CONTRACT
     )
 }

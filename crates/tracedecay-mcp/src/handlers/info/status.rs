@@ -618,7 +618,10 @@ fn active_project_context(
     let project_root = ctx.project_root();
     let layout = ctx.store_layout();
     let graph_db_path = ctx.graph_db_path();
+    let admitted_scope = ctx.admitted_scope();
     let mut output = json!({
+        "project_id": layout.identity.project_id.as_deref(),
+        "repository_id": admitted_scope.repository_id.as_str(),
         "project_root": display_path(project_root),
         "resolution_source": "active_project",
         "storage": {

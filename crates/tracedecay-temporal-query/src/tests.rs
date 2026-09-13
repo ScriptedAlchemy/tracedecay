@@ -728,7 +728,16 @@ fn malicious_producer_cannot_underreport_or_cross_prework_allocation_contract() 
         )
         .await;
 
-        assert_eq!(result, Err(TemporalKernelError::BudgetExceeded));
+        // The kernel forwards the port's own resource name so a caller can tell
+        // a candidate read cap from a record read cap or a work-unit ceiling.
+        assert_eq!(
+            result,
+            Err(TemporalKernelError::Port(
+                TemporalPortError::BudgetExceeded {
+                    resource: "candidate stable id bytes", accounting: None,
+                }
+            ))
+        );
         assert_eq!(port.max_candidate_page_items.load(Ordering::SeqCst), 1);
         assert_eq!(port.observed_candidate_field_cap.load(Ordering::SeqCst), 8);
         assert_eq!(
@@ -1244,7 +1253,7 @@ fn summary_lineage_is_limited_to_the_selected_ranked_page() {
 /// A derived-evidence group anchor is a span/burst container, not a retrievable
 /// payload: no hydration authority resolves one. Ranking it would spend a result
 /// slot and then report an unresolvable omission, so the group stays out of the
-/// ranked page while its member occurrences keep their ordinary coverage.
+/// ranked page, and a member that never matched is not a hidden result.
 #[test]
 fn derived_group_candidate_never_ranks_as_a_standalone_row() {
     block_on(async {
@@ -1285,8 +1294,51 @@ fn derived_group_candidate_never_ranks_as_a_standalone_row() {
                 .all(|hydrated| hydrated.anchor_id() != &derived_anchor),
             "a group container must never reach hydration, so it can never be omitted"
         );
-        // The member the group pulled into the record read still counts as
-        // covered, exactly as before: only the container itself is withheld.
+        // Coverage counts what this query could have returned. Nothing here
+        // could: the only candidate is a container, and its member matched no
+        // channel of its own. Counting that member would report a result the
+        // query never had — and, once groups are wide, thousands of them.
+        assert_eq!(result.coverage.total(), Some(0));
+    });
+}
+
+/// The other half of the coverage contract: a group member that *did* match a
+/// channel of its own is an ordinary covered result. Membership neither adds a
+/// result nor takes one away.
+#[test]
+fn a_group_member_that_matched_on_its_own_is_covered_once() {
+    block_on(async {
+        let mut group = candidate("derived-span", "derived-span", 20);
+        group.channel = CandidateChannel::Span;
+        group.retriever_record_id = "span-evidence-id".to_string();
+        let direct = candidate("source-occurrence", "source-occurrence", 30);
+        let mut member = occurrence('a', "source-occurrence", 20);
+        member.evidence = member
+            .evidence
+            .with_supporting_anchor(anchor("derived-span"));
+        let port = FakeReadPort::new(
+            vec![group, direct],
+            vec![TemporalRecord::Occurrence(member)],
+        );
+
+        let result = execute_temporal_kernel(
+            &request(TemporalModeV1::Current, 1),
+            &port,
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("group member with its own candidate");
+
+        assert_eq!(
+            result
+                .ranked
+                .iter()
+                .map(|candidate| candidate.anchor_id.clone())
+                .collect::<Vec<_>>(),
+            vec![anchor("source-occurrence")]
+        );
         assert_eq!(result.coverage.visible, 1);
         assert_eq!(result.coverage.total(), Some(1));
     });

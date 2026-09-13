@@ -320,7 +320,7 @@ fn map_relation_rebuild_control_error(error: TemporalPortError) -> SessionStoreE
     match error {
         TemporalPortError::Cancelled => SessionStoreError::Cancelled,
         TemporalPortError::DeadlineExceeded => SessionStoreError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { resource } => {
+        TemporalPortError::BudgetExceeded { resource, .. } => {
             SessionStoreError::BudgetExceeded { resource }
         }
         _ => SessionStoreError::InvalidStateTransition {

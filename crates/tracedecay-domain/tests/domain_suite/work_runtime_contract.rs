@@ -203,6 +203,7 @@ fn admitted_graph(identity: WorkAttemptIdentityV1) -> WorkProductGraphV1 {
         WorkRouteDecisionV1::abstain("execution admission pins the provider").unwrap(),
         "Admit the runtime attempt".to_owned(),
         digest('f'),
+        digest('e'),
     )
     .unwrap();
     let graph = graph

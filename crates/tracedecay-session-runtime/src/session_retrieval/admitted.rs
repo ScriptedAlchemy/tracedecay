@@ -421,7 +421,7 @@ fn task_session_binding_outcome(
         SessionRetrievalServiceOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
         SessionRetrievalServiceOutcome::CursorStale => TaskSessionRetrievalOutcomeV1::Unavailable,
         SessionRetrievalServiceOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
-        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, .. } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
@@ -447,8 +447,8 @@ fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescr
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalServiceOutcome::CursorStale => LcmDescribeServiceOutcome::CursorStale,
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            LcmDescribeServiceOutcome::BudgetExhausted
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
+            LcmDescribeServiceOutcome::BudgetExhausted { stage, accounting }
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,
@@ -476,8 +476,8 @@ fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandS
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalServiceOutcome::CursorStale => LcmExpandServiceOutcome::CursorStale,
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            LcmExpandServiceOutcome::BudgetExhausted
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
+            LcmExpandServiceOutcome::BudgetExhausted { stage, accounting }
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,

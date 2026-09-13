@@ -3,21 +3,9 @@
 
 use crate::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_rusqlite_runtime::repository::RETIRED_MUTATION_COPY_TABLES;
-
-/// Rows moved per migration write.
-///
-/// Each chunk is its own transaction, so it stays well inside the ordinary
-/// per-statement execution limit — the limit keeps working as the safety
-/// bound it is — and the writer is released between chunks so ordinary
-/// mutations are never queued behind a whole-table rewrite.
-///
-/// Sized against the costliest of these moves measured on a real store: the
-/// projection publications rewrite ran 283 s over 189 k rows, so a chunk of
-/// this many of them is a few seconds of work, well under the limit, while
-/// still amortizing the per-transaction cost over enough rows that a
-/// multi-million-row table finishes in bounded time.
-const RETIRED_MUTATION_COPY_CHUNK_ROWS: i64 = 5_000;
+use tracedecay_rusqlite_runtime::repository::{
+    RETIRED_MUTATION_COPY_CHUNK_ROWS, RETIRED_MUTATION_COPY_TABLES,
+};
 
 /// Installs the external-source state shape. Cheap idempotent DDL only, so it
 /// belongs inside a caller's leased schema transaction.
@@ -97,6 +85,40 @@ pub async fn migrate_retired_mutation_copy_tables(conn: &crate::db::Database) ->
             }
             transaction.commit().await?;
         }
+    }
+    Ok(())
+}
+
+/// Retires the payload-copying predecessors inside a caller's transaction.
+///
+/// The released project store carries them and the shape this binary admits
+/// does not, so the one-time convergence of such a store has to finish the
+/// move before admission rather than after it. Each chunk is still bounded by
+/// the same statements [`migrate_retired_mutation_copy_tables`] uses; what a
+/// caller gives up is resumability, which a one-shot upgrade transaction does
+/// not have anyway.
+pub(super) async fn retire_mutation_copies_in_transaction(
+    conn: &(impl Executor + Sync),
+) -> Result<()> {
+    for (retired_table, chunk_statements) in RETIRED_MUTATION_COPY_TABLES {
+        if !table_exists(conn, retired_table).await? {
+            continue;
+        }
+        while let Some(ceiling) = retired_chunk_ceiling(conn, retired_table).await? {
+            for statement in *chunk_statements {
+                conn.execute(statement, params![ceiling])
+                    .await
+                    .map_err(|error| {
+                        migration_failure(
+                            format!("failed to move {retired_table} rows through rowid {ceiling}"),
+                            error,
+                        )
+                    })?;
+            }
+        }
+        conn.execute_batch(&format!("DROP TABLE {retired_table}"))
+            .await
+            .map_err(|error| migration_failure(format!("failed to drop {retired_table}"), error))?;
     }
     Ok(())
 }

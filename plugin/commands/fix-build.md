@@ -1,14 +1,15 @@
 ---
-description: Fix build and type errors by running or parsing diagnostics, mapping them to symbols with callers, then fixing.
+description: Diagnose and fix build or type errors with source and dependency evidence.
 ---
 
 # Fix build
 
-Interpret `$ARGUMENTS`: if it contains pasted `cargo`/`clippy`/`rustc` output, route it to `tracedecay_diagnose`; otherwise run `tracedecay_diagnostics` (scoped to a directory if one was given). Prefer pasted output when available.
+Follow the bundled `fixing-build-and-type-errors` skill. If `$ARGUMENTS`
+contains compiler output, map it with `tracedecay_diagnose`; otherwise use
+retained diagnostics for the requested file or workspace. Inspect the root
+diagnostic, failing contract, and relevant callers before editing.
 
-1. Already have raw output → `tracedecay_diagnose` (`cargo_output` required, optional `severity`, `include_callers`, `max_diagnostics`): each diagnostic maps to the smallest containing node with up to 5 callers pre-attached. No toolchain run — cheap and safe.
-2. Need retained diagnostics → `tracedecay_diagnostics` (`scope`: `workspace` | `file` (needs `path`)): canonical clean-generation errors/warnings, each mapped to the enclosing graph node. Configured producers publish new diagnostics through their owned lifecycle.
-3. Inspect the failing code and affected callers; use `tracedecay_impact` when dependent contracts need investigation.
-4. Apply the fix, then run the applicable native build/typecheck and relevant behavioral checks. Retained diagnostics alone cannot verify an edit; report any unavailable fresh verification.
-
-Output: grouped diagnostics with enclosing symbols + callers, the applied fix, and a clean re-check.
+Apply the smallest complete fix, then run the applicable native build or
+typecheck and relevant behavioral checks. Retained diagnostics alone do not
+verify an edit. Report the fix and fresh verification, or the exact reason fresh
+verification was unavailable.

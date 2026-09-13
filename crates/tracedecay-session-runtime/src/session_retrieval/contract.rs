@@ -20,7 +20,10 @@ use tracedecay_global_db::WorkflowScopeFilter;
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
-use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
+use tracedecay_session_memory::session::{
+    SessionDataFreshness, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
+    SessionTemporalQuery,
+};
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
 use tracedecay_sessions::runtime::{
     SessionMessageSearchResult, SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
@@ -302,6 +305,10 @@ pub enum SessionRetrievalUnavailableReason {
     HistoricalRetry,
     HistoricalBlocked,
     TemporalStoreUnavailable,
+    /// A temporal store read failed. Distinct from `TemporalStoreUnavailable`:
+    /// the store is there and answered with an error, which is a different
+    /// operator problem from a store that is not present at all.
+    TemporalStoreReadFailed,
     HydrationUnavailable,
 }
 
@@ -394,7 +401,11 @@ pub enum LcmDescribeServiceOutcome {
         observed: usize,
         maximum: usize,
     },
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
+    },
     TimedOut,
     Cancelled,
 }
@@ -435,7 +446,11 @@ pub enum LcmExpandServiceOutcome {
         observed: usize,
         maximum: usize,
     },
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
+    },
     TimedOut,
     Cancelled,
 }
@@ -481,7 +496,9 @@ pub enum SessionRetrievalServiceOutcome {
         maximum: usize,
     },
     BudgetExhausted {
-        stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1,
+        stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
     TimedOut,
     Cancelled,

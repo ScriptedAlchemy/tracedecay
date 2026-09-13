@@ -5,44 +5,20 @@ argument-hint: "[subject]"
 
 # Curate memory
 
-Interpret `$ARGUMENTS` as the fact, entity, query, curation scope, or existing run.
-For requested broad curation without a scope, use the active registered project.
-For inspection, read the existing run without launching another; for an exact
-fact change, use the direct administration operation below.
+Interpret `$ARGUMENTS` as a fact, entity, query, curation scope, or existing
+run. Follow the bundled `project-memory` skill and load its curation reference
+only for a broad curation request or run inspection. Resolve the registered
+project before mutation. A read-only inspection must not launch another run,
+and the dashboard opens only when the user asks for visual curation.
 
-1. Resolve scope: confirm the active project root/store with `tracedecay_active_project` before touching memory.
-2. When fact evidence is needed, use `tracedecay_fact_store_search`, `tracedecay_fact_store_list`, `tracedecay_fact_store_get`, `tracedecay_fact_store_probe`, `tracedecay_fact_store_related`, `tracedecay_fact_store_reason`, or `tracedecay_fact_store_contradict`. Use `tracedecay_memory_status` only when the user asks for its read-only canonical fact/entity/trust/feedback/holographic-algebra status snapshot. Open `tracedecay_dashboard` (`action: "start"`) only when the user wants visual curation.
-3. For broad curation, run the sole public semantic launcher, `fact_store_curate`, through the MCP
-   adapter `tracedecay_fact_store_curate` or generic CLI adapter `tracedecay
-   tool fact_store_curate`, with only `fact_review_limit` and
-   `min_confidence_millionths`. Capture the returned run id. The request
-   accepts no caller-selected task, operations, run identity, or effect
-   authority; validation and supported canonical mutations finish inside the
-   daemon-owned run.
-4. Inspect it without mutation: call `tracedecay_automation_run_list`
-   (`limit?`), then `tracedecay_automation_run_view` (`run_id`). CLI
-   equivalents are `tracedecay automation runs list --json` and `tracedecay
-   automation runs view <run_id> --json`. Report terminal status, validation
-   report, and applied/rejected operations.
-5. If the record advertises an artifact kind, read it with
-   `tracedecay_automation_run_artifact_view` (`run_id`, `kind`) or `tracedecay
-   automation runs artifact <run_id> <kind> --json`. Do not invent an artifact
-   kind.
-6. The HTTP adapter is `POST /api/application/retained/fact_store_curate`; HTTP
-   inspection equivalents are `GET
-   /api/automation/runs`, `GET /api/automation/runs/{run_id}/artifacts`, and
-   `GET /api/automation/runs/{run_id}/artifacts/{kind}`.
-7. Use direct `tracedecay_fact_store_add`, `tracedecay_fact_store_update`,
-   `tracedecay_fact_store_supersede`, `tracedecay_fact_store_remove`, or
-   `tracedecay_fact_feedback` only for an exact administrative instruction;
-   these are independent retained operations. Prefer supersede over remove
-   when a newer fact corrects an older one. Deletion is permanent. If the requested deletion target is
-   ambiguous, show the resolved fact id and content summary and confirm only
-   that target before removal.
-8. Verify read-only with canonical fact queries and memory status. If a failed
-   run already records applied operations, report the committed effects and
-   required reconciliation instead of rerunning it blindly.
+Broad curation uses `tracedecay_fact_store_curate`; the daemon owns its task,
+validation, and supported effects. Preserve the returned run id and inspect
+terminal state and only advertised artifacts through the automation run views.
+If a failed run records applied operations, report them and the required
+reconciliation before considering a retry.
 
-Output: run id, terminal status, facts changed/skipped, applied/rejected
-operations, artifacts inspected, any reconciliation required, and the final
-verification result.
+Direct fact operations are for exact administration requests and are independent
+of curator runs. Prefer supersession when a newer fact corrects an older one.
+Removal is permanent; an exact deletion instruction is sufficient, while an
+ambiguous target must be resolved before removal. Verify the final state through
+canonical fact reads and report the run or fact identities that establish it.

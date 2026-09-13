@@ -100,9 +100,13 @@ fn summary_request_for_backlog(
         .collect::<Vec<_>>();
     let focus = focus_topic.as_deref().unwrap_or("the conversation so far");
     let prompt = format!(
-        "Summarize LCM raw messages for provider '{provider}', session '{session_id}', \
-         store_id range {first_store_id}..={last_store_id}. Focus on {focus}. \
-         Preserve durable instructions, decisions, open tasks, and facts needed to continue."
+        "Create a continuation-ready summary of the supplied messages for provider \
+         '{provider}', session '{session_id}', store_id range \
+         {first_store_id}..={last_store_id}. Focus on {focus}. Preserve user intent, \
+         durable instructions and constraints, decisions and stated rationale, completed \
+         work and evidence, open tasks and blockers, and exact paths, identifiers, \
+         citations, source references, and redaction markers. Do not invent facts or \
+         reconstruct omitted or redacted content."
     );
 
     LcmSummaryRequest {

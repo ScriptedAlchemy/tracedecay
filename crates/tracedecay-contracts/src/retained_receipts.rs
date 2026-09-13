@@ -526,7 +526,11 @@ fn map_evidence_terminal(
         }
         RetainedSurfaceEvidenceTerminalV1::Busy => RetainedSurfaceExecutionErrorV1::Saturated,
         RetainedSurfaceEvidenceTerminalV1::CursorManifestLimitExceeded => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+            // Re-projected from a terminal that reports no manifest counts.
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(
+                crate::retrieval::SessionRetrievalBudgetStageV1::CursorManifestLimit,
+                None,
+            )
         }
         RetainedSurfaceEvidenceTerminalV1::Cancelled => {
             RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)

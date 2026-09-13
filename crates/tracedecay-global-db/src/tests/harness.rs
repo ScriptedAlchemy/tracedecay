@@ -1175,8 +1175,11 @@ pub async fn publish_test_session_relation_projection(
     )
 }
 
+/// Mounts the daemon-owned relation graph a registered session shard needs to
+/// serve a query. A fixture that only freezes a snapshot can skip it; one that
+/// runs `execute` cannot, because the read and hydration ports both bind it.
 #[cfg(any(test, feature = "test-helpers"))]
-fn bind_test_session_relation_graph(
+pub fn bind_test_session_relation_graph(
     database: &RegisteredGlobalDb,
 ) -> tracedecay_domain::errors::Result<()> {
     let registry =

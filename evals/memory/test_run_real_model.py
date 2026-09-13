@@ -27,6 +27,19 @@ SCORE_SPEC.loader.exec_module(hermetic_score)
 
 
 class HermesHomeSelectionTest(unittest.TestCase):
+    def test_driver_defaults_resolve_before_launch_and_reporting(self):
+        self.assertEqual(run_real_model.parse_args([]).model, "gpt-5.4-mini")
+        self.assertEqual(
+            run_real_model.parse_args(["--driver", "cursor-agent"]).model,
+            "composer-2.5",
+        )
+        self.assertEqual(
+            run_real_model.parse_args(
+                ["--driver", "cursor-agent", "--model", "explicit-model"]
+            ).model,
+            "explicit-model",
+        )
+
     def test_removed_profile_flags_are_rejected(self):
         for args in (["--profile", "custom-eval"], ["--hermes-home", "/tmp/hermes"]):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
@@ -56,6 +69,36 @@ class HermesHomeSelectionTest(unittest.TestCase):
         self.assertNotIn("--project-root", cmd)
         self.assertEqual(run_mock.call_args.kwargs["cwd"], fixture)
         self.assertEqual(run_mock.call_args.kwargs["env"], env.env)
+
+
+class CursorComposerSelectionTest(unittest.TestCase):
+    def test_cursor_driver_loads_the_installed_plugin_in_composer(self):
+        env = run_real_model.create_eval_environment("cursor-composer")
+        self.addCleanup(env.cleanup)
+        fixture = env.root / "fixture"
+        fixture.mkdir()
+        log_dir = run_real_model.RUNS_DIR / "cursor-composer-test"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: log_dir.rmdir())
+        self.addCleanup(lambda: (log_dir / "cursor-composer-prompt1.log").unlink(missing_ok=True))
+        args = argparse.Namespace(tracedecay_bin="tracedecay", model="composer-2.5")
+        scenario = {"id": "cursor-composer", "real_model": {"prompts": ["inspect"]}}
+        completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
+
+        with mock.patch.object(run_real_model, "run", return_value=completed) as run_mock:
+            run_real_model.drive_cursor_agent(
+                args, scenario, fixture, log_dir, env.env
+            )
+
+        command = run_mock.call_args_list[1].args[0]
+        self.assertEqual(command[0], "cursor-agent")
+        self.assertEqual(
+            command[command.index("--plugin-dir") + 1],
+            str(env.home / ".cursor/plugins/local/tracedecay"),
+        )
+        self.assertIn("--approve-mcps", command)
+        self.assertIn("--force", command)
+        self.assertIn("--trust", command)
 
 
 class EvalStorageIsolationTest(unittest.TestCase):

@@ -326,6 +326,11 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
      ON observation_projection_rebuild_workflow_facts
         (projector_version, generation, provider, session_id, semantic_kind,
          provider_reference, observation_sequence);",
+    "CREATE INDEX IF NOT EXISTS idx_observations_session_sequence
+     ON observations (
+        json_extract(observation_json, '$.identity.source.session_id'),
+        sequence
+     );",
     "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
      ON observations (observation_id, receipt_id);",
     "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
@@ -619,6 +624,7 @@ mod tests {
              DROP INDEX idx_observation_workflow_facts_item;
              DROP INDEX idx_projection_rebuild_provenance_output;
              DROP INDEX idx_projection_rebuild_workflow_goal;
+             DROP INDEX idx_observations_session_sequence;
              DROP INDEX idx_observations_identity_receipt;
              DROP INDEX idx_projection_dispositions_observation_receipt;",
         )
@@ -644,6 +650,7 @@ mod tests {
                     'idx_observation_workflow_facts_item',
                     'idx_projection_rebuild_provenance_output',
                     'idx_projection_rebuild_workflow_goal',
+                    'idx_observations_session_sequence',
                     'idx_observations_identity_receipt',
                     'idx_projection_dispositions_observation_receipt'
                  )",

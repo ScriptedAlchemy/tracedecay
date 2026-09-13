@@ -1199,24 +1199,24 @@ pub(crate) struct SessionRefreshSelectors {
     /// Registered project id that owns the refresh operation
     #[arg(
         long,
-        conflicts_with_all = ["project_path", "profile_id"],
-        required_unless_present_any = ["project_path", "profile_id"]
+        conflicts_with_all = ["project_path", "profile"],
+        required_unless_present_any = ["project_path", "profile"]
     )]
     pub(crate) project_id: Option<String>,
     /// Registered project root path or alias that owns the refresh operation
     #[arg(
         long,
-        conflicts_with_all = ["project_id", "profile_id"],
-        required_unless_present_any = ["project_id", "profile_id"]
+        conflicts_with_all = ["project_id", "profile"],
+        required_unless_present_any = ["project_id", "profile"]
     )]
     pub(crate) project_path: Option<String>,
-    /// Typed `profile.<id>` identity whose user-scope session store owns a profile-scoped refresh
+    /// Use the authenticated profile's user-scope session store
     #[arg(
         long,
         conflicts_with_all = ["project_id", "project_path"],
         required_unless_present_any = ["project_id", "project_path"]
     )]
-    pub(crate) profile_id: Option<String>,
+    pub(crate) profile: bool,
     /// Exact session id to refresh
     #[arg(long)]
     pub(crate) session_id: String,

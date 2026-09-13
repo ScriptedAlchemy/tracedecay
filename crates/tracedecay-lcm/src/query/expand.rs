@@ -9,6 +9,32 @@ pub async fn expand(
     request: LcmExpandRequest,
 ) -> Result<LcmExpandResponse, LcmError> {
     match request.target {
+        LcmExpandTarget::CanonicalOccurrence { message_id } => {
+            let raw = raw::load_raw_message_by_identity(
+                conn,
+                &request.provider,
+                &request.session_id,
+                &message_id,
+            )
+            .await?
+            .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+            let (raw, range) = raw_message_with_sliced_content(raw, request.content_slice);
+            let content = raw.content.clone();
+            crate::metrics::record_lcm_retrieval(1);
+            Ok(LcmExpandResponse {
+                kind: "raw_message".to_string(),
+                content,
+                content_range: range,
+                raw_message: Some(raw),
+                raw_message_metadata: None,
+                summary_node: None,
+                summary_sources: Vec::new(),
+                payload_ref: None,
+                from_current_session: Some(true),
+                externalized_note: None,
+                source_pagination: None,
+            })
+        }
         LcmExpandTarget::RawMessage { store_id } => {
             let raw = raw::load_raw_message_by_store_id(conn, store_id).await?;
             // Raw store_id expansion works across sessions like hermes-lcm

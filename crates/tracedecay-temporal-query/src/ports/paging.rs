@@ -1,6 +1,9 @@
 use std::marker::PhantomData;
 
-use super::{ExecutionControl, MeasuredTemporalValue, TemporalPortError, TemporalRecord};
+use super::{
+    ExecutionControl, MeasuredTemporalValue, ReadBudgetAccounting, TemporalPortError,
+    TemporalRecord,
+};
 use crate::ranking::RankingCandidate;
 
 const MAX_READ_ITEMS: usize = 8_192;
@@ -18,6 +21,13 @@ pub struct PageLimits {
     max_page_items: usize,
 }
 
+/// Accounting for a request-shape ceiling check. A zero value is malformed
+/// rather than oversized, and reporting it as "requested 0" against a ceiling it
+/// never reached would be a fabricated number.
+pub(super) fn over_ceiling(requested: usize, ceiling: usize) -> Option<ReadBudgetAccounting> {
+    (requested > ceiling).then(|| ReadBudgetAccounting::requested(ceiling as u64, requested as u64))
+}
+
 impl PageLimits {
     pub fn new(
         max_items: usize,
@@ -28,22 +38,26 @@ impl PageLimits {
         if max_items == 0 || max_items > MAX_READ_ITEMS {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "item count",
+                accounting: over_ceiling(max_items, MAX_READ_ITEMS),
             });
         }
         if max_total_bytes == 0 || max_total_bytes > MAX_READ_TOTAL_BYTES {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "total bytes",
+                accounting: over_ceiling(max_total_bytes, MAX_READ_TOTAL_BYTES),
             });
         }
         if max_item_bytes == 0 || max_item_bytes > MAX_READ_ITEM_BYTES {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "item bytes",
+                accounting: over_ceiling(max_item_bytes, MAX_READ_ITEM_BYTES),
             });
         }
         if max_page_items == 0 || max_page_items > max_items || max_page_items > MAX_PAGE_ITEMS_CAP
         {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "page item count",
+                accounting: over_ceiling(max_page_items, max_items.min(MAX_PAGE_ITEMS_CAP)),
             });
         }
         Ok(Self {
@@ -277,16 +291,28 @@ impl<T> ReadState<T> {
         if self.limits.max_items > max_items {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: resources.item_count,
+                accounting: Some(ReadBudgetAccounting::requested(
+                    max_items as u64,
+                    self.limits.max_items as u64,
+                )),
             });
         }
         if self.limits.max_total_bytes > max_total_bytes {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: resources.total_bytes,
+                accounting: Some(ReadBudgetAccounting::requested(
+                    max_total_bytes as u64,
+                    self.limits.max_total_bytes as u64,
+                )),
             });
         }
         if self.limits.max_item_bytes > max_item_bytes {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: resources.item_bytes,
+                accounting: Some(ReadBudgetAccounting::requested(
+                    max_item_bytes as u64,
+                    self.limits.max_item_bytes as u64,
+                )),
             });
         }
         Ok(())
@@ -352,10 +378,18 @@ impl<T> ReadState<T> {
         if self.consumed_items == self.limits.max_items {
             TemporalPortError::BudgetExceeded {
                 resource: resources.item_count,
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(
+                    self.limits.max_items as u64,
+                    self.consumed_items as u64,
+                )),
             }
         } else {
             TemporalPortError::BudgetExceeded {
                 resource: resources.total_bytes,
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(
+                    self.limits.max_total_bytes as u64,
+                    self.consumed_bytes as u64,
+                )),
             }
         }
     }
@@ -404,8 +438,20 @@ impl<T: MeasuredTemporalValue> BoundedPageSink<'_, T> {
     pub fn push(&mut self, value: T) -> Result<(), TemporalPortError> {
         self.control.checkpoint()?;
         if self.items.len() == self.max_page_items || *self.consumed_items == self.max_items {
+            let accounting = if *self.consumed_items == self.max_items {
+                ReadBudgetAccounting::consumed_with_more(
+                    self.max_items as u64,
+                    *self.consumed_items as u64,
+                )
+            } else {
+                ReadBudgetAccounting::requested(
+                    self.max_page_items as u64,
+                    self.items.len().saturating_add(1) as u64,
+                )
+            };
             return Err(TemporalPortError::BudgetExceeded {
                 resource: self.budget_resources.item_count,
+                accounting: Some(accounting),
             });
         }
         value.validate_candidate_fields(self.candidate_field_caps)?;
@@ -413,16 +459,28 @@ impl<T: MeasuredTemporalValue> BoundedPageSink<'_, T> {
         if encoded_bytes > self.max_item_bytes {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: self.budget_resources.item_bytes,
+                accounting: Some(ReadBudgetAccounting::requested(
+                    self.max_item_bytes as u64,
+                    encoded_bytes as u64,
+                )),
             });
         }
         let total_bytes = self.consumed_bytes.checked_add(encoded_bytes).ok_or(
             TemporalPortError::BudgetExceeded {
                 resource: self.budget_resources.total_bytes,
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(
+                    self.max_total_bytes as u64,
+                    *self.consumed_bytes as u64,
+                )),
             },
         )?;
         if total_bytes > self.max_total_bytes {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: self.budget_resources.total_bytes,
+                accounting: Some(ReadBudgetAccounting::requested(
+                    self.max_total_bytes as u64,
+                    total_bytes as u64,
+                )),
             });
         }
         *self.consumed_items += 1;
@@ -450,6 +508,10 @@ impl<T: MeasuredTemporalValue> BoundedPageSink<'_, T> {
         if key.0.len() > key_cap {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "continuation key bytes",
+                accounting: Some(ReadBudgetAccounting::requested(
+                    key_cap as u64,
+                    key.0.len() as u64,
+                )),
             });
         }
         self.continuation = Some(key);

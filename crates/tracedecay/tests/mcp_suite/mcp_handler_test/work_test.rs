@@ -162,8 +162,8 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         prepared_admit["request"].clone(),
     )
     .await;
-    let admitted_version = admitted["verified_graph_version"].clone();
-    assert_eq!(admitted["replayed"], false, "{admitted}");
+    let admitted_version = admitted["mutation"]["verified_graph_version"].clone();
+    assert_eq!(admitted["mutation"]["replayed"], false, "{admitted}");
 
     let placement_request = json!({
         "task_id": "task.mcp-attempt-read",
@@ -204,8 +204,6 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         .expect("commit is UTF-8")
         .trim()
         .to_owned();
-    let topology = serde_json::to_value(tracedecay_domain::safe_work_topology_policy_v1())
-        .expect("serialize registered topology");
     let attempt_at = now_micros();
     let start_request = json!({
         "task_id": "task.mcp-attempt-read",
@@ -217,43 +215,7 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         "instructions": "Observe the fixture only.",
         "effect_state": "observational",
         "occurred_at": attempt_at,
-        "execution_snapshot": {
-            "configuration_revision_id": "configuration.initial.canonical.v1",
-            "configuration_snapshot_id": format!(
-                "tracedecay.configuration.snapshot.v1.{}",
-                "4".repeat(64)
-            ),
-            "effective_behavior_digest": format!("sha256:{}", "1".repeat(64)),
-            "resolution_provenance_digest": format!("sha256:{}", "2".repeat(64)),
-            "route": {
-                "provider_id": "provider.work.codex-app-server",
-                "route_id": "route.work.mcp-attempt-read"
-            },
-            "backend": "codex_app_server",
-            "protocol": "codex_app_server_json_rpc",
-            "model": "fixture-model",
-            "executable": {
-                "executable_id": "executable.work.mcp-attempt-read",
-                "artifact_digest": format!("sha256:{}", "3".repeat(64))
-            },
-            "sandbox": "required",
-            "approval": "never",
-            "filesystem": "workspace_write",
-            "egress": "deny",
-            "environment_allowlist": [],
-            "credential_references": [],
-            "limits": {
-                "max_input_tokens": 128000,
-                "max_output_tokens": 8192,
-                "max_stdout_bytes": 65536,
-                "max_stderr_bytes": 65536,
-                "max_protocol_bytes": 65536,
-                "max_concurrency": 1
-            },
-            "deadline": attempt_at + 60_000_000,
-            "fallback": { "kind": "disabled" },
-            "topology": topology
-        }
+        "execution_snapshot": admitted["execution_snapshot"].clone()
     });
     let _: tracedecay_contracts::StartWorkAttemptCommand =
         serde_json::from_value(start_request.clone()).expect("valid start-attempt request");
