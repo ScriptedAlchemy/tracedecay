@@ -2264,22 +2264,6 @@ class WorkflowLifecycleTests(unittest.TestCase):
         return {
             "project_id": "project.fixture",
             "configuration_key": "work.topology_policy.v1",
-            "work_execution_snapshot": {
-                "route": {"provider_id": "provider.fixture", "route_id": "route.fixture"},
-                "backend": "codex_cli",
-                "model": "fixture-model",
-            },
-            "work_task_id": "task.fixture",
-            "work_admitted_version": {"graph_version": 4},
-            "work_attempt_frontier": {
-                "identity": {
-                    "task_id": "task.fixture",
-                    "run_id": "run.fixture",
-                    "attempt_id": "attempt.fixture",
-                },
-                "state": "cancelled",
-                "evidence_digest": None,
-            },
         }
 
     def test_shared_lifecycle_consumes_public_pins_and_reaches_terminal_states(self) -> None:
