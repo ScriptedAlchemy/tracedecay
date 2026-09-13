@@ -17,6 +17,7 @@ import {
   type DoctorFindingsPayloadV1,
   type DoctorReportCoverageV1,
   type DoctorReportEntryV1,
+  type SchemaConvergenceFindingV1,
 } from '../../contracts/generated.ts';
 import { doctorFindingsQueryKey, fetchDoctorFindings } from '../../data/query/doctor.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -27,6 +28,7 @@ import { ReadModelState, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn.ts';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { doctorEvidencePresentation, doctorFamilyLabel } from './doctorModel.ts';
 
 /** Canonical, read-only Doctor diagnostics for the selected project scope. */
@@ -111,6 +113,7 @@ function DoctorFindings({
     <>
       <EnvelopeTruth envelope={envelope} refreshing={refreshing} onRefresh={onRefresh} />
       <DoctorReportCoverageGaps coverage={envelope.payload.report_coverage} />
+      <SchemaConvergencePanel findings={envelope.payload.schema_convergences} />
       {envelope.payload.entries.length === 0 ? (
         <ReadModelState kind={envelope.domain_state} detail={envelope.payload.note} />
       ) : (
@@ -128,6 +131,56 @@ function DoctorFindings({
       </p>
     </>
   );
+}
+
+export function SchemaConvergencePanel({
+  findings,
+}: {
+  findings: SchemaConvergenceFindingV1[];
+}) {
+  if (findings.length === 0) return null;
+  return (
+    <section
+      aria-label="Schema convergence"
+      className="mx-4 mt-2 border border-edge-subtle bg-surface-1 p-3"
+    >
+      <h3 className="text-xs font-semibold">Schema convergence</h3>
+      <ul className="mt-2 space-y-2">
+        {findings.map((finding, index) => (
+          <li
+            key={`${finding.store}:${finding.stage}:${index}`}
+            data-convergence-state={finding.state}
+            className="text-2xs text-text-secondary"
+          >
+            <span className="font-medium text-text-primary">
+              {convergenceStateLabel(finding.state)}
+            </span>{' '}
+            · {finding.store} · {finding.stage.replaceAll('_', ' ')}
+            {finding.progress ? (
+              <>
+                {' '}
+                · {finding.progress.unit} {finding.progress.done} done /{' '}
+                {finding.progress.remaining} remaining
+              </>
+            ) : null}
+            {' · '}started {formatMicrosUtc(finding.started_at_micros)}
+            {finding.degraded_row ? <> · {finding.degraded_row}</> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function convergenceStateLabel(state: SchemaConvergenceFindingV1['state']): string {
+  return (
+    {
+      pending_schema_migration: 'Pending schema migration',
+      released_shape_convergence_in_progress: 'Released-shape convergence in progress',
+      degraded: 'Schema convergence degraded',
+      completed: 'Schema convergence completed',
+    } satisfies Record<SchemaConvergenceFindingV1['state'], string>
+  )[state];
 }
 
 function DoctorReportCoverageGaps({

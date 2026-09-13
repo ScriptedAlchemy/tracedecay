@@ -1939,6 +1939,7 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       })),
     },
     known_families: [...DOCTOR_FAMILIES],
+    schema_convergences: [],
     note: 'five of seven finding families were consulted; two reported no evidence source',
   };
   return envelope(payload, 'partial', [
@@ -2261,6 +2262,7 @@ const storageFindings = envelope({
     'semantic_index',
     'observability',
   ],
+  schema_convergences: [],
   note: 'storage producers reported independent source coverage',
   kind_statuses: [
     {

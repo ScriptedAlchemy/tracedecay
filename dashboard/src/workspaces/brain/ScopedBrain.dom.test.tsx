@@ -169,6 +169,51 @@ describe('ScopedBrain', () => {
     expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
   });
 
+  it('shows every schema convergence state for the selected project', async () => {
+    const schemaConvergences = [
+      'pending_schema_migration',
+      'released_shape_convergence_in_progress',
+      'degraded',
+      'completed',
+    ].map((state, index) => ({
+      store: 'profile-sessions',
+      stage: 'registered_schema',
+      state,
+      progress: index === 1 ? { unit: 'rows', done: 12, remaining: 3 } : null,
+      started_at_micros: 42 + index,
+      degraded_row: state === 'degraded' ? 'observation_id=obs-9' : null,
+    }));
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/doctor/findings': {
+          status: 200,
+          body: withEnvelopePayload({
+            family_filter: null,
+            entries: [],
+            report_coverage: null,
+            known_families: ['storage'],
+            schema_convergences: schemaConvergences,
+            note: 'schema convergence state',
+          }, 'partial'),
+        },
+        '/api/projects/proj_x/plugins/graph/subgraph': {
+          status: 200,
+          body: SUBGRAPH_ENVELOPE,
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+
+    renderScoped();
+
+    expect(await screen.findByText('Pending schema migration')).toBeTruthy();
+    expect(screen.getByText('Released-shape convergence in progress')).toBeTruthy();
+    expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
+    expect(screen.getByText('Schema convergence completed')).toBeTruthy();
+    expect(screen.getByText(/rows 12 done \/ 3 remaining/)).toBeTruthy();
+  });
+
   it('does not infer an unmounted graph from a generic scoped read failure', async () => {
     vi.stubGlobal(
       'fetch',
