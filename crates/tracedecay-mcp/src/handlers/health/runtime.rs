@@ -129,14 +129,17 @@ fn attach_doctor_report(value: &mut Value, report: McpDoctorReportV1<'_>) {
             "kind": "observed",
             "report": admitted.report,
             "table_growth_evidence": admitted.table_growth_evidence,
+            "schema_convergences": admitted.schema_convergences,
         }),
         McpDoctorReportV1::ReadFailed => json!({
             "kind": "unknown",
             "table_growth_evidence": [],
+            "schema_convergences": [],
         }),
         McpDoctorReportV1::NotAttached => json!({
             "kind": "unsupported",
             "table_growth_evidence": [],
+            "schema_convergences": [],
         }),
     };
 }

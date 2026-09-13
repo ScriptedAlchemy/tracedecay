@@ -1025,6 +1025,15 @@ async fn store_sized_migrations_are_reported_and_converge_after_admission() {
         vec![(shard_id.clone(), RegisteredSchemaConvergenceStatus::Running)],
         "the shard still migrating must be the one reported"
     );
+    let convergence_observations = registry.registered_schema_convergence_observations();
+    let [convergence] = convergence_observations.as_slice() else {
+        panic!("one running store must publish one typed convergence finding");
+    };
+    assert_eq!(
+        convergence.state,
+        tracedecay_contracts::storage::SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+    );
+    assert!(convergence.started_at_micros > 0);
     let report =
         tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(&unconverged);
     let tracedecay_contracts::doctor::DoctorStorageFamilyReadV1::Observed { findings } = report
@@ -1052,6 +1061,10 @@ async fn store_sized_migrations_are_reported_and_converge_after_admission() {
     assert!(
         registry.unconverged_registered_schemas().is_empty(),
         "a converged shard must stop being reported"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_observations()[0].state,
+        tracedecay_contracts::storage::SchemaConvergenceStateV1::Completed
     );
     let snapshot = database
         .read_snapshot()

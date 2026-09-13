@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 #[cfg(any(test, feature = "test-helpers"))]
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
+use tracedecay_contracts::storage::{
+    SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
+};
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
@@ -29,6 +32,8 @@ pub enum RegisteredSchemaConvergenceStatus {
 
 type RegisteredSchemaConvergenceStatuses =
     BTreeMap<StoreShardIdV1, RegisteredSchemaConvergenceStatus>;
+type RegisteredSchemaConvergenceMetadata =
+    BTreeMap<StoreShardIdV1, (SchemaConvergenceStageV1, i64)>;
 
 fn lock_registered_schema_convergence_statuses(
     statuses: &StdMutex<RegisteredSchemaConvergenceStatuses>,
@@ -58,6 +63,7 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
     foreground_project_opens: Arc<ForegroundProjectOpenState>,
     concurrency: Arc<Semaphore>,
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
+    metadata: Arc<StdMutex<RegisteredSchemaConvergenceMetadata>>,
     tasks: StdMutex<BTreeMap<StoreShardIdV1, Arc<RetainedHookTaskJoin>>>,
     #[cfg(any(test, feature = "test-helpers"))]
     schedule_count: std::sync::atomic::AtomicUsize,
@@ -167,6 +173,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             // retention while ordinary per-shard reads and writes stay live.
             concurrency: Arc::new(Semaphore::new(1)),
             statuses: Arc::new(StdMutex::new(BTreeMap::new())),
+            metadata: Arc::new(StdMutex::new(BTreeMap::new())),
             tasks: StdMutex::new(BTreeMap::new()),
             #[cfg(any(test, feature = "test-helpers"))]
             schedule_count: std::sync::atomic::AtomicUsize::new(0),
@@ -206,8 +213,53 @@ impl RegisteredSchemaConvergenceMaintenance {
             .collect()
     }
 
+    pub(super) fn observations(&self) -> Vec<SchemaConvergenceFindingV1> {
+        let metadata = self
+            .metadata
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let statuses = lock_registered_schema_convergence_statuses(&self.statuses);
+        statuses
+            .iter()
+            .filter_map(|(store, status)| {
+                let (stage, started_at_micros) = metadata.get(store)?;
+                let (state, degraded_row) = match status {
+                    RegisteredSchemaConvergenceStatus::Pending => {
+                        (SchemaConvergenceStateV1::PendingSchemaMigration, None)
+                    }
+                    RegisteredSchemaConvergenceStatus::Running => (
+                        SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+                        None,
+                    ),
+                    RegisteredSchemaConvergenceStatus::Complete => {
+                        (SchemaConvergenceStateV1::Completed, None)
+                    }
+                    RegisteredSchemaConvergenceStatus::Degraded { message } => {
+                        (SchemaConvergenceStateV1::Degraded, Some(message.clone()))
+                    }
+                };
+                Some(SchemaConvergenceFindingV1 {
+                    store: format!("{:?}", store.scope),
+                    stage: *stage,
+                    state,
+                    progress: None,
+                    started_at_micros: *started_at_micros,
+                    degraded_row,
+                })
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub(super) fn defer(&self, shard_id: StoreShardIdV1) {
+        self.metadata
+            .lock()
+            .expect("registered schema convergence metadata lock remains healthy")
+            .entry(shard_id.clone())
+            .or_insert((
+                SchemaConvergenceStageV1::RegisteredSchema,
+                tracedecay_contracts::now_micros().0,
+            ));
         lock_registered_schema_convergence_statuses(&self.statuses)
             .entry(shard_id)
             .or_insert(RegisteredSchemaConvergenceStatus::Pending);
@@ -233,6 +285,14 @@ impl RegisteredSchemaConvergenceMaintenance {
 
     fn schedule_target(&self, target: SchemaConvergenceTarget) {
         let shard_id = target.binding().shard_id.clone();
+        let stage = match &target {
+            SchemaConvergenceTarget::Registered { .. } => {
+                SchemaConvergenceStageV1::RegisteredSchema
+            }
+            SchemaConvergenceTarget::RuntimeLedger(_) => {
+                SchemaConvergenceStageV1::RuntimeWriterLedger
+            }
+        };
         let mut tasks = self
             .tasks
             .lock()
@@ -240,13 +300,22 @@ impl RegisteredSchemaConvergenceMaintenance {
         if !self.accepting.load(Ordering::Acquire) {
             return;
         }
+        let mut metadata = self
+            .metadata
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         {
             let mut statuses = lock_registered_schema_convergence_statuses(&self.statuses);
             if statuses.contains_key(&shard_id) {
                 return;
             }
+            metadata.insert(
+                shard_id.clone(),
+                (stage, tracedecay_contracts::now_micros().0),
+            );
             statuses.insert(shard_id.clone(), RegisteredSchemaConvergenceStatus::Pending);
         }
+        drop(metadata);
         #[cfg(any(test, feature = "test-helpers"))]
         self.schedule_count.fetch_add(1, Ordering::Relaxed);
         #[cfg(any(test, feature = "test-helpers"))]
@@ -374,6 +443,10 @@ impl RegisteredSchemaConvergenceMaintenance {
             .is_some_and(|retained| Arc::ptr_eq(retained, &task))
         {
             tasks.remove(shard_id);
+            self.metadata
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(shard_id);
             lock_registered_schema_convergence_statuses(&self.statuses).remove(shard_id);
         }
         Ok(())
@@ -548,6 +621,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
     ) -> Vec<(StoreShardIdV1, RegisteredSchemaConvergenceStatus)> {
         self.registered_schema_convergence.unconverged()
+    }
+
+    #[must_use]
+    pub fn registered_schema_convergence_observations(&self) -> Vec<SchemaConvergenceFindingV1> {
+        self.registered_schema_convergence.observations()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

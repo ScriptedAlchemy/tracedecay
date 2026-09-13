@@ -9,6 +9,7 @@ use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use tracedecay_application::semantic_runtime::{
     SemanticConfigurationPinV1, project_lifecycle_status,
 };
+use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};
 use tracedecay_daemon_service::shutdown::DaemonActivity;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
@@ -75,6 +76,34 @@ pub(crate) fn doctor_runtime_request(
         id: request.id.clone().unwrap_or(serde_json::Value::Null),
         startup_health_only,
         doctor_report_requested,
+    })
+}
+
+fn status_request_id(request: Option<&JsonRpcRequest>) -> Option<serde_json::Value> {
+    let request = request?;
+    if request.method != "tools/call" {
+        return None;
+    }
+    let (tool_name, _) = projectless_tool_call(request.params.as_ref()).ok()?;
+    (tool_name == "tracedecay_status")
+        .then(|| request.id.clone().unwrap_or(serde_json::Value::Null))
+}
+
+fn project_open_status_value(
+    handshake: &DaemonHandshake,
+    project_open: &ProjectOpenStatusV1,
+) -> serde_json::Value {
+    json!({
+        "project_root": handshake.project_path,
+        "graph_statistics": {
+            "state": "unavailable",
+            "reason": "exact_scope_generation_not_ready",
+        },
+        "project_open": project_open,
+        "schema_convergence": {
+            "status": "unavailable",
+            "findings": [],
+        },
     })
 }
 
@@ -193,6 +222,7 @@ fn doctor_runtime_coverage(startup_health_only: bool) -> Option<serde_json::Valu
 async fn doctor_runtime_value(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
+    project_open: Option<ProjectOpenStatusV1>,
     startup_health_only: bool,
     git_watcher_health: Option<serde_json::Value>,
     build_version: &str,
@@ -204,6 +234,7 @@ async fn doctor_runtime_value(
         build_version,
     ))
     .await;
+    value["project_open"] = project_open.map_or(serde_json::Value::Null, |status| json!(status));
     value["git_watcher"] = git_watcher_health.unwrap_or_else(|| {
         json!({
             "status": "unavailable",
@@ -505,6 +536,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
+    project_open: Option<ProjectOpenStatusV1>,
     request: DoctorRuntimeRequest,
     git_watcher_health: Option<serde_json::Value>,
 ) -> Result<()> {
@@ -512,6 +544,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     let mut value = Box::pin(doctor_runtime_value(
         handshake,
         store_administration,
+        project_open,
         request.startup_health_only,
         git_watcher_health,
         build_version,
@@ -543,6 +576,7 @@ pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     transport: &mut T,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
+    project_open: Option<ProjectOpenStatusV1>,
     setup_activity: DaemonActivity,
     first_request: &super::AuthenticatedFirstRequest,
     git_watcher_health: Option<serde_json::Value>,
@@ -553,6 +587,19 @@ where
     Probe: FnOnce() -> ProbeFuture,
     ProbeFuture: std::future::Future<Output = Result<bool>>,
 {
+    if let Some(id) = status_request_id(first_request.parsed())
+        && let Some(project_open) = project_open.as_ref()
+        && project_open.state != ProjectOpenStatusStateV1::Completed
+    {
+        drop(setup_activity);
+        let result = doctor_runtime_tool_result(project_open_status_value(handshake, project_open));
+        Box::pin(write_json_rpc_response(
+            transport,
+            &JsonRpcResponse::success(id, result),
+        ))
+        .await?;
+        return Ok(None);
+    }
     let Some(request) = doctor_runtime_request(first_request.parsed()) else {
         return Ok(Some(setup_activity));
     };
@@ -569,6 +616,7 @@ where
         transport,
         handshake,
         store_administration,
+        project_open,
         request,
         git_watcher_health,
     ))
@@ -595,6 +643,9 @@ mod doctor_runtime_route_tests {
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use crate::project::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_contracts::project_open::{
+        ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+    };
     use tracedecay_daemon_protocol::DaemonClientIdentity;
     use tracedecay_mcp::McpTransport;
     use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
@@ -711,6 +762,19 @@ mod doctor_runtime_route_tests {
         .to_string()
     }
 
+    fn status_request_line() -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_status",
+                "arguments": { "format": "json" },
+            },
+        })
+        .to_string()
+    }
+
     fn filesystem_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn visit(root: &Path, current: &Path, entries: &mut Vec<(PathBuf, Vec<u8>)>) {
             let mut children = std::fs::read_dir(current)
@@ -802,6 +866,53 @@ mod doctor_runtime_route_tests {
     }
 
     #[tokio::test]
+    async fn status_returns_typed_project_open_state_without_waiting_for_owner() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+        let first_request = AuthenticatedFirstRequest::new(status_request_line());
+        let project_open = ProjectOpenStatusV1 {
+            state: ProjectOpenStatusStateV1::Converging,
+            reason: ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery,
+            retry_after_ms: Some(250),
+            detail: Some("repository discovery is deferred".to_owned()),
+        };
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            Some(project_open),
+            setup_activity,
+            &first_request,
+            None,
+            || async { panic!("status must not probe the project owner") },
+        )
+        .await
+        .expect("serve core status response");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason":"deferred_repository_discovery""#)
+        );
+        assert!(transport.output.contains(r#""retry_after_ms":250"#));
+    }
+
+    #[tokio::test]
     async fn unix_doctor_probe_drops_activity_before_core_response_write() {
         let root = tempfile::TempDir::new().expect("fixture root");
         let profile = root.path().join("profile");
@@ -826,6 +937,7 @@ mod doctor_runtime_route_tests {
             &mut transport,
             &handshake,
             &store_administration,
+            None,
             setup_activity,
             &first_request,
             Some(serde_json::json!({
@@ -876,6 +988,7 @@ mod doctor_runtime_route_tests {
             &mut transport,
             &handshake,
             &store_administration,
+            None,
             setup_activity,
             &first_request,
             None,
@@ -955,6 +1068,7 @@ mod doctor_runtime_route_tests {
         let value = super::doctor_runtime_value(
             &handshake,
             &store_administration,
+            None,
             false,
             None,
             build_version,

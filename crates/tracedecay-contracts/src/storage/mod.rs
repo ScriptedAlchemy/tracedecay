@@ -22,6 +22,7 @@
 //! reported seam in the storage runtime crate (see [`telemetry`]).
 
 pub mod compaction;
+pub mod convergence;
 pub mod debris;
 pub mod findings;
 pub mod identity;
@@ -29,6 +30,10 @@ pub mod inventory;
 pub mod telemetry;
 
 pub use compaction::{CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1};
+pub use convergence::{
+    SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
+    SchemaConvergenceStateV1,
+};
 pub use debris::{
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, QuarantineContractV1,
     QuarantinedArtifactV1,
