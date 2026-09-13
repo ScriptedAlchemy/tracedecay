@@ -2490,6 +2490,7 @@ def run_phase(args: argparse.Namespace) -> int:
         "summary": {"discovered": 0, "completed": 0, "failed": 0, "cancelled": 0},
     }
     client: McpClient | None = None
+    fixture: dict[str, Any] = {}
     try:
         fixture_path = args.out / "fixture.json"
         if not fixture_path.is_file():
@@ -2557,8 +2558,12 @@ def run_phase(args: argparse.Namespace) -> int:
                 execute_effect(client, *selected[0], fixture, {policy.name: policy for _, policy in policies})
             )
     except Exception as error:
-        report["fatal"] = str(error)
+        report["fatal"] = f"{type(error).__name__}: {error}"
         report["fatal_problem_code"] = "tool_sweep.phase_failed"
+        # A fatal raised during priming would otherwise hide the producer
+        # failure that made a later step's fixture key missing.
+        if fixture.get("priming_errors"):
+            report["priming_errors"] = fixture["priming_errors"]
     finally:
         if client is not None:
             client.close()
