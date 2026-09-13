@@ -393,9 +393,9 @@ impl ProjectContextScoutOwnerV1 {
             .await
     }
 
-    /// Claims only one caller-resolved full-lifecycle address and the exact
-    /// current publication watermark. Callers obtain `address` from the
-    /// current-admission registry path immediately before invoking this.
+    /// Claims only one caller-resolved full-lifecycle address. The current
+    /// publication watermark proves that authority is mounted; queued guidance
+    /// can predate the boundary that makes it deliverable.
     pub async fn claim_ready_guidance_exact(
         &self,
         hook: &HookEventEnvelopeV2,
@@ -422,8 +422,6 @@ impl ProjectContextScoutOwnerV1 {
         };
         let entry = recent.pending.into_iter().find(|entry| {
             entry.work.address == address
-                && entry.work.input_watermark == current_input_watermark
-                && entry.envelope.input_watermark == current_input_watermark
                 && entry.envelope.configuration_revision == control.configuration_revision
                 && entry.envelope.candidate.expires_at.0 > now.0
         })?;
@@ -1666,6 +1664,7 @@ mod tests {
             .await
             .expect("current configuration");
         let input_watermark = [14; 32];
+        let boundary_watermark = [15; 32];
         let entry = ContextScoutDurableQueueEntryV1 {
             work: ContextScoutWorkV1 {
                 address,
@@ -1701,7 +1700,7 @@ mod tests {
             .claim_ready_guidance_exact(
                 admitted.envelope(),
                 address,
-                input_watermark,
+                boundary_watermark,
                 1,
                 UtcMicros(observed_at.0 + 1),
             )
@@ -1711,7 +1710,7 @@ mod tests {
             .claim_ready_guidance_exact(
                 admitted.envelope(),
                 address,
-                input_watermark,
+                boundary_watermark,
                 1,
                 UtcMicros(observed_at.0 + 2),
             )
@@ -1726,7 +1725,7 @@ mod tests {
                 .claim_ready_guidance_exact(
                     &foreign,
                     address,
-                    input_watermark,
+                    boundary_watermark,
                     1,
                     UtcMicros(observed_at.0 + 3),
                 )
