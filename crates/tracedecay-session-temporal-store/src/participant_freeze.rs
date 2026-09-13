@@ -483,14 +483,26 @@ struct FrozenWatermarksWire {
 mod tests {
     use super::*;
     use tempfile::{TempDir, tempdir};
-    use tracedecay_domain::{RetrievalGrainV1, TemporalModeV1};
+    use tracedecay_domain::{
+        CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
+        DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1,
+        ProjectionGenerationId, ProviderId, RetentionClass, RetrievalGrainV1,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, TemporalModeV1, UtcMicros,
+    };
     use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
-    use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
+    use tracedecay_global_db::tests::harness::{
+        bind_test_session_relation_graph, open_registered_test_database_fixture,
+        publish_test_session_relation_projection,
+    };
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
     use tracedecay_temporal_query::candidates::CandidateChannel;
-    use tracedecay_temporal_query::context::ContextBudget;
-    use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
+    use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+    use tracedecay_temporal_query::ports::{ExecutionLimits, TemporalSnapshotRequest};
     use tracedecay_temporal_query::ranking::DiversityLimits;
 
     fn root(project_id: Option<&str>) -> TemporalAuthorizedRoot {
@@ -530,7 +542,7 @@ mod tests {
             ContextBudget {
                 max_bytes: 64 * 1024,
                 max_tokens: 4_096,
-                estimator_version: "test-estimator.v1".to_string(),
+                estimator_version: "words-v1".to_string(),
             },
             1,
             1,
@@ -539,6 +551,13 @@ mod tests {
     }
 
     fn root_execution_request(query: &str) -> AuthorizedTemporalExecutionRequest {
+        root_execution_request_with_limits(query, ExecutionLimits::default())
+    }
+
+    fn root_execution_request_with_limits(
+        query: &str,
+        limits: ExecutionLimits,
+    ) -> AuthorizedTemporalExecutionRequest {
         let snapshot = TemporalSnapshotRequest::new(
             SessionId::new("root-anchor").expect("session"),
             digest('1'),
@@ -552,7 +571,8 @@ mod tests {
         .expect("authorized root")
         .with_provider_scope(Some("codex".to_string()))
         .expect("provider scope")
-        .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot);
+        .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot)
+        .with_limits(limits);
         AuthorizedTemporalExecutionRequest::new(
             snapshot,
             query.to_string(),
@@ -562,12 +582,141 @@ mod tests {
             ContextBudget {
                 max_bytes: 64 * 1024,
                 max_tokens: 4_096,
-                estimator_version: "test-estimator.v1".to_string(),
+                estimator_version: "words-v1".to_string(),
             },
             1,
             1,
             digest('4'),
         )
+    }
+
+    /// `execute()` signs its continuation cursors, so a root fixture that stops at
+    /// `freeze()` needs no key and one that runs a query needs exactly one.
+    async fn seed_root_cursor_key(connection: &TestConnection) {
+        connection
+            .execute(
+                "INSERT INTO session_query_cursor_keys (
+                     key_id, key_version, key_material, created_at, retired_at
+                 ) VALUES ('cursor.key.root', 1, ?1, 1, NULL)",
+                params![vec![7u8; 32]],
+            )
+            .await
+            .expect("root cursor signing key");
+    }
+
+    /// Hands the seeded session's relation receipt to the production publisher.
+    ///
+    /// `seed_root_sessions` writes a receipt itself so a freeze-only fixture has a
+    /// graph watermark to check; the receipt is immutable, so a fixture that goes
+    /// on to publish a real projection must let the publisher mint its own.
+    async fn publish_root_relation_projection(
+        database: &RegisteredGlobalDbLeaseV1,
+        connection: &TestConnection,
+        session_id: &str,
+    ) {
+        for table in [
+            "session_relation_effect_journal",
+            "session_relation_receipts",
+        ] {
+            connection
+                .execute(
+                    &format!("DELETE FROM {table} WHERE session_id = ?1"),
+                    params![session_id],
+                )
+                .await
+                .expect("release fixture relation receipt");
+        }
+        publish_test_session_relation_projection(database, session_id, 1)
+            .await
+            .expect("published relation projection");
+    }
+
+    /// Canonical observation and anchor rows for one seeded root message.
+    ///
+    /// The relation projection the record read loads is reconstructed from these
+    /// two payloads, so a fixture that stubs them with `{}` can freeze a snapshot
+    /// but never execute a query.
+    fn fixture_root_evidence(
+        session_id: &str,
+        ordinal: u64,
+        record_id: &str,
+        receipt_id: &str,
+        text: &str,
+    ) -> (String, String) {
+        let session = SessionId::new(session_id).expect("session id");
+        let provider = ProviderId::new("codex").expect("provider");
+        let record_id = ObservationId::new(record_id).expect("record id");
+        let source = ObservationSourceIdentityV1::for_provider(provider.clone(), session.clone())
+            .expect("observation source");
+        let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider,
+            "message",
+            record_id.clone(),
+            CanonicalObservationRelationsV1::new(session).with_message_id(
+                ObservationId::new(format!("message.{ordinal}")).expect("message id"),
+            ),
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::User,
+                content: serde_json::json!({ "text": text }),
+                model: None,
+                timestamp: Some(i64::try_from(ordinal + 1).expect("timestamp")),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        )
+        .expect("observation envelope");
+        let payload = serde_json::to_value(envelope).expect("payload");
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).expect("source generation"),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .expect("observation identity");
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(receipt_id).expect("receipt id"),
+                ComponentVersion::new("sanitizer.root-fixture.v1").expect("sanitizer version"),
+            )
+            .expect("receipt ref"),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).expect("payload reference")),
+        )
+        .expect("sanitization receipt");
+        let observation = DurableObservationV1::new(
+            identity,
+            receipt,
+            RetentionClass::new("retention.root-fixture").expect("retention class"),
+            payload,
+        )
+        .expect("durable observation");
+        let projection_generation =
+            ProjectionGenerationId::new("projection.root-fixture.v1").expect("projection id");
+        let authorization = tracedecay_store::build_observation_resolution_authorization_v1(
+            &observation,
+            "root-fixture",
+        )
+        .expect("resolution authorization");
+        let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+            &observation,
+            projection_generation,
+            UtcMicros(1),
+            authorization,
+        )
+        .expect("retrieval anchor");
+        (
+            serde_json::to_string(&observation).expect("observation json"),
+            serde_json::to_string(&anchor).expect("anchor json"),
+        )
+    }
+
+    /// Occurrence identity is a content digest, so fixtures must mint canonical
+    /// ones or the record read refuses them before any budget is charged.
+    fn canonical_occurrence_id(index: usize) -> String {
+        format!("sha256:{index:064x}")
     }
 
     async fn seed_root_sessions(
@@ -598,7 +747,8 @@ mod tests {
                     params![
                         session_id.as_str(),
                         format!(
-                            "{{\"active_generation\":1,\"cursor_key\":null,\
+                            "{{\"active_generation\":1,\
+                             \"cursor_key\":{{\"key_id\":\"cursor.key.root\",\"version\":1}},\
                              \"projection_frontier\":1,\"source_frontier\":{source_frontier},\
                              \"summary_frontier\":1}}"
                         )
@@ -643,7 +793,7 @@ mod tests {
             let observation_id = format!("observation.{index:03}");
             let anchor_id = format!("anchor.{index:03}");
             let turn_id = format!("turn.{index:03}");
-            let occurrence_id = format!("occurrence.{index:03}");
+            let occurrence_id = canonical_occurrence_id(index);
             let message_id = format!("message.{index:03}");
             connection
                 .execute(
@@ -654,17 +804,24 @@ mod tests {
                 )
                 .await
                 .expect("sanitization receipt");
+            let (observation_json, anchor_json) = fixture_root_evidence(
+                session_id.as_str(),
+                u64::try_from(index).expect("observation ordinal"),
+                &format!("record.{index:03}"),
+                receipt_id.as_str(),
+                "needle cohort",
+            );
             connection
                 .execute(
                     "INSERT INTO observations (
                          observation_id, payload_digest, receipt_id, observation_json,
                          committed_cursor_json
-                     ) VALUES (?1, ?2, ?3, '{\"identity\":{\"source\":{
-                         \"provider\":\"codex\"}}}', '{}')",
+                     ) VALUES (?1, ?2, ?3, ?4, '{}')",
                     params![
                         observation_id.as_str(),
                         format!("sha256:payload.{index:03}"),
-                        receipt_id.as_str()
+                        receipt_id.as_str(),
+                        observation_json.as_str()
                     ],
                 )
                 .await
@@ -673,8 +830,8 @@ mod tests {
                 .execute(
                     "INSERT INTO retrieval_anchors (
                          anchor_id, anchor_json, owner_json, projection_generation
-                     ) VALUES (?1, '{}', '{\"kind\":\"profile\"}', 'fixture')",
-                    params![anchor_id.as_str()],
+                     ) VALUES (?1, ?2, '{\"kind\":\"profile\"}', 'fixture')",
+                    params![anchor_id.as_str(), anchor_json.as_str()],
                 )
                 .await
                 .expect("retrieval anchor");
@@ -697,7 +854,14 @@ mod tests {
                          evidence_json, sanitized_content_digest, sanitized_content_bytes,
                          snippet_text, index_text
                      ) VALUES (?1, 1, ?2, ?3, 'codex', 0, ?4, ?5, ?6, 'user', ?7,
-                               '{\"kind\":\"unknown\"}', '{}',
+                               '{\"kind\":\"unknown\"}',
+                               '{\"authority\":\"provider_native\",
+                                 \"evidence_class\":\"provider_declared\",
+                                 \"source_anchor_id\":\"source-evidence-anchor\",
+                                 \"sanitization_receipt\":{
+                                    \"receipt_id\":\"root-receipt\",
+                                    \"sanitizer_version\":\"root-sanitizer\"
+                                 }}',
                                '0000000000000000000000000000000000000000000000000000000000000000',
                                14, 'needle cohort', 'needle cohort')",
                     params![
@@ -712,6 +876,20 @@ mod tests {
                 )
                 .await
                 .expect("occurrence");
+            connection
+                .execute(
+                    "INSERT INTO session_current_entities (
+                         session_id, generation, entity_kind, entity_id,
+                         current_assertion_id, current_occurrence_id, coverage_json
+                     ) VALUES (?1, 1, 'occurrence_anchor', ?2, NULL, ?3, '{}')",
+                    params![
+                        session_id.as_str(),
+                        anchor_id.as_str(),
+                        occurrence_id.as_str()
+                    ],
+                )
+                .await
+                .expect("current occurrence anchor");
         }
     }
 
@@ -729,15 +907,50 @@ mod tests {
         )
         .await
         .expect("registered schema");
+        bind_test_session_relation_graph(&database).expect("session relation graph");
         (database, owner, TestConnection::open(&database_path))
     }
 
     /// Groups the first seeded session's matching occurrence together with
     /// `extra_members` further matching occurrences into one span evidence row.
     async fn seed_root_span_evidence(connection: &TestConnection, extra_members: usize) {
-        let mut members = vec!["occurrence.000".to_owned()];
+        seed_root_span(connection, extra_members, "needle cohort", "anchor.000").await;
+    }
+
+    /// The production shape of a wide group: a span of ordinary chatter that
+    /// happens to contain the one message the query matched. Each member carries
+    /// its own anchor and text, so no channel proposes it as a result.
+    async fn seed_root_span_over_unmatched_members(
+        connection: &TestConnection,
+        extra_members: usize,
+    ) {
+        seed_root_span(connection, extra_members, "surrounding chatter", "").await;
+    }
+
+    async fn seed_root_span(
+        connection: &TestConnection,
+        extra_members: usize,
+        text: &str,
+        shared_anchor: &str,
+    ) {
+        let mut members = vec![canonical_occurrence_id(0)];
         for extra in 0..extra_members {
-            let occurrence_id = format!("occurrence.000.m{extra}");
+            let occurrence_id = canonical_occurrence_id(1_000 + extra);
+            let anchor_id = if shared_anchor.is_empty() {
+                let anchor_id = format!("anchor.000.m{extra}");
+                connection
+                    .execute(
+                        "INSERT INTO retrieval_anchors (
+                             anchor_id, anchor_json, owner_json, projection_generation
+                         ) VALUES (?1, '{}', '{}', 'fixture')",
+                        params![anchor_id.as_str()],
+                    )
+                    .await
+                    .expect("span member anchor");
+                anchor_id
+            } else {
+                shared_anchor.to_owned()
+            };
             connection
                 .execute(
                     "INSERT INTO session_occurrences (
@@ -747,27 +960,59 @@ mod tests {
                          evidence_json, sanitized_content_digest, sanitized_content_bytes,
                          snippet_text, index_text
                      ) VALUES ('session.000', 1, ?1, 'observation.000', 'codex', ?2,
-                               'anchor.000', ?3, 'turn.000', 'user', ?2,
-                               '{\"kind\":\"unknown\"}', '{}',
+                               ?4, ?3, 'turn.000', 'user', ?2,
+                               '{\"kind\":\"unknown\"}',
+                               '{\"authority\":\"provider_native\",
+                                 \"evidence_class\":\"provider_declared\",
+                                 \"source_anchor_id\":\"source-evidence-anchor\",
+                                 \"sanitization_receipt\":{
+                                    \"receipt_id\":\"root-receipt\",
+                                    \"sanitizer_version\":\"root-sanitizer\"
+                                 }}',
                                '0000000000000000000000000000000000000000000000000000000000000000',
-                               14, 'needle cohort', 'needle cohort')",
+                               14, ?5, ?5)",
                     params![
                         occurrence_id.as_str(),
                         i64::try_from(extra + 1).expect("member ordinal"),
-                        format!("message.000.m{extra}")
+                        format!("message.000.m{extra}"),
+                        anchor_id.as_str(),
+                        text
                     ],
                 )
                 .await
                 .expect("span member occurrence");
+            connection
+                .execute(
+                    "INSERT INTO session_current_entities (
+                         session_id, generation, entity_kind, entity_id,
+                         current_assertion_id, current_occurrence_id, coverage_json
+                     ) VALUES ('session.000', 1, 'occurrence_anchor', ?1, NULL, ?2, '{}')
+                     ON CONFLICT DO NOTHING",
+                    params![anchor_id.as_str(), occurrence_id.as_str()],
+                )
+                .await
+                .expect("current span member anchor");
             members.push(occurrence_id);
         }
+        // A group container carries its own anchor. Sharing a member's anchor would
+        // make the container and the message indistinguishable to every filter
+        // that withholds containers from results.
+        connection
+            .execute(
+                "INSERT INTO retrieval_anchors (
+                     anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('span-anchor.000', '{}', '{\"kind\":\"profile\"}', 'fixture')",
+                (),
+            )
+            .await
+            .expect("span container anchor");
         connection
             .execute(
                 "INSERT INTO session_derived_evidence (
                      session_id, generation, evidence_kind, evidence_id, retrieval_anchor_id,
                      first_occurrence_id, last_occurrence_id, algorithm_version,
                      configuration_digest, member_count, member_digest, evidence_json
-                 ) VALUES ('session.000', 1, 'span', 'span.000', 'anchor.000',
+                 ) VALUES ('session.000', 1, 'span', 'span.000', 'span-anchor.000',
                            ?1, ?2, 'fixture.v1', 'sha256:fixture', ?3, 'sha256:members', '{}')",
                 params![
                     members.first().expect("first member").as_str(),
@@ -802,6 +1047,18 @@ mod tests {
         }
     }
 
+    struct WordEstimator;
+
+    impl VersionedTokenEstimator for WordEstimator {
+        fn version(&self) -> &'static str {
+            "words-v1"
+        }
+
+        fn token_policy(&self) -> TokenPolicy {
+            TokenPolicy::Whitespace
+        }
+    }
+
     #[tokio::test]
     async fn root_span_matched_by_many_members_is_one_candidate_over_300_sessions() {
         let directory = tempdir().expect("temporary directory");
@@ -830,6 +1087,88 @@ mod tests {
             "a span matched by several members must be one candidate: {spans:?}"
         );
         assert_eq!(spans[0].session.as_deref(), Some("session.000"));
+    }
+
+    /// The refusal this reproduces: one rare hit across 300 sessions, wrapped in a
+    /// span whose membership dwarfs `record_limit`. The query must return its hit
+    /// under the unchanged ceiling, because a group costs its bounds — not its
+    /// census.
+    #[tokio::test]
+    async fn root_rare_hit_executes_under_the_unchanged_record_ceiling() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_sessions(&connection, 300, 1, 1).await;
+        seed_root_cursor_key(&connection).await;
+        publish_root_relation_projection(&database, &connection, "session.000").await;
+
+        seed_root_span_over_unmatched_members(&connection, 2_000).await;
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let report = execution
+            .execute(root_execution_request("needle cohort"), &WordEstimator)
+            .await
+            .expect("a rare root hit inside a wide span must still be retrievable");
+
+        assert_eq!(
+            report
+                .result()
+                .ranked
+                .iter()
+                .map(|candidate| candidate.anchor_id.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["anchor.000".to_owned()],
+            "the matching message is the result; the span's 2000 members are not"
+        );
+        // Coverage counts the query-relevant population, so a wider span cannot
+        // inflate it into thousands of phantom omissions.
+        assert_eq!(report.result().coverage.total(), Some(1));
+    }
+
+    /// A record read that genuinely runs out must say so in its own terms. Before
+    /// this, every one of these reached the surface as an indistinguishable
+    /// "unavailable".
+    #[tokio::test]
+    async fn root_record_read_exhaustion_is_a_typed_budget_refusal_from_execute() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_sessions(&connection, 300, 8, 1).await;
+        seed_root_cursor_key(&connection).await;
+        for index in 0..8 {
+            publish_root_relation_projection(&database, &connection, &format!("session.{index:03}"))
+                .await;
+        }
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let result = execution
+            .execute(
+                root_execution_request_with_limits(
+                    "needle cohort",
+                    ExecutionLimits {
+                        record_limit: 4,
+                        ..ExecutionLimits::default()
+                    },
+                ),
+                &WordEstimator,
+            )
+            .await;
+
+        match result {
+            Err(SessionTemporalExecutionError::BudgetExhausted { stage, accounting }) => {
+                assert_eq!(stage, SessionRetrievalBudgetStageV1::RecordReadExhausted);
+                assert_eq!(
+                    accounting,
+                    Some(SessionRetrievalBudgetAccountingV1 {
+                        limit: 4,
+                        observed:
+                            SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                                units: 4,
+                            },
+                    }),
+                    "the refusal reports the ceiling it hit and what it consumed"
+                );
+            }
+            other => panic!("record-read exhaustion must be typed, not collapsed: {other:?}"),
+        }
     }
 
     #[tokio::test]
