@@ -351,8 +351,8 @@ pub enum ObservationApplicationError {
     Cancelled,
     #[error("observation batch contains a non-durable privacy outcome")]
     BatchContainsNonDurable,
-    #[error("observation batch worker stopped before completing")]
-    BatchWorkerStopped,
+    #[error("observation preparation worker stopped before completing")]
+    PreparationWorkerStopped,
 }
 
 enum PreparedObservationCapture {
@@ -478,11 +478,31 @@ where
         Ok(outcome)
     }
 
-    fn prepare_capture(
+    /// Prepares one record on the blocking pool, exactly as the batch path does.
+    ///
+    /// Preparation is synchronous and unbounded: sanitization walks the record,
+    /// and repository provenance opens the repository and reads loose refs and
+    /// the Git index. Running that inline on a runtime worker starves every
+    /// other task sharing the worker — with enough concurrent ingest frames,
+    /// every worker at once — so the accept loop and unrelated requests stop
+    /// making progress. Awaiting a `spawn_blocking` join handle keeps the
+    /// worker free, and the background-CPU permit bounds how many of these
+    /// spans run at once.
+    #[hotpath::measure(label = "sessions.observation.prepare_capture", future = true)]
+    async fn prepare_capture(
         &self,
         request: CaptureObservationRequest,
     ) -> Result<PreparedObservationCapture, ObservationApplicationError> {
-        Self::prepare_capture_with_sanitizer(&self.sanitizer, request)
+        let sanitizer = self.sanitizer.clone();
+        let background_cpu = self.background_cpu.clone();
+        tokio::task::spawn_blocking(move || match background_cpu {
+            Some(authority) => {
+                authority.with_permit(|| Self::prepare_capture_with_sanitizer(&sanitizer, request))
+            }
+            None => Self::prepare_capture_with_sanitizer(&sanitizer, request),
+        })
+        .await
+        .map_err(|_| ObservationApplicationError::PreparationWorkerStopped)?
     }
 
     fn prepare_capture_with_sanitizer(
@@ -652,7 +672,7 @@ where
     > {
         Box::pin(hotpath::future!(
             async move {
-                match self.prepare_capture(request)? {
+                match self.prepare_capture(request).await? {
                     PreparedObservationCapture::Durable {
                         write,
                         sanitized_record,
@@ -811,14 +831,14 @@ where
                 break;
             };
             let (index, capture) =
-                joined.map_err(|_| ObservationApplicationError::BatchWorkerStopped)?;
+                joined.map_err(|_| ObservationApplicationError::PreparationWorkerStopped)?;
             prepared[index] = Some(capture?);
         }
 
         prepared
             .into_iter()
             .collect::<Option<Vec<_>>>()
-            .ok_or(ObservationApplicationError::BatchWorkerStopped)
+            .ok_or(ObservationApplicationError::PreparationWorkerStopped)
     }
 
     fn persisted_batch_outcomes(

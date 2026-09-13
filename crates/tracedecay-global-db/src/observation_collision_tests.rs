@@ -2453,9 +2453,9 @@ impl ProductionJsonlAdmission {
                     "observation_batch_non_durable",
                 )
             }
-            ObservationApplicationError::BatchWorkerStopped => {
+            ObservationApplicationError::PreparationWorkerStopped => {
                 tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
-                    "observation_batch_worker_stopped",
+                    "observation_preparation_worker_stopped",
                 )
             }
             ObservationApplicationError::Store(_) => {

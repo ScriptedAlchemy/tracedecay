@@ -567,8 +567,8 @@ pub fn classify_claude_observation_failure(
             }
             // The worker went away before reaching a verdict, so nothing was
             // decided about the payload. Re-running the same input can succeed.
-            crate::observation::ObservationApplicationError::BatchWorkerStopped => {
-                unavailable("observation_batch_worker_stopped")
+            crate::observation::ObservationApplicationError::PreparationWorkerStopped => {
+                unavailable("observation_preparation_worker_stopped")
             }
         },
         Ingest::MissingParsedRecord => permanent("observation_parsed_record_missing"),
