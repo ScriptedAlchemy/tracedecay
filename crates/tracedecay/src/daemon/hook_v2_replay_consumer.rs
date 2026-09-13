@@ -155,7 +155,6 @@ async fn drain_all_hosts(
             continue;
         };
         let report = Box::pin(drain_admitted_host_spool(
-            data_root,
             *host,
             project_id,
             worktree_id,
@@ -182,7 +181,6 @@ async fn drain_all_hosts(
 }
 
 async fn drain_admitted_host_spool(
-    data_root: &Path,
     host: HookHostV1,
     project_id: [u8; 16],
     worktree_id: [u8; 16],
@@ -191,6 +189,7 @@ async fn drain_admitted_host_spool(
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> Option<HookReplayPassReportV1> {
+    let data_root = &graph.hook_store_layout().data_root;
     let root = hook_v2_spool_root(data_root, host);
     if !root.is_dir() {
         return None;

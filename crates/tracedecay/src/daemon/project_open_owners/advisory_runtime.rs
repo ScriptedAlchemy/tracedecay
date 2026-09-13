@@ -733,17 +733,7 @@ impl ConfigurationRuntimeRefreshPort for ProjectOpenFeedbackConfigurationRefresh
     }
 }
 
-/// One admitted hook boundary's advisory-and-Scout cycle: the one-shot
-/// advisory/hook-notice run, then the Scout producer tail —
-/// canonical input assembly from the latest committed publication, daemon-side
-/// delivery selection, `prepare_configured`, and a claim-authority mount for
-/// the enqueued generation. Every early return is a typed fail-closed state;
-/// none of them invents guidance.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Production hook cycle is one ingest-and-advise pass for the opened project."
-)]
-/// The Scout producer tail is detached background work. Every refusal below
+/// The Scout producer tail is detached background work. Every refusal in it
 /// ends the cycle with no claim authority mounted, so the host never receives a
 /// Scout address and nothing in the request path reports why. Name each typed
 /// outcome on the operator event stream, the same way the deferred advisory
@@ -758,6 +748,16 @@ fn log_scout_producer_outcome(project_root: &Path, outcome: &str) {
     );
 }
 
+/// One admitted hook boundary's advisory-and-Scout cycle: the one-shot
+/// advisory/hook-notice run, then the Scout producer tail —
+/// canonical input assembly from the latest committed publication, daemon-side
+/// delivery selection, `prepare_configured`, and a claim-authority mount for
+/// the enqueued generation. Every early return is a typed fail-closed state;
+/// none of them invents guidance.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Production hook cycle is one ingest-and-advise pass for the opened project."
+)]
 async fn run_production_hook_cycle(
     cycle: Arc<ProjectOpenAdvisoryFeedbackCycleV1>,
     request: HookOrchestrationRequestV1,
