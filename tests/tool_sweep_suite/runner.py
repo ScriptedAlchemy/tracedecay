@@ -1266,11 +1266,6 @@ def prime_fixture_values(
                     "LCM expansion did not return the canonical prompt identity and content"
                 )
 
-    with prime_group("code_navigation"):
-        prime_code_navigation(
-            client, fixture, deadline("tracedecay_code_symbol_search")
-        )
-
     with prime_group("work"):
         prime_work_lifecycle(
             fixture,
@@ -1313,6 +1308,33 @@ def prime_fixture_values(
                 deadline,
                 effect_target,
             )
+
+    # Native/Scout setup can change the source snapshot. Mint navigation
+    # identities only after every producer has finished touching the fixture.
+    with prime_group("code_navigation"):
+        prime_code_navigation(
+            client, fixture, deadline("tracedecay_code_symbol_search")
+        )
+        node_id = fixture["code_navigation_node_ids"]["tracedecay_code_declaration"]
+        node = _producer_call(
+            client,
+            "tracedecay_node",
+            {"node_id": node_id},
+            deadline("tracedecay_node"),
+        )
+        qualified_name = first_value(node, {"qualified_name"})
+        node_kind = first_value(node, {"kind"})
+        if not isinstance(qualified_name, str) or not qualified_name:
+            raise SweepError("node producer did not publish the qualified symbol identity")
+        if not isinstance(node_kind, str) or not node_kind:
+            raise SweepError("node producer did not publish the symbol kind")
+        fixture.update(
+            {
+                "node_id": node_id,
+                "qualified_name": qualified_name,
+                "node_kind": node_kind,
+            }
+        )
 
     if effect_target is None:
         with prime_group("configuration_preview"):
@@ -1399,6 +1421,56 @@ def prime_code_navigation(
         time.sleep(MOUNT_RETRY_DELAY_S)
 
 
+def mint_code_navigation_input(
+    client: McpClient,
+    fixture: dict[str, Any],
+    consumer: str,
+    deadline_ms: int,
+) -> None:
+    """Mint one generation-current symbol identity for its immediate consumer."""
+    producer_key = CODE_NAVIGATION_INPUT_PRODUCERS[consumer]
+    expected_name = CODE_NAVIGATION_NODE_NAMES[producer_key]
+    ends_at = time.monotonic() + CODE_INDEX_READY_TIMEOUT_S
+    while True:
+        searched, elapsed_ms = client.call_tool(
+            "tracedecay_code_symbol_search",
+            {
+                "query": expected_name,
+                "lazy_index_ignored_dependencies": False,
+                "scope": {},
+                "meta": {"projection": "summary", "order": "relevance"},
+                "format": "json",
+            },
+            deadline_ms,
+        )
+        row = response_row(
+            "tool", "tracedecay_code_symbol_search", searched, elapsed_ms, deadline_ms
+        )
+        matches = [
+            value
+            for value in _objects(searched)
+            if isinstance(value.get("node_id"), str)
+            and value.get("name") == expected_name
+        ]
+        if producer_key == "tracedecay_code_type_hierarchy":
+            matches = [value for value in matches if value.get("kind") == "struct"]
+        if row["verdict"] == "PASS" and len(matches) == 1:
+            if duration_us(searched) is None:
+                raise SweepError(
+                    "code symbol-search producer omitted the enabled _meta.duration_us receipt"
+                )
+            identities = fixture.setdefault("code_navigation_node_ids", {})
+            identities[producer_key] = matches[0]["node_id"]
+            if consumer in {"tracedecay_node", "tracedecay_rename_preview"}:
+                fixture["node_id"] = matches[0]["node_id"]
+            return
+        if time.monotonic() >= ends_at:
+            raise SweepError(
+                f"code symbol-search producer did not mint {expected_name} for {consumer}"
+            )
+        time.sleep(MOUNT_RETRY_DELAY_S)
+
+
 def mint_preview_input(client: McpClient, fixture: dict[str, str], deadline_ms: int) -> None:
     """Mint one expiring stage-preview input from the live git_hunks producer."""
     hunks = _producer_call(
@@ -1446,6 +1518,16 @@ CODE_NAVIGATION_NODE_NAMES = {
 # Navigation consumers whose `node_id` is a code-query identity minted by the
 # symbol-search producer, not the graph node identity used everywhere else.
 CODE_QUERY_NODE_CONSUMERS = frozenset(CODE_NAVIGATION_NODE_NAMES)
+
+# Every consumer below takes a generation-bound symbol identity. The code
+# watcher can publish another complete generation after fixture setup, so the
+# sweep must obtain the identity immediately before the consuming read.
+CODE_NAVIGATION_INPUT_PRODUCERS = {
+    **{name: name for name in CODE_QUERY_NODE_CONSUMERS},
+    "tracedecay_node": "tracedecay_code_declaration",
+    "tracedecay_rename_preview": "tracedecay_code_declaration",
+    "tracedecay_type_hierarchy": "tracedecay_code_type_hierarchy",
+}
 
 # Expected hermetic typed-denial verdicts. Each entry asserts the EXACT
 # (kind, code) problem a tool must return inside the hermetic fixture because
@@ -1535,6 +1617,16 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return dict(fixture["workflow_read_arguments"][name])
     if name == "tracedecay_git_preview":
         return git_preview_arguments(fixture)
+    if name == "tracedecay_type_hierarchy":
+        identities = fixture.get("code_navigation_node_ids")
+        node_id = (
+            identities.get("tracedecay_code_type_hierarchy")
+            if isinstance(identities, dict)
+            else None
+        )
+        if not isinstance(node_id, str) or not node_id:
+            raise SweepError("type hierarchy producer minted no type identity")
+        return {"node_id": node_id, "format": "json"}
     if name == "tracedecay_branch_diff":
         # The runtime requires `base` even though the negotiated schema marks
         # it optional (schema gap logged to the binding owner). Diff the real
@@ -2110,6 +2202,18 @@ def _read_tool_row(
     policies: dict[str, ToolPolicy] | None = None,
 ) -> dict[str, Any]:
     try:
+        if policy.name in CODE_NAVIGATION_INPUT_PRODUCERS:
+            mint_code_navigation_input(
+                client,
+                fixture,
+                policy.name,
+                policy.deadline_ms,
+            )
+        if policy.name == "tracedecay_git_preview":
+            hunks_policy = (policies or {}).get("tracedecay_git_hunks")
+            if hunks_policy is None:
+                raise SweepError("git preview consumer has no advertised git_hunks producer")
+            mint_preview_input(client, fixture, hunks_policy.deadline_ms)
         arguments = materialize_tool_arguments(definition, fixture)
     except Exception as error:
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.arguments_unmaterialized", str(error))
@@ -2118,23 +2222,7 @@ def _read_tool_row(
     except Exception as error:
         return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
     row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
-    if row["verdict"] == "PASS" and policy.name in CODE_QUERY_NODE_CONSUMERS:
-        items = next(
-            (
-                value["items"]
-                for value in _objects(response)
-                if isinstance(value.get("items"), list)
-            ),
-            None,
-        )
-        if not items:
-            row.update(
-                {
-                    "verdict": "FAIL",
-                    "problem_code": "tool_sweep.navigation_evidence_empty",
-                    "note": "navigation consumer returned no symbol evidence",
-                }
-            )
+    row = _require_navigation_evidence(row, policy.name, response)
     expected = EXPECTED_HERMETIC_DENIALS.get(policy.name)
     if row["verdict"] == "FAIL":
         ends_at = time.monotonic() + MOUNT_RETRY_BUDGET_OVERRIDES_S.get(
@@ -2157,7 +2245,28 @@ def _read_tool_row(
                     arguments = materialize_tool_arguments(definition, fixture)
                 except Exception:
                     break
-            elif kind != "unavailable":
+            elif (
+                policy.name in CODE_NAVIGATION_INPUT_PRODUCERS
+                and (
+                    row.get("problem_code")
+                    == "tool_sweep.navigation_evidence_empty"
+                    or code in {"node_not_found", "not_found"}
+                )
+            ):
+                try:
+                    mint_code_navigation_input(
+                        client,
+                        fixture,
+                        policy.name,
+                        policy.deadline_ms,
+                    )
+                    arguments = materialize_tool_arguments(definition, fixture)
+                except Exception:
+                    break
+            elif (
+                row.get("problem_code") != "tool_sweep.navigation_evidence_empty"
+                and kind != "unavailable"
+            ):
                 break
             time.sleep(MOUNT_RETRY_DELAY_S)
             try:
@@ -2165,6 +2274,7 @@ def _read_tool_row(
             except Exception as error:
                 return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
             row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
+            row = _require_navigation_evidence(row, policy.name, response)
     row = _expected_denial_row(row, policy.name, response)
     if row["verdict"] == "PASS" and policy.name in FACT_READ_TOOLS:
         try:
@@ -2177,6 +2287,31 @@ def _read_tool_row(
                     "note": str(error),
                 }
             )
+    return row
+
+
+def _require_navigation_evidence(
+    row: dict[str, Any], name: str, response: dict[str, Any]
+) -> dict[str, Any]:
+    if row["verdict"] != "PASS" or name not in CODE_QUERY_NODE_CONSUMERS:
+        return row
+    items = next(
+        (
+            value["items"]
+            for value in _objects(response)
+            if isinstance(value.get("items"), list)
+        ),
+        None,
+    )
+    if items:
+        return row
+    row.update(
+        {
+            "verdict": "FAIL",
+            "problem_code": "tool_sweep.navigation_evidence_empty",
+            "note": "navigation consumer returned no symbol evidence",
+        }
+    )
     return row
 
 

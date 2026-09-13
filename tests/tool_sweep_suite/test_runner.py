@@ -376,6 +376,21 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             )
             self.assertEqual(arguments, {"node_id": node_id, "format": "json"}, name)
 
+    def test_legacy_type_hierarchy_uses_the_searched_type_identity(self) -> None:
+        runner = load_runner()
+
+        arguments = runner.materialize_tool_arguments(
+            {"name": "tracedecay_type_hierarchy"},
+            {
+                "node_id": "symbol:function",
+                "code_navigation_node_ids": {
+                    "tracedecay_code_type_hierarchy": "symbol:type",
+                },
+            },
+        )
+
+        self.assertEqual(arguments, {"node_id": "symbol:type", "format": "json"})
+
     def test_graph_file_consumers_use_the_seeded_source_file(self) -> None:
         runner = load_runner()
         schema = {
@@ -1900,7 +1915,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 {"qualified_name": "src/lib.rs::sweep_anchor"},
             ],
         )
-        self.assertEqual(fixture["node_id"], "function:fixture")
+        self.assertEqual(fixture["node_id"], "sym:anchor")
         self.assertEqual(
             fixture["code_navigation_node_ids"],
             {
@@ -2082,7 +2097,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
         ]
         self.assertEqual(len(qualified_name_calls), 1)
         self.assertIn("code-graph-unavailable", fixture["priming_errors"]["graph"]["message"])
-        self.assertNotIn("node_id", fixture)
+        self.assertEqual(fixture["node_id"], "sym:anchor")
         self.assertEqual(fixture["handle"], "rh_fixture")
         self.assertEqual(
             fixture["code_navigation_node_ids"],
@@ -2406,6 +2421,17 @@ class MountRetryTests(unittest.TestCase):
             }
         }
 
+    def navigation_identity_response(
+        self, name="sweep_anchor", node_id="symbol:fixture"
+    ):
+        return self.text_response(
+            '{"payload":{"items":[{"name":"'
+            + name
+            + '","kind":"function","node_id":"'
+            + node_id
+            + '"}]}}'
+        )
+
     def test_retryable_unavailable_settles_to_the_real_success(self) -> None:
         """A mounting authority's typed unavailable retries into its real payload."""
         runner = load_runner()
@@ -2426,6 +2452,7 @@ class MountRetryTests(unittest.TestCase):
 
     def test_navigation_requires_nonempty_symbol_evidence(self) -> None:
         runner = load_runner()
+        runner.MOUNT_RETRY_BUDGET_S = 0
         name = "tracedecay_code_declaration"
         definition = {
             "name": name,
@@ -2438,7 +2465,12 @@ class MountRetryTests(unittest.TestCase):
         fixture = {"code_navigation_node_ids": {name: "symbol:fixture"}}
 
         empty = self.scripted_client(
-            {name: [self.text_response('{"payload":{"items":[]}}')]}
+            {
+                "tracedecay_code_symbol_search": [
+                    self.navigation_identity_response()
+                ],
+                name: [self.text_response('{"payload":{"items":[]}}')],
+            }
         )
         row = runner._read_tool_row(
             empty, definition, self.policy(runner, name), fixture
@@ -2447,12 +2479,64 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(row["problem_code"], "tool_sweep.navigation_evidence_empty")
 
         populated = self.scripted_client(
-            {name: [self.text_response('{"payload":{"items":[{"node_id":"symbol:fixture"}]}}')]}
+            {
+                "tracedecay_code_symbol_search": [
+                    self.navigation_identity_response()
+                ],
+                name: [
+                    self.text_response(
+                        '{"payload":{"items":[{"node_id":"symbol:fixture"}]}}'
+                    )
+                ],
+            }
         )
         row = runner._read_tool_row(
             populated, definition, self.policy(runner, name), fixture
         )
         self.assertEqual(row["verdict"], "PASS")
+
+    def test_navigation_retries_until_the_generation_has_symbol_evidence(self) -> None:
+        runner = load_runner()
+        runner.MOUNT_RETRY_BUDGET_S = 0.01
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+        name = "tracedecay_code_declaration"
+        definition = {
+            "name": name,
+            "inputSchema": {
+                "type": "object",
+                "properties": {"node_id": {"type": "string"}},
+                "required": ["node_id"],
+            },
+        }
+        fixture = {"code_navigation_node_ids": {name: "symbol:fixture"}}
+        client = self.scripted_client(
+            {
+                "tracedecay_code_symbol_search": [
+                    self.navigation_identity_response()
+                ],
+                name: [
+                    self.text_response('{"payload":null}'),
+                    self.text_response(
+                        '{"payload":{"items":[{"node_id":"symbol:fixture"}]}}'
+                    ),
+                ]
+            }
+        )
+
+        row = runner._read_tool_row(
+            client, definition, self.policy(runner, name), fixture
+        )
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(
+            [called for called, _arguments in client.calls],
+            [
+                "tracedecay_code_symbol_search",
+                name,
+                "tracedecay_code_symbol_search",
+                name,
+            ],
+        )
 
     def test_persistent_unavailable_still_fails_after_the_budget(self) -> None:
         """The retry is falsifiable: an authority that never mounts stays a FAIL."""
@@ -2516,7 +2600,9 @@ class MountRetryTests(unittest.TestCase):
             '{"preview_input_id":"preview.fresh","hunks":[{"digest":"d1","hunk":{}}]}'
         )
         success = self.text_response('{"operation":"stage_hunks","staged":1}')
-        client = self.scripted_client({name: [expired, success], "tracedecay_git_hunks": [minted]})
+        client = self.scripted_client(
+            {name: [expired, success], "tracedecay_git_hunks": [minted, minted]}
+        )
         fixture = {"preview_input_id": "preview.stale", "selected_hunk_digests": '["d0"]'}
         policies = {
             "tracedecay_git_hunks": self.policy(runner, "tracedecay_git_hunks"),
@@ -2531,6 +2617,36 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(fixture["preview_input_id"], "preview.fresh")
         replayed = [arguments for tool, arguments in client.calls if tool == name]
         self.assertEqual(len(replayed), 2)
+
+    def test_git_preview_mints_its_input_immediately_before_the_read(self) -> None:
+        runner = load_runner()
+        name = "tracedecay_git_preview"
+        minted = self.text_response(
+            '{"preview_input_id":"preview.fresh","hunks":'
+            '[{"digest":"d1","hunk":{}}]}'
+        )
+        success = self.text_response('{"operation":"stage_hunks","selected":1}')
+        client = self.scripted_client(
+            {"tracedecay_git_hunks": [minted], name: [success]}
+        )
+        policies = {
+            "tracedecay_git_hunks": self.policy(runner, "tracedecay_git_hunks"),
+            name: self.policy(runner, name),
+        }
+
+        row = runner._read_tool_row(
+            client,
+            self.definition(name),
+            self.policy(runner, name),
+            {},
+            policies=policies,
+        )
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(
+            [tool for tool, _arguments in client.calls],
+            ["tracedecay_git_hunks", name],
+        )
 
 
 if __name__ == "__main__":
