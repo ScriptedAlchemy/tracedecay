@@ -734,6 +734,19 @@ def prime_context_scout(
 
     source = Path(fixture["root"]) / "src/scout_error.rs"
     source.write_text('pub fn scout_type_error() -> i32 { "not an integer" }\n')
+    try:
+        _prime_context_scout_diagnostic(client, fixture, deadline, revision, source)
+    finally:
+        source.unlink(missing_ok=True)
+
+
+def _prime_context_scout_diagnostic(
+    client: McpClient,
+    fixture: dict[str, Any],
+    deadline: Callable[[str], int],
+    revision: str,
+    source: Path,
+) -> None:
     session_id = f"tool-sweep-scout-{os.getpid()}-{time.monotonic_ns()}"
     payload = json.dumps(
         {
