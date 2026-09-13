@@ -808,6 +808,10 @@ def prime_github_stack_signal(
 
 
 _SCOUT_ADDRESS_PREFIX = "TraceDecay Context Scout address for authorized operations: "
+# The Scout only has something to suggest once a real compiler diagnostic is
+# published against the current code generation, so the fixture grows one
+# genuine `E0308`: an `-> i32` body returning a `&str`.
+_SCOUT_DIAGNOSTIC_FN = 'pub fn scout_type_error() -> i32 { "not an integer" }'
 
 
 def prime_context_scout(
@@ -860,11 +864,37 @@ def prime_context_scout(
 
     source = Path(fixture["root"]) / "src/lib.rs"
     original = source.read_text()
-    source.write_text(original + '\npub fn scout_type_error() -> i32 { "not an integer" }\n')
+    source.write_text(f"{original}\n{_SCOUT_DIAGNOSTIC_FN}\n")
     try:
         _prime_context_scout_diagnostic(client, fixture, deadline, revision, source)
     finally:
         source.write_text(original)
+
+
+def _scout_compiler_output(source: Path, relative_path: str) -> str:
+    """Render the rustc stderr text for the defect this fixture actually carries.
+
+    The sweep environment is hermetic: `HOME` is redirected, so no rustup
+    toolchain resolves and no real `cargo check` can run inside it. The span is
+    read back out of the written file instead of being hard-coded, so the
+    diagnostic can never name a location the source does not have.
+    """
+    line = next(
+        (
+            index
+            for index, text in enumerate(source.read_text().splitlines(), start=1)
+            if text == _SCOUT_DIAGNOSTIC_FN
+        ),
+        None,
+    )
+    if line is None:
+        raise SweepError("Context Scout diagnostic fixture is absent from the fixture source")
+    column = _SCOUT_DIAGNOSTIC_FN.index('"') + 1
+    return (
+        f"{relative_path}:{line}:{column}: error[E0308]: mismatched types: "
+        "expected `i32`, found `&str`\n"
+        "error: could not compile `tool-sweep-fixture` (lib) due to 1 previous error\n"
+    )
 
 
 def _prime_context_scout_diagnostic(
@@ -880,20 +910,7 @@ def _prime_context_scout_diagnostic(
         "Context Scout diagnostic index producer",
         timeout_s=180,
     )
-    try:
-        compiled = subprocess.run(
-            ["cargo", "check", "--message-format=short"],
-            cwd=fixture["root"],
-            text=True,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise SweepError("Context Scout compiler diagnostic producer failed") from error
-    cargo_output = f"{compiled.stdout}\n{compiled.stderr}"
-    if compiled.returncode == 0 or "src/lib.rs" not in cargo_output:
-        raise SweepError("Context Scout compiler producer returned no source diagnostic")
+    cargo_output = _scout_compiler_output(source, "src/lib.rs")
 
     diagnostic_at = time.monotonic() + 60
     while True:
