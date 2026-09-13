@@ -349,6 +349,9 @@ async fn initialize_test_project(
         &client_identity.profile_root,
         "daemon test fixture initialization",
     );
+    // The composition root registers the daemon's runtime ports before any
+    // project opens; this fixture stands in for that root.
+    crate::register_runtime_ports().expect("runtime port registration");
     // Heap-allocate the graph-init composition so every test awaiting this
     // fixture keeps a bounded resident frame (perf-profile layouts overflow
     // the test stack when the mega-future is inlined).
