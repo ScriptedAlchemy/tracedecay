@@ -1199,10 +1199,12 @@ fn serve_broker_socket_client_inner(
                     &mut transport,
                     &handshake,
                     &engine.store_administration,
-                    project_open,
+                    CoreDoctorStatusV1 {
+                        project_open,
+                        git_watcher_health,
+                    },
                     setup_activity,
                     &first_request,
-                    git_watcher_health,
                     || {
                         Box::pin(async {
                             Ok(engine
@@ -1708,10 +1710,12 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         &mut transport,
         &handshake,
         &store_administration,
-        project_open,
+        CoreDoctorStatusV1 {
+            project_open,
+            git_watcher_health: None,
+        },
         setup_activity,
         &first_request,
-        None,
         || async {
             let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
             Ok(Box::pin(portable_cached_project_server(
