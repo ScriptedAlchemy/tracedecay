@@ -897,6 +897,141 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertEqual(running["state"], "running")
         self.assertEqual(terminal["state"], "cancelled")
 
+    def test_retry_journey_consumes_terminal_failure_and_observes_recovery_fence(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        calls = []
+        digest = "sha256:" + "a" * 64
+        fixture = {
+            "root": "/fixture",
+            "work_task_id": "task.fixture",
+            "work_run_id": "run.fixture",
+            "work_effect_arguments": {
+                "tracedecay_work_start_attempt": {
+                    "task_id": "task.fixture",
+                    "run_id": "run.fixture",
+                    "attempt_id": "attempt.base",
+                    "format": "json",
+                }
+            },
+        }
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_work_start_attempt":
+                return {"identity": {
+                    "task_id": "task.fixture",
+                    "run_id": "run.fixture",
+                    "attempt_id": arguments["attempt_id"],
+                }}
+            if tool == "tracedecay_work_attempt_status":
+                state = (
+                    "failed"
+                    if arguments["attempt_id"].startswith("attempt.retry-source")
+                    else "recovery_required"
+                )
+                result = {
+                    "identity": {
+                        "task_id": "task.fixture",
+                        "run_id": "run.fixture",
+                        "attempt_id": arguments["attempt_id"],
+                    },
+                    "state": state,
+                }
+                if state == "failed":
+                    result["terminal"] = {"evidence_digest": digest}
+                return result
+            self.assertEqual(tool, "tracedecay_work_retry_attempt")
+            return {"outcome": "replayed", "receipt": {}, "attempt": {}}
+
+        prepared = journeys._prepare_work_effect_journey(
+            "tracedecay_work_retry_attempt",
+            fixture,
+            call,
+            lambda _tool: 1_000,
+            {},
+            {},
+        )
+        note = prepared.cleanup({
+            "outcome": "created",
+            "receipt": {"command": {"command_id": prepared.arguments["command_id"]}},
+            "attempt": {"recovery": {"outcome": "recovery_required"}},
+        })
+
+        self.assertEqual(
+            prepared.arguments["failure"]["evidence_ref"],
+            f"runtime-terminal:{digest}",
+        )
+        source_start = next(args for tool, args in calls if tool == "tracedecay_work_start_attempt")
+        self.assertEqual(source_start["worktree_root"], "/fixture/missing-retry-root")
+        self.assertIn("recovery fence", note)
+
+    def test_synthesis_journey_requires_and_replays_the_source_artifact(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        calls = []
+        artifact = {"artifact_id": "artifact.provider.stdout", "digest": "sha256:" + "b" * 64}
+        source = {
+            "task_id": "task.fixture",
+            "run_id": "run.fixture",
+            "attempt_id": "",
+        }
+        fixture = {
+            "work_task_id": "task.fixture",
+            "work_run_id": "run.fixture",
+            "work_effect_arguments": {
+                "tracedecay_work_start_attempt": {
+                    "task_id": "task.fixture",
+                    "run_id": "run.fixture",
+                    "attempt_id": "attempt.base",
+                    "format": "json",
+                }
+            },
+        }
+
+        def synthesis_result(attempt_id):
+            return {
+                "synthesis": "admitted",
+                "source_set": {
+                    "set_digest": "sha256:" + "c" * 64,
+                    "sources": [{
+                        "source": source,
+                        "outcome": {
+                            "outcome": "succeeded",
+                            "artifacts": [artifact["digest"]],
+                        },
+                    }],
+                },
+                "draft": {"cited_source_digests": [artifact["digest"]]},
+                "attempt": {"identity": {**source, "attempt_id": attempt_id}},
+            }
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_work_start_attempt":
+                source["attempt_id"] = arguments["attempt_id"]
+                return {"identity": source}
+            if tool == "tracedecay_work_attempt_status":
+                if arguments["attempt_id"].startswith("attempt.synthesis-source"):
+                    return {"identity": source, "state": "succeeded", "artifacts": [artifact]}
+                return {"identity": {**source, "attempt_id": arguments["attempt_id"]}, "state": "succeeded"}
+            self.assertEqual(tool, "tracedecay_work_synthesize")
+            return synthesis_result(arguments["start"]["attempt_id"])
+
+        prepared = journeys._prepare_work_effect_journey(
+            "tracedecay_work_synthesize",
+            fixture,
+            call,
+            lambda _tool: 1_000,
+            {},
+            {},
+        )
+        note = prepared.cleanup(synthesis_result(prepared.arguments["start"]["attempt_id"]))
+
+        self.assertEqual(prepared.arguments["sources"], [source])
+        self.assertNotIn("format", prepared.arguments["start"])
+        self.assertIn("synthesis admission", note)
+
     def test_generic_work_mutation_consumes_fresh_request_before_replay(self) -> None:
         runner = load_runner()
         journeys = sys.modules[runner.prime_work_lifecycle.__module__]
@@ -938,7 +1073,13 @@ class MutationJourneyTests(unittest.TestCase):
         )
         note = prepared.cleanup({"replayed": False})
 
-        self.assertEqual(prepared.arguments, {"mutation_id": "mutation.fresh"})
+        self.assertEqual(
+            prepared.arguments,
+            {
+                "mutation": "create_task",
+                "request": {"mutation_id": "mutation.fresh"},
+            },
+        )
         self.assertEqual(
             [tool for tool, _arguments in calls],
             [
@@ -981,7 +1122,8 @@ class MutationJourneyTests(unittest.TestCase):
                 return {"proposal": {"proposal_id": "proposal.fixture"}}
             if tool == "tracedecay_work_accept_proposal":
                 return {"verified_graph_version": {"graph_version": 2}}
-            if tool == "tracedecay_work_admit_execution":
+            if tool == "tracedecay_work_mutate_graph":
+                self.assertEqual(arguments["mutation"], "admit_execution")
                 return {"replayed": True}
             self.assertEqual(tool, "tracedecay_work_views")
             return {"tasks": [{"task_id": admitted_task_id}]}
@@ -1002,7 +1144,7 @@ class MutationJourneyTests(unittest.TestCase):
         note = prepared.cleanup({"replayed": False})
 
         self.assertEqual(prepared.arguments, {"mutation_id": "mutation.admit"})
-        self.assertIn("exact replay/view", note)
+        self.assertIn("graph replay/view", note)
 
     def test_work_adjudication_receipts_select_the_matching_nested_command(self) -> None:
         runner = load_runner()
