@@ -300,7 +300,13 @@ impl SessionMessageProjection {
     }
 }
 
-fn message_output_digest(
+/// The digest a projected message output carries, over records a caller
+/// already holds.
+///
+/// The same function [`SessionMessageProjection::output_digest`] memoizes, so
+/// an authority that reads the output rows a store persisted can name their
+/// digest without re-deriving the projection that wrote them.
+pub fn message_output_digest(
     session: &SessionRecord,
     message: &SessionMessageRecord,
     output_ordinal: u32,
