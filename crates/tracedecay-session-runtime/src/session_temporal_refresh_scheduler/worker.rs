@@ -35,16 +35,16 @@ fn history_allows_summary_convergence(outcome: Option<SessionHistoricalIngestOut
     !outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass)
 }
 
-/// Consecutive history-priority passes after which the one-shot
-/// predecessor-range rewrite takes one bounded page of its own.
+/// Consecutive history-priority passes before derived LCM convergence takes
+/// one bounded page of its own.
 ///
-/// This is the horizon the rewrite buys under perpetually pending history:
+/// This bounds summary and repair starvation under perpetually pending history:
 /// one `LCM_SCAN_PAGE_ROWS`-row page every eighth pass, so an N-row store
 /// converges in `ceil(N / LCM_SCAN_PAGE_ROWS) * 8` worker passes (about 3,800
 /// for the 244k-row profile in #843) while history keeps seven of every eight
-/// passes. It is a fairness ratio, not a deadline; a terminal history window
-/// resets it and admits the full convergence page, which also runs the rewrite.
-const HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE: u32 = 8;
+/// passes. A terminal history window resets the ratio and admits convergence
+/// immediately.
+const HISTORY_PRIORITY_PASSES_BEFORE_LCM_CONVERGENCE: u32 = 8;
 
 /// What a pass may spend its historical-work admission on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,43 +52,30 @@ enum LcmConvergenceAdmission {
     /// Historical continuation owns the pass outright.
     Deferred,
     /// The pass takes the shared admission permit for one bounded page.
-    Admitted(LcmConvergencePage),
-}
-
-/// Which bounded page an admitted pass runs under the shared permit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LcmConvergencePage {
-    /// Historical continuation still owns the next window, but the one-shot
-    /// predecessor-range rewrite runs alone for one bounded page.
-    PredecessorRangeRewrite,
-    /// The raw frontier is terminal for now, so derived convergence runs.
-    Full,
+    Admitted,
 }
 
 /// Decides what one pass owes retained LCM convergence.
 ///
 /// Deferring derived summaries to historical continuation is deliberate: a
 /// model call placed between source windows delays both project and profile
-/// readiness. The one-shot predecessor-range rewrite lives behind the same
-/// convergence page but is bounded SQL with no model call, so a profile whose
-/// history perpetually needs another pass would otherwise never repair a
-/// range persisted before the policy-anchor role filter. Every
-/// `HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE`-th such pass therefore
-/// spends its admission — the same permit and bounded budget one history page
-/// takes — on the rewrite alone, which caps the rewrite's starvation at that
-/// many passes per page while leaving history the other passes.
+/// readiness. Deferring it forever is worse: one provider can remain pending
+/// after another provider has already published raw summary sources. Every
+/// `HISTORY_PRIORITY_PASSES_BEFORE_LCM_CONVERGENCE`-th pass therefore spends
+/// the same shared admission on one bounded convergence page, while history
+/// keeps the other passes.
 fn lcm_convergence_admission(
     outcome: Option<SessionHistoricalIngestOutcome>,
     history_priority_passes: &mut u32,
 ) -> LcmConvergenceAdmission {
     if history_allows_summary_convergence(outcome) {
         *history_priority_passes = 0;
-        return LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full);
+        return LcmConvergenceAdmission::Admitted;
     }
     *history_priority_passes = history_priority_passes.saturating_add(1);
-    if *history_priority_passes >= HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE {
+    if *history_priority_passes >= HISTORY_PRIORITY_PASSES_BEFORE_LCM_CONVERGENCE {
         *history_priority_passes = 0;
-        return LcmConvergenceAdmission::Admitted(LcmConvergencePage::PredecessorRangeRewrite);
+        return LcmConvergenceAdmission::Admitted;
     }
     LcmConvergenceAdmission::Deferred
 }
@@ -203,12 +190,8 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
             let convergence_admission =
                 lcm_convergence_admission(history_outcome, &mut history_priority_passes);
-            // Derived from the admission so the pass report can never disagree
-            // with what this pass actually ran.
-            let history_needs_another_pass = !matches!(
-                convergence_admission,
-                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
-            );
+            let history_needs_another_pass =
+                history_outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass);
             let (
                 summary_convergence_made_progress,
                 summary_convergence_has_more,
@@ -221,7 +204,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     // source windows delays both project and profile readiness.
                     (false, false, None)
                 }
-                LcmConvergenceAdmission::Admitted(convergence_page) => {
+                LcmConvergenceAdmission::Admitted => {
                     // Queue through the semaphore's fair async admission even when a
                     // permit appears immediately available. A retrying profile must
                     // not use `try_acquire` to jump ahead of profiles already waiting
@@ -268,21 +251,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     let summary_result = {
                         let permit = summary_admission;
                         let page = async {
-                            match convergence_page {
-                            LcmConvergencePage::PredecessorRangeRewrite => {
-                                crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
-                                    database.clone(),
-                                )
-                                .await
-                            }
-                            LcmConvergencePage::Full => {
-                                crate::lcm_summary_convergence::run_summary_convergence_page(
-                                    database.clone(),
-                                    crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
-                                )
-                                .await
-                            }
-                        }
+                            crate::lcm_summary_convergence::run_summary_convergence_page(
+                                database.clone(),
+                                crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
+                            )
+                            .await
                         };
                         tokio::pin!(page);
                         let result = tokio::select! {
@@ -1134,7 +1107,7 @@ mod tests {
         let mut passes = 7;
         assert_eq!(
             lcm_convergence_admission(Some(SessionHistoricalIngestOutcome::Complete), &mut passes),
-            LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
+            LcmConvergenceAdmission::Admitted
         );
         assert_eq!(
             passes, 0,
@@ -1143,11 +1116,10 @@ mod tests {
     }
 
     /// A profile whose history perpetually needs another window must still
-    /// converge the one-shot predecessor-range rewrite: the fix for #843 moved
-    /// that rewrite behind this scheduler, so a permanently prioritized
-    /// history lane would leave a pre-fix widened range in place forever.
+    /// run bounded derived convergence. Otherwise one pending provider can
+    /// starve summaries and repairs for already-ingested providers forever.
     #[tokio::test]
-    async fn perpetually_pending_history_cannot_starve_the_range_rewrite() {
+    async fn perpetually_pending_history_cannot_starve_lcm_convergence() {
         let harness = RegisteredGlobalDbHarness::open("lcm-range-rewrite-fairness").await;
         let database = harness.registered.clone();
         let session_id = "range-rewrite-fairness-session";
@@ -1160,12 +1132,12 @@ mod tests {
         // One bounded page per admitted pass, so the whole rewrite may need
         // several; the bound is generous enough to prove convergence rather
         // than to pin the page count.
-        const PASS_BOUND: u32 = HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE * 4;
+        const PASS_BOUND: u32 = HISTORY_PRIORITY_PASSES_BEFORE_LCM_CONVERGENCE * 4;
         let pending = Some(SessionHistoricalIngestOutcome::Pending {
             made_progress: true,
         });
         let mut history_priority_passes = 0u32;
-        let mut admitted_rewrites = 0u32;
+        let mut admitted_pages = 0u32;
         let mut passes = 0u32;
         while rewrite_has_work(&database).await {
             passes = passes.saturating_add(1);
@@ -1175,25 +1147,19 @@ mod tests {
                  {passes} passes"
             );
             let admission = lcm_convergence_admission(pending, &mut history_priority_passes);
-            assert_ne!(
-                admission,
-                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full),
-                "historical continuation must keep priority over derived summaries"
-            );
-            if admission
-                == LcmConvergenceAdmission::Admitted(LcmConvergencePage::PredecessorRangeRewrite)
-            {
-                admitted_rewrites = admitted_rewrites.saturating_add(1);
-                crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
+            if admission == LcmConvergenceAdmission::Admitted {
+                admitted_pages = admitted_pages.saturating_add(1);
+                crate::lcm_summary_convergence::run_summary_convergence_page(
                     database.clone(),
+                    crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
                 )
                 .await
-                .expect("bounded predecessor-range rewrite page");
+                .expect("bounded LCM convergence page");
             }
         }
         assert!(
-            admitted_rewrites > 0 && passes >= HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE,
-            "the rewrite must converge through admitted passes, not by skipping priority"
+            admitted_pages > 0 && passes >= HISTORY_PRIORITY_PASSES_BEFORE_LCM_CONVERGENCE,
+            "derived convergence must receive a bounded page without displacing history priority"
         );
         assert_eq!(
             persisted_range(&database, session_id).await,
