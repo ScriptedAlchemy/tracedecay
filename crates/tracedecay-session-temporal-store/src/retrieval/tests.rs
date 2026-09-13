@@ -1377,9 +1377,18 @@ fn candidate_and_record_cursors_are_stable_and_bounded() {
         session_id: "session-b".to_string(),
         stable_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_string(),
+        strict_lexical_matched: false,
     };
     let encoded = candidate.encode(256).unwrap();
     assert_eq!(CandidateCursor::decode(Some(&encoded)).unwrap(), candidate);
+    // The ladder state a continuation carries survives the round trip, so a page
+    // that resumes on the relaxation tier still knows the strict tier answered.
+    let answered = CandidateCursor {
+        strict_lexical_matched: true,
+        ..candidate
+    };
+    let encoded = answered.encode(256).unwrap();
+    assert_eq!(CandidateCursor::decode(Some(&encoded)).unwrap(), answered);
 
     let record = RecordCursor {
         candidate: 99_999,

@@ -112,6 +112,7 @@ async fn summary_search_ids(
             knowledge_at: i64::MAX,
             session_id: String::new(),
             stable_id: String::new(),
+            strict_lexical_matched: false,
         },
         8,
         &request,

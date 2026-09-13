@@ -4,7 +4,9 @@ use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 
 use tracedecay_capture::parse_rfc3339_timestamp;
 use tracedecay_runtime_core::db::engine::Value as SqlValue;
-use tracedecay_temporal_query::candidates::{CandidateChannel, CandidateClause};
+use tracedecay_temporal_query::candidates::{
+    CandidateChannel, CandidateClause, is_fts_boolean_operator,
+};
 use tracedecay_temporal_query::ports::{
     CandidateFieldCaps, PageRequest, ReadBudgetAccounting, TemporalExecutionSnapshot,
     TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest,
@@ -104,7 +106,8 @@ impl RootAuthorityChannel {
             | CandidateChannel::Phrase
             | CandidateChannel::Entity
             | CandidateChannel::Time
-            | CandidateChannel::Lexical => Self::Occurrence,
+            | CandidateChannel::Lexical
+            | CandidateChannel::LexicalRelaxed => Self::Occurrence,
         }
     }
 
@@ -398,10 +401,10 @@ pub(super) async fn query_candidate_clause(
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
     let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
-    let occurrence_fts_query = if clause.channel == CandidateChannel::Lexical {
-        fts_any_terms(&clause.value)
-    } else {
-        fts_phrase(&clause.value)
+    let occurrence_fts_query = match clause.channel {
+        CandidateChannel::Lexical => fts_all_terms(&clause.value),
+        CandidateChannel::LexicalRelaxed => fts_drop_one_terms(&clause.value),
+        _ => fts_phrase(&clause.value),
     };
     let (sql, params) = match (scope, clause.channel) {
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Scope) => {
@@ -452,7 +455,10 @@ pub(super) async fn query_candidate_clause(
         ),
         (
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
-            CandidateChannel::Phrase | CandidateChannel::Entity | CandidateChannel::Lexical,
+            CandidateChannel::Phrase
+            | CandidateChannel::Entity
+            | CandidateChannel::Lexical
+            | CandidateChannel::LexicalRelaxed,
         ) => (
             ROOT_OCCURRENCE_FTS_QUERY,
             vec![
@@ -608,7 +614,10 @@ pub(super) async fn query_candidate_clause(
         ),
         (
             TemporalRetrievalScope::Session(session_id),
-            CandidateChannel::Phrase | CandidateChannel::Entity | CandidateChannel::Lexical,
+            CandidateChannel::Phrase
+            | CandidateChannel::Entity
+            | CandidateChannel::Lexical
+            | CandidateChannel::LexicalRelaxed,
         ) => (
             OCCURRENCE_FTS_QUERY,
             vec![
@@ -792,6 +801,9 @@ pub(super) const fn candidate_score(channel: CandidateChannel) -> i64 {
         CandidateChannel::Time => 600,
         CandidateChannel::Summary => 500,
         CandidateChannel::Lexical => 400,
+        // Below every strict channel: a relaxed hit answered a query no strict
+        // tier could, and never outranks one that did.
+        CandidateChannel::LexicalRelaxed => 380,
     }
 }
 
@@ -799,10 +811,54 @@ pub(super) fn fts_phrase(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-fn fts_any_terms(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(fts_phrase)
+/// Strict lexical tier: every term must match the same message.
+///
+/// Terms are joined with `AND` unless the query typed its own operator between
+/// them, in which case that operator stands. Each term is quoted, so a term
+/// FTS5 would otherwise read as syntax (`NEAR`, `(`, `*`) matches as the word
+/// it is.
+fn fts_all_terms(value: &str) -> String {
+    let mut expression = String::new();
+    let mut term_precedes = false;
+    for token in value.split_whitespace() {
+        if is_fts_boolean_operator(token) {
+            expression.push(' ');
+            expression.push_str(token);
+            term_precedes = false;
+            continue;
+        }
+        if term_precedes {
+            expression.push_str(" AND ");
+        } else if !expression.is_empty() {
+            expression.push(' ');
+        }
+        expression.push_str(&fts_phrase(token));
+        term_precedes = true;
+    }
+    expression
+}
+
+/// The one relaxation tier: any all-but-one subset of the terms.
+///
+/// The plan reaches this channel only for a plain conjunction of bounded width;
+/// a typed boolean expression already says what to match and is answered
+/// strictly.
+fn fts_drop_one_terms(value: &str) -> String {
+    let terms = value.split_whitespace().collect::<Vec<_>>();
+    if terms.len() < 2 || terms.iter().copied().any(is_fts_boolean_operator) {
+        return fts_all_terms(value);
+    }
+    (0..terms.len())
+        .map(|dropped| {
+            let kept = terms
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != dropped)
+                .map(|(_, term)| fts_phrase(term))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            format!("({kept})")
+        })
         .collect::<Vec<_>>()
         .join(" OR ")
 }

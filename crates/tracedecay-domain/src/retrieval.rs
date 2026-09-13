@@ -265,7 +265,11 @@ pub enum TemporalCandidateChannelV1 {
     Phrase,
     Entity,
     Time,
+    /// Strict lexical tier: every term matched one message.
     Lexical,
+    /// Drop-one lexical tier, reached only after the strict tier was verified
+    /// empty under the same filters and snapshot.
+    LexicalRelaxed,
     Summary,
     Span,
     Burst,

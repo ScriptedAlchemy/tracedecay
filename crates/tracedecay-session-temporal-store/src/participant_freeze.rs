@@ -482,6 +482,9 @@ struct FrozenWatermarksWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    use crate::SessionTemporalExecutionReport;
     use tempfile::{TempDir, tempdir};
     use tracedecay_domain::{
         CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -502,7 +505,9 @@ mod tests {
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
     use tracedecay_temporal_query::candidates::CandidateChannel;
     use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-    use tracedecay_temporal_query::ports::{ExecutionLimits, TemporalSnapshotRequest};
+    use tracedecay_temporal_query::ports::{
+        ExecutionControl, ExecutionLimits, TemporalSnapshotRequest,
+    };
     use tracedecay_temporal_query::ranking::DiversityLimits;
 
     fn root(project_id: Option<&str>) -> TemporalAuthorizedRoot {
@@ -552,6 +557,30 @@ mod tests {
 
     fn root_execution_request(query: &str) -> AuthorizedTemporalExecutionRequest {
         root_execution_request_with_limits(query, ExecutionLimits::default())
+    }
+
+    /// The same root request under an execution control that already refuses.
+    fn root_execution_request_under_control(
+        query: &str,
+        control: ExecutionControl,
+    ) -> AuthorizedTemporalExecutionRequest {
+        let request = root_execution_request(query);
+        let snapshot = request.snapshot_request().clone();
+        AuthorizedTemporalExecutionRequest::new(
+            snapshot.with_execution_control(control),
+            query.to_string(),
+            None,
+            10,
+            DiversityLimits::unbounded(),
+            ContextBudget {
+                max_bytes: 64 * 1024,
+                max_tokens: 4_096,
+                estimator_version: "words-v1".to_string(),
+            },
+            1,
+            1,
+            digest('4'),
+        )
     }
 
     fn root_execution_request_with_limits(
@@ -725,6 +754,24 @@ mod tests {
         hit_count: usize,
         source_frontier: u64,
     ) {
+        seed_root_sessions_with_text(connection, count, hit_count, source_frontier, &|_| {
+            "needle cohort".to_string()
+        })
+        .await;
+    }
+
+    /// Seeds `count` sessions of which the first `hit_count` carry one message,
+    /// whose text `message_text` supplies per session index.
+    ///
+    /// Term overlap across sessions is what separates the lexical tiers, so a
+    /// fixture that exercises them has to choose each session's words.
+    async fn seed_root_sessions_with_text(
+        connection: &TestConnection,
+        count: usize,
+        hit_count: usize,
+        source_frontier: u64,
+        message_text: &dyn Fn(usize) -> String,
+    ) {
         for index in 0..count {
             let session_id = format!("session.{index:03}");
             connection
@@ -804,12 +851,13 @@ mod tests {
                 )
                 .await
                 .expect("sanitization receipt");
+            let text = message_text(index);
             let (observation_json, anchor_json) = fixture_root_evidence(
                 session_id.as_str(),
                 u64::try_from(index).expect("observation ordinal"),
                 &format!("record.{index:03}"),
                 receipt_id.as_str(),
-                "needle cohort",
+                &text,
             );
             connection
                 .execute(
@@ -863,7 +911,7 @@ mod tests {
                                     \"sanitizer_version\":\"root-sanitizer\"
                                  }}',
                                '0000000000000000000000000000000000000000000000000000000000000000',
-                               14, 'needle cohort', 'needle cohort')",
+                               14, ?8, ?8)",
                     params![
                         session_id.as_str(),
                         occurrence_id.as_str(),
@@ -871,7 +919,8 @@ mod tests {
                         anchor_id.as_str(),
                         message_id.as_str(),
                         turn_id.as_str(),
-                        i64::try_from(index + 1).expect("knowledge at")
+                        i64::try_from(index + 1).expect("knowledge at"),
+                        text.as_str()
                     ],
                 )
                 .await
@@ -1056,6 +1105,159 @@ mod tests {
 
         fn token_policy(&self) -> TokenPolicy {
             TokenPolicy::Whitespace
+        }
+    }
+
+    /// The measured shape behind the conjunctive clause: a root where each of the
+    /// query's terms is common and their conjunction is rare. Two sessions carry
+    /// all four terms; every other session carries three of them, so an OR clause
+    /// proposes the entire root and even a drop-one clause proposes hundreds.
+    async fn seed_root_lexical_cohort(connection: &TestConnection, count: usize) {
+        seed_root_sessions_with_text(connection, count, count, 1, &|index| {
+            match index {
+                0 | 1 => "alpha beta gamma delta",
+                _ => match index % 4 {
+                    0 => "beta gamma delta",
+                    1 => "alpha gamma delta",
+                    2 => "alpha beta delta",
+                    _ => "alpha beta gamma",
+                },
+            }
+            .to_string()
+        })
+        .await;
+    }
+
+    /// One session holds three of the query's four terms and nothing holds all
+    /// four, so the strict tier is a verified zero and the drop-one tier answers.
+    async fn seed_root_relaxable_cohort(connection: &TestConnection) {
+        seed_root_sessions_with_text(connection, 4, 4, 1, &|index| match index {
+            0 => "alpha beta gamma".to_string(),
+            _ => format!("beta without the rest {index}"),
+        })
+        .await;
+    }
+
+    fn ranked_anchors(report: &SessionTemporalExecutionReport) -> Vec<String> {
+        let mut anchors = report
+            .result()
+            .ranked
+            .iter()
+            .map(|candidate| candidate.anchor_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        // Two messages that match identically are ordered by recency; the claim
+        // under test is which population answered, not its internal order.
+        anchors.sort();
+        anchors
+    }
+
+    fn answering_channels(report: &SessionTemporalExecutionReport) -> Vec<CandidateChannel> {
+        let mut channels = report
+            .result()
+            .ranked
+            .iter()
+            .flat_map(|candidate| &candidate.contributions)
+            .map(|contribution| contribution.channel)
+            .collect::<Vec<_>>();
+        channels.sort();
+        channels.dedup();
+        channels
+    }
+
+    /// The measured failure: four common terms over 300 sessions proposed 41,064
+    /// candidates for a query two messages answer, and the candidate read refused
+    /// before either reached a page. All four terms must match one message.
+    #[tokio::test]
+    async fn root_conjunctive_lexical_answers_with_the_messages_every_term_matches() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_lexical_cohort(&connection, 300).await;
+        seed_root_cursor_key(&connection).await;
+        for session in ["session.000", "session.001"] {
+            publish_root_relation_projection(&database, &connection, session).await;
+        }
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let report = execution
+            .execute(
+                root_execution_request("alpha beta gamma delta"),
+                &WordEstimator,
+            )
+            .await
+            .expect("a conjunction two messages satisfy must be retrievable");
+
+        assert_eq!(
+            ranked_anchors(&report),
+            vec!["anchor.000".to_owned(), "anchor.001".to_owned()],
+            "only the messages every term matches are results"
+        );
+        // 298 sessions match three of the four terms. Reaching the relaxation
+        // tier here would answer a question nobody asked, with hundreds of rows.
+        assert!(
+            !answering_channels(&report).contains(&CandidateChannel::LexicalRelaxed),
+            "a strict tier that answered must not relax: {:?}",
+            answering_channels(&report)
+        );
+        assert_eq!(report.result().coverage.total(), Some(2));
+    }
+
+    /// A strict tier that is verified empty — scanned to exhaustion under these
+    /// filters and this snapshot — takes exactly one named step down the ladder,
+    /// and the answer says which tier produced it.
+    #[tokio::test]
+    async fn a_verified_zero_strict_tier_relaxes_one_named_step() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_relaxable_cohort(&connection).await;
+        seed_root_cursor_key(&connection).await;
+        publish_root_relation_projection(&database, &connection, "session.000").await;
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let report = execution
+            .execute(
+                root_execution_request("alpha beta gamma delta"),
+                &WordEstimator,
+            )
+            .await
+            .expect("a verified-zero strict tier relaxes rather than refusing");
+
+        assert_eq!(ranked_anchors(&report), vec!["anchor.000".to_owned()]);
+        assert_eq!(
+            answering_channels(&report),
+            vec![CandidateChannel::LexicalRelaxed],
+            "the relaxation tier answered, and the receipt names it"
+        );
+    }
+
+    /// A tier that ran out of time was never verified empty, so the ladder does
+    /// not advance: the query reports the timeout it hit. The same fixture and
+    /// query relax and answer without the deadline, which is what makes the
+    /// withheld step observable rather than assumed.
+    #[tokio::test]
+    async fn a_timed_out_strict_tier_refuses_instead_of_relaxing() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_relaxable_cohort(&connection).await;
+        seed_root_cursor_key(&connection).await;
+        publish_root_relation_projection(&database, &connection, "session.000").await;
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let result = execution
+            .execute(
+                root_execution_request_under_control(
+                    "alpha beta gamma delta",
+                    ExecutionControl::new(Some(Instant::now())),
+                ),
+                &WordEstimator,
+            )
+            .await;
+
+        match result {
+            Err(SessionTemporalExecutionError::DeadlineExceeded) => {}
+            other => panic!(
+                "a timed-out lexical scan must stay a deadline, not become a \
+                 relaxed answer or a zero: {other:?}"
+            ),
         }
     }
 
