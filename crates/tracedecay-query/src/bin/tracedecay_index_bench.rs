@@ -92,13 +92,22 @@ const REPLICAS_ENV: &str = "TRACEDECAY_INDEX_BENCH_REPLICAS";
 /// directory rather than clustering in whichever one sorts first.
 const EDIT_STRIDE: usize = 17;
 
-/// Sealed-source paging bounds. Chosen so the corpus yields many pages (the
-/// batch-stage span needs repetitions to be readable) while the retained
-/// window stays far below the 4 GB ceiling the profiling job budgets.
+/// Sealed-source paging bounds. Page granularity stays small so the corpus
+/// yields many pages (the batch-stage span needs repetitions to be readable)
+/// and the retained window stays far below the 4 GB ceiling the profiling job
+/// budgets on any runner.
 const MAX_PAGE_CHUNKS: usize = 64;
 const MAX_PAGE_BYTES: usize = 512 * 1024;
-const BATCH_MAX_PAGES: usize = 16;
-const BATCH_MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
+/// Offered transaction width, equal to the scheduler's own unscaled batch
+/// limits (`TEXT_ARTIFACT_BASE_BATCH_PAGES_V1`,
+/// `TEXT_ARTIFACT_BASE_BATCH_BYTES_V1`). Transaction width decides how often
+/// the artifact pays a rollback-journal commit, so a narrower window would
+/// profile a commit frequency no daemon produces. The builder's memory ledger
+/// narrows this offer to the admissible prefix, exactly as it does for the
+/// scheduler. The scheduler scales these with host memory; a benchmark must
+/// not, or head and base measure different workloads on different runners.
+const BATCH_MAX_PAGES: usize = 64;
+const BATCH_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 const FINALIZATION_WORK_BUDGET: usize = 4_096;
 
 const CLEAN_SEALED_AT: i64 = 1_700_000_000_000_000;
@@ -804,10 +813,20 @@ fn ingest_artifact(
     let mut progress = builder
         .progress()
         .map_err(|error| format!("read artifact progress: {error}"))?;
-    for batch in pages.chunks(BATCH_MAX_PAGES) {
+    // The daemon offers a bounded window and lets the builder's own ledger
+    // pick the admissible prefix. Fixed chunking only happens to fit the
+    // committed fixture; a real-repository corpus offers pages whose prepared
+    // charge exceeds the batch budget, and the builder correctly refuses them.
+    let mut offered = 0usize;
+    while offered < pages.len() {
+        let window = &pages[offered..pages.len().min(offered + BATCH_MAX_PAGES)];
+        let prepared = builder
+            .prepare_admissible_page_prefix(window, control)
+            .map_err(|error| format!("prepare lexical artifact batch: {error}"))?;
         progress = builder
-            .append_pages(batch, control)
+            .append_prepared_pages(prepared.prepared_pages(), control)
             .map_err(|error| format!("append lexical artifact batch: {error}"))?;
+        offered += prepared.accepted_prefix().get();
     }
     let receipt = loop {
         match builder
