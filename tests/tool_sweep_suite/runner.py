@@ -820,6 +820,7 @@ def prime_context_scout(
     client: McpClient,
     fixture: dict[str, Any],
     deadline: Callable[[str], int],
+    target: str | None,
 ) -> None:
     """Produce one real Scout address and pending work through an OpenCode hook."""
     key = "context_scout.settings.v1"
@@ -868,7 +869,7 @@ def prime_context_scout(
     original = source.read_text()
     source.write_text(f"{original}\n{_SCOUT_DIAGNOSTIC_FN}\n")
     try:
-        _prime_context_scout_diagnostic(client, fixture, deadline, revision, source)
+        _prime_context_scout_diagnostic(client, fixture, deadline, revision, source, target)
     finally:
         source.write_text(original)
 
@@ -879,6 +880,7 @@ def _prime_context_scout_diagnostic(
     deadline: Callable[[str], int],
     revision: str,
     source: Path,
+    target: str | None,
 ) -> None:
     _publish_context_scout_diagnostic(client, fixture, deadline)
 
@@ -951,11 +953,28 @@ def _prime_context_scout_diagnostic(
             {"address": address, "limit": 8, "format": "json"},
             deadline("tracedecay_context_scout_recent"),
         )
-        if _context_scout_pending(recent, "next_boundary") is not None:
+        pending = _context_scout_pending(recent, "next_boundary")
+        if pending is not None:
             break
         if time.monotonic() >= pending_at:
             raise SweepError("Context Scout saved-edit producer returned no boundary suggestion")
         time.sleep(MOUNT_RETRY_DELAY_S)
+
+    fixture.update(
+        {
+            "context_scout_address": address,
+            "context_scout_revision": revision,
+            "context_scout_work": pending.get("work"),
+        }
+    )
+    if not isinstance(fixture["context_scout_work"], dict):
+        raise SweepError("Context Scout recent producer omitted pending work identity")
+    if target not in {
+        "tracedecay_context_scout_claim",
+        "tracedecay_context_scout_delivery",
+        "tracedecay_context_scout_feedback",
+    }:
+        return
 
     boundary_payload = json.dumps(
         {
@@ -964,8 +983,9 @@ def _prime_context_scout_diagnostic(
             "properties": {"sessionID": session_id},
         }
     )
-    _run_checked(
-        [str(binary), "hook-opencode-event"],
+    boundary_command = [str(binary), "hook-opencode-event"]
+    boundary = _run_checked(
+        boundary_command,
         Path(fixture["root"]),
         "Context Scout OpenCode boundary delivery",
         timeout_s=60,
@@ -974,6 +994,13 @@ def _prime_context_scout_diagnostic(
     delivered_at = time.monotonic() + 30
     delivered: dict[str, Any] | None = None
     while time.monotonic() < delivered_at:
+        boundary = _run_checked(
+            boundary_command,
+            Path(fixture["root"]),
+            "Context Scout OpenCode boundary replay",
+            timeout_s=60,
+            input_text=boundary_payload,
+        )
         recent = _producer_call(
             client,
             "tracedecay_context_scout_recent",
@@ -993,7 +1020,15 @@ def _prime_context_scout_diagnostic(
             break
         time.sleep(MOUNT_RETRY_DELAY_S)
     if delivered is None:
-        raise SweepError("OpenCode idle boundary did not deliver its pending Scout suggestion")
+        state = [
+            {"pending": value.get("pending"), "deliveries": value.get("deliveries")}
+            for value in _objects(recent)
+            if "pending" in value or "deliveries" in value
+        ]
+        raise SweepError(
+            "OpenCode idle boundary did not deliver its pending Scout suggestion: "
+            f"hook={boundary.stdout.strip()[:600]!r} state={json.dumps(state)[:1200]}"
+        )
 
     receipt = delivered["receipt"]
     _producer_call(
@@ -1107,8 +1142,7 @@ def _publish_context_scout_diagnostic(
 
     diagnostic_at = time.monotonic() + 60
     while True:
-        diagnostic = _producer_call(
-            client,
+        diagnostic, elapsed_ms = client.call_tool(
             "tracedecay_diagnose",
             {
                 "cargo_output": compiler_output,
@@ -1119,6 +1153,22 @@ def _publish_context_scout_diagnostic(
             },
             deadline("tracedecay_diagnose"),
         )
+        row = response_row(
+            "tool",
+            "tracedecay_diagnose",
+            diagnostic,
+            elapsed_ms,
+            deadline("tracedecay_diagnose"),
+        )
+        if row["verdict"] != "PASS":
+            _kind, code = response_problem_code(diagnostic)
+            retryable = any(value.get("retryable") is True for value in _objects(diagnostic))
+            if code == "code-graph-unavailable" and retryable and time.monotonic() < diagnostic_at:
+                time.sleep(MOUNT_RETRY_DELAY_S)
+                continue
+            raise SweepError(
+                f"tracedecay_diagnose producer failed: {row['problem_code'] or row['note']}"
+            )
         publication = next(
             (
                 value["published"]
@@ -1374,7 +1424,7 @@ def prime_fixture_values(
         and effect_target.startswith("tracedecay_context_scout_")
     ):
         with prime_group("context_scout"):
-            prime_context_scout(client, fixture, deadline)
+            prime_context_scout(client, fixture, deadline, effect_target)
 
     if effect_target is None and FACT_READ_TOOLS.intersection(policies):
         with prime_group("facts"):
@@ -2674,7 +2724,8 @@ def validate_context_scout_read_response(
         if pending is None:
             raise SweepError("Context Scout recent omitted the producer-minted pending work")
         if (
-            not isinstance(pending.get("envelope_id"), str)
+            not isinstance(pending.get("envelope_id"), list)
+            or len(pending["envelope_id"]) != 16
             or not isinstance(pending.get("suggestion_text"), str)
             or "envelope" in pending
         ):
