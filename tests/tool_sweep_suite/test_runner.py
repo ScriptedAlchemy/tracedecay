@@ -2283,6 +2283,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertNotIn("tracedecay_automation_run_list", names)
         self.assertNotIn("tracedecay_lcm_load_session", names)
         self.assertNotIn("tracedecay_session_refresh_begin", names)
+        self.assertNotIn("work", fixture["priming_errors"], fixture["priming_errors"])
         self.assertEqual(fixture["work_admitted_version"], {"graph_version": 3})
         self.assertEqual(
             fixture["work_status_arguments"]["attempt_id"],
