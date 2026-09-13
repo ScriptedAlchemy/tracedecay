@@ -190,4 +190,5 @@ mod guard;
 mod lease;
 mod limits;
 mod pragma;
+mod reader_contention;
 mod transaction;
