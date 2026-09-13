@@ -354,35 +354,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             return HookV2AdmissionOutcomeV1::Conflict;
         }
     }
-    if let Some(mount) = mount.as_ref()
-        && let Some(native_lifecycle) = mount.lifecycle.as_ref()
-    {
-        let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        };
-        let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        };
-        if !admit_native_context_scout_lifecycle(
-            mount.project_sessions,
-            mount.background_cpu,
-            provider,
-            native_lifecycle,
-            range,
-        )
-        .await
-        {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        }
-    }
     let requires_producer_work = hook_v2_requires_producer_work(envelope);
-    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
-        && !requires_producer_work
-    {
-        return HookV2AdmissionOutcomeV1::ExactDuplicate {
-            context_scout_address: None,
-        };
-    }
     if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
         && receipt.work_completed
     {
@@ -411,6 +383,34 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         };
         return HookV2AdmissionOutcomeV1::ExactDuplicate {
             context_scout_address,
+        };
+    }
+    if let Some(mount) = mount.as_ref()
+        && let Some(native_lifecycle) = mount.lifecycle.as_ref()
+    {
+        let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
+        let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
+        if !admit_native_context_scout_lifecycle(
+            mount.project_sessions,
+            mount.background_cpu,
+            provider,
+            native_lifecycle,
+            range,
+        )
+        .await
+        {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        }
+    }
+    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+        && !requires_producer_work
+    {
+        return HookV2AdmissionOutcomeV1::ExactDuplicate {
+            context_scout_address: None,
         };
     }
     let completion = if requires_producer_work {
