@@ -717,6 +717,64 @@ async fn analytics_batch_ids_preserve_input_order_across_insert_chunks() {
 }
 
 #[tokio::test]
+async fn single_analytics_append_commits_in_one_writer_dispatch() {
+    let harness = RegisteredGlobalDbHarness::open("analytics-single-dispatch").await;
+    let inspection = rusqlite::Connection::open(harness.registered.db_path()).unwrap();
+    inspection
+        .busy_timeout(std::time::Duration::from_millis(100))
+        .unwrap();
+    let event = AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: "project".to_string(),
+        session_id: Some("session".to_string()),
+        timestamp: 1,
+        event_kind: "mcp_tool_call".to_string(),
+        hook_name: None,
+        tool_name: Some("tracedecay_work".to_string()),
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: Some("success".to_string()),
+        metadata_json: None,
+    };
+
+    let append = harness.registered.append_analytics_event(&event);
+    tokio::pin!(append);
+    assert!(matches!(
+        futures_util::poll!(&mut append),
+        std::task::Poll::Pending
+    ));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let count = inspection
+            .query_row("SELECT COUNT(*) FROM analytics_events", (), |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        if count == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "single append did not autocommit while its future remained unpolled"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert_eq!(
+        inspection
+            .execute(
+                "UPDATE analytics_events SET outcome = 'verified' WHERE id = 1",
+                (),
+            )
+            .expect("completed single append must retain no SQLite transaction"),
+        1
+    );
+}
+
+#[tokio::test]
 async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
     let harness = RegisteredGlobalDbHarness::open("analytics-batch-rollback").await;
     let db = &harness.registered;

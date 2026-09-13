@@ -119,17 +119,42 @@ impl RegisteredGlobalDb {
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
-        crate::hotpath_observe::record_transaction_rows(1);
-        let transaction = self
-            .begin_write_transaction()
+        let writer = self
+            .runtime_database()
+            .writer_connection("append analytics event")
             .await
-            .map_err(|error| format!("failed to begin analytics event transaction: {error}"))?;
-        let id = append_analytics_event_in_existing_tx(&transaction, event).await?;
-        transaction
-            .commit()
+            .map_err(|error| format!("failed to acquire analytics event writer: {error}"))?;
+        let changed = writer
+            .execute(
+                "INSERT INTO analytics_events
+                     (provider, project_id, session_id, timestamp, event_kind, hook_name,
+                      tool_name, tool_category, skill_name, hint_category, hint_id, outcome,
+                      metadata_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                tracedecay_runtime_core::db::engine::params![
+                    event.provider.as_str(),
+                    event.project_id.as_str(),
+                    event.session_id.as_deref(),
+                    event.timestamp,
+                    event.event_kind.as_str(),
+                    event.hook_name.as_deref(),
+                    event.tool_name.as_deref(),
+                    event.tool_category.as_deref(),
+                    event.skill_name.as_deref(),
+                    event.hint_category.as_deref(),
+                    event.hint_id.as_deref(),
+                    event.outcome.as_deref(),
+                    event.metadata_json.as_deref(),
+                ],
+            )
             .await
-            .map_err(|error| format!("failed to commit analytics event transaction: {error}"))?;
-        Ok(id)
+            .map_err(|error| format!("failed to append analytics event: {error}"))?;
+        if changed != 1 {
+            return Err(format!(
+                "analytics event append changed {changed} rows instead of one"
+            ));
+        }
+        Ok(writer.last_insert_rowid())
     }
 
     /// Canonical observability append with replay-safe idempotency.

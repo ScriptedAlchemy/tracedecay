@@ -18,13 +18,17 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute_batch(sql).await
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {
         self.conn.execute(sql, params).await
+    }
+
+    #[must_use]
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.conn.last_insert_rowid()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
