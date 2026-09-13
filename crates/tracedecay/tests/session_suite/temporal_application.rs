@@ -401,7 +401,8 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
                     | ContextOmissionReasonV1::Locked
                     | ContextOmissionReasonV1::Unavailable
                     | ContextOmissionReasonV1::SummaryHorizonMismatch
-                    | ContextOmissionReasonV1::DuplicateRepresentative => coverage.unknown = 1,
+                    | ContextOmissionReasonV1::DuplicateRepresentative
+                    | ContextOmissionReasonV1::RootContinuationUnavailable => coverage.unknown = 1,
                 }
             }
             let summary_rejection = match query.as_str() {
