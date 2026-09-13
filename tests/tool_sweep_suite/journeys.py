@@ -1167,19 +1167,35 @@ def prime_work_lifecycle(
     )
     if _object_field(status, "identity").get("attempt_id") != attempt_id:
         raise JourneyError("Work status did not consume the started attempt identity")
+    terminal_states = {"succeeded", "failed", "timed_out", "cancelled"}
+    spawn_deadline = time.monotonic() + 30
+    attempt_state = first_value(status, {"state"})
+    while attempt_state not in terminal_states | {"running"}:
+        if time.monotonic() >= spawn_deadline:
+            raise JourneyError(
+                f"Work attempt did not cross its spawn boundary (state {attempt_state!r})"
+            )
+        time.sleep(0.1)
+        status = call(
+            "tracedecay_work_attempt_status",
+            status_arguments,
+            deadline("tracedecay_work_attempt_status"),
+        )
+        attempt_state = first_value(status, {"state"})
     cancel_arguments = {
         **status_arguments,
         "request_id": f"cancel.tool-sweep.{suffix}",
         "occurred_at": int(time.time() * 1_000_000),
     }
-    cancelled = call(
-        "tracedecay_work_cancel_attempt",
-        cancel_arguments,
-        deadline("tracedecay_work_cancel_attempt"),
-    )
-    if _object_field(cancelled, "identity").get("attempt_id") != attempt_id:
-        raise JourneyError("Work cancellation did not retain the attempt identity")
-    terminal_states = {"succeeded", "failed", "timed_out", "cancelled"}
+    cancelled = status
+    if attempt_state == "running":
+        cancelled = call(
+            "tracedecay_work_cancel_attempt",
+            cancel_arguments,
+            deadline("tracedecay_work_cancel_attempt"),
+        )
+        if _object_field(cancelled, "identity").get("attempt_id") != attempt_id:
+            raise JourneyError("Work cancellation did not retain the attempt identity")
     cancellation_deadline = time.monotonic() + 30
     while first_value(cancelled, {"state"}) not in terminal_states:
         if time.monotonic() >= cancellation_deadline:
