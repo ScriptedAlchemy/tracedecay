@@ -9,9 +9,11 @@
 //! probes that must not open pack indexes use
 //! [`discover_repository_identity_cli_first`].
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::cancellation::{CancellationToken, MonotonicDeadline};
@@ -130,6 +132,111 @@ enum AuthorityProbe {
     Interrupted(GitDiscoveryUnknown),
 }
 
+/// What one resolution published, once it finished.
+#[derive(Clone, Debug)]
+enum IdentityResolutionResult {
+    Decided(GitRepositoryIdentityOutcome),
+    Unreadable,
+}
+
+/// One resolution that is still running, and every caller's view of its answer.
+struct IdentityResolution {
+    started: Instant,
+    published: tokio::sync::watch::Receiver<Option<IdentityResolutionResult>>,
+}
+
+/// In-flight identity resolutions, keyed by the directory each was asked about.
+///
+/// An entry exists only while its resolution runs: the answer itself is
+/// retained by the per-root topology the resolution publishes into, not here.
+static IDENTITY_RESOLUTIONS: LazyLock<Mutex<HashMap<PathBuf, IdentityResolution>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn identity_resolutions() -> MutexGuard<'static, HashMap<PathBuf, IdentityResolution>> {
+    IDENTITY_RESOLUTIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How long the in-flight resolution for `directory` has been running, when one
+/// is still running.
+///
+/// A deferred caller reports this so its refusal says the root is *being*
+/// resolved rather than merely unresolved.
+#[must_use]
+pub fn identity_resolution_elapsed(directory: &Path) -> Option<Duration> {
+    identity_resolutions()
+        .get(directory)
+        .map(|resolution| resolution.started.elapsed())
+}
+
+/// Join the resolution running for `directory`, starting one if none is.
+///
+/// Single-flight per directory: concurrent callers share one walk, and a
+/// caller that abandons its bounded wait does not abandon the work. The
+/// resolution runs to completion on the blocking pool and publishes into the
+/// retained per-root topology, so the next caller reads a resolved root
+/// instead of starting the walk over.
+fn join_identity_resolution(
+    directory: &Path,
+) -> tokio::sync::watch::Receiver<Option<IdentityResolutionResult>> {
+    let mut resolutions = identity_resolutions();
+    if let Some(resolution) = resolutions.get(directory) {
+        return resolution.published.clone();
+    }
+    let (publish, published) = tokio::sync::watch::channel(None);
+    resolutions.insert(
+        directory.to_path_buf(),
+        IdentityResolution {
+            started: Instant::now(),
+            published: published.clone(),
+        },
+    );
+    drop(resolutions);
+
+    // The slot is retired when the resolution ends, however it ends: normally,
+    // by panic, or by the runtime dropping a blocking task it never ran. A root
+    // is never left pointing at a resolution that will never publish, and no
+    // typed failure survives its own resolution to poison the next one.
+    let retire = RetireResolution(directory.to_path_buf());
+    tokio::task::spawn_blocking(move || {
+        let result = resolve_identity_from_authority(&retire.0);
+        // Retired before publishing, so a caller arriving after the answer
+        // starts a fresh resolution — which the retained topology answers
+        // without a walk — instead of joining a resolution that is history.
+        drop(retire);
+        let _ = publish.send(Some(result));
+    });
+    published
+}
+
+/// Retires one directory's resolution slot when the resolution ends.
+struct RetireResolution(PathBuf);
+
+impl Drop for RetireResolution {
+    fn drop(&mut self) {
+        identity_resolutions().remove(&self.0);
+    }
+}
+
+fn resolve_identity_from_authority(path: &Path) -> IdentityResolutionResult {
+    let exists = hotpath::measure_block!(
+        "runtime_core.git.discover.control_walk",
+        repository_control_may_exist(path)
+    );
+    if !exists {
+        return IdentityResolutionResult::Decided(GitRepositoryIdentityOutcome::NotRepository);
+    }
+    hotpath::measure_block!(
+        "runtime_core.git.discover.authority",
+        repository_identity_from_authority(path)
+    )
+    .map_or(
+        IdentityResolutionResult::Unreadable,
+        IdentityResolutionResult::Decided,
+    )
+}
+
 /// Run the ancestor walk and repository open on the blocking pool.
 ///
 /// Live defect this exists for: this function promises discovery "without
@@ -142,27 +249,25 @@ enum AuthorityProbe {
 ///
 /// The blocking task cannot be interrupted once started, but the caller is:
 /// an elapsed deadline or a cancelled token returns the typed uncertainty the
-/// module contract already defines, and the abandoned probe finishes on the
+/// module contract already defines, and the resolution finishes on the
 /// blocking pool without holding a worker.
+///
+/// Second live defect: that abandoned probe used to be *forgotten* as well as
+/// abandoned, so every retry started its own walk and a root on a slow volume
+/// stayed deferred for as long as clients kept asking. The resolution is now
+/// single-flight and outlives the caller that started it.
 async fn authority_identity_off_executor(
     directory: &Path,
     deadline: MonotonicDeadline,
     cancellation: &CancellationToken,
 ) -> AuthorityProbe {
-    let path = directory.to_path_buf();
-    let probe = tokio::task::spawn_blocking(move || {
-        if !repository_control_may_exist(&path) {
-            return Some(GitRepositoryIdentityOutcome::NotRepository);
-        }
-        repository_identity_from_authority(&path)
-    });
-    tokio::pin!(probe);
+    let mut published = join_identity_resolution(directory);
     tokio::select! {
         biased;
-        probed = &mut probe => match probed {
-            Ok(Some(outcome)) => AuthorityProbe::Decided(outcome),
-            Ok(None) => AuthorityProbe::Unreadable,
-            Err(_) => AuthorityProbe::Interrupted(GitDiscoveryUnknown::ProbeFailed),
+        result = published_identity(&mut published) => match result {
+            Some(IdentityResolutionResult::Decided(outcome)) => AuthorityProbe::Decided(outcome),
+            Some(IdentityResolutionResult::Unreadable) => AuthorityProbe::Unreadable,
+            None => AuthorityProbe::Interrupted(GitDiscoveryUnknown::ProbeFailed),
         },
         () = cancellation.cancelled() => {
             AuthorityProbe::Interrupted(GitDiscoveryUnknown::Cancelled)
@@ -170,6 +275,21 @@ async fn authority_identity_off_executor(
         () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.instant())) => {
             AuthorityProbe::Interrupted(GitDiscoveryUnknown::DeadlineExceeded)
         }
+    }
+}
+
+/// Await the answer a joined resolution publishes, or `None` when the
+/// resolution ended without one.
+#[hotpath::measure(label = "runtime_core.git.discover.single_flight_wait", future = true)]
+async fn published_identity(
+    published: &mut tokio::sync::watch::Receiver<Option<IdentityResolutionResult>>,
+) -> Option<IdentityResolutionResult> {
+    loop {
+        let result = published.borrow_and_update().clone();
+        if let Some(result) = result {
+            return Some(result);
+        }
+        published.changed().await.ok()?;
     }
 }
 
@@ -525,6 +645,213 @@ mod tests {
             outcome,
             GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed)
         );
+    }
+
+    /// What one discovery walk costs on the modelled slow volume.
+    const SLOW_WALK: Duration = Duration::from_millis(750);
+
+    fn budget(within: Duration) -> MonotonicDeadline {
+        MonotonicDeadline::at(Instant::now() + within)
+    }
+
+    /// A repository whose every live discovery walk costs [`SLOW_WALK`].
+    fn slow_volume_repository(fixture: &Path) -> PathBuf {
+        let repository = fixture.join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main", "--quiet"]);
+        crate::git_repository::delay_repository_discovery_for_test(&repository, SLOW_WALK);
+        repository
+    }
+
+    /// Wait for whatever resolution is running for `directory` to retire its
+    /// slot, which it does only after publishing into the retained topology.
+    async fn published_resolution(directory: &Path) {
+        for _ in 0..200 {
+            if identity_resolution_elapsed(directory).is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the resolution for {} never published", directory.display());
+    }
+
+    /// A probe abandoned at its deadline must still finish and publish, or the
+    /// deferral never converges: every retry starts the walk over and a root on
+    /// a slow volume stays deferred for as long as clients keep asking.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_probe_over_its_budget_publishes_for_the_next_resolution() {
+        let tmp = tempdir().unwrap();
+        let repository = slow_volume_repository(tmp.path());
+
+        let deferred = discover_repository_identity(
+            &repository,
+            budget(Duration::from_millis(100)),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(
+            deferred,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded),
+            "a probe past its budget is deferred, not decided"
+        );
+        assert!(
+            identity_resolution_elapsed(&repository).is_some(),
+            "the abandoned resolution must still be running, not discarded with its caller"
+        );
+
+        published_resolution(&repository).await;
+        let started = Instant::now();
+        let converged = discover_repository_identity(
+            &repository,
+            budget(Duration::from_millis(250)),
+            &CancellationToken::new(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let resolutions =
+            crate::git_repository::repository_topology_resolution_count_for_test(&repository);
+        crate::git_repository::reset_repository_discovery_for_test(&repository);
+
+        let GitRepositoryIdentityOutcome::Resolved(identity) = converged else {
+            panic!("the abandoned resolution must decide the next probe: {converged:?}");
+        };
+        assert_eq!(identity.worktree_root, repository.canonicalize().unwrap());
+        assert_eq!(resolutions, 1, "the converged probe re-ran discovery");
+        assert!(
+            elapsed < SLOW_WALK,
+            "the converged probe waited {elapsed:?}, so it walked the volume again"
+        );
+    }
+
+    /// Once a root's topology is published, reading its HEAD must not walk the
+    /// volume to find the repository again.
+    ///
+    /// Live wedge this covers: the topology memo only short-circuited topology
+    /// questions. Every route resolution still read HEAD through a complete
+    /// `gix::discover`, so a deferred root on a slow volume was rediscovered
+    /// from scratch on every retry and the deferral never converged.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_head_read_after_a_published_topology_does_not_walk_again() {
+        let tmp = tempdir().unwrap();
+        let repository = slow_volume_repository(tmp.path());
+        let resolved = discover_repository_identity(
+            &repository,
+            budget(Duration::from_secs(5)),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(
+            resolved,
+            GitRepositoryIdentityOutcome::Resolved(_)
+        ));
+
+        let started = Instant::now();
+        let branch = crate::branch::current_branch(&repository);
+        let elapsed = started.elapsed();
+        let walks = crate::git_repository::repository_discovery_count_for_test(&repository);
+        crate::git_repository::reset_repository_discovery_for_test(&repository);
+
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(
+            walks, 1,
+            "the HEAD read walked the volume again instead of opening the published Git directory"
+        );
+        assert!(
+            elapsed < SLOW_WALK,
+            "the HEAD read took {elapsed:?}, the cost of a fresh discovery walk"
+        );
+    }
+
+    /// Reusing a retained topology opens the repository at its own Git
+    /// directory instead of walking to it. A linked worktree is where that can
+    /// go wrong: its HEAD lives beside its per-worktree Git directory, not in
+    /// the common directory it shares with the main checkout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retained_topology_still_reports_the_linked_worktree_head() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "-b", "main", "--quiet"]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        );
+        let linked = tmp.path().join("linked");
+        run_git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked-branch",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let within = Duration::from_secs(2);
+
+        let cold =
+            discover_repository_identity(&linked, budget(within), &CancellationToken::new()).await;
+        let warm =
+            discover_repository_identity(&linked, budget(within), &CancellationToken::new()).await;
+
+        assert_eq!(
+            cold, warm,
+            "a retained topology must name the same identity the walk did"
+        );
+        assert!(matches!(warm, GitRepositoryIdentityOutcome::Resolved(_)));
+        assert_eq!(
+            crate::branch::current_branch(&linked).as_deref(),
+            Some("linked-branch"),
+            "a worktree opened at its own Git directory must report its own HEAD"
+        );
+        assert_eq!(
+            crate::branch::current_branch(&main).as_deref(),
+            Some("main"),
+            "the main checkout must keep reporting its own HEAD"
+        );
+    }
+
+    /// A decided-but-negative answer is an observation, not a verdict about the
+    /// root: nothing about it survives the resolution that produced it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_typed_probe_failure_does_not_poison_the_root() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let within = Duration::from_secs(2);
+
+        let absent =
+            discover_repository_identity(&workspace, budget(within), &CancellationToken::new())
+                .await;
+        assert_eq!(
+            absent,
+            GitRepositoryIdentityOutcome::NotRepository,
+            "an ordinary directory is not a repository"
+        );
+        assert!(
+            identity_resolution_elapsed(&workspace).is_none(),
+            "a finished resolution must not stay in flight"
+        );
+
+        run_git(&workspace, &["init", "--quiet"]);
+        let outcome =
+            discover_repository_identity(&workspace, budget(within), &CancellationToken::new())
+                .await;
+
+        let GitRepositoryIdentityOutcome::Resolved(identity) = outcome else {
+            panic!("a repository created after a negative answer must resolve: {outcome:?}");
+        };
+        assert_eq!(identity.worktree_root, workspace.canonicalize().unwrap());
     }
 
     #[test]
