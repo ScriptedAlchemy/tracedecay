@@ -54,6 +54,15 @@ from outcomes import (
     text_blocks,
 )
 
+AUTHORITATIVE_TOOL_COUNT = 239
+AUTHORITATIVE_RESOURCES = {
+    "tracedecay://status": "application/json",
+    "tracedecay://files": "text/plain",
+    "tracedecay://overview": "text/plain",
+    "tracedecay://branches": "application/json",
+    "tracedecay://schema": "text/markdown",
+}
+
 def response_row(
     kind: str, name: str, response: dict[str, Any], elapsed_ms: int, deadline_ms: int
 ) -> dict[str, Any]:
@@ -163,7 +172,17 @@ def exercise_discovered_surfaces(
         except Exception as error:
             rows.append(_call_failure_row("resource", uri, deadline_ms, error))
             continue
-        rows.append(response_row("resource", uri, response, elapsed_ms, deadline_ms))
+        row = response_row("resource", uri, response, elapsed_ms, deadline_ms)
+        if row["verdict"] == "PASS":
+            try:
+                validate_resource_response(uri, response, fixture)
+            except SweepError as error:
+                row.update(
+                    verdict="FAIL",
+                    problem_code="tool_sweep.resource_contract_invalid",
+                    note=str(error),
+                )
+        rows.append(row)
     for prompt in prompts:
         name = prompt.get("name") if isinstance(prompt, dict) else None
         if not isinstance(name, str) or not name:
@@ -187,6 +206,94 @@ def exercise_discovered_surfaces(
             continue
         rows.append(response_row("prompt", name, response, elapsed_ms, deadline_ms))
     return rows
+
+
+def assert_authoritative_inventory(
+    tools: list[dict[str, Any]],
+    resources: list[dict[str, Any]],
+    prompts: list[dict[str, Any]],
+) -> None:
+    """Reject a release binary whose advertised product surface is incomplete."""
+    tool_names = [tool.get("name") for tool in tools]
+    if (
+        len(tool_names) != AUTHORITATIVE_TOOL_COUNT
+        or any(not isinstance(name, str) or not name for name in tool_names)
+        or len(set(tool_names)) != AUTHORITATIVE_TOOL_COUNT
+    ):
+        raise SweepError(
+            f"authoritative catalog requires {AUTHORITATIVE_TOOL_COUNT} unique tools; "
+            f"binary advertised {len(tool_names)}"
+        )
+    advertised_resources = {
+        resource.get("uri"): resource.get("mimeType") for resource in resources
+    }
+    if (
+        len(resources) != len(AUTHORITATIVE_RESOURCES)
+        or advertised_resources != AUTHORITATIVE_RESOURCES
+    ):
+        raise SweepError(
+            "authoritative resource inventory drifted: "
+            f"{advertised_resources!r}"
+        )
+    if prompts:
+        raise SweepError(f"authoritative catalog advertises no prompts; binary advertised {len(prompts)}")
+
+
+def _resource_contents(uri: str, response: dict[str, Any]) -> tuple[str, str]:
+    result = response.get("result")
+    contents = result.get("contents") if isinstance(result, dict) else None
+    if not isinstance(contents, list) or len(contents) != 1 or not isinstance(contents[0], dict):
+        raise SweepError(f"{uri} did not return exactly one resource content object")
+    content = contents[0]
+    if content.get("uri") != uri:
+        raise SweepError(f"{uri} response changed its typed URI identity")
+    expected_mime = AUTHORITATIVE_RESOURCES.get(uri)
+    if expected_mime is None:
+        raise SweepError(f"{uri} is not an authoritative TraceDecay resource")
+    if content.get("mimeType") != expected_mime:
+        raise SweepError(f"{uri} response did not preserve MIME {expected_mime}")
+    text = content.get("text")
+    if not isinstance(text, str) or not text:
+        raise SweepError(f"{uri} response has no text body")
+    return expected_mime, text
+
+
+def validate_resource_response(
+    uri: str, response: dict[str, Any], fixture: dict[str, Any]
+) -> None:
+    """Validate each resource's typed identity and source-backed body contract."""
+    _mime, text = _resource_contents(uri, response)
+    if uri == "tracedecay://status":
+        try:
+            body = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise SweepError("status resource body is not JSON") from error
+        if body.get("project_root") != fixture.get("root"):
+            raise SweepError("status resource did not identify the admitted fixture project")
+        if not isinstance(body.get("branch_diagnostics"), dict) or not isinstance(
+            body.get("graph_statistics"), dict
+        ):
+            raise SweepError("status resource omitted typed branch or graph state")
+    elif uri == "tracedecay://files":
+        if text != (
+            "status: unavailable\n"
+            "reason: verified_generation_file_inventory_not_admitted"
+        ):
+            raise SweepError("files resource did not preserve its truthful typed-unavailable body")
+    elif uri == "tracedecay://overview":
+        if f"Project: {fixture.get('root')}" not in text or "Graph statistics:" not in text:
+            raise SweepError("overview resource omitted project identity or graph state")
+    elif uri == "tracedecay://branches":
+        try:
+            body = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise SweepError("branches resource body is not JSON") from error
+        branches = body.get("branches")
+        if not isinstance(branches, list) or body.get("branch_count") != len(branches):
+            raise SweepError("branches resource count does not match its typed branch list")
+    elif uri == "tracedecay://schema":
+        if not text.startswith("# tracedecay SQLite schema\n") or "## Tables" not in text or "## Recipes" not in text:
+            raise SweepError("schema resource omitted its schema tables or query recipes")
 
 
 class SweepError(RuntimeError):
@@ -550,6 +657,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         "impl SweepTrait for SweepType { fn marker(&self) -> i32 { self.value } }\n"
         "pub fn sweep_peer() -> i32 { sweep_anchor().marker() }\n"
         "pub fn sweep_typed(input: SweepType) -> SweepType { input }\n"
+        "#[cfg(test)] mod tests { use super::*; #[test] fn sweep_anchor_is_covered() { assert_eq!(sweep_anchor().value, 7); } }\n"
         "\n"
         "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
     )
@@ -597,6 +705,30 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     _run_checked([str(binary), "init"], root, "fixture tracedecay init", timeout_s=180)
     _run_checked(
         [str(binary), "init"], cleanup_root, "fixture cleanup tracedecay init", timeout_s=180
+    )
+    skill_id = "tool-sweep-managed-skill"
+    _run_checked(
+        [
+            str(binary),
+            "automation",
+            "skills",
+            "create",
+            "--id",
+            skill_id,
+            "--title",
+            "Catalog sweep skill",
+            "--summary",
+            "Exercises the installed managed-skill read surface.",
+            "--routing-description",
+            "Use while auditing the installed MCP catalog.",
+            "--category",
+            "maintenance",
+            "--body",
+            "Read this skill through the installed TraceDecay MCP server.",
+        ],
+        root,
+        "fixture managed-skill producer",
+        timeout_s=180,
     )
     _seed_work_executable_binding(binary, root, parent)
     session_id = f"tool-sweep-session-{os.getpid()}-{time.monotonic_ns()}"
@@ -686,6 +818,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         "to_ref": "HEAD",
         "branch": "main",
         "commit": commit,
+        "managed_skill_id": skill_id,
     }
 
 
@@ -1196,6 +1329,205 @@ def _publish_context_scout_diagnostic(
         time.sleep(MOUNT_RETRY_DELAY_S)
 
 
+def prime_feedback_reads(
+    client: McpClient,
+    fixture: dict[str, Any],
+    deadline: Callable[[str], int],
+) -> None:
+    """Mint every opaque feedback handle from one published advisory cycle."""
+    ready_at = time.monotonic() + MOUNT_RETRY_BUDGET_S
+    response: dict[str, Any]
+    while True:
+        response, elapsed_ms = client.call_tool(
+            "tracedecay_feedback_advisory_cycle",
+            {"document_uri": fixture["document_uri"], "format": "json"},
+            deadline("tracedecay_feedback_advisory_cycle"),
+        )
+        row = response_row(
+            "tool",
+            "tracedecay_feedback_advisory_cycle",
+            response,
+            elapsed_ms,
+            deadline("tracedecay_feedback_advisory_cycle"),
+        )
+        if row["verdict"] == "PASS":
+            break
+        kind, _code = response_problem_code(response)
+        if kind != "unavailable" or time.monotonic() >= ready_at:
+            raise SweepError(
+                "feedback advisory producer failed: "
+                f"{row['problem_code'] or row['note']}"
+            )
+        time.sleep(MOUNT_RETRY_DELAY_S)
+    if duration_us(response) is None:
+        raise SweepError("feedback advisory producer omitted _meta.duration_us")
+    payload = next(
+        (
+            value
+            for value in _objects(response)
+            if isinstance(value.get("cycle"), dict)
+            and isinstance(value.get("read_handles"), dict)
+            and isinstance(value.get("finding_handles"), list)
+        ),
+        None,
+    )
+    if payload is None:
+        raise SweepError("feedback advisory producer omitted its handle publication")
+    cycle = payload["cycle"]
+    result_id = cycle.get("result_id")
+    cycle_id = cycle.get("cycle_id")
+    if (
+        not isinstance(result_id, str)
+        or not result_id
+        or not isinstance(cycle_id, str)
+        or not cycle_id
+    ):
+        raise SweepError("feedback advisory producer omitted its cycle identity")
+    finding = next(
+        (
+            value
+            for value in payload["finding_handles"]
+            if isinstance(value, dict)
+            and isinstance(value.get("finding_id"), str)
+            and isinstance(value.get("get_handle"), str)
+            and isinstance(value.get("expansion_handle"), str)
+            and isinstance(value.get("retrieval_anchor_id"), str)
+        ),
+        None,
+    )
+    if finding is None:
+        raise SweepError("feedback advisory producer returned no expandable finding")
+    handles = payload["read_handles"]
+    required = {
+        "tracedecay_feedback_diagnostics": "diagnostics_handle",
+        "tracedecay_feedback_impact": "impact_handle",
+        "tracedecay_affected_tests": "affected_tests_handle",
+        "tracedecay_feedback_list": "list_handle",
+    }
+    arguments: dict[str, dict[str, str]] = {}
+    for tool, field in required.items():
+        handle = handles.get(field)
+        if not isinstance(handle, str) or not handle:
+            raise SweepError(f"feedback advisory producer omitted {field}")
+        arguments[tool] = {"request_handle": handle, "format": "json"}
+    arguments["tracedecay_feedback_get"] = {
+        "request_handle": finding["get_handle"],
+        "format": "json",
+    }
+    arguments["tracedecay_feedback_expand"] = {
+        "request_handle": finding["expansion_handle"],
+        "format": "json",
+    }
+    fixture.update(
+        feedback_read_arguments=arguments,
+        feedback_result_id=result_id,
+        feedback_cycle_id=cycle_id,
+        feedback_finding_id=finding["finding_id"],
+        feedback_anchor_id=finding["retrieval_anchor_id"],
+    )
+
+
+def prime_managed_test_results(
+    client: McpClient,
+    fixture: dict[str, Any],
+    deadline: Callable[[str], int],
+) -> None:
+    """Run the fixture's graph-selected test before reading retained results."""
+    response = _producer_call(
+        client,
+        "tracedecay_run_affected_tests",
+        {
+            "changed_paths": [fixture["file"]],
+            "timeout_secs": 60,
+            "max_tests": 5,
+            "format": "json",
+        },
+        deadline("tracedecay_run_affected_tests"),
+    )
+    results = [
+        value
+        for value in _objects(response)
+        if isinstance(value.get("test"), str) and isinstance(value.get("passed"), bool)
+    ]
+    if not results or not all(value["passed"] for value in results):
+        raise SweepError("affected-test producer retained no passing fixture result")
+    expected = {value["test"] for value in results}
+    fixture["managed_test_names"] = sorted(expected)
+    ready_at = time.monotonic() + 10
+    while True:
+        retained = _producer_call(
+            client,
+            "tracedecay_test_results",
+            {"format": "json"},
+            deadline("tracedecay_test_results"),
+        )
+        observed = {
+            value["test"]
+            for value in _objects(retained)
+            if isinstance(value.get("test"), str) and value.get("passed") is True
+        }
+        if expected.issubset(observed):
+            return
+        if time.monotonic() >= ready_at:
+            raise SweepError(
+                "affected-test producer's retained results never became readable: "
+                f"expected={sorted(expected)!r} observed={sorted(observed)!r}"
+            )
+        time.sleep(MOUNT_RETRY_DELAY_S)
+
+
+def _automation_artifact_identity(response: dict[str, Any]) -> tuple[str, str] | None:
+    for value in _objects(response):
+        run_id = value.get("run_id")
+        artifacts = value.get("artifacts", value.get("artifact_kinds"))
+        if not isinstance(run_id, str) or not run_id or not isinstance(artifacts, list):
+            continue
+        for artifact in artifacts:
+            kind = artifact.get("kind") if isinstance(artifact, dict) else artifact
+            if isinstance(kind, str) and kind:
+                return run_id, kind
+    return None
+
+
+def prime_automation_artifact(
+    client: McpClient,
+    fixture: dict[str, Any],
+    deadline: Callable[[str], int],
+) -> None:
+    """Produce one genuine automation artifact, then retain its exact identity."""
+    listed = _producer_call(
+        client,
+        "tracedecay_automation_run_list",
+        {"limit": 50, "format": "json"},
+        deadline("tracedecay_automation_run_list"),
+    )
+    identity = _automation_artifact_identity(listed)
+    if identity is None:
+        curated = _producer_call(
+            client,
+            "tracedecay_fact_store_curate",
+            {
+                "fact_review_limit": 24,
+                "min_confidence_millionths": 720_000,
+                "format": "json",
+            },
+            deadline("tracedecay_fact_store_curate"),
+        )
+        run_id = first_value(curated, {"run_id"})
+        if not isinstance(run_id, str) or not run_id:
+            raise SweepError("automation producer omitted its run identity")
+        viewed = _producer_call(
+            client,
+            "tracedecay_automation_run_view",
+            {"run_id": run_id, "format": "json"},
+            deadline("tracedecay_automation_run_view"),
+        )
+        identity = _automation_artifact_identity(viewed)
+    if identity is None:
+        raise SweepError("automation producer retained no verifiable run artifact")
+    fixture["automation_run_id"], fixture["automation_artifact_kind"] = identity
+
+
 def prime_fixture_values(
     client: McpClient,
     fixture: dict[str, Any],
@@ -1419,12 +1751,22 @@ def prime_fixture_values(
             }
         )
 
-    if (effect_target is None and "tracedecay_context_scout_status" in policies) or (
+    if (
+        effect_target is None
+        and "tracedecay_context_scout_status" in policies
+    ) or (
         isinstance(effect_target, str)
-        and effect_target.startswith("tracedecay_context_scout_")
+        and (
+            effect_target.startswith("tracedecay_context_scout_")
+            or effect_target in FEEDBACK_READ_TOOLS
+        )
     ):
         with prime_group("context_scout"):
             prime_context_scout(client, fixture, deadline, effect_target)
+
+    if effect_target is None or effect_target in FEEDBACK_READ_TOOLS:
+        with prime_group("feedback"):
+            prime_feedback_reads(client, fixture, deadline)
 
     if effect_target is None and FACT_READ_TOOLS.intersection(policies):
         with prime_group("facts"):
@@ -1436,24 +1778,11 @@ def prime_fixture_values(
                 deadline,
             )
 
-    if effect_target is None:
+    if effect_target is None or effect_target == "tracedecay_automation_run_artifact_view":
         with prime_group("automation"):
-            ready_at = time.monotonic() + 10
-            while True:
-                runs = _producer_call(
-                    client,
-                    "tracedecay_automation_run_list",
-                    {"limit": 1, "format": "json"},
-                    deadline("tracedecay_automation_run_list"),
-                )
-                run_id = first_value(runs, {"run_id"})
-                if isinstance(run_id, str) and run_id:
-                    fixture["automation_run_id"] = run_id
-                    break
-                if time.monotonic() >= ready_at:
-                    raise SweepError("automation run list producer returned no inspectable run identity")
-                time.sleep(MOUNT_RETRY_DELAY_S)
+            prime_automation_artifact(client, fixture, deadline)
 
+    if effect_target is None:
         with prime_group("session_lcm"):
             refresh_selectors = profile_refresh_selectors(fixture)
             refresh_deadline_ms = deadline("tracedecay_session_refresh_begin")
@@ -1700,6 +2029,10 @@ def prime_fixture_values(
             }
         )
 
+    if effect_target is None or effect_target == "tracedecay_test_results":
+        with prime_group("managed_test_results"):
+            prime_managed_test_results(client, fixture, deadline)
+
     if effect_target is None:
         with prime_group("configuration_preview"):
             configuration_key = fixture["configuration_key"]
@@ -1893,59 +2226,16 @@ CODE_NAVIGATION_INPUT_PRODUCERS = {
     "tracedecay_type_hierarchy": "tracedecay_code_type_hierarchy",
 }
 
-# Expected hermetic typed-denial verdicts. Each entry asserts the EXACT
-# (kind, code) problem a tool must return inside the hermetic fixture because
-# its success path consumes state no hermetic producer can mint:
-# - context_scout_* reads consume an opaque scout address minted only by a
-#   real host-agent claim journey, and context_scout_claim itself is declared
-#   unavailable (effect_journey_unverified), so the concealment denial is the
-#   complete hermetic contract.
-# - context_scout_pause/resume persist scout state through the configuration
-#   authority for one exact daemon-minted scout address; without a real
-#   host-agent claim the address cannot exist, so the control mutation must
-#   deny before admission and therefore needs no rollback.
-# - feedback_* reads and affected_tests consume daemon-minted request handles
-#   produced only by live LSP context projections or durable advisory cycles
-#   with findings; clients cannot reconstruct them by design.
-# - automation_run_artifact_view and skill_view read durable artifacts that
-#   only real automation runs / skill installs create; the isolated profile
-#   has none, so an unknown identity must stay a typed not-found.
-# - test_results reads daemon-retained managed test results that only a
-#   covered run_affected_tests execution retains; the fixture has no covered
-#   tests, and its zero-coverage journey verifies nothing is retained.
-
-# An entry is falsifiable in both directions: a different problem stays FAIL,
-# and a hermetic success FAILs with expected_denial_superseded until the entry
-# is removed.
-EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
-    "tracedecay_affected_tests": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_feedback_diagnostics": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_feedback_expand": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_feedback_get": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_feedback_impact": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_feedback_list": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
-    "tracedecay_automation_run_artifact_view": ("failed", "not_found"),
-    "tracedecay_skill_view": ("failed", "not_found"),
-    "tracedecay_test_results": ("unavailable", "application.retrieval.unavailable"),
-
-}
-
-# Opaque probe inputs are permitted ONLY for tools carrying an expected
-# hermetic denial: the probe proves the deny path is typed and exact; it never
-# fakes a producible success input. Every other opaque field still requires an
-# authentic producer.
-_UNKNOWN_REQUEST_HANDLE_PROBE = {
-    "request_handle": "tool-sweep-unknown-request-handle.v1",
-    "format": "json",
-}
-HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
-    "tracedecay_affected_tests": _UNKNOWN_REQUEST_HANDLE_PROBE,
-    "tracedecay_feedback_diagnostics": _UNKNOWN_REQUEST_HANDLE_PROBE,
-    "tracedecay_feedback_expand": _UNKNOWN_REQUEST_HANDLE_PROBE,
-    "tracedecay_feedback_get": _UNKNOWN_REQUEST_HANDLE_PROBE,
-    "tracedecay_feedback_impact": _UNKNOWN_REQUEST_HANDLE_PROBE,
-    "tracedecay_feedback_list": _UNKNOWN_REQUEST_HANDLE_PROBE,
-}
+FEEDBACK_READ_TOOLS = frozenset(
+    {
+        "tracedecay_affected_tests",
+        "tracedecay_feedback_diagnostics",
+        "tracedecay_feedback_expand",
+        "tracedecay_feedback_get",
+        "tracedecay_feedback_impact",
+        "tracedecay_feedback_list",
+    }
+)
 
 
 def git_preview_arguments(fixture: dict[str, Any]) -> dict[str, Any]:
@@ -2022,6 +2312,22 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         }
     if name == "tracedecay_automation_run_view":
         return {"run_id": fixture["automation_run_id"], "format": "json"}
+    if name == "tracedecay_automation_run_artifact_view":
+        return {
+            "run_id": fixture["automation_run_id"],
+            "kind": fixture["automation_artifact_kind"],
+            "format": "json",
+        }
+    if name == "tracedecay_skill_view":
+        return {
+            "id": fixture["managed_skill_id"],
+            "include_support_files": True,
+            "format": "json",
+        }
+    if name == "tracedecay_test_results":
+        return {"format": "json"}
+    if isinstance(name, str) and name in fixture.get("feedback_read_arguments", {}):
+        return dict(fixture["feedback_read_arguments"][name])
     if name == "tracedecay_lcm_expand":
         return {
             "provider": "codex",
@@ -2139,11 +2445,6 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return dict(arguments)
     if isinstance(name, str) and name in fixture.get("native_read_arguments", {}):
         return dict(fixture["native_read_arguments"][name])
-    probe = HERMETIC_DENIAL_PROBE_ARGUMENTS.get(name) if isinstance(name, str) else None
-    if probe is not None:
-        if name not in EXPECTED_HERMETIC_DENIALS:
-            raise SweepError(f"{name}: denial probe exists without an expected hermetic denial")
-        return dict(probe)
     if isinstance(name, str) and name in CODE_QUERY_NODE_CONSUMERS:
         identities = fixture.get("code_navigation_node_ids")
         code_node_id = identities.get(name) if isinstance(identities, dict) else None
@@ -2437,58 +2738,6 @@ def _reconcile_effect(
     return row
 
 
-def _expected_denial_row(row: dict[str, Any], name: str, response: dict[str, Any]) -> dict[str, Any]:
-    """Rewrite one row against the tool's cataloged exact hermetic denial."""
-    expected = EXPECTED_HERMETIC_DENIALS.get(name)
-    if expected is None:
-        return row
-    problem = response_problem_code(response)
-    if row["verdict"] == "FAIL" and problem == expected:
-        row.update(
-            {
-                "verdict": "PASS",
-                "note": f"expected hermetic typed denial confirmed: {problem[0]}",
-                "problem_code": problem[1],
-                "expected_denial": True,
-            }
-        )
-    elif row["verdict"] == "PASS":
-        row.update(
-            {
-                "verdict": "FAIL",
-                "problem_code": "tool_sweep.expected_denial_superseded",
-                "note": "tool succeeded hermetically; remove its expected hermetic denial entry",
-            }
-        )
-    return row
-
-
-def _effect_denial_row(
-    client: McpClient, definition: dict[str, Any], policy: ToolPolicy, fixture: dict[str, str],
-) -> dict[str, Any]:
-    """Prove a mutation with no hermetic success path denies with its exact typed error."""
-    try:
-        if policy.name == "tracedecay_git_preview":
-            hunks_policy = (policies or {}).get("tracedecay_git_hunks")
-            if hunks_policy is None:
-                raise SweepError("git preview consumer has no advertised git_hunks producer")
-            mint_preview_input(client, fixture, hunks_policy.deadline_ms)
-        arguments = materialize_tool_arguments(definition, fixture)
-    except Exception as error:
-        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.arguments_unmaterialized", str(error))
-    try:
-        response, elapsed_ms = client.call_tool(policy.name, arguments, policy.deadline_ms)
-    except Exception as error:
-        return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
-    row = _expected_denial_row(
-        response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms), policy.name, response,
-    )
-    if row.get("expected_denial"):
-        row["rollback"] = "not_required"
-        row["rollback_note"] = "typed denial produced no effect to roll back"
-    return row
-
-
 def execute_effect(
     client: McpClient, definition: dict[str, Any], policy: ToolPolicy, fixture: dict[str, str],
     policies: dict[str, ToolPolicy],
@@ -2496,8 +2745,6 @@ def execute_effect(
     """Exercise a real effect and its inverse inside this phase's disposable profile."""
     if policy.name == "tracedecay_source_edit_reconcile":
         return _reconcile_effect(client, policy, fixture, policies)
-    if policy.name in EXPECTED_HERMETIC_DENIALS:
-        return _effect_denial_row(client, definition, policy, fixture)
     try:
         def deadline(tool: str) -> int:
             candidate = policies.get(tool)
@@ -2625,17 +2872,12 @@ def _read_tool_row(
         return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
     row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
     row = _require_navigation_evidence(row, policy.name, response)
-    expected = EXPECTED_HERMETIC_DENIALS.get(policy.name)
     if row["verdict"] == "FAIL":
         ends_at = time.monotonic() + MOUNT_RETRY_BUDGET_OVERRIDES_S.get(
             policy.name, MOUNT_RETRY_BUDGET_S
         )
         while row["verdict"] == "FAIL" and time.monotonic() < ends_at:
             kind, code = response_problem_code(response)
-            if expected is not None and (kind, code) == expected:
-                # The exact cataloged denial is terminal; retrying it would
-                # hide a fixed surface behind the stale expectation.
-                break
             if code == "git_index.expired_preview" and policy.name == "tracedecay_git_preview":
                 # The stage preview input carries a short product TTL; re-mint
                 # it from its live producer instead of consuming a dead cursor.
@@ -2677,7 +2919,6 @@ def _read_tool_row(
                 return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
             row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
             row = _require_navigation_evidence(row, policy.name, response)
-    row = _expected_denial_row(row, policy.name, response)
     if row["verdict"] == "PASS" and (
         policy.name in FACT_READ_TOOLS or policy.name in LCM_READ_TOOLS
     ):
@@ -2703,7 +2944,75 @@ def _read_tool_row(
                     "note": str(error),
                 }
             )
+    if row["verdict"] == "PASS":
+        try:
+            validate_produced_read(policy.name, response, fixture)
+        except SweepError as error:
+            row.update(
+                verdict="FAIL",
+                problem_code="tool_sweep.consumer_unverified",
+                note=str(error),
+            )
     return row
+
+
+def validate_produced_read(
+    name: str, response: dict[str, Any], fixture: dict[str, Any]
+) -> None:
+    """Bind previously canned reads to identities minted by real producers."""
+    values = list(_objects(response))
+    if name in FEEDBACK_READ_TOOLS:
+        result_id = fixture.get("feedback_result_id")
+        cycle_id = fixture.get("feedback_cycle_id")
+        if not any(
+            value.get("result_id") == result_id and value.get("cycle_id") == cycle_id
+            for value in values
+        ):
+            raise SweepError(f"{name} did not return the producer's feedback cycle")
+        if name in {
+            "tracedecay_feedback_get",
+            "tracedecay_feedback_expand",
+            "tracedecay_feedback_list",
+        } and not any(
+            value.get("finding_id") == fixture.get("feedback_finding_id")
+            for value in values
+        ):
+            raise SweepError(f"{name} did not return the producer's finding")
+        if name == "tracedecay_feedback_expand" and not any(
+            fixture.get("feedback_anchor_id") in value.get("anchors", [])
+            for value in values
+            if isinstance(value.get("anchors"), list)
+        ):
+            raise SweepError("feedback expand did not return the producer's retrieval anchor")
+    elif name == "tracedecay_automation_run_artifact_view":
+        if not any(
+            value.get("run_id") == fixture.get("automation_run_id")
+            and isinstance(value.get("artifact"), dict)
+            and value["artifact"].get("kind") == fixture.get("automation_artifact_kind")
+            and isinstance(value.get("payload"), dict)
+            for value in values
+        ):
+            raise SweepError("automation artifact view did not return its producer's verified payload")
+    elif name == "tracedecay_skill_view":
+        if not any(
+            isinstance(value.get("metadata"), dict)
+            and value["metadata"].get("id") == fixture.get("managed_skill_id")
+            and isinstance(value.get("body_markdown"), str)
+            for value in values
+        ):
+            raise SweepError("skill view did not return the CLI-produced managed skill")
+    elif name == "tracedecay_test_results":
+        expected = set(fixture.get("managed_test_names", []))
+        observed = {
+            value["test"]
+            for value in values
+            if isinstance(value.get("test"), str) and value.get("passed") is True
+        }
+        if not expected or not expected.issubset(observed):
+            raise SweepError(
+                "test results did not return the managed run's passing tests: "
+                f"expected={sorted(expected)!r} observed={sorted(observed)!r}"
+            )
 
 
 def validate_context_scout_read_response(
@@ -2852,6 +3161,7 @@ def run_phase(args: argparse.Namespace) -> int:
         tools = client.list_tools(AUXILIARY_SURFACE_DEADLINE_MS)
         resources = client.list_resources(AUXILIARY_SURFACE_DEADLINE_MS) if "resources" in surfaces else []
         prompts = client.list_prompts(AUXILIARY_SURFACE_DEADLINE_MS) if "prompts" in surfaces else []
+        assert_authoritative_inventory(tools, resources, prompts)
         manifest = canonical_manifest(tools, resources, prompts)
         (args.out / "catalog.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         report["catalog"] = manifest

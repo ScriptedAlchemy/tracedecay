@@ -381,7 +381,7 @@ class ProblemCodeTests(unittest.TestCase):
             ("effect.source-edit.fixture", "sha256:" + "a" * 64, "fixture-key"),
         )
 
-class ExpectedHermeticDenialTests(unittest.TestCase):
+class ProducerBackedIdentityTests(unittest.TestCase):
     @staticmethod
     def policy(runner, name):
         return runner.ToolPolicy(name=name, availability="available", effect="read", deadline_ms=1_000)
@@ -398,54 +398,79 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
     def definition(name):
         return {"name": name, "inputSchema": {"type": "object", "properties": {}, "required": []}}
 
-    def test_exact_expected_denial_is_the_passing_hermetic_verdict(self) -> None:
-        """A declared non-producible surface passes only on its exact typed denial."""
+    def test_previously_canned_reads_require_producer_inputs(self) -> None:
         runner = load_runner()
-        name = "tracedecay_test_results"
-        self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
-        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
+        names = {
+            "tracedecay_affected_tests",
+            "tracedecay_feedback_diagnostics",
+            "tracedecay_feedback_expand",
+            "tracedecay_feedback_get",
+            "tracedecay_feedback_impact",
+            "tracedecay_feedback_list",
+            "tracedecay_automation_run_artifact_view",
+            "tracedecay_skill_view",
+            "tracedecay_test_results",
+        }
+        self.assertEqual(names & runner.FEEDBACK_READ_TOOLS, runner.FEEDBACK_READ_TOOLS)
+        self.assertFalse(hasattr(runner, "EXPECTED_HERMETIC_DENIALS"))
 
-        row = runner._read_tool_row(
-            self.client(f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}'),
-            self.definition(name),
-            self.policy(runner, name),
-            fixture={},
-        )
-
-        self.assertEqual(row["verdict"], "PASS")
-        self.assertTrue(row["expected_denial"])
-        self.assertEqual(row["problem_code"], code)
-
-    def test_a_different_typed_problem_stays_a_failure(self) -> None:
-        """The expected-denial verdict is exact; it is not a blanket allowlist."""
+    def test_producer_backed_read_arguments_and_evidence_are_exact(self) -> None:
         runner = load_runner()
-        name = "tracedecay_test_results"
-
-        row = runner._read_tool_row(
-            self.client('{"problem":{"kind":"unavailable","code":"store.offline"}}'),
-            self.definition(name),
-            self.policy(runner, name),
-            fixture={},
+        fixture = {
+            "feedback_read_arguments": {
+                "tracedecay_feedback_get": {
+                    "request_handle": "rh.get",
+                    "format": "json",
+                }
+            },
+            "feedback_result_id": "result.fixture",
+            "feedback_cycle_id": "cycle.fixture",
+            "feedback_finding_id": "finding.fixture",
+            "feedback_anchor_id": "anchor.fixture",
+            "automation_run_id": "run.fixture",
+            "automation_artifact_kind": "codex_handoff",
+            "managed_skill_id": "skill.fixture",
+            "managed_test_names": ["tests::fixture"],
+        }
+        definition = {
+            "name": "tracedecay_feedback_get",
+            "inputSchema": {"type": "object", "properties": {}, "required": []},
+        }
+        self.assertEqual(
+            runner.materialize_tool_arguments(definition, fixture),
+            {"request_handle": "rh.get", "format": "json"},
         )
-
-        self.assertEqual(row["verdict"], "FAIL")
-        self.assertEqual(row["problem_code"], "store.offline")
-
-    def test_hermetic_success_supersedes_a_stale_denial_entry(self) -> None:
-        """A tool that gains a hermetic success path fails until its entry is removed."""
-        runner = load_runner()
-        name = "tracedecay_test_results"
-
-        class Client:
-            def call_tool(self, _name, _arguments, _deadline_ms):
-                return {"result": {"content": [{"type": "text", "text": '{"results":[]}'}]}}, 3
-
-        row = runner._read_tool_row(
-            Client(), self.definition(name), self.policy(runner, name), fixture={}
+        runner.validate_produced_read(
+            "tracedecay_feedback_get",
+            {"payload": {
+                "result_id": "result.fixture",
+                "cycle_id": "cycle.fixture",
+                "finding_id": "finding.fixture",
+            }},
+            fixture,
         )
-
-        self.assertEqual(row["verdict"], "FAIL")
-        self.assertEqual(row["problem_code"], "tool_sweep.expected_denial_superseded")
+        runner.validate_produced_read(
+            "tracedecay_automation_run_artifact_view",
+            {"payload": {
+                "run_id": "run.fixture",
+                "artifact": {"kind": "codex_handoff"},
+                "payload": {"status": "ready"},
+            }},
+            fixture,
+        )
+        runner.validate_produced_read(
+            "tracedecay_skill_view",
+            {"payload": {
+                "metadata": {"id": "skill.fixture"},
+                "body_markdown": "fixture",
+            }},
+            fixture,
+        )
+        runner.validate_produced_read(
+            "tracedecay_test_results",
+            {"payload": {"results": [{"test": "tests::fixture", "passed": True}]}},
+            fixture,
+        )
 
     def test_mutation_denial_with_a_different_problem_stays_a_failure(self) -> None:
         runner = load_runner()
@@ -754,6 +779,63 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
 
 
 class NegotiatedSurfaceTests(unittest.TestCase):
+    def test_authoritative_inventory_requires_239_tools_and_five_resources(self) -> None:
+        runner = load_runner()
+        tools = [{"name": f"tracedecay_fixture_{index}"} for index in range(239)]
+        resources = [
+            {"uri": uri, "mimeType": mime}
+            for uri, mime in runner.AUTHORITATIVE_RESOURCES.items()
+        ]
+
+        runner.assert_authoritative_inventory(tools, resources, [])
+        with self.assertRaises(runner.SweepError):
+            runner.assert_authoritative_inventory(tools[:-1], resources, [])
+        with self.assertRaises(runner.SweepError):
+            runner.assert_authoritative_inventory(tools, resources[:-1], [])
+        with self.assertRaises(runner.SweepError):
+            runner.assert_authoritative_inventory(
+                tools[:-1] + [{"name": None}], resources, []
+            )
+        with self.assertRaises(runner.SweepError):
+            runner.assert_authoritative_inventory(
+                tools, resources + [resources[0]], []
+            )
+
+    def test_all_resource_bodies_preserve_typed_identity(self) -> None:
+        runner = load_runner()
+        root = "/fixture"
+        bodies = {
+            "tracedecay://status": json.dumps({
+                "project_root": root,
+                "branch_diagnostics": {},
+                "graph_statistics": {},
+            }),
+            "tracedecay://files": (
+                "status: unavailable\n"
+                "reason: verified_generation_file_inventory_not_admitted"
+            ),
+            "tracedecay://overview": f"Project: {root}\nGraph statistics: unavailable",
+            "tracedecay://branches": json.dumps({"branch_count": 0, "branches": []}),
+            "tracedecay://schema": "# tracedecay SQLite schema\n\n## Tables\n\n## Recipes\n",
+        }
+        for uri, mime in runner.AUTHORITATIVE_RESOURCES.items():
+            response = {"result": {"contents": [{
+                "uri": uri,
+                "mimeType": mime,
+                "text": bodies[uri],
+            }]}}
+            runner.validate_resource_response(uri, response, {"root": root})
+
+        wrong_mime = {"result": {"contents": [{
+            "uri": "tracedecay://status",
+            "mimeType": "text/plain",
+            "text": bodies["tracedecay://status"],
+        }]}}
+        with self.assertRaises(runner.SweepError):
+            runner.validate_resource_response(
+                "tracedecay://status", wrong_mime, {"root": root}
+            )
+
     def test_resources_and_prompts_are_exercised_from_live_discovery(self) -> None:
         """A resource/prompt added to negotiation cannot be silently tool-only coverage."""
         runner = load_runner()
@@ -764,7 +846,15 @@ class NegotiatedSurfaceTests(unittest.TestCase):
 
             def read_resource(self, uri: str, deadline_ms: int):
                 self.calls.append(("resource", (uri, deadline_ms)))
-                return {"result": {"contents": [{"uri": uri, "text": "ready"}]}}, 9
+                return {"result": {"contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": json.dumps({
+                        "project_root": "/fixture",
+                        "branch_diagnostics": {},
+                        "graph_statistics": {},
+                    }),
+                }]}}, 9
 
             def get_prompt(self, name: str, arguments: dict[str, str], deadline_ms: int):
                 self.calls.append(("prompt", (name, arguments, deadline_ms)))
@@ -773,9 +863,9 @@ class NegotiatedSurfaceTests(unittest.TestCase):
         client = Client()
         rows = runner.exercise_discovered_surfaces(
             client,
-            resources=[{"uri": "tracedecay://health"}],
+            resources=[{"uri": "tracedecay://status"}],
             prompts=[{"name": "triage", "arguments": [{"name": "question", "required": True}]}],
-            fixture={"question": "inspect sweep anchor"},
+            fixture={"root": "/fixture", "question": "inspect sweep anchor"},
             deadline_ms=30_000,
         )
 
@@ -784,7 +874,7 @@ class NegotiatedSurfaceTests(unittest.TestCase):
         self.assertEqual(
             client.calls,
             [
-                ("resource", ("tracedecay://health", 30_000)),
+                ("resource", ("tracedecay://status", 30_000)),
                 ("prompt", ("triage", {"question": "inspect sweep anchor"}, 30_000)),
             ],
         )
@@ -1877,18 +1967,12 @@ class MutationJourneyTests(unittest.TestCase):
         note = prepared.cleanup(self.response('{"status":"ok","memory":{"fact_count":1}}'))
         self.assertIn("counted", note)
 
-    def test_run_affected_tests_journey_proves_zero_coverage_retains_nothing(self) -> None:
-        """A truthful zero-coverage run passes only while test_results stays unavailable."""
+    def test_run_affected_tests_journey_proves_retained_results(self) -> None:
         runner = load_runner()
-        retained = {"unavailable": True}
 
         def call(tool, _arguments, _deadline_ms):
             self.assertEqual(tool, "tracedecay_test_results")
-            if retained["unavailable"]:
-                raise RuntimeError(
-                    "tracedecay_test_results journey call failed: application.retrieval.unavailable"
-                )
-            return self.response('{"results":[{"test":"phantom","passed":true}]}')
+            return self.response('{"results":[{"test":"tests::sweep_anchor_is_covered","passed":true}]}')
 
         prepared = runner.prepare_journey(
             "tracedecay_run_affected_tests",
@@ -1899,13 +1983,12 @@ class MutationJourneyTests(unittest.TestCase):
         )
         self.assertEqual(prepared.arguments["changed_paths"], ["src/lib.rs"])
 
-        zero = '{"passed":0,"failed":0,"results":[],"note":"no tests cover the changed paths (1 file(s))"}'
-        note = prepared.cleanup(self.response(zero))
-        self.assertIn("no managed result retained", note)
-
-        retained["unavailable"] = False
+        produced = self.response(
+            '{"passed":1,"failed":0,"results":[{"test":"tests::sweep_anchor_is_covered","passed":true}]}'
+        )
+        self.assertIn("retained result consumed", prepared.cleanup(produced))
         with self.assertRaises(Exception):
-            prepared.cleanup(self.response(zero))
+            prepared.cleanup(self.response('{"passed":0,"failed":0,"results":[]}'))
 
     def test_session_refresh_journey_requires_a_durable_terminal_receipt(self) -> None:
         """The refresh rollback is a receipt-backed durable cancel, verified terminal,
@@ -2290,7 +2373,15 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 '["no_review","independent_review","standard_pull_requests"]}}}}}'
             ),
             "tracedecay_automation_run_list": cls.response(
-                '{"runs":[{"run_id":"automation.run.fixture"}]}'
+                '{"runs":[{"run_id":"automation.run.fixture",'
+                '"artifact_kinds":["feedback"]}]}'
+            ),
+            "tracedecay_fact_store_curate": cls.response(
+                '{"run_id":"automation.generated.fixture"}'
+            ),
+            "tracedecay_automation_run_view": cls.response(
+                '{"run":{"run_id":"automation.generated.fixture",'
+                '"artifacts":[{"kind":"feedback"}]}}'
             ),
             "tracedecay_lcm_load_session": cls.response(
                 '{"messages":[{"message_id":"message.fixture",'
@@ -2420,6 +2511,8 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_code_symbol_search",
             "tracedecay_git_hunks",
             "tracedecay_automation_run_list",
+            "tracedecay_fact_store_curate",
+            "tracedecay_automation_run_view",
             "tracedecay_lcm_load_session",
             "tracedecay_lcm_expand",
             "tracedecay_session_refresh_begin",
@@ -2493,6 +2586,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertNotIn("preview_input_id", fixture)
         self.assertNotIn("tracedecay_git_hunks", [name for name, _ in client.calls])
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
+        self.assertEqual(fixture["automation_artifact_kind"], "feedback")
         self.assertEqual(fixture["lcm_message_id"], "message.fixture")
         self.assertEqual(fixture["session_refresh_handle"], "srh_fixture")
         self.assertEqual(
@@ -2523,7 +2617,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             ),
         )
 
-    def test_delayed_automation_and_lcm_producers_are_consumed(self) -> None:
+    def test_missing_automation_artifact_is_produced_and_lcm_mount_retries(self) -> None:
         runner = load_runner()
         client = self.client([self.response('{"node_id":"function:fixture"}')])
         original = client.call_tool
@@ -2556,10 +2650,18 @@ class FixturePrimingRetryTests(unittest.TestCase):
         runner.prime_fixture_values(client, fixture, self.policies(runner))
 
         self.assertEqual(attempts, {
-            "tracedecay_automation_run_list": 2,
+            "tracedecay_automation_run_list": 1,
             "tracedecay_lcm_load_session": 2,
         })
-        self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
+        self.assertEqual(fixture["automation_run_id"], "automation.generated.fixture")
+        self.assertEqual(fixture["automation_artifact_kind"], "feedback")
+        self.assertIn(
+            (
+                "tracedecay_automation_run_view",
+                {"run_id": "automation.generated.fixture", "format": "json"},
+            ),
+            client.calls,
+        )
         self.assertEqual(fixture["lcm_message_id"], "message.fixture")
 
     def test_work_proposal_observes_the_committed_create(self) -> None:
@@ -3148,7 +3250,6 @@ class MountRetryTests(unittest.TestCase):
         runner = load_runner()
         runner.MOUNT_RETRY_DELAY_S = 0.001
         name = "tracedecay_feedback_advisory_cycle"
-        self.assertNotIn(name, runner.EXPECTED_HERMETIC_DENIALS)
         unavailable = self.text_response(
             '{"problem":{"kind":"unavailable","code":"feedback.advisory-cycle.unavailable"}}',
             is_error=True,
@@ -3267,23 +3368,9 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(row["problem_code"], "feedback.advisory-cycle.unavailable")
         self.assertGreater(len(client.calls), 1)
 
-    def test_expected_denials_are_terminal_and_never_retried(self) -> None:
-        """An expected hermetic denial is the terminal contract; no retry burns time on it."""
-        runner = load_runner()
-        name = "tracedecay_test_results"
-        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
-        denial = self.text_response(f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}', is_error=True)
-        client = self.scripted_client({name: [denial]})
-
-        row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
-
-        self.assertEqual(row["verdict"], "PASS")
-        self.assertTrue(row["expected_denial"])
-        self.assertEqual(len(client.calls), 1)
-
     def test_branch_search_no_longer_claims_the_superseded_denial(self) -> None:
         runner = load_runner()
-        self.assertNotIn("tracedecay_branch_search", runner.EXPECTED_HERMETIC_DENIALS)
+        self.assertFalse(hasattr(runner, "EXPECTED_HERMETIC_DENIALS"))
 
     def test_multi_root_tools_use_producer_minted_arguments(self) -> None:
         runner = load_runner()
@@ -3292,7 +3379,6 @@ class MountRetryTests(unittest.TestCase):
             "tracedecay_multi_root_execute",
             "tracedecay_multi_root_scope_set_read",
         ):
-            self.assertNotIn(name, runner.EXPECTED_HERMETIC_DENIALS)
             expected = {"scope_set_id": "scope.fixture", "format": "json"}
             arguments = runner.materialize_tool_arguments(
                 self.definition(name), {"native_read_arguments": {name: expected}}

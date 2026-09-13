@@ -4110,27 +4110,26 @@ def prepare(
             raise JourneyError("fixture did not record its seeded source file")
 
         def cleanup(response: dict[str, Any]) -> str:
-            note = first_value(response, {"note"})
-            if not isinstance(note, str) or "no tests cover" not in note:
-                raise JourneyError(
-                    "affected-test run did not report its truthful zero-coverage outcome"
-                )
-            # The journey call helper raises on any typed problem, so the
-            # exact retained-result unavailability arrives as that raise.
-            try:
-                call(
-                    "tracedecay_test_results",
-                    {"format": "json"},
-                    deadline("tracedecay_test_results"),
-                )
-            except Exception as error:
-                if "application.retrieval.unavailable" not in str(error):
-                    raise JourneyError(
-                        f"zero-coverage retention check failed atypically: {error}"
-                    ) from error
-            else:
-                raise JourneyError("zero-coverage run must retain no managed test result")
-            return "zero-coverage run completed truthfully; no managed result retained"
+            produced = {
+                value["test"]
+                for value in objects(response)
+                if isinstance(value.get("test"), str) and value.get("passed") is True
+            }
+            if not produced:
+                raise JourneyError("affected-test run produced no passing covered test")
+            retained = call(
+                "tracedecay_test_results",
+                {"format": "json"},
+                deadline("tracedecay_test_results"),
+            )
+            consumed = {
+                value["test"]
+                for value in objects(retained)
+                if isinstance(value.get("test"), str) and value.get("passed") is True
+            }
+            if not produced.issubset(consumed):
+                raise JourneyError("test_results omitted the exact managed run result")
+            return "covered test executed and retained result consumed"
 
         return PreparedJourney(
             {"changed_paths": [changed], "timeout_secs": 60, "max_tests": 5, "format": "json"},
