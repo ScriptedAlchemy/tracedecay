@@ -67,3 +67,33 @@ pub(super) fn workflow_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
 fn invalid_workflow_discovery(field: &'static str, reason: &'static str) -> crate::McpCatalogError {
     CatalogValidationError::InvalidValue { field, reason }.into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::workflow_definitions;
+
+    #[test]
+    fn activation_help_names_catalog_and_revision_preconditions() {
+        let definitions = workflow_definitions().expect("workflow definitions");
+        let activate = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_workflow_activate_definition")
+            .expect("workflow activation definition");
+        let revision_help = activate.input_schema["properties"]["expected_revision"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(revision_help.contains("candidate disposition revision"));
+        assert!(revision_help.contains('1'));
+
+        let register = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_workflow_register_definition")
+            .expect("workflow registration definition");
+        let catalog_help = register.input_schema["$defs"]["WorkflowDefinition"]["properties"]
+            ["pinned_catalog_digest"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(catalog_help.contains("live Work executable catalog digest"));
+        assert!(catalog_help.to_ascii_lowercase().contains("validation"));
+    }
+}
