@@ -5,9 +5,10 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
-    Column, INDEX_DESCENDING_COLUMNS, INDEXES, Index, REGISTRY_TABLE_NAMES,
-    SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX, SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY,
-    SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3, TABLES, Table,
+    Column, INDEX_DESCENDING_COLUMNS, INDEX_EXPRESSION_COLUMN, INDEXES, Index,
+    REGISTRY_TABLE_NAMES, SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX,
+    SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY, SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3, TABLES,
+    Table,
 };
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
@@ -225,23 +226,30 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
             .iter()
             .zip(expected.columns)
             .all(|(actual, expected_column)| {
-                actual.cid >= 0
-                    && actual.descending
-                        == expected
+                if expected_column.eq_ignore_ascii_case(INDEX_EXPRESSION_COLUMN) {
+                    actual.cid == -2 && actual.name.is_none()
+                } else {
+                    actual.cid >= 0
+                        && actual.descending
+                            == expected
+                                .name
+                                .and_then(|name| {
+                                    INDEX_DESCENDING_COLUMNS
+                                        .iter()
+                                        .find(|(index, _)| index.eq_ignore_ascii_case(name))
+                                        .map(|(_, columns)| *columns)
+                                })
+                                .is_some_and(|columns| {
+                                    columns
+                                        .iter()
+                                        .any(|column| column.eq_ignore_ascii_case(expected_column))
+                                })
+                        && actual.collation.eq_ignore_ascii_case("BINARY")
+                        && actual
                             .name
-                            .and_then(|name| {
-                                INDEX_DESCENDING_COLUMNS
-                                    .iter()
-                                    .find(|(index, _)| index.eq_ignore_ascii_case(name))
-                                    .map(|(_, columns)| *columns)
-                            })
-                            .is_some_and(|columns| {
-                                columns
-                                    .iter()
-                                    .any(|column| column.eq_ignore_ascii_case(expected_column))
-                            })
-                    && actual.collation.eq_ignore_ascii_case("BINARY")
-                    && actual.name.eq_ignore_ascii_case(expected_column)
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(expected_column))
+                }
             })
 }
 
@@ -273,7 +281,10 @@ fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) ->
                 actual.cid >= 0
                     && !actual.descending
                     && actual.collation.eq_ignore_ascii_case("BINARY")
-                    && actual.name.eq_ignore_ascii_case(expected)
+                    && actual
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
             })
 }
 
