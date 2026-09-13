@@ -1,6 +1,6 @@
 ---
 name: managing-session-context
-description: 'Recover raw prior-session messages, temporal or Git-scoped history, summary sources, or post-compaction context; inspect read-only LCM health.'
+description: Recover prior-session messages or summaries, including Git- or time-scoped history, and inspect LCM state.
 ---
 
 # Managing session context
@@ -26,21 +26,6 @@ session relations (`tracedecay_sessions_for`) distinguish produced from observed
 commits; workflow recovery reads `wf_*` session runs through
 `tracedecay_workflows`, not the Workflow definition/run mutation surface.
 
-Recall does not ingest or refresh. A `refresh_required` result needs authorized
-lifecycle intent before `tracedecay_session_refresh_begin`. Preserve returned
-project/profile scope in the request's `scope` selector (`scope.kind=project`
-with the registered project route, or `scope.kind=profile` with its
-`profile_id`) and opaque handles through `tracedecay_session_refresh_status` or
-`tracedecay_session_refresh_cancel`; only receipt-backed success proves durable
-cancellation. Never route a profile refresh through an arbitrary active project
-or reconstruct its authority from chat text.
-
-Compression admission and session boundaries are authenticated daemon-owned
-host operations, not agent-generated summaries or callable recall operations.
-`tracedecay_lcm_status` and `tracedecay_lcm_doctor` are bounded read-only
-diagnosis, with no repair or cleanup controls.
-
-Hermes native LCM aliases (`lcm_grep`, `lcm_load_session`, `lcm_describe`,
-`lcm_expand`, `lcm_expand_query`) have their own schemas (for example
-session_scope and max_content_chars); do not mix alias fields with canonical
-command fields or assume those aliases exist on another host.
+For refresh lifecycle and read-only LCM health, see
+[refresh and health](references/refresh-and-health.md). For Hermes native alias
+schemas, see [Hermes aliases](references/hermes-aliases.md).

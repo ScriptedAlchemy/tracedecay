@@ -664,7 +664,7 @@ impl TemporalExecutionSnapshot {
         let limits = self.request.limits();
         if cohort.candidates().len() > limits.candidate_limit {
             return Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item count",
+                resource: "candidate item count", accounting: None,
             });
         }
         let mut cohort_bytes = 0usize;
@@ -672,17 +672,17 @@ impl TemporalExecutionSnapshot {
             let candidate_bytes = candidate.measured_encoded_bytes()?;
             if candidate_bytes > limits.candidate_item_bytes {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "candidate item bytes",
+                    resource: "candidate item bytes", accounting: None,
                 });
             }
             cohort_bytes = cohort_bytes.checked_add(candidate_bytes).ok_or(
                 TemporalPortError::BudgetExceeded {
-                    resource: "candidate total bytes",
+                    resource: "candidate total bytes", accounting: None,
                 },
             )?;
             if cohort_bytes > limits.candidate_total_bytes {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "candidate total bytes",
+                    resource: "candidate total bytes", accounting: None,
                 });
             }
             let Some(session_id) = candidate.session.as_deref() else {

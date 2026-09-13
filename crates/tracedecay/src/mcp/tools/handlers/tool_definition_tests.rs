@@ -76,6 +76,37 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
 }
 
 #[test]
+fn work_proposal_tools_expose_only_the_dispositions_their_routes_accept() {
+    let tools = get_tool_definitions().expect("tool definitions");
+    for (tool_name, disposition_schema, expected) in [
+        (
+            "tracedecay_work_review_proposal",
+            "ReviewWorkProposalDispositionV1",
+            json!(["rejected", "superseded"]),
+        ),
+        (
+            "tracedecay_work_accept_proposal",
+            "AcceptWorkProposalDispositionV1",
+            json!(["accepted"]),
+        ),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} must be advertised"));
+        assert_eq!(
+            tool.input_schema["properties"]["disposition"]["$ref"],
+            format!("#/$defs/{disposition_schema}"),
+            "{tool_name} must expose its route-specific disposition schema"
+        );
+        assert_eq!(
+            tool.input_schema["$defs"][disposition_schema]["enum"], expected,
+            "{tool_name} must not advertise a disposition its handler refuses"
+        );
+    }
+}
+
+#[test]
 fn diagnostics_public_name_preserves_one_shipped_flat_request_schema() {
     let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");

@@ -603,7 +603,8 @@ fn prepared_cohort_preserves_typed_candidate_byte_budget_failure() {
         assert_eq!(
             prepare_temporal_candidate_cohort(&request, &port).await,
             Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item bytes"
+                resource: "candidate item bytes",
+                accounting: Some(ReadBudgetAccounting::requested(128, 1_313)),
             })
         );
     });
@@ -653,7 +654,8 @@ fn sink_rejects_producer_that_ignores_item_and_page_limits() {
             )
             .await,
             Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item count"
+                resource: "candidate item count",
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(1, 1)),
             })
         );
     });
@@ -1005,7 +1007,8 @@ fn record_total_bytes_cap_with_producer_more_is_incomplete_coverage() {
             Err(error) => assert_eq!(
                 error,
                 TemporalPortError::BudgetExceeded {
-                    resource: "record total bytes"
+                    resource: "record total bytes",
+                    accounting: Some(ReadBudgetAccounting::consumed_with_more(33, 33)),
                 }
             ),
             Ok(_) => panic!("More + record total-byte cap must be incomplete coverage"),
@@ -1026,7 +1029,8 @@ fn record_item_bytes_cap_fails_closed_without_complete() {
             Err(error) => assert_eq!(
                 error,
                 TemporalPortError::BudgetExceeded {
-                    resource: "record item bytes"
+                    resource: "record item bytes",
+                    accounting: Some(ReadBudgetAccounting::requested(64, 543)),
                 }
             ),
             Ok(_) => panic!("oversized record must fail closed"),
@@ -1171,7 +1175,8 @@ fn exhausted_caps_never_synthesize_complete_or_silently_drop_unread_work() {
         assert_eq!(
             candidate_follow_up,
             TemporalPortError::BudgetExceeded {
-                resource: "candidate item count"
+                resource: "candidate item count",
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(1, 1)),
             }
         );
         assert_ne!(
@@ -1190,7 +1195,8 @@ fn exhausted_caps_never_synthesize_complete_or_silently_drop_unread_work() {
         assert_eq!(
             record_err,
             TemporalPortError::BudgetExceeded {
-                resource: "record item count"
+                resource: "record item count",
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(1, 1)),
             }
         );
         let Err(record_follow_up) =
@@ -1201,7 +1207,8 @@ fn exhausted_caps_never_synthesize_complete_or_silently_drop_unread_work() {
         assert_eq!(
             record_follow_up,
             TemporalPortError::BudgetExceeded {
-                resource: "record item count"
+                resource: "record item count",
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(1, 1)),
             }
         );
     });
@@ -1212,37 +1219,43 @@ fn page_limits_reject_zero_inverted_and_absolute_ceilings() {
     assert_eq!(
         PageLimits::new(0, 1024, 1024, 1),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "item count"
+            resource: "item count", accounting: None
         })
     );
     assert_eq!(
         PageLimits::new(1, 0, 1024, 1),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "total bytes"
+            resource: "total bytes", accounting: None
         })
     );
     assert_eq!(
         PageLimits::new(1, 1024, 0, 1),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "item bytes"
+            resource: "item bytes", accounting: None
         })
     );
     assert_eq!(
         PageLimits::new(1, 1024, 1024, 2),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "page item count"
+            resource: "page item count",
+            accounting: Some(ReadBudgetAccounting::requested(1, 2)),
         })
     );
     assert_eq!(
         PageLimits::new(usize::MAX, 1024, 1024, 1),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "item count"
+            resource: "item count",
+            accounting: Some(ReadBudgetAccounting::requested(MAX_READ_ITEMS as u64, usize::MAX as u64)),
         })
     );
     assert_eq!(
         PageLimits::new(MAX_READ_ITEMS, MAX_READ_TOTAL_BYTES + 1, 1024, 1),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "total bytes"
+            resource: "total bytes",
+            accounting: Some(ReadBudgetAccounting::requested(
+                MAX_READ_TOTAL_BYTES as u64,
+                MAX_READ_TOTAL_BYTES as u64 + 1,
+            )),
         })
     );
     assert!(
@@ -1260,7 +1273,11 @@ fn execution_limits_reject_zero_and_absolute_ceilings() {
     assert_eq!(
         oversize.validate(),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "candidate item count"
+            resource: "candidate item count",
+            accounting: Some(ReadBudgetAccounting::requested(
+                MAX_READ_ITEMS as u64,
+                MAX_READ_ITEMS as u64 + 1,
+            )),
         })
     );
     let zero = ExecutionLimits {
@@ -1270,7 +1287,7 @@ fn execution_limits_reject_zero_and_absolute_ceilings() {
     assert_eq!(
         zero.validate(),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "record item bytes"
+            resource: "record item bytes", accounting: None
         })
     );
     assert!(ExecutionLimits::default().validate().is_ok());
@@ -1312,7 +1329,11 @@ fn execution_snapshot_rejects_oversize_execution_limits() {
             ValidatedAuthorization::Authorized,
         ),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "candidate item count"
+            resource: "candidate item count",
+            accounting: Some(ReadBudgetAccounting::requested(
+                MAX_READ_ITEMS as u64,
+                MAX_READ_ITEMS as u64 + 1,
+            )),
         })
     );
 }
@@ -1531,7 +1552,7 @@ fn candidate_pull_observes_post_authorization_tightening() {
             )
             .await,
             Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate stable id bytes"
+                resource: "candidate stable id bytes", accounting: None
             })
         );
     });
@@ -1564,32 +1585,32 @@ impl TemporalReadPort for UnreachableReadPort {
 #[test]
 fn pull_rejects_read_state_looser_than_tightened_snapshot() {
     block_on(async {
+        // The admitted snapshot each looser read state is measured against; the
+        // refusal must name these ceilings, not the read state's own.
+        const ADMITTED_ITEMS: u64 = 1;
+        const ADMITTED_BYTES: u64 = 128;
+        const ADMITTED_ITEM_BYTES: u64 = 64;
         let authorized = ExecutionLimits::default();
         let mut tighter = authorized;
-        tighter.candidate_limit = 1;
-        tighter.candidate_total_bytes = 128;
-        tighter.candidate_item_bytes = 64;
-        tighter.record_limit = 1;
-        tighter.record_total_bytes = 128;
-        tighter.record_item_bytes = 64;
+        tighter.candidate_limit = ADMITTED_ITEMS as usize;
+        tighter.candidate_total_bytes = ADMITTED_BYTES as usize;
+        tighter.candidate_item_bytes = ADMITTED_ITEM_BYTES as usize;
+        tighter.record_limit = ADMITTED_ITEMS as usize;
+        tighter.record_total_bytes = ADMITTED_BYTES as usize;
+        tighter.record_item_bytes = ADMITTED_ITEM_BYTES as usize;
         let snapshot = snapshot_with_limits(authorized)
             .with_limits(tighter)
             .expect("valid tightening");
 
-        for (limits, resource) in [
-            (
-                PageLimits::new(2, 128, 64, 1).expect("candidate count"),
-                "candidate item count",
-            ),
-            (
-                PageLimits::new(1, 129, 64, 1).expect("candidate total bytes"),
-                "candidate total bytes",
-            ),
-            (
-                PageLimits::new(1, 128, 65, 1).expect("candidate item bytes"),
-                "candidate item bytes",
-            ),
-        ] {
+        // The refusal names the admitted ceiling and what the state asked for,
+        // so a caller can correct the request instead of guessing at a name.
+        let candidate_cases = [
+            ("candidate item count", PageLimits::new(2, 128, 64, 1), ADMITTED_ITEMS, 2),
+            ("candidate total bytes", PageLimits::new(1, 129, 64, 1), ADMITTED_BYTES, 129),
+            ("candidate item bytes", PageLimits::new(1, 128, 65, 1), ADMITTED_ITEM_BYTES, 65),
+        ];
+        for (resource, limits, admitted, asked) in candidate_cases {
+            let limits = limits.expect("looser page limits");
             let mut state = CandidateReadState::new(limits);
             assert_eq!(
                 pull_candidate_page(
@@ -1599,31 +1620,33 @@ fn pull_rejects_read_state_looser_than_tightened_snapshot() {
                     &mut state,
                 )
                 .await,
-                Err(TemporalPortError::BudgetExceeded { resource })
+                Err(TemporalPortError::BudgetExceeded {
+                    resource,
+                    accounting: Some(ReadBudgetAccounting::requested(admitted, asked)),
+                })
             );
         }
 
-        for (limits, resource) in [
-            (
-                PageLimits::new(2, 128, 64, 1).expect("record count"),
-                "record item count",
-            ),
-            (
-                PageLimits::new(1, 129, 64, 1).expect("record total bytes"),
-                "record total bytes",
-            ),
-            (
-                PageLimits::new(1, 128, 65, 1).expect("record item bytes"),
-                "record item bytes",
-            ),
-        ] {
+        let record_cases = [
+            ("record item count", PageLimits::new(2, 128, 64, 1), ADMITTED_ITEMS, 2),
+            ("record total bytes", PageLimits::new(1, 129, 64, 1), ADMITTED_BYTES, 129),
+            ("record item bytes", PageLimits::new(1, 128, 65, 1), ADMITTED_ITEM_BYTES, 65),
+        ];
+        for (resource, limits, admitted, asked) in record_cases {
+            let limits = limits.expect("looser page limits");
             let mut state = TemporalRecordReadState::new(limits);
             let Err(error) =
                 pull_temporal_record_page(&UnreachableReadPort, &snapshot, &[], &mut state).await
             else {
                 panic!("looser record state must fail before producer entry");
             };
-            assert_eq!(error, TemporalPortError::BudgetExceeded { resource });
+            assert_eq!(
+                error,
+                TemporalPortError::BudgetExceeded {
+                    resource,
+                    accounting: Some(ReadBudgetAccounting::requested(admitted, asked)),
+                }
+            );
         }
     });
 }
@@ -1692,7 +1715,8 @@ fn continuation_key_enforces_exact_byte_cap() {
             )
             .await,
             Err(TemporalPortError::BudgetExceeded {
-                resource: "continuation key bytes"
+                resource: "continuation key bytes",
+                accounting: Some(ReadBudgetAccounting::requested(256, 257)),
             })
         );
     });

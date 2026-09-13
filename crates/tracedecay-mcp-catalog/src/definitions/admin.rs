@@ -27,7 +27,7 @@ pub(super) fn def_active_project() -> ToolDefinition {
     def_always_load(
         "tracedecay_active_project",
         "Active Project",
-        "Return the resolved active project context for this MCP session, including project root, scope prefix, branch identity, and the active project store paths. Use this instead of guessing from repo-local marker files or hardcoded DB paths.",
+        "Return the resolved active project context for this MCP session, including project ID, project root, scope prefix, branch identity, and the active project store paths. Use this instead of guessing from repo-local marker files or hardcoded DB paths.",
         json!({
             "type": "object",
             "properties": {}

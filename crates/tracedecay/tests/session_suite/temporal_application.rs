@@ -23,7 +23,8 @@ use tracedecay_session_memory::context::{
 use tracedecay_session_memory::session::{
     AuthorizationGrantId, AuthorizedTemporalExecutionRequest, SessionAccess,
     SessionAuthorizationError, SessionAuthorizationGrant, SessionDataFreshness,
-    SessionRequestBinding, SessionRetrievalBudgetStageV1, SessionRetrievalConfiguration,
+    SessionRequestBinding, SessionRetrievalBudgetAccountingV1,
+    SessionRetrievalBudgetObservationV1, SessionRetrievalBudgetStageV1, SessionRetrievalConfiguration,
     SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, SessionTemporalQuery,
@@ -305,7 +306,15 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
             "execution-deleted" => Some(SessionTemporalExecutionError::Deleted),
             "execution-denied" => Some(SessionTemporalExecutionError::Denied),
             "execution-unavailable" => Some(SessionTemporalExecutionError::Unavailable),
-            "execution-budget" => Some(SessionTemporalExecutionError::BudgetExhausted),
+            "execution-budget" => Some(SessionTemporalExecutionError::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::RecordReadExhausted,
+                accounting: Some(SessionRetrievalBudgetAccountingV1 {
+                    limit: 1_024,
+                    observed: SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                        units: 1_024,
+                    },
+                }),
+            }),
             "execution-cancelled" => Some(SessionTemporalExecutionError::Cancelled),
             _ => None,
         };
@@ -1630,6 +1639,7 @@ async fn request_budget_preflight_rejects_before_execution() {
         retrieve(&service, &constrained, query("alpha")).await,
         SessionRetrievalOutcome::BudgetExhausted {
             stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
+            accounting: None,
         }
     ));
     assert_eq!(port.calls.load(Ordering::SeqCst), 0);
@@ -1827,12 +1837,14 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
         retrieve(&service, &context("root.one"), query("budget-bytes")).await,
         SessionRetrievalOutcome::BudgetExhausted {
             stage: SessionRetrievalBudgetStageV1::ContextBytes,
+            accounting: None,
         }
     ));
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("kernel-budget")).await,
         SessionRetrievalOutcome::BudgetExhausted {
             stage: SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            accounting: None,
         }
     ));
     assert!(matches!(
@@ -1865,8 +1877,17 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
     ));
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("execution-budget")).await,
+        // The store names the boundary it refused at and the numbers that
+        // boundary counted; the service forwards both instead of re-labelling
+        // every refusal as work-unit exhaustion with no accounting.
         SessionRetrievalOutcome::BudgetExhausted {
-            stage: SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            stage: SessionRetrievalBudgetStageV1::RecordReadExhausted,
+            accounting: Some(SessionRetrievalBudgetAccountingV1 {
+                limit: 1_024,
+                observed: SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                    units: 1_024,
+                },
+            }),
         }
     ));
     assert!(matches!(

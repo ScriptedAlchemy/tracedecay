@@ -62,7 +62,8 @@ pub use evidence_assembly::EvidenceAssemblyExecutor;
 #[doc(hidden)]
 pub use evidence_assembly::tests::write_fixture_for_project;
 pub use external_source::{
-    EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor, RETIRED_MUTATION_COPY_TABLES,
+    EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor, RETIRED_MUTATION_COPY_CHUNK_ROWS,
+    RETIRED_MUTATION_COPY_TABLES,
 };
 pub use fact::FactExecutor;
 pub use graph_publication::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};

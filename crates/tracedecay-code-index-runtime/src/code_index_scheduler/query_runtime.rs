@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
+use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, ConfigurationRevisionId,
@@ -520,6 +521,20 @@ pub enum QuerySearchExecutionErrorV1 {
     Authority(#[from] QueryAuthorityErrorV1),
 }
 
+struct HistoricalTextRequestControlV1<'a> {
+    request: &'a dyn RetrievalExecutionControl,
+}
+
+impl CodeIndexExecutionControlV1 for HistoricalTextRequestControlV1<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.request.is_cancelled()
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
 impl CodeIndexSchedulerRegistryV1 {
     /// Execute exact, lexical, and graph independently against the newest
     /// complete generation for one exact scope, then pass their typed outcomes
@@ -712,6 +727,13 @@ impl CodeIndexSchedulerRegistryV1 {
         // [`super::registry::latest_matches_scope_identity`]).
         if !super::registry::latest_matches_scope_identity(&latest, scope) {
             return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
+        }
+        let text = latest.text_generation_handle();
+        let request_control = HistoricalTextRequestControlV1 {
+            request: graph_control.as_ref(),
+        };
+        if !text.finish_text_serving_for_request(&request_control)? {
+            return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
         }
         execute_query_search_on_latest(self, scope, input, latest, false, graph_control).await
     }

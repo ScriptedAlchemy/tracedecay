@@ -730,31 +730,23 @@ This project has a TraceDecay code graph exposed as `tracedecay_*` MCP tools. Us
 when the task is about code structure, callers, impact, or where something lives; use \
 Kiro's native file reads and edits for known files, ordinary local edits, and \
 non-indexed material.\n\n\
-Routing:\n\
-- Literal or regex text in code: `tracedecay_grep`.\n\
-- A symbol by name: `tracedecay_search`; a concept or \"how does X work\": `tracedecay_context`.\n\
-- A source file you have not seen: `tracedecay_outline`, then `tracedecay_body` / \
-`tracedecay_read` slices.\n\
-- Callers, callees, call chains: `tracedecay_callers` / `tracedecay_callees`.\n\
-- What a change breaks: `tracedecay_impact`, `tracedecay_diff_context`, `tracedecay_affected`.\n\
-- Project or storage identity: `tracedecay_active_project` / `tracedecay_storage_status`, \
-not repo-local marker files or database paths.\n\
-- Prior decisions or conversations: `tracedecay_message_search` / `tracedecay_lcm_expand_query`.\n\n\
+Use `tracedecay_context` for concepts, `tracedecay_search` for symbols, `tracedecay_grep` \
+for literal or regex text, and `tracedecay_callers`, `tracedecay_callees`, or \
+`tracedecay_impact` for relationships. Use `tracedecay_active_project` or \
+`tracedecay_storage_status` for identity and `tracedecay_message_search` when prior \
+conversation context matters.\n\n\
 Read the freshness and coverage line that opens each result; an empty result does not \
-prove absence. When you were handed the exact files, symbols, or excerpts to act on, act \
-on them instead of re-running discovery. Explicit user instructions and project rules win \
-over this guidance.\n\n\
-Kiro's `delegate` fits long-running execution such as builds, tests, generated reports, \
-and independent implementation; code research is usually answered faster by the graph.\n\n\
+prove absence. Preserve exact project/worktree selectors and opaque continuation or \
+mutation identities. Explicit user instructions and project rules win over this guidance.\n\n\
 For durable project/user facts, `tracedecay_fact_store_add` persists and \
 `tracedecay_fact_store_search` recalls or deduplicates them; prefer `tracedecay_fact_feedback` \
 and read-only `tracedecay_memory_status` over ad-hoc notes. Use `memory_scope=user` for \
 durable preferences or projectless chat and `memory_scope=project` for active-codebase \
 facts. Do not store secrets, credentials, or unnecessary PII in persistent facts.\n\n\
 {cli_fallback}\n\n\
-If an extractor, schema, or tracedecay tool could answer a question natively but does \
-not, propose opening an issue at https://github.com/ScriptedAlchemy/tracedecay and remind \
-the user to strip sensitive or proprietary code from the description first.",
+A preview or read result does not authorize mutation. Once the user has authorized a \
+change, continue through implementation and relevant verification; pause only for a \
+missing decision or an external or destructive action outside that authority.",
         cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
     )
 }

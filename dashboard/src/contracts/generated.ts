@@ -16,6 +16,18 @@ export function assertNever(value: never): never {
 
 export const WIRE_SCHEMA_REVISION = 1 as const;
 
+/** The accept-proposal operation can commit acceptance only. */
+export const AcceptWorkProposalDispositionV1Schema = z.literal("accepted");
+export type AcceptWorkProposalDispositionV1 = z.infer<typeof AcceptWorkProposalDispositionV1Schema>;
+
+export const AcceptWorkProposalRequestV1Schema = z.object({
+  disposition: z.lazy(() => AcceptWorkProposalDispositionV1Schema),
+  mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
+  proposal: z.lazy(() => WorkProposalV1Schema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+}).strict();
+export type AcceptWorkProposalRequestV1 = z.infer<typeof AcceptWorkProposalRequestV1Schema>;
+
 export const AcceptWorkTaskRequestV1Schema = z.object({
   evidence_by_criterion: z.record(z.string()),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
@@ -43,6 +55,14 @@ export const AdjudicateWorkLeakCommandV1Schema = z.object({
   expected_revision: z.number().int().safe().min(0).nullable(),
 }).strict();
 export type AdjudicateWorkLeakCommandV1 = z.infer<typeof AdjudicateWorkLeakCommandV1Schema>;
+
+/** Execution admission together with the immutable provider snapshot licensed
+by the accepted proposal and current configuration authority. */
+export const AdmittedWorkExecutionV1Schema = z.object({
+  execution_snapshot: z.lazy(() => WorkExecutionSnapshotSchema),
+  mutation: z.lazy(() => WorkProductMutationReceiptV1Schema),
+}).strict();
+export type AdmittedWorkExecutionV1 = z.infer<typeof AdmittedWorkExecutionV1Schema>;
 
 export const AdmitWorkExecutionRequestV1Schema = z.object({
   based_on_version: z.number().int().safe().min(0),
@@ -4127,6 +4147,20 @@ export const ReviewTopologyPolicyV1Schema = z.object({
 }).strict();
 export type ReviewTopologyPolicyV1 = z.infer<typeof ReviewTopologyPolicyV1Schema>;
 
+/** The only non-accepting dispositions the proposal-review operation can
+commit. The broader decision request remains available to the graph
+mutation operation, which owns all decision forms. */
+export const ReviewWorkProposalDispositionV1Schema = z.enum(["rejected", "superseded"]);
+export type ReviewWorkProposalDispositionV1 = z.infer<typeof ReviewWorkProposalDispositionV1Schema>;
+
+export const ReviewWorkProposalRequestV1Schema = z.object({
+  disposition: z.lazy(() => ReviewWorkProposalDispositionV1Schema),
+  mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
+  proposal: z.lazy(() => WorkProposalV1Schema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+}).strict();
+export type ReviewWorkProposalRequestV1 = z.infer<typeof ReviewWorkProposalRequestV1Schema>;
+
 /** Immutable collection and stack revisions for one exact resolved root. */
 export const RootGenerationV1Schema = z.object({
   collection_revision: z.lazy(() => ManifestDigestSchema),
@@ -4418,13 +4452,42 @@ export type SensitivityV1 = z.infer<typeof SensitivityV1Schema>;
 export const SessionIdSchema = z.string();
 export type SessionId = z.infer<typeof SessionIdSchema>;
 
+/** The ceiling and count behind a budget refusal.
+
+`stage` names which budget refused; this is what tells an oversized request
+apart from a read whose cost was mis-sized for it. The ceiling value also
+distinguishes the resources inside one stage — a record read that stopped at
+1024 hit the item count, one that stopped at 16 MiB hit the byte total — so
+the kernel's resource spelling stays in the kernel instead of becoming a
+second wire vocabulary to keep in step. */
+export const SessionRetrievalBudgetAccountingV1Schema = z.object({
+  limit: z.number().int().safe().min(0),
+  observed: z.lazy(() => SessionRetrievalBudgetObservationV1Schema),
+}).strict();
+export type SessionRetrievalBudgetAccountingV1 = z.infer<typeof SessionRetrievalBudgetAccountingV1Schema>;
+
+/** What a refusing budget boundary had counted.
+
+Both variants are exact. A bounded read never counts the rows it declined to
+read, so an exhausted read reports what it consumed and that storage held
+more — never a total it would have to run the refused scan to learn. */
+export const SessionRetrievalBudgetObservationV1Schema = z.discriminatedUnion("observation", [z.object({
+  observation: z.literal("consumed_with_more_available"),
+  units: z.number().int().safe().min(0),
+}).strict(), z.object({
+  observation: z.literal("requested"),
+  units: z.number().int().safe().min(0),
+}).strict()]);
+export type SessionRetrievalBudgetObservationV1 = z.infer<typeof SessionRetrievalBudgetObservationV1Schema>;
+
 /** Structural budget boundary that rejected a session retrieval request.
 These causes are non-retryable request corrections; concurrent permit or
 queue pressure remains a separate capacity-saturation failure. */
-export const SessionRetrievalBudgetStageV1Schema = z.enum(["context_bytes", "context_tokens", "estimator_version_mismatch", "execution_work_exhausted", "hydration_bytes", "kernel_result_limit", "participant_manifest_canonical_bytes", "participant_manifest_participants", "request_candidate_bytes", "request_context_bytes", "request_hydration_bytes", "request_hydration_limit", "request_record_bytes", "request_result_limit"]);
+export const SessionRetrievalBudgetStageV1Schema = z.enum(["candidate_read_exhausted", "context_bytes", "context_tokens", "cursor_manifest_limit", "estimator_version_mismatch", "execution_work_exhausted", "hydration_bytes", "kernel_result_limit", "participant_manifest_canonical_bytes", "participant_manifest_participants", "record_read_exhausted", "request_candidate_bytes", "request_context_bytes", "request_hydration_bytes", "request_hydration_limit", "request_record_bytes", "request_result_limit"]);
 export type SessionRetrievalBudgetStageV1 = z.infer<typeof SessionRetrievalBudgetStageV1Schema>;
 
 export const SessionRetrievalStructuralRefusalV1Schema = z.discriminatedUnion("refusal", [z.object({
+  accounting: z.union([z.lazy(() => SessionRetrievalBudgetAccountingV1Schema), z.null()]),
   refusal: z.literal("budget_exhausted"),
   stage: z.lazy(() => SessionRetrievalBudgetStageV1Schema),
 }).strict(), z.object({
@@ -6763,6 +6826,7 @@ export type WorkProposalReasonV1 = z.infer<typeof WorkProposalReasonV1Schema>;
 export const WorkProposalV1Schema = z.object({
   based_on_version: z.number().int().safe().min(0),
   children: z.array(z.lazy(() => WorkProposedChildV1Schema)),
+  configuration_digest: z.lazy(() => ManifestDigestSchema),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   explanation: z.string(),
   proposal_id: z.lazy(() => ProposalIdSchema),

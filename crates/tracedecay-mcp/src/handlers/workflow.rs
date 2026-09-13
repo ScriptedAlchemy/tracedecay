@@ -18,13 +18,12 @@ use tracedecay_contracts::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, OperationBudgetUsage,
     OperationReceipt, OperationTermination,
 };
-use tracedecay_domain::{CommitId, UtcMicros};
+use tracedecay_domain::{CodeGenerationId, CommitId, UtcMicros};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
 use tracedecay_application::diagnose::{Severity, parse_cargo_output};
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
-use tracedecay_application::diagnostics_query::DiagnosticsQuery;
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_application::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
@@ -457,20 +456,11 @@ pub async fn handle_run_affected_tests<F>(
     graph: F,
     args: Value,
     cancellation: Option<CancellationSignal>,
-    code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
 ) -> Result<ToolResult>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
-    handle_run_affected_tests_with_runner(
-        cg,
-        graph,
-        args,
-        cancellation,
-        code_index_identity,
-        run_cargo_tests,
-    )
-    .await
+    handle_run_affected_tests_with_runner(cg, graph, args, cancellation, run_cargo_tests).await
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
@@ -483,7 +473,6 @@ async fn handle_run_affected_tests_with_runner<F, Runner, RunFuture>(
     graph: F,
     args: Value,
     cancellation: Option<CancellationSignal>,
-    code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
     runner: Runner,
 ) -> Result<ToolResult>
 where
@@ -551,7 +540,7 @@ where
         cg,
         &changed_paths,
         effective_deadline.clone(),
-        code_index_identity,
+        graph.generation().clone(),
     )
     .await?;
 
@@ -688,7 +677,7 @@ async fn begin_test_run(
     cg: &TraceDecay,
     changed_paths: &[String],
     deadline: Deadline,
-    code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
+    code_generation_id: CodeGenerationId,
 ) -> Result<OperationEmitter> {
     let root = cg
         .project_root()
@@ -708,19 +697,6 @@ async fn begin_test_run(
                 message: error.to_string(),
             }
         })?;
-    let database = cg.dashboard_database_guard();
-    let code_generation_id = match code_index_identity {
-        Some(identity) => identity
-            .resolve(root.clone())
-            .await
-            .map(|identity| identity.generation_id().clone()),
-        None => {
-            DiagnosticsQuery::new(database.as_ref().clone())
-                .current_generation()
-                .await
-                .generation
-        }
-    };
     let document_content_digests =
         managed_test_document_content_digests(&root, changed_paths).await?;
     operation_event_authority()
@@ -728,7 +704,7 @@ async fn begin_test_run(
             root_uri,
             request_id,
             head_commit_id,
-            code_generation_id,
+            Some(code_generation_id),
             document_content_digests,
             deadline,
         )

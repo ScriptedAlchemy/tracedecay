@@ -7,7 +7,8 @@ description: Port or migrate code between directories in dependency-safe order a
 
 Use `tracedecay:editing-safely`.
 
-- **Args:** interpret `$ARGUMENTS` as "<source_dir> <target_dir>"; if absent, ask for the source and target directories.
-- Port leaves first. Respect Cursor approval/run-mode for edits and toolchain runs.
-
-Output: updated port status (done / remaining) and the per-batch typecheck result.
+Interpret `$ARGUMENTS` as `<source_dir> <target_dir>`; ask for a missing side.
+Use port order to move leaf dependencies before dependents. Respect Cursor
+approval and run mode for edits and toolchain checks. Continue through the
+requested port unless a missing decision or failed check blocks it, then report
+verified progress and remaining work.

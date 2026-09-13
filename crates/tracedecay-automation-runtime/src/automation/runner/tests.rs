@@ -425,6 +425,7 @@ async fn oversized_automation_request_preserves_candidate_stage_without_executio
         AutomationTemporalRetrieval::StructuralRefusal(
             tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                 stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+                accounting: None,
             }
         )
     ));
@@ -496,6 +497,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
     let refusal = accept_automation_temporal_outcome(
         SessionRetrievalOutcome::<TemporalKernelResult>::BudgetExhausted {
             stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            accounting: None,
         },
     );
     assert!(matches!(
@@ -503,6 +505,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
         AutomationTemporalRetrieval::StructuralRefusal(
             tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                 stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                accounting: None,
             }
         )
     ));
@@ -614,6 +617,7 @@ async fn combined_reflector_first_preserves_budget_stage_for_sequential_fallback
         refusal:
             tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                 stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+                accounting: None,
             },
         calls: AtomicUsize::new(0),
     };
@@ -646,6 +650,7 @@ async fn combined_skill_second_preserves_distinct_budget_stage_for_sequential_fa
         refusal:
             tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                 stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                accounting: None,
             },
         calls: AtomicUsize::new(0),
     };

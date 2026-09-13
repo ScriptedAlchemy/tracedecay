@@ -231,6 +231,7 @@ impl LcmRetrievalOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LcmExpandTarget {
+    CanonicalOccurrence { message_id: String },
     RawMessage { store_id: i64 },
     SummaryNode { node_id: String },
     ExternalPayload { payload_ref: String },

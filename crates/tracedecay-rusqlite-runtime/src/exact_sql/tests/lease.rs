@@ -205,9 +205,6 @@ fn seed_migration_source(channel: &ExactSqlHandle, rows: i64) {
 /// firing; the fixture would have to get faster than the limit to go quiet.
 const STORE_SIZED_ROWS: i64 = 3_000_000;
 
-/// Rows a migration moves per write, mirroring the production chunk.
-const MIGRATION_CHUNK_ROWS: i64 = 5_000;
-
 /// Why a store-sized migration cannot run as one statement inside a caller's
 /// leased transaction, which is what took a daemon down on a large store: a
 /// schema stage rewrote whole tables and rebuilt an index on every open, each
@@ -274,12 +271,17 @@ fn a_store_sized_statement_is_refused_and_a_migration_chunk_has_headroom() {
     chunk
         .execute(statement(
             MOVE,
-            vec![ExactSqlValue::Integer(MIGRATION_CHUNK_ROWS)],
+            vec![ExactSqlValue::Integer(
+                crate::repository::RETIRED_MUTATION_COPY_CHUNK_ROWS,
+            )],
         ))
         .expect("a bounded chunk of the same move fits inside one execution");
     chunk.commit().unwrap();
     let chunk_took = started.elapsed();
-    assert_eq!(moved_rows(&channel), MIGRATION_CHUNK_ROWS);
+    assert_eq!(
+        moved_rows(&channel),
+        crate::repository::RETIRED_MUTATION_COPY_CHUNK_ROWS
+    );
     assert!(
         chunk_took * 4 < EXACT_SQL_EXECUTION_LIMIT,
         "a migration chunk must leave the limit room to spare on a slower host: {chunk_took:?}"

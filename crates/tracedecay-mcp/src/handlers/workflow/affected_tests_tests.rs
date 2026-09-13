@@ -26,7 +26,12 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 #[allow(dead_code)]
 fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
     fn assert_send<T: Send>(_: T) {}
-    assert_send(begin_test_run(cg, &[], deadline, None));
+    assert_send(begin_test_run(
+        cg,
+        &[],
+        deadline,
+        CodeGenerationId::new("generation.managed-test.send").expect("fixture generation"),
+    ));
 }
 
 #[derive(Clone, Copy)]
@@ -323,7 +328,6 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
             "format": "json"
         }),
         None,
-        None,
         move |root, profile, tests, timeout_duration, _control| async move {
             assert_eq!(root, expected_root);
             assert_eq!(profile, TestProfile::Debug);
@@ -442,7 +446,6 @@ async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
             "format": "json"
         }),
         None,
-        None,
         move |_root, _profile, tests, _timeout_duration, _control| async move {
             assert_eq!(
                 tests,
@@ -503,7 +506,6 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
             "changed_paths": ["tests/valid.rs", 7],
             "format": "json"
         }),
-        None,
         None,
         |_root, _profile, _tests, _timeout_duration, _control| async move {
             panic!("invalid producer input must never reach the test runner")
@@ -603,7 +605,6 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
         ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
-        None,
         |_root, _profile, _tests, _timeout_duration, _control| async move {
             Err(TestRunFailure::Timeout {
                 output_bytes: 17,
@@ -679,7 +680,6 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
         ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
-        None,
         |_root, _profile, _tests, _timeout_duration, _control| async move {
             Err(TestRunFailure::Cancelled {
                 output_bytes: 20,
@@ -752,7 +752,6 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
         ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
-        None,
         |_root, _profile, _tests, _timeout_duration, _control| async move {
             Ok(TestRunOutput {
                 exit_code: Some(0),
@@ -775,7 +774,6 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
         &cg,
         ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
-        None,
         None,
         |_root, _profile, _tests, _timeout_duration, _control| async move {
             Ok(TestRunOutput {
@@ -845,7 +843,6 @@ async fn reported_passing_and_failing_tests_complete_with_observed_results() {
         &cg,
         ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
-        None,
         None,
         |_root, _profile, _tests, _timeout_duration, _control| async move {
             Ok(TestRunOutput {
