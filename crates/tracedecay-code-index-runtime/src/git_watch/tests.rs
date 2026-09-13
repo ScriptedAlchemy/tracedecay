@@ -669,6 +669,7 @@ async fn metadata_frontier_routes_to_the_mounted_canonical_scheduler() {
         schedulers.shutdown().await;
         return;
     };
+    let freshness_requested = state.health.freshness_requested.notified();
     classify_and_mark(
         &state,
         &notify::Event {
@@ -679,13 +680,9 @@ async fn metadata_frontier_routes_to_the_mounted_canonical_scheduler() {
             attrs: EventAttributes::default(),
         },
     );
-    tokio::time::timeout(TEST_READY_TIMEOUT, async {
-        while state.health.snapshot().last_freshness_request == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("debounce must route the metadata frontier");
+    tokio::time::timeout(TEST_READY_TIMEOUT, freshness_requested)
+        .await
+        .expect("debounce must route the metadata frontier");
 
     assert_ne!(
         state.health.snapshot().last_freshness_request,

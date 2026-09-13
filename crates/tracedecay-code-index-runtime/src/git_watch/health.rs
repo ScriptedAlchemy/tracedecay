@@ -2,6 +2,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
+#[cfg(test)]
+use tokio::sync::Notify;
+
 const HEARTBEAT_STALE_SECS: u64 = 120;
 #[cfg(test)]
 pub const HEARTBEAT_STALE_MILLIS: u64 = HEARTBEAT_STALE_SECS * 1_000;
@@ -43,6 +46,8 @@ pub struct ProjectHealth {
     status: AtomicU8,
     #[cfg(test)]
     last_freshness_request: AtomicU64,
+    #[cfg(test)]
+    pub freshness_requested: Notify,
 }
 
 impl ProjectHealth {
@@ -55,6 +60,7 @@ impl ProjectHealth {
     pub fn mark_requested(&self) {
         self.last_freshness_request
             .store(monotonic_health_millis(), Ordering::Relaxed);
+        self.freshness_requested.notify_one();
     }
 
     pub fn set_status(&self, status: ProjectWatchStatus) {
