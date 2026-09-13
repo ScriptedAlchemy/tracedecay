@@ -33,7 +33,7 @@ const EMBED_SESSIONS_ENV: &str = "TRACEDECAY_EMBED_SESSIONS";
 /// Share of process resident admission reserved for semantic sessions by
 /// default. The remainder stays available to graph/text generations, queries,
 /// and model-load transients.
-const DEFAULT_RESIDENT_FRACTION_DENOMINATOR: u64 = 8;
+const DEFAULT_RESIDENT_FRACTION_DENOMINATOR: u64 = 3;
 
 /// Intra-op width at which independent sessions remain the preferred way to
 /// fill the shared CPU authority. The execution planner only widens a session
@@ -406,7 +406,8 @@ mod tests {
         const GIB: u64 = 1024 * 1024 * 1024;
 
         assert_eq!(default_resident_ceiling_for(6 * GIB), 2 * GIB);
-        assert_eq!(default_resident_ceiling_for(96 * GIB), 12 * GIB);
+        assert_eq!(default_resident_ceiling_for(36 * GIB), 12 * GIB);
+        assert_eq!(default_resident_ceiling_for(96 * GIB), 16 * GIB);
         assert_eq!(default_resident_ceiling_for(256 * GIB), 16 * GIB);
     }
 
@@ -434,7 +435,7 @@ mod tests {
         assert_eq!(
             effective_resident_ceiling(96 * GIB, SemanticResourceCeilings::default()),
             SemanticResidentCeilingV1 {
-                bytes: 12 * GIB,
+                bytes: 16 * GIB,
                 source: SemanticResidentCeilingSourceV1::HostDerived,
             }
         );

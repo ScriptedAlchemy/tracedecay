@@ -1073,6 +1073,19 @@ where
 /// lowest-index failure.
 type EncodedStripeResultV1 = Result<(Vec<Vec<Vec<f32>>>, u64), String>;
 
+fn balanced_contiguous_stripes<T>(items: &[T], requested: usize) -> Vec<&[T]> {
+    let stripe_count = requested.max(1).min(items.len());
+    let mut remaining = items;
+    let mut stripes = Vec::with_capacity(stripe_count);
+    for slots in (1..=stripe_count).rev() {
+        let take = remaining.len().div_ceil(slots);
+        let (stripe, rest) = remaining.split_at(take);
+        stripes.push(stripe);
+        remaining = rest;
+    }
+    stripes
+}
+
 /// Encode one already-composed group against one checked-out session.
 ///
 /// Free-standing so the sequential and concurrent paths run byte-identical
@@ -1190,10 +1203,25 @@ where
             return Ok(Vec::new());
         }
         self.ensure_sessions(1)?;
-        let texts = compose_group_documents(key, chunks, self.documents.as_ref())?;
-        self.sessions[0]
-            .encoded_token_lengths(&texts)
-            .map_err(|error| error.to_string())
+        let batch_size = usize::try_from(key.inference_batch_size)
+            .ok()
+            .filter(|size| *size > 0)
+            .ok_or_else(|| "semantic projection inference batch size is invalid".to_owned())?;
+        let mut lengths = Vec::with_capacity(chunks.len());
+        for batch in chunks.chunks(batch_size) {
+            if self.progress.cancelled() {
+                return Err("semantic projection cancelled".to_owned());
+            }
+            let texts = compose_group_documents(key, batch, self.documents.as_ref())?;
+            let measured = self.sessions[0]
+                .encoded_token_lengths(&texts)
+                .map_err(|error| error.to_string())?;
+            if measured.len() != batch.len() {
+                return Err("semantic tokenizer returned an unexpected length count".to_owned());
+            }
+            lengths.extend(measured);
+        }
+        Ok(lengths)
     }
 }
 
@@ -1310,8 +1338,7 @@ where
             return Ok(encoded);
         }
 
-        let stripe_len = groups.len().div_ceil(sessions);
-        let stripes = groups.chunks(stripe_len).collect::<Vec<_>>();
+        let stripes = balanced_contiguous_stripes(groups, sessions);
         hotpath::gauge!("semantic_embed_encode_stripes").set(stripes.len());
         let progress = Arc::clone(&self.progress);
         let documents = Arc::clone(&self.documents);
@@ -1377,6 +1404,29 @@ where
             Some(reason) => Err(reason),
             None => Ok(encoded),
         }
+    }
+}
+
+#[cfg(test)]
+mod stripe_partition_tests {
+    use super::balanced_contiguous_stripes;
+
+    #[test]
+    fn every_admitted_session_receives_a_balanced_contiguous_stripe() {
+        let items = (0..16).collect::<Vec<_>>();
+        let stripes = balanced_contiguous_stripes(&items, 5);
+
+        assert_eq!(
+            stripes
+                .iter()
+                .map(|stripe| stripe.len())
+                .collect::<Vec<_>>(),
+            [4, 3, 3, 3, 3]
+        );
+        assert_eq!(
+            stripes.into_iter().flatten().copied().collect::<Vec<_>>(),
+            items
+        );
     }
 }
 

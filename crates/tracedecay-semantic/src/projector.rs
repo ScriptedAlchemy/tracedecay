@@ -722,9 +722,9 @@ where
         resolved.push((change, chunk));
     }
 
-    // One tokenizer pass for the whole lane. Ordering and packing both need
-    // every length before either can start, and the authority batches far
-    // better than per-chunk calls would.
+    // Ordering and packing need every length before either can start. The
+    // production authority measures them in admitted inference-sized windows
+    // so this corpus-wide logical pass never retains corpus-wide encodings.
     let token_lengths = match lengths {
         CanonicalGroupLengthsV1::Tokenized(authority) => {
             let documents = resolved
