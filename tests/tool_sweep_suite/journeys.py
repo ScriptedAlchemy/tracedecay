@@ -873,11 +873,16 @@ def prime_workflow_lifecycle(
         "command_id": f"command.workflow.start.{suffix}",
         "format": "json",
     }
-    started = call(
+    started = probe(
         "tracedecay_workflow_start_run",
         start_arguments,
         deadline("tracedecay_workflow_start_run"),
     )
+    if any(value.get("diagnostic", {}).get("code") == "workflow.invalid_request" for value in objects(started)):
+        raise JourneyError(
+            "Workflow start debug: "
+            + json.dumps({"request": start_arguments, "response": started}, sort_keys=True)
+        )
     running = _workflow_run(started, run_id, {"running"})
     observed = call(
         "tracedecay_workflow_get_run",
