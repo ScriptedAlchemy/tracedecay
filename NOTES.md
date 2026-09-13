@@ -354,6 +354,56 @@ root (or a client crate), never daemon-service. `core_doctor_schema.rs` is a `#[
 `core_doctor.rs` (`McpServer`-bound). The plan's "(c) rows as `tracedecay-daemon-service::composition`"
 is therefore not reachable: the daemon composition that builds `McpServer` is the root's job (slice 3).
 
+### Slice 3 — composition (one commit, stacked on slice 2)
+
+Moves the modules slices 1–2 unblocked, then reclassifies every remaining root module. Root `src/`
+144,714 → 116,396 lines over the three slices (−28,318); `src/mcp/` 42,321 → 24,373 (−42%, 14,457 of
+what remains is production code); `src/daemon/` + `daemon.rs` 98,867 → 88,735 (−10%).
+`tracedecay-mcp` 36,751 → 54,380; `tracedecay-daemon-service` 54,177 → 64,757. Test attributes
+conserved in this slice: root 800 → 739, mcp 320 → 360, daemon-service 324 → 345.
+
+| root module | lines | new home |
+| --- | ---: | --- |
+| `mcp/tools/handlers/hook_runtime/` (tree) | 4,875 | `tracedecay_mcp::handlers::hook_runtime` (context-scout lifecycle is in daemon-service since slice 2) |
+| `mcp/tools/handlers/{analytics,admin_project}.rs`, root `bench.rs` | 1,653 | `tracedecay_mcp::{handlers::analytics, handlers::admin_project, bench}` |
+| `daemon/retained_owner.rs` + tests, `dashboard_automation/retained_curator.rs`, `daemon/automation_effect/` (+ journal tests) | 3,637 | `tracedecay_daemon_service::{retained_owner, automation_effect}`; `automation_run_observer` and `scheduler_automation_request_id` (pure identity minting) follow as item cuts |
+| `tracedecay_mcp::server::session_refresh` (placed by slice 1) | 393 | `tracedecay_daemon_service::session_refresh` — no MCP coupling, and `StoreAdministration`/`retained_owner` hold it |
+| `test_support::host_admission::mcp_session_authorities` | 6 | `tracedecay_mcp::handlers::mcp_session_authorities` behind the new `tracedecay-mcp/test-helpers` feature |
+
+**Reclassification of what stays (116,396 lines) and why.** Markers: a file is pinned by the first
+authority it names.
+
+| reason | production lines | test lines | files |
+| --- | ---: | ---: | --- |
+| names `McpServer` (the root server: `mcp/server.rs` + `server/{requests,connection,construction,ledger,rmcp,lifecycle,routing,hook_dispatch,status_resource,project_open_access}`, `mcp/project_route.rs`; and the daemon modules that hold `Arc<McpServer>`: `branch_admin.rs` + `project_retirement.rs`, `project_composition.rs`, `connection_serving.rs`, `engine.rs`, `core_doctor.rs`, `project_open_owners/**`, `project_open_orchestration.rs`, `project_server_lifecycle.rs`, `project_routing.rs`, `database_owner_registry.rs`, `graph_resolution.rs`, `wire_io.rs`, `production_harness.rs`) | 28,728 | 10,819 | 47 |
+| names `StoreAdministration` (`scheduler.rs`, `maintenance.rs`, `pr_autotrack.rs` + `runtime.rs`, `branch_admin/remote_deletion_lifecycle*`, `branch_admin/session_runtime_shutdown.rs`, `projectless.rs`, `core_admission.rs`, `project_open_handshake.rs`, `branch_add.rs`, `project_composition/runtime.rs`, `bootstrap_route.rs`, `store_maintenance/`) | 9,894 | 2,619 | 18 |
+| names `DaemonInvocationState` (`invocation_state.rs` + `project_invocation.rs`, `bootstrap.rs`, `invocation_dispatch.rs`, `invocation_executor.rs`, `branch_admin/remote_recovery_lifecycle.rs`, `project_composition/code_index_activation.rs`, `daemon.rs`, `remote_deletion.rs`, `github_credential_lifecycle.rs`, `lsp_sessions.rs`, `http_application_router.rs`, `project_delivery_mount.rs`) | 7,236 | 7,080 | 18 |
+| names `DaemonEngine` (`scheduler/{combined_effect,effect_admission,host_receipt_review,automation_observation}.rs`, `engine/shutdown.rs`) | 3,047 | 1,323 | 7 |
+| MCP JSON-RPC frames (`tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport, BrokerStreamTransport}`): `project_open_admission.rs`, `core_proxy.rs`, `core_client.rs`, `core_hooks.rs`, `tool_call_support.rs` | 3,360 | 5,757 | 10 |
+| `ToolCallRegistryOptions` (root dispatch: `handlers/mod.rs`, `dispatch_groups.rs` + `health_dispatch.rs`, `retained_catalog.rs`, `dispatch_controls.rs`, `tools/mod.rs`) and the root server port aliases (`dashboard.rs` handler, `application_surface.rs`, `hook_writes.rs`, `info/`, `support.rs`, `dashboard_automation.rs`, `advisory_runtime/model.rs`) | 4,820 | 3,714 | 24 |
+| composition root proper (`lib.rs`, `runtime_ports.rs`, `serve.rs`, `hooks.rs`, `dashboard.rs` + `dashboard/`, `doctor.rs` + `doctor/`, `core_handshake.rs`, `http_application.rs`, `hook_v2_replay_consumer.rs`, `test_support/`, harness/test-only files) | 5,988 | 22,011 | 63 |
+
+Three authorities pin everything: `McpServer` (root `mcp/server.rs`), `StoreAdministration`
+(`branch_admin.rs`, which holds `Arc<McpServer>`, the hook route cache, and MCP frames) and
+`DaemonInvocationState` (which holds `StoreAdministration`). They form one strongly connected cluster
+with `DaemonEngine`, `project_composition`, and `connection_serving`: the daemon *is* the composition
+that builds and serves `McpServer`. With `tracedecay-mcp → tracedecay-daemon-service` fixed, none of it
+can enter daemon-service, and moving `McpServer` alone into `tracedecay-mcp` drags the cluster's
+daemon half (`branch_admin`, `core_admission`, `dashboard_automation`, the root `dashboard`/`hooks`
+composition) along — a ~40k-line move that would make `tracedecay-mcp` the daemon. The honest end
+state is therefore not the plan's step 5 ("delete `src/mcp/` and `src/daemon/`") but: the root
+`tracedecay` crate **is** the daemon composition crate (engine, connection serving, project
+composition, store administration, the root MCP server, the client seam) plus the product
+features it composes (`doctor`, `dashboard`, `runtime_ports`, `test_support`). If a smaller
+"composition wiring only" root is still wanted, the remaining lever is a `tracedecay-daemon` crate
+above mcp and daemon-service that receives the cluster wholesale — a rename of the same lines, not a
+reduction — which is a maintainer decision, not a slice.
+
+Still-movable leftovers not taken here (small, each would need its own edge or a test-fixture
+relocation): `serve.rs` (59, `tracedecay-lsp` percent decoding; only `routing.rs` reads it),
+`mcp/tools/handlers/info/mod.rs` (43, `TraceDecay` only but `info/status.rs` needs the server ports),
+`core_doctor_schema.rs` (22, `#[path]` child of `core_doctor.rs`).
+
 ### Tip-side / environment reds observed (not this lane's)
 
 - `hooks_lsp_suite::hooks_test::test_codex_{workspace_status_distinguishes_generic_and_project_like_dirs,
@@ -542,8 +592,10 @@ their two `crate::mcp` uses are typed.
 4. ~~`src/daemon` (b) rows into daemon-service~~ — the `TraceDecay`/`config`-only rows landed in slice 2;
    the rest names `McpServer`/`StoreAdministration`/`tracedecay-mcp` frames and cannot enter
    daemon-service (see the daemon wall above), so the daemon composition stays in the root.
-5. Delete `src/mcp/` and `src/daemon/`; the root keeps `lib.rs` re-exports, `product_runtime`, `doctor`,
-   `dashboard`, `version`, and the `test_support` fixture surface.
+5. ~~Delete `src/mcp/` and `src/daemon/`~~ — not reachable as written: the daemon composition that builds
+   and serves `McpServer` cannot live below `tracedecay-mcp` (see slice 3's reclassification). The root
+   is the daemon composition crate; a `tracedecay-daemon` crate above mcp and daemon-service would only
+   rename it.
 
 ### Test placement facts (item 3 probe)
 
