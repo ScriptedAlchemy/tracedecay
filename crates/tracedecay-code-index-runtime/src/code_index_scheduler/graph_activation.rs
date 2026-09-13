@@ -449,11 +449,10 @@ impl CodeGraphActivationAuthorityV1 {
             latest.refuse_graph_activation(reason);
             return Err(CodeIndexSchedulerErrorV1::GraphActivationRefused(reason));
         }
-        // Graph activation consumes the sealed generation directly. Text
-        // serving is a separate bounded projection advanced by the mounted
-        // scheduler after this generation is seated; requiring it here makes
-        // the first partial text pass enter graph-retry backoff before that
-        // worker can continue the projection.
+        // Graph activation consumes the sealed generation directly. The
+        // mounted scheduler therefore admits a full replay only after text
+        // projection is ready; verified-head recovery has its own path above
+        // and does not replay the sealed source.
         match self {
             Self::Persistent {
                 runtime,

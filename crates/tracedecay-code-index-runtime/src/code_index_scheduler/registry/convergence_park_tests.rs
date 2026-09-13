@@ -274,17 +274,14 @@ async fn an_unhealable_text_artifacts_root_parks_typed_and_recovers_when_fixed()
     fixture.registry.shutdown().await;
 }
 
-/// A publication's graph activation consumes the sealed generation, not the
-/// text artifact, so it must not queue behind the text owner's projection.
-/// The pinned defect: the seat gate demanded a *finished* text owner before
-/// any graph work began, so on a 772-file fixture the graph build (tens of
-/// seconds) started only after the whole text build and their sum missed the
-/// journey's restart bound. A text owner that can never finish — parked on an
-/// unhealable artifacts root — makes the ordering observable: activation must
-/// start while the owner is still parked. The seat itself still waits for a
-/// ready owner, so the parked state stays truthful throughout.
+/// A fresh graph publication and its text projection are both corpus-sized
+/// consumers of the sealed generation. Starting graph work while text is
+/// parked can hold the source text needs, cross the process RSS watermark,
+/// and then prevent text from reacquiring its reservation indefinitely. A
+/// text owner parked on an unhealable artifacts root makes the required
+/// ordering observable: fresh graph activation must not start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn graph_activation_starts_while_the_published_text_owner_is_parked() {
+async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked() {
     let (fixture, admission) = Fixture::mount_with_poisoned_artifacts_root_held(
         "project.text-artifacts-root-graph-ahead",
         |artifacts_root| {
@@ -310,9 +307,12 @@ async fn graph_activation_starts_while_the_published_text_owner_is_parked() {
         "the text owner must park on the unhealable root: {parked:?}"
     );
 
-    tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
-        .await
-        .expect("graph activation must start without waiting for the parked text owner");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), gate.wait_until_started())
+            .await
+            .is_err(),
+        "fresh graph activation must not overlap a parked text projection"
+    );
     let observed = fixture
         .registry
         .dashboard_freshness(&fixture.project)
@@ -321,7 +321,7 @@ async fn graph_activation_starts_while_the_published_text_owner_is_parked() {
     assert_eq!(
         observed.staleness_state.as_deref(),
         Some("parked"),
-        "activation must not seat or unpark an owner that has not finished: {observed:?}"
+        "waiting graph activation must not unpark an owner that has not finished: {observed:?}"
     );
     assert!(
         fixture
@@ -333,8 +333,6 @@ async fn graph_activation_starts_while_the_published_text_owner_is_parked() {
             .is_none(),
         "the seat still waits for a ready text owner"
     );
-    gate.release();
-
     fixture.registry.shutdown().await;
 }
 

@@ -2835,14 +2835,9 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
         .send(())
         .expect("release publication projection");
 
-    let ready = wait_until_serving_seat(
-        &registry,
-        fixture.path(),
-        Duration::from_secs(10),
-        || {
-            registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-        },
-    )
+    let ready = wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
+        registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+    })
     .await;
     let generation = ready.generation().manifest().generation_id.clone();
 
@@ -7116,8 +7111,7 @@ async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
 
     // Fence new work before settling the mount pass, so no worker can enter
     // between the quiescence observation and admission acquisition.
-    let admission =
-        quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
     let receipts_before = registry.event_to_ready_receipts().len();
     // Stand in for the worker's own pass: in-progress, scheduler mutex free.
@@ -10512,20 +10506,20 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, true, true),
         GraphSeatGateV1::Prepare,
-        "a publication prepares once its own text owner has reopened, however busy the \
-         checkout is; the owner's projection runs alongside and the seat joins it"
+        "a publication prepares once its own text owner is ready, however busy the checkout is; \
+         graph replay follows that projection"
     );
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, true, false),
         GraphSeatGateV1::PublishedTextOwnerUnavailable,
-        "a publication whose replacement text owner did not reopen must not start graph work"
+        "a publication whose replacement text owner did not become ready must not start graph work"
     );
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, false, true),
         GraphSeatGateV1::Prepare,
         "an unchanged pass prepares as soon as a retained owner exists to recover a head \
-         from: the seat reads that owner's sealed manifest, never its lexical artifact, so a \
-         restart resuming an unfinished ngram index serves the graph while text still warms"
+         from: verified-head recovery may serve graph reads while text warms, but a full sealed \
+         generation replay waits for the text owner to become ready"
     );
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, false, false),
