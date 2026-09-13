@@ -408,43 +408,34 @@ pub(super) fn derive_row_dictionary(
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))
 }
 
+/// Intern the batch's distinct exact terms, which the insert plan already
+/// deduplicated and content-addressed while ordering its rows. `terms` is
+/// ascending by `term_id`, the order `exact_vocabulary` was always interned
+/// in, so the sealed b-tree keeps the same page layout.
 pub(super) fn intern_exact_terms(
     transaction: &Transaction<'_>,
-    pages: &[PreparedCodeLexicalArtifactPageV1],
+    terms: &[(&[u8], i64)],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mut terms = BTreeMap::<i64, &[u8]>::new();
-    for page in pages {
-        for document in &page.documents {
-            for (_, term) in &document.exact_postings {
-                let term_id = stable_exact_term_id(term);
-                if let Some(previous) = terms.insert(term_id, term)
-                    && previous != term.as_slice()
-                {
-                    return Err(CodeLexicalArtifactErrorV1::Contract(
-                        "lexical artifact exact term identifier collided".to_owned(),
-                    ));
-                }
-            }
-        }
-    }
     let mut insert = transaction
-        .prepare(
+        .prepare_cached(
             "INSERT INTO exact_vocabulary(term_id, term) VALUES (?1, ?2) ON CONFLICT(term_id) DO NOTHING",
         )
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
     let mut lookup = transaction
-        .prepare("SELECT term FROM exact_vocabulary WHERE term_id = ?1")
+        .prepare_cached("SELECT term FROM exact_vocabulary WHERE term_id = ?1")
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-    for (term_id, term) in terms {
+    for (term, term_id) in terms {
         checkpoint(control)?;
         insert
             .execute(params![term_id, term])
             .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        // An id already held by different bytes would silently redirect this
+        // batch's postings at the stored term, so the readback stays.
         let stored: Vec<u8> = lookup
             .query_row([term_id], |row| row.get(0))
             .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-        if stored != term {
+        if stored != *term {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact exact term identifier collided".to_owned(),
             ));
@@ -455,35 +446,29 @@ pub(super) fn intern_exact_terms(
 
 /// Intern the batch's distinct terms and return the ids now present in
 /// `vocabulary`, so the posting writer can confirm every planned posting's
-/// term was interned with one integer probe per row.
+/// term was interned with one integer probe per row. `terms` is ascending by
+/// term text — the order `vocabulary` was always interned in — and carries
+/// the ids the insert plan already content-addressed, so neither the digest
+/// nor the walk over every posting is repeated here.
 pub(super) fn intern_terms(
     transaction: &Transaction<'_>,
-    pages: &[PreparedCodeLexicalArtifactPageV1],
+    terms: &[(&str, i64)],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<HashSet<i64>, CodeLexicalArtifactErrorV1> {
-    let mut terms = BTreeSet::new();
-    for page in pages {
-        for document in &page.documents {
-            for posting in &document.term_postings {
-                terms.insert(posting.term.as_str());
-            }
-        }
-    }
     let mut assigned = HashSet::with_capacity(terms.len());
     let mut insert = transaction
-        .prepare(
+        .prepare_cached(
             "INSERT INTO vocabulary(term_id, term, in_fuzzy) VALUES (?1, ?2, 0) ON CONFLICT(term) DO NOTHING",
         )
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-    for term in terms {
+    for (term, term_id) in terms {
         checkpoint(control)?;
-        let term_id = stable_term_id(term);
         insert.execute(params![term_id, term]).map_err(|error| {
             CodeLexicalArtifactErrorV1::Contract(format!(
                 "lexical artifact term identifier collided or vocabulary insert failed: {error}"
             ))
         })?;
-        assigned.insert(term_id);
+        assigned.insert(*term_id);
     }
     Ok(assigned)
 }
@@ -538,12 +523,52 @@ pub(super) fn lookup_term_ids(
 mod tests {
     use super::{
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
+        CodeLexicalArtifactErrorV1,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14, LexicalArtifactLayoutV1, exact_field_code,
         field_code, field_from_code,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
+    use rusqlite::Connection;
+    use tracedecay_code_index::production::CodeIndexExecutionControlV1;
     use tracedecay_domain::ExactFieldV1;
+
+    struct ActiveControl;
+
+    impl CodeIndexExecutionControlV1 for ActiveControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    /// The insert plan hands `intern_exact_terms` ids it content-addressed
+    /// itself, so a second term claiming an id already held by different bytes
+    /// must be rejected by the stored-term readback: `ON CONFLICT DO NOTHING`
+    /// would otherwise silently point this batch's postings at the other term.
+    #[test]
+    fn exact_term_interning_rejects_an_identifier_already_held_by_other_bytes() {
+        let mut connection = Connection::open_in_memory().expect("open");
+        connection
+            .execute_batch(
+                "CREATE TABLE exact_vocabulary (term_id INTEGER PRIMARY KEY, term BLOB NOT NULL)",
+            )
+            .expect("schema");
+        let transaction = connection.transaction().expect("transaction");
+        super::intern_exact_terms(&transaction, &[(b"alpha", 7)], &ActiveControl).expect("intern");
+        // Idempotent for the same bytes: a replayed batch re-interns cleanly.
+        super::intern_exact_terms(&transaction, &[(b"alpha", 7)], &ActiveControl).expect("replay");
+        let error = super::intern_exact_terms(&transaction, &[(b"beta", 7)], &ActiveControl)
+            .expect_err("colliding identifier must fail closed");
+        assert!(
+            matches!(error, CodeLexicalArtifactErrorV1::Contract(ref message)
+                if message.contains("exact term identifier collided")),
+            "unexpected error: {error:?}"
+        );
+    }
 
     #[test]
     fn layout_accepts_open_revisions_and_fails_closed_otherwise() {
