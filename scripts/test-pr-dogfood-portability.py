@@ -555,6 +555,8 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             fake_binary = tmp_path / "fake-tracedecay"
             write_full_journey_fake(fake_binary)
             env = os.environ.copy()
+            env.pop("GITHUB_RUN_ID", None)
+            env.pop("GITHUB_RUN_ATTEMPT", None)
             env["TRACEDECAY_BIN"] = str(fake_binary)
             status_counter = tmp_path / "status-counter"
             env["FAKE_STATUS_COUNTER"] = str(status_counter)
