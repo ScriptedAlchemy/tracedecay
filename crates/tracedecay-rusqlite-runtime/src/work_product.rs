@@ -17,12 +17,12 @@
 //!    them. This module reads them back out of the journal and folds them; it
 //!    never estimates one, never backfills one, and never reads one off an
 //!    attempt row.
-//! 2. **No cross-authority joins.** `work_attempts_v1` is scoped by
+//! 2. **Explicit runtime authority.** `work_attempts_v1` is scoped by
 //!    [`WorkAuthority`](tracedecay_domain::WorkAuthority); the product journal
-//!    is scoped by the registered profile owner. Nothing here correlates them,
-//!    so a runtime reading for accepted attempts this authority cannot observe
-//!    is reported as an explicit unavailable coverage rather than as a
-//!    fabricated zero.
+//!    is scoped by the registered profile owner. Plain product storage does not
+//!    correlate them and reports unavailable coverage. A daemon route may bind
+//!    its registered Work authority explicitly and then hydrates only attempts
+//!    the product graph already accepted.
 //! 3. **Only verified versions are readable.** The event and its recovered
 //!    graph version commit in one transaction, so a caller can never observe an
 //!    event without the graph authority that verified and digested it.
@@ -47,6 +47,8 @@ mod history;
 mod publication;
 mod read;
 mod rooted_evidence;
+
+pub use read::AuthorizedWorkProductReadStorageV1;
 
 /// The digest domain separator for a recovered Work product graph.
 pub(crate) const WORK_PRODUCT_GRAPH_DIGEST_DOMAIN: &str =

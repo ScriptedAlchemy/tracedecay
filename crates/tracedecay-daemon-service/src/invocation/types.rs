@@ -675,6 +675,7 @@ pub struct RegisteredWorkRuntime {
     pub(super) database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
+    pub(super) authority: tracedecay_domain::WorkAuthority,
     pub(super) authority_digest: ManifestDigest,
     pub(super) policy_digest: ManifestDigest,
     pub(super) configuration_digest: ManifestDigest,

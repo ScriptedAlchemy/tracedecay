@@ -127,9 +127,11 @@ pub(super) fn prepare_execution_snapshot(
     binding: &tracedecay_contracts::WorkProductBindingV1,
     request: &tracedecay_contracts::AdmitWorkExecutionRequestV1,
 ) -> Result<tracedecay_domain::WorkExecutionSnapshot, ApplicationProblem> {
-    let services = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
+    let services =
+        tracedecay_application::work::RegisteredWorkProductServicesV1::attach_with_attempt_authority(
         &registered.database,
         binding.clone(),
+        registered.authority.clone(),
     )
     .map_err(|_| work_product_authority_unavailable())?;
     let read = services
@@ -215,9 +217,10 @@ pub(super) fn current_work_product_attempt_topology(
     let capability =
         CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
     let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
-    tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
+    tracedecay_application::work::RegisteredWorkProductServicesV1::attach_with_attempt_authority(
         &registered.database,
         binding,
+        registered.authority.clone(),
     )
     .map_err(|_| work_product_authority_unavailable())?
     .reads()
@@ -242,10 +245,12 @@ pub(super) fn current_work_product_snapshot(
         }]),
     )
     .map_err(|_| work_product_authority_unavailable())?;
-    let read = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
-        &registered.database,
-        binding,
-    )
+    let read =
+        tracedecay_application::work::RegisteredWorkProductServicesV1::attach_with_attempt_authority(
+            &registered.database,
+            binding,
+            registered.authority.clone(),
+        )
     .map_err(|_| work_product_authority_unavailable())?
     .reads()
     .read_graph(

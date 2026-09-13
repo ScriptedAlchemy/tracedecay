@@ -1311,6 +1311,7 @@ impl DaemonWorkRuntimeRegistrar {
                         database: database.clone(),
                         actor: actor.clone(),
                         grant: grant.clone(),
+                        authority: authority.clone(),
                         authority_digest: authority_digest.clone(),
                         policy_digest: policy_digest.clone(),
                         configuration_digest: configuration_digest.clone(),

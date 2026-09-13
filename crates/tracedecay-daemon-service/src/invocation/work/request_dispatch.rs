@@ -685,9 +685,10 @@ pub(super) async fn dispatch_work_application(
                 let binding =
                     tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
                 let product_services =
-                    match tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
+                    match tracedecay_application::work::RegisteredWorkProductServicesV1::attach_with_attempt_authority(
                         &registered.database,
                         binding,
+                        registered.authority.clone(),
                     ) {
                         Ok(services) => services,
                         Err(_) => {

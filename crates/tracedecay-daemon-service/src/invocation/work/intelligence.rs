@@ -36,19 +36,23 @@ pub(super) fn generate_proposal(
         )
     })?;
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    tracedecay_application::work::work_intelligence_service(&registered.database, binding)
-        .map_err(|_| {
-            work_product_problem(
-                tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-            )
-        })?
-        .generate_proposal(
-            context,
-            registered.configuration_digest.clone(),
-            &registered.proposal_routing,
-            request,
+    tracedecay_application::work::authorized_work_intelligence_service(
+        &registered.database,
+        binding,
+        registered.authority.clone(),
+    )
+    .map_err(|_| {
+        work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
         )
-        .map_err(work_product_problem)
+    })?
+    .generate_proposal(
+        context,
+        registered.configuration_digest.clone(),
+        &registered.proposal_routing,
+        request,
+    )
+    .map_err(work_product_problem)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -122,9 +126,10 @@ pub(super) async fn experience(
         return unavailable(request_id);
     };
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence = match tracedecay_application::work::work_intelligence_service(
+    let intelligence = match tracedecay_application::work::authorized_work_intelligence_service(
         &registered.database,
         binding,
+        registered.authority.clone(),
     ) {
         Ok(service) => service,
         Err(_) => return unavailable(request_id),
@@ -179,9 +184,10 @@ pub(super) fn compare_proposal(
         return unavailable(request_id);
     };
     let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence = match tracedecay_application::work::work_intelligence_service(
+    let intelligence = match tracedecay_application::work::authorized_work_intelligence_service(
         &registered.database,
         binding,
+        registered.authority.clone(),
     ) {
         Ok(service) => service,
         Err(_) => return unavailable(request_id),

@@ -146,6 +146,24 @@ impl RegisteredWorkProductServicesV1 {
         })
     }
 
+    pub fn attach_with_attempt_authority(
+        db: &RegisteredGlobalDb,
+        binding: tracedecay_contracts::WorkProductBindingV1,
+        authority: tracedecay_domain::WorkAuthority,
+    ) -> tracedecay_domain::errors::Result<RegisteredAuthorizedWorkProductServicesV1> {
+        let storage = db.work_storage()?;
+        Ok(RegisteredAuthorizedWorkProductServicesV1 {
+            reads: tracedecay_contracts::WorkProductReadServiceV1::new(
+                tracedecay_rusqlite_runtime::work_product::AuthorizedWorkProductReadStorageV1::new(
+                    storage.clone(),
+                    authority,
+                ),
+                storage,
+                binding,
+            ),
+        })
+    }
+
     pub const fn reads(
         &self,
     ) -> &tracedecay_contracts::WorkProductReadServiceV1<
@@ -188,6 +206,24 @@ impl RegisteredWorkProductServicesV1 {
         tracedecay_contracts::RuntimeWorkRetryEvidenceV1,
     > {
         &self.retry
+    }
+}
+
+pub struct RegisteredAuthorizedWorkProductServicesV1 {
+    reads: tracedecay_contracts::WorkProductReadServiceV1<
+        tracedecay_rusqlite_runtime::work_product::AuthorizedWorkProductReadStorageV1,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+}
+
+impl RegisteredAuthorizedWorkProductServicesV1 {
+    pub const fn reads(
+        &self,
+    ) -> &tracedecay_contracts::WorkProductReadServiceV1<
+        tracedecay_rusqlite_runtime::work_product::AuthorizedWorkProductReadStorageV1,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.reads
     }
 }
 
@@ -337,6 +373,27 @@ pub fn work_intelligence_service(
     let storage = db.work_storage()?;
     Ok(tracedecay_contracts::WorkIntelligenceServiceV1::new(
         storage.clone(),
+        storage,
+        binding,
+    ))
+}
+
+pub fn authorized_work_intelligence_service(
+    db: &RegisteredGlobalDb,
+    binding: tracedecay_contracts::WorkProductBindingV1,
+    authority: tracedecay_domain::WorkAuthority,
+) -> tracedecay_domain::errors::Result<
+    tracedecay_contracts::WorkIntelligenceServiceV1<
+        tracedecay_rusqlite_runtime::work_product::AuthorizedWorkProductReadStorageV1,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+> {
+    let storage = db.work_storage()?;
+    Ok(tracedecay_contracts::WorkIntelligenceServiceV1::new(
+        tracedecay_rusqlite_runtime::work_product::AuthorizedWorkProductReadStorageV1::new(
+            storage.clone(),
+            authority,
+        ),
         storage,
         binding,
     ))
