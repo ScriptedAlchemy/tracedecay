@@ -2036,6 +2036,18 @@ def execute_effect(
                 }
             )
         else:
+            if (
+                row["verdict"] == "FAIL"
+                and prepared.accepted_terminal_problem is not None
+                and response_problem_code(response) == prepared.accepted_terminal_problem
+            ):
+                row.update(
+                    {
+                        "verdict": "PASS",
+                        "note": "admitted terminal problem retained with exact settlement evidence",
+                        "accepted_terminal_problem": True,
+                    }
+                )
             if prepared.settlement == "verified":
                 row["rollback"] = "verified"
                 row["rollback_note"] = rollback_note

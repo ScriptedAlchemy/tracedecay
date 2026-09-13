@@ -35,6 +35,7 @@ class PreparedJourney:
     arguments: dict[str, Any]
     cleanup: Callable[[dict[str, Any]], str]
     settlement: str = "verified"
+    accepted_terminal_problem: tuple[str, str] | None = None
 
 
 def _fact_trust(response: dict[str, Any], fact_id: str | int) -> float | None:
@@ -3618,10 +3619,27 @@ def prepare(
         )
 
         def cleanup(response: dict[str, Any]) -> str:
+            settled_problem = next(
+                (
+                    value
+                    for value in objects(response)
+                    if value.get("kind") == "execution_failed"
+                    and value.get("code")
+                    == "application.automation-run.execution-failed"
+                    and value.get("terminality") == "admitted_terminal"
+                    and isinstance(value.get("request_id"), str)
+                    and value["request_id"]
+                ),
+                None,
+            )
             run_id = first_value(response, {"run_id"})
+            if (not isinstance(run_id, str) or not run_id) and settled_problem is not None:
+                # FactStoreCurateRequestV1 deliberately projects the transport
+                # replay identity straight through as the durable run identity.
+                run_id = settled_problem["request_id"]
             if not isinstance(run_id, str) or not run_id:
                 raise JourneyError("fact curator omitted its durable run identity")
-            if not any(
+            if settled_problem is None and not any(
                 value.get("run_id") == run_id and value.get("task") == "memory_curator"
                 for value in objects(response)
             ):
@@ -3637,7 +3655,8 @@ def prepare(
                     for value in objects(viewed)
                     if value.get("run_id") == run_id
                     and value.get("task") == "memory_curator"
-                    and value.get("status") in {"succeeded", "skipped"}
+                    and value.get("status")
+                    in ({"failed"} if settled_problem is not None else {"succeeded", "skipped"})
                 ),
                 None,
             )
@@ -3653,6 +3672,10 @@ def prepare(
             },
             cleanup,
             settlement="isolated",
+            accepted_terminal_problem=(
+                "execution_failed",
+                "application.automation-run.execution-failed",
+            ),
         )
     if name == "tracedecay_memory_status":
         content = "catalog sweep temporary status fact"
