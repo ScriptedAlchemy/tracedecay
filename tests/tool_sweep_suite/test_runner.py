@@ -1633,7 +1633,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             ),
             "tracedecay_configuration_get": cls.response(
                 '{"payload":{"key":"work.topology_policy.v1",'
-                '"revision_id":"configuration.fixture.v1",'
+                '"revision_id":"configuration.fixture.current",'
                 '"effective_value":{"kind":"work_topology_policy",'
                 '"value":{"review_topology":{"allowed":'
                 '["no_review","independent_review","standard_pull_requests"]}}}}}'
@@ -1850,7 +1850,23 @@ class FixturePrimingRetryTests(unittest.TestCase):
             client.calls,
         )
         self.assertEqual(fixture["configuration_scalar_value"], {"kind": "boolean", "value": False})
-        self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
+        self.assertEqual(fixture["configuration_revision"], "configuration.fixture.current")
+        topology_read = next(
+            index
+            for index, call in enumerate(client.calls)
+            if call == (
+                "tracedecay_configuration_get",
+                {"key": "work.topology_policy.v1", "format": "json"},
+            )
+        )
+        self.assertGreater(
+            topology_read,
+            next(
+                index
+                for index, (name, _arguments) in enumerate(client.calls)
+                if name == "tracedecay_work_cancel_attempt"
+            ),
+        )
 
     def test_delayed_automation_and_lcm_producers_are_consumed(self) -> None:
         runner = load_runner()

@@ -974,36 +974,7 @@ def prime_fixture_values(
         configuration_key = "work.topology_policy.v1"
         if configuration_key not in keys:
             raise SweepError("configuration list producer omitted work.topology_policy.v1")
-        setting = _producer_call(
-            client,
-            "tracedecay_configuration_get",
-            {"key": configuration_key, "format": "json"},
-            deadline("tracedecay_configuration_get"),
-        )
-        revision = first_value(setting, {"revision_id"})
-        effective_value = next(
-            (
-                value["effective_value"]
-                for value in _objects(setting)
-                if isinstance(value.get("effective_value"), dict)
-            ),
-            None,
-        )
-        if (
-            not isinstance(revision, str)
-            or not revision
-            or not isinstance(effective_value, dict)
-            or effective_value.get("kind") != "work_topology_policy"
-            or "value" not in effective_value
-        ):
-            raise SweepError("configuration get producer omitted topology value or revision")
-        fixture.update(
-            {
-                "configuration_key": configuration_key,
-                "configuration_revision": revision,
-                "configuration_topology_policy": effective_value["value"],
-            }
-        )
+        fixture["configuration_key"] = configuration_key
 
         scalar_key = "diagnostics.prewarm.v1"
         if scalar_key not in keys:
@@ -1341,6 +1312,41 @@ def prime_fixture_values(
                 ),
                 deadline,
                 effect_target,
+            )
+
+    if effect_target is None:
+        with prime_group("configuration_preview"):
+            configuration_key = fixture["configuration_key"]
+            setting = _producer_call(
+                client,
+                "tracedecay_configuration_get",
+                {"key": configuration_key, "format": "json"},
+                deadline("tracedecay_configuration_get"),
+            )
+            revision = first_value(setting, {"revision_id"})
+            effective_value = next(
+                (
+                    value["effective_value"]
+                    for value in _objects(setting)
+                    if isinstance(value.get("effective_value"), dict)
+                ),
+                None,
+            )
+            if (
+                not isinstance(revision, str)
+                or not revision
+                or not isinstance(effective_value, dict)
+                or effective_value.get("kind") != "work_topology_policy"
+                or "value" not in effective_value
+            ):
+                raise SweepError(
+                    "configuration get producer omitted topology value or revision"
+                )
+            fixture.update(
+                {
+                    "configuration_revision": revision,
+                    "configuration_topology_policy": effective_value["value"],
+                }
             )
 
 
