@@ -175,7 +175,11 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     if has_non_scalar {
         let _ = writeln!(out, "Example (whole MCP arguments object via stdin):");
         let _ = writeln!(out, "  tracedecay tool {short} --args - <<'JSON'");
-        let _ = writeln!(out, "  {}", example_args_object(props, &required));
+        let _ = writeln!(
+            out,
+            "  {}",
+            example_args_object(&def.input_schema, props, &required)
+        );
         let _ = writeln!(out, "  JSON");
         let _ = writeln!(out);
     }
@@ -374,12 +378,17 @@ const EXAMPLE_MAX_DEPTH: usize = 6;
 /// Object-valued properties are expanded recursively. Emitting `{}` for them —
 /// as this did before — produced an example the daemon rejects outright
 /// whenever the nested schema has required keys of its own.
-fn example_args_object(props: &serde_json::Map<String, Value>, required: &[&str]) -> String {
-    serde_json::to_string(&example_object_value(props, required, 0))
+fn example_args_object(
+    root: &Value,
+    props: &serde_json::Map<String, Value>,
+    required: &[&str],
+) -> String {
+    serde_json::to_string(&example_object_value(root, props, required, 0))
         .unwrap_or_else(|_| "{}".to_string())
 }
 
 fn example_object_value(
+    root: &Value,
     props: &serde_json::Map<String, Value>,
     required: &[&str],
     depth: usize,
@@ -388,24 +397,28 @@ fn example_object_value(
     let mut entries: Vec<(&String, &Value)> = props.iter().collect();
     entries.sort_by_key(|(key, _)| (!required.contains(&key.as_str()), (*key).clone()));
     for (key, schema) in entries {
+        let schema = resolve_property_schema(root, schema);
         let ty = schema_type(schema);
         if !required.contains(&key.as_str()) && !matches!(ty, "array" | "object") {
             continue;
         }
-        example.insert(key.clone(), placeholder_value(key, schema, ty, depth));
+        example.insert(
+            key.clone(),
+            placeholder_value(root, key, schema, ty, depth),
+        );
     }
     Value::Object(example)
 }
 
 /// Expand an object schema into a skeleton containing its required keys.
-fn example_from_object_schema(schema: &Value, depth: usize) -> Value {
+fn example_from_object_schema(root: &Value, schema: &Value, depth: usize) -> Value {
     if depth >= EXAMPLE_MAX_DEPTH {
         return Value::Object(serde_json::Map::new());
     }
     // A closed variant union: show the first variant, which the accompanying
     // shape note lists alongside its alternatives.
     if let Some(variant) = one_of_variants(schema).and_then(|variants| variants.first()) {
-        return example_from_object_schema(variant, depth + 1);
+        return example_from_object_schema(root, variant, depth + 1);
     }
     let Some(props) = schema.get("properties").and_then(Value::as_object) else {
         return Value::Object(serde_json::Map::new());
@@ -415,10 +428,10 @@ fn example_from_object_schema(schema: &Value, depth: usize) -> Value {
         .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    example_object_value(props, &required, depth + 1)
+    example_object_value(root, props, &required, depth + 1)
 }
 
-fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value {
+fn placeholder_value(root: &Value, key: &str, schema: &Value, ty: &str, depth: usize) -> Value {
     match ty {
         "boolean" => Value::Bool(true),
         "integer" | "number" => Value::from(10),
@@ -433,16 +446,24 @@ fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value
                         .unwrap_or(Value::Null);
                     let inner_type = schema_type(&inner);
                     Value::Array(vec![
-                        placeholder_value(key, &inner, inner_type, depth + 1),
-                        placeholder_value(key, &inner, inner_type, depth + 1),
+                        placeholder_value(root, key, &inner, inner_type, depth + 1),
+                        placeholder_value(root, key, &inner, inner_type, depth + 1),
                     ])
                 }
-                "object" => example_from_object_schema(items.unwrap_or(&Value::Null), depth + 1),
-                other => placeholder_value(key, items.unwrap_or(&Value::Null), other, depth + 1),
+                "object" => {
+                    example_from_object_schema(root, items.unwrap_or(&Value::Null), depth + 1)
+                }
+                other => placeholder_value(
+                    root,
+                    key,
+                    items.unwrap_or(&Value::Null),
+                    other,
+                    depth + 1,
+                ),
             };
             Value::Array(vec![element])
         }
-        "object" => example_from_object_schema(schema, depth),
+        "object" => example_from_object_schema(root, schema, depth),
         _ => {
             if let Some(literal) = schema.get("const") {
                 return literal.clone();
@@ -543,6 +564,27 @@ mod tests {
         assert_eq!(parsed["meta"]["temporal"]["kind"], json!("current"));
         // Optional scalar sub-keys stay out, exactly as at the top level.
         assert!(parsed["scope"].get("path_prefix").is_none());
+    }
+
+    #[test]
+    fn help_example_expands_referenced_object_schemas() {
+        let definition = tracedecay_mcp_catalog::get_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_code_implementations")
+            .expect("code_implementations is advertised");
+
+        let help = render_tool_cli_help(&definition);
+        let example = help
+            .lines()
+            .find(|line| line.trim_start().starts_with('{'))
+            .expect("example object")
+            .trim();
+        let parsed: Value = serde_json::from_str(example).expect("example parses as JSON");
+
+        assert!(parsed["meta"].is_object(), "{example}");
+        assert!(parsed["scope"].is_object(), "{example}");
+        assert!(parsed["selector"].is_object(), "{example}");
     }
 
     /// The rename help must name every key the daemon requires in the accepted
