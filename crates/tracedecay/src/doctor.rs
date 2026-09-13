@@ -5,6 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
+use tracedecay_contracts::project_open::{ProjectOpenStatusReasonV1, ProjectOpenStatusV1};
+use tracedecay_contracts::storage::{
+    SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
+};
 use tracedecay_contracts::{ApplicationOutcome, ResolvedSetting};
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
@@ -117,17 +121,21 @@ pub async fn run_doctor(
             dc.warn(&format!("{RUNTIME_TELEMETRY_PENDING} within {RUNTIME_TELEMETRY_WARMUP:?}; health remains unknown until the project is admitted"));
             DatabaseHealth::unknown("daemon_storage_telemetry_pending")
         }
-        Ok(Some(status)) => match canonical_daemon_doctor_report(status)? {
-            Some(report) => {
-                let storage_health = database_health_from_canonical_report(&report);
-                render_canonical_doctor_report(&mut dc, &report);
-                storage_health
+        Ok(Some(status)) => {
+            render_project_open_status(&mut dc, status)?;
+            match canonical_daemon_doctor_report(status)? {
+                Some(report) => {
+                    let storage_health = database_health_from_canonical_report(&report);
+                    render_canonical_doctor_report(&mut dc, &report);
+                    render_schema_convergences(&mut dc, status)?;
+                    storage_health
+                }
+                None => {
+                    dc.warn("Canonical Doctor report is unavailable; health remains unknown");
+                    DatabaseHealth::unknown("canonical_doctor_report_unavailable")
+                }
             }
-            None => {
-                dc.warn("Canonical Doctor report is unavailable; health remains unknown");
-                DatabaseHealth::unknown("canonical_doctor_report_unavailable")
-            }
-        },
+        }
         Err(error) => {
             report_daemon_diagnostics_unavailable(
                 &mut dc,
@@ -179,6 +187,68 @@ pub async fn run_doctor(
     print_summary(&dc);
 
     doctor_result(&dc, &storage_health)
+}
+
+fn render_project_open_status(
+    dc: &mut DoctorCounters,
+    status: &serde_json::Value,
+) -> tracedecay_domain::errors::Result<()> {
+    let Some(value) = status.get("project_open").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let project_open: ProjectOpenStatusV1 = serde_json::from_value(value.clone())?;
+    let message = format!(
+        "Project open: {:?} ({:?}){}",
+        project_open.state,
+        project_open.reason,
+        project_open
+            .retry_after_ms
+            .map_or_else(String::new, |delay| format!(", retry after {delay} ms"))
+    );
+    if project_open.reason == ProjectOpenStatusReasonV1::UnrepairableVerdict {
+        dc.fail(&message);
+    } else {
+        dc.warn(&message);
+    }
+    Ok(())
+}
+
+fn render_schema_convergences(
+    dc: &mut DoctorCounters,
+    status: &serde_json::Value,
+) -> tracedecay_domain::errors::Result<()> {
+    let Some(value) = status.pointer("/doctor_report/schema_convergences") else {
+        return Ok(());
+    };
+    let findings: Vec<SchemaConvergenceFindingV1> = serde_json::from_value(value.clone())?;
+    for finding in findings {
+        let progress = match finding.progress {
+            Some(SchemaConvergenceProgressV1::Rows { done, remaining }) => {
+                format!(", rows {done} done / {remaining} remaining")
+            }
+            Some(SchemaConvergenceProgressV1::Pages { done, remaining }) => {
+                format!(", pages {done} done / {remaining} remaining")
+            }
+            None => String::new(),
+        };
+        let message = format!(
+            "Schema convergence: {} {} {}{progress}, started at {}",
+            finding.store.as_str(),
+            finding.stage.as_str(),
+            finding.state.as_str(),
+            finding.started_at_micros
+        );
+        match finding.state {
+            SchemaConvergenceStateV1::Completed => dc.pass(&message),
+            SchemaConvergenceStateV1::Degraded => match finding.degraded_row {
+                Some(row) => dc.fail(&format!("{message}: {row}")),
+                None => dc.fail(&message),
+            },
+            SchemaConvergenceStateV1::PendingSchemaMigration
+            | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress => dc.warn(&message),
+        }
+    }
+    Ok(())
 }
 
 fn should_run_host_healthcheck(agent: &dyn agents::AgentIntegration, home: &Path) -> bool {
@@ -413,6 +483,9 @@ fn daemon_runtime_status(
     let mut status = serde_json::json!({ "storage_health": storage });
     if let Some(value) = runtime.get("doctor_report").cloned() {
         status["doctor_report"] = value;
+    }
+    if let Some(value) = runtime.get("project_open").cloned() {
+        status["project_open"] = value;
     }
     Ok(Some(status))
 }
