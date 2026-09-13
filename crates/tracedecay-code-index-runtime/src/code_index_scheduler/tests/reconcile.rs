@@ -2835,19 +2835,15 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
         .send(())
         .expect("release publication projection");
 
-    let ready = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(ready) = registry
-                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-                .await
-            {
-                break ready;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("post-projection source proof never admitted the exact active generation");
+    let ready = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        Duration::from_secs(10),
+        || {
+            registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        },
+    )
+    .await;
     let generation = ready.generation().manifest().generation_id.clone();
 
     // Exercise the ordinary expiry path too: one readiness request starts a
@@ -4993,11 +4989,13 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
     // starving every other worktree's query.
     let slow_registry = registry.clone();
     let slow_path = slow.path().to_path_buf();
-    let slow_query =
-        tokio::spawn(async move { slow_registry.latest_complete_fresh(&slow_path).await });
-    // Let the slow query enter its blocking reconcile section (acquire and drop
-    // the map lock, then park on the scheduler lock) before the fast query runs.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let query_start = Arc::new(tokio::sync::Barrier::new(2));
+    let slow_start = Arc::clone(&query_start);
+    let slow_query = tokio::spawn(async move {
+        slow_start.wait().await;
+        slow_registry.latest_complete_fresh(&slow_path).await
+    });
+    query_start.wait().await;
 
     // The fast worktree's query must complete within a bounded time even while
     // the slow worktree's reconcile is stuck holding its scheduler lock.
