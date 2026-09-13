@@ -118,6 +118,11 @@ async fn drain_all_hosts(
     let _sweep = HookReplaySweepObservation::begin();
     let project_id =
         tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout());
+    let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
+        &crate::hook_runtime(),
+        graph.hook_store_layout(),
+    )
+    .ok();
     for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
         drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await;
@@ -146,10 +151,14 @@ async fn drain_all_hosts(
         let Some(project_id) = project_id else {
             continue;
         };
+        let Some(worktree_id) = worktree_id else {
+            continue;
+        };
         let report = Box::pin(drain_admitted_host_spool(
             data_root,
             *host,
             project_id,
+            worktree_id,
             now,
             graph,
             project_sessions,
@@ -176,6 +185,7 @@ async fn drain_admitted_host_spool(
     data_root: &Path,
     host: HookHostV1,
     project_id: [u8; 16],
+    worktree_id: [u8; 16],
     now: UtcMicros,
     graph: &crate::project::TraceDecay,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
@@ -194,7 +204,7 @@ async fn drain_admitted_host_spool(
         return None;
     }
     let (spool, _report) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now).ok()?;
-    let binding = published_hook_scope_binding(data_root, host, now);
+    let binding = published_hook_scope_binding(data_root, worktree_id, host, now);
     Some(
         Box::pin(drain_host_spool_once(
             spool,

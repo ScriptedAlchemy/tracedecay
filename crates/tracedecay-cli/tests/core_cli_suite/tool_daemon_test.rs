@@ -648,7 +648,7 @@ fn enroll_native_capture_project(
     std::fs::create_dir_all(&data_root).unwrap();
     let now = capture_test_now();
     HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(hook_configuration_path(
-        &data_root, host,
+        &data_root, [3; 16], host,
     )))
     .publish(HookConfigurationSnapshotV1 {
         schema_version: HOOK_CONFIGURATION_SCHEMA_VERSION,
