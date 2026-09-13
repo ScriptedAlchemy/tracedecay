@@ -419,35 +419,52 @@ fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
     );
 }
 
-fn tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
+fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
     let project_arg = project.to_string_lossy().to_string();
-    let output = tracedecay_command_with_home(home)
-        .current_dir(project)
-        .args([
-            "tool",
-            "--project",
-            &project_arg,
-            "status",
-            "--json",
-            "--format",
-            "json",
-        ])
-        .output()
-        .expect("tracedecay tool status should run");
-    assert!(
-        output.status.success(),
-        "status should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let result: Value = serde_json::from_slice(&output.stdout).expect("tool result json");
-    let text = result["content"][0]["text"]
-        .as_str()
-        .expect("status result text");
-    let payload: Value = serde_json::from_str(text).expect("status payload json");
-    payload["server"]["tool_calls"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("missing server.tool_calls in {payload}"))
+    let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+    loop {
+        let output = tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args([
+                "tool",
+                "--project",
+                &project_arg,
+                "status",
+                "--json",
+                "--format",
+                "json",
+            ])
+            .output()
+            .expect("tracedecay tool status should run");
+        assert!(
+            output.status.success(),
+            "status should succeed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).expect("tool result json");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("status result text");
+        let payload: Value = serde_json::from_str(text).expect("status payload json");
+        if let Some(tool_calls) = payload["server"]["tool_calls"].as_u64() {
+            return tool_calls;
+        }
+        assert_eq!(
+            payload["project_open"]["state"], "converging",
+            "status without server stats must report typed project convergence: {payload}"
+        );
+        let retry_after = Duration::from_millis(
+            payload["project_open"]["retry_after_ms"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("converging status omitted retry delay: {payload}")),
+        );
+        assert!(
+            Instant::now() + retry_after <= deadline,
+            "project server did not converge before the CLI roundtrip deadline: {payload}"
+        );
+        std::thread::sleep(retry_after);
+    }
 }
 
 fn configuration_tool_success(
@@ -1386,8 +1403,8 @@ fn daemon_reuses_project_engine_across_tool_clients() {
     init_project_with_cli(&home_path, &project_path);
     let _daemon = spawn_tracedecay_daemon(&home_path);
 
-    let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
-    let second_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let first_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
+    let second_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
 
     // `init` is brokered through the daemon now (`tracedecay_status` then
     // `tracedecay_admin_sync`), so the fixture has already spent tool calls on
@@ -1441,7 +1458,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     });
 
     let _daemon = spawn_tracedecay_daemon(&home_path);
-    let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let first_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
     let output = tracedecay_command_with_home(&home_path)
         .arg("doctor")
         .current_dir(&project_path)
@@ -1459,7 +1476,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         "doctor must stay read-only while daemon owns the database:\n{stderr}"
     );
 
-    let second_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let second_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
     assert!(
         second_tool_calls > first_tool_calls,
         "daemon project engine must remain usable after doctor"
