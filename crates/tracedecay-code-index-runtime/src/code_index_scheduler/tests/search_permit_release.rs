@@ -15,8 +15,8 @@ use std::thread::ThreadId;
 
 use tracedecay_contracts::CancellationSignal;
 use tracedecay_query::code_search::{
-    CodeIndexSearchAuthorityV1, CodeIndexSearchModeV1, CodeIndexSearchOutcomeV1,
-    CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
+    CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor, CodeIndexSearchModeV1,
+    CodeIndexSearchOutcomeV1, CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
 };
 
 use crate::code_index_executor::code_index_search_executor;
@@ -265,33 +265,66 @@ async fn cancelled_lexical_scan_releases_the_search_permit_to_the_next_request()
     registry.shutdown().await;
 }
 
-/// A request whose dispatch deadline expires while its search is parked in
-/// generation resolution must release the execution permit to the next
-/// request.
+/// Park one request on the scheduler's mounted map behind every waiter already
+/// queued for it, and hand back the signals that observe and end that hold.
 ///
-/// Generation resolution is the first thing an admitted search does, it runs
-/// with the single execution permit already held, and it consults no control:
-/// it parks on the scheduler's mounted map and, when nothing is servable, on
-/// the in-flight decode. Holding that map is exactly the window a busy daemon
-/// spends there. Before the permit followed request settlement, an expired
-/// request left the permit held by work nobody was waiting for, and the retry
-/// its `retryable=true` refusal invited was refused
-/// `search_capacity_unavailable` for as long as the abandoned scan sat there.
-#[tokio::test]
-async fn expired_request_parked_in_generation_resolution_releases_the_permit() {
-    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 0 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+/// `tokio::sync::Mutex` serves its waiters in the order they enter the queue,
+/// so "behind every current waiter" is a position, not a timing guess: the
+/// returned `queued` notification and the enqueue itself happen in one poll,
+/// so a task that observes `queued` cannot have run between them. From there
+/// the map belongs to this hold the moment the waiter ahead of it releases,
+/// and stays held until `release` is notified.
+fn park_mounted_map_behind_current_waiters(
+    registry: &CodeIndexSchedulerRegistryV1,
+) -> (
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+    tokio::task::JoinHandle<()>,
+) {
+    let queued = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mounted = Arc::clone(&registry.mounted);
+    let task = tokio::spawn({
+        let queued = Arc::clone(&queued);
+        let release = Arc::clone(&release);
+        async move {
+            let held = mounted.lock_owned();
+            queued.notify_one();
+            let held = held.await;
+            release.notified().await;
+            drop(held);
+        }
+    });
+    (queued, release, task)
+}
 
+/// One mounted worktree and a search executor over it whose scope resolution
+/// reports.
+///
+/// Scope resolution is the last thing a request does before the ranking
+/// authority read that takes the scheduler's mounted map, so the report is how
+/// a deadline test observes that a request is queued for that map rather than
+/// polling for it.
+async fn map_reporting_search_executor(
+    fixture: &GitFixture,
+    store: &TempDir,
+    authority: &str,
+) -> (
+    CodeIndexSchedulerRegistryV1,
+    CodeIndexSearchExecutor,
+    Arc<tokio::sync::Notify>,
+) {
+    let (registry, scope) = mounted_core_query_worktree(fixture, store).await;
     let admitted = Arc::new(tokio::sync::Notify::new());
     let executor = code_index_search_executor(
         registry.clone(),
         test_project_id(),
         OpenAdmission(CodeIndexSearchAuthorityV1 {
-            principal: PrincipalId::new("principal.search-permit.deadline").expect("principal"),
-            authorization_revision: AuthorizationRevision::new(
-                "authorization.search-permit.deadline",
-            )
+            principal: PrincipalId::new(format!("principal.search-permit.{authority}"))
+                .expect("principal"),
+            authorization_revision: AuthorizationRevision::new(format!(
+                "authorization.search-permit.{authority}"
+            ))
             .expect("authorization revision"),
         }),
         AdmittingScopeResolver {
@@ -299,47 +332,139 @@ async fn expired_request_parked_in_generation_resolution_releases_the_permit() {
             admitted: Arc::clone(&admitted),
         },
     );
+    (registry, executor, admitted)
+}
 
-    // The control-free window, reproduced: every generation resolution takes
-    // this lock, and none of them checks the request control first.
-    let parked_resolution = registry.mounted.lock().await;
-
+/// A search whose dispatch deadline expires shortly after it is issued —
+/// long enough to reach the park each test stages, short enough that the test
+/// observes the settlement rather than the work.
+fn expiring_request(project_root: &Path) -> CodeIndexSearchRequestV1 {
     let deadline = Deadline::new(UtcMicros(
         tracedecay_contracts::clock::now_micros().0 + 300_000,
     ))
     .expect("deadline");
-    let abandoned = tokio::spawn(executor(CodeIndexSearchRequestV1 {
+    CodeIndexSearchRequestV1 {
         deadline: Some(deadline),
-        ..search_request(fixture.path(), None)
-    }));
-    admitted.notified().await;
+        ..search_request(project_root, None)
+    }
+}
 
-    let refused = executor(search_request(fixture.path(), None)).await;
-    assert_eq!(
-        unavailable_reason(&refused),
-        Some(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable),
-        "the parked request owns the single execution permit: {refused:?}"
-    );
-
+/// Join a request the test abandoned mid-park and assert it reports the
+/// deadline it was dispatched under.
+///
+/// The join is bounded an order of magnitude above that deadline, so the bound
+/// is not the assertion: a request that settles on its own deadline never
+/// reaches it, and one parked on `unbounded_await` names the await that
+/// regressed instead of hanging the suite.
+async fn abandoned_request_reports_its_deadline(
+    abandoned: tokio::task::JoinHandle<CodeIndexSearchOutcomeV1>,
+    unbounded_await: &str,
+) {
     let outcome = tokio::time::timeout(Duration::from_secs(5), abandoned)
         .await
-        .expect(
-            "a request past its deadline must stop holding the execution permit even where \
-             generation resolution consults no control",
-        )
+        .unwrap_or_else(|_| {
+            panic!("a request past its deadline must stop waiting on {unbounded_await}")
+        })
         .expect("executor task joins");
     assert_eq!(
         unavailable_reason(&outcome),
         Some(CodeIndexSearchUnavailableReasonV1::TimedOut),
         "the expired request reports the typed deadline state: {outcome:?}"
     );
+}
 
-    drop(parked_resolution);
-    let admitted_next = executor(search_request(fixture.path(), None)).await;
+/// The expired request left neither the execution permit nor the mounted map
+/// held: an ordinary request issued after the staged hold ends completes.
+async fn next_request_is_admitted(executor: &CodeIndexSearchExecutor, project_root: &Path) {
+    let admitted = executor(search_request(project_root, None)).await;
     assert!(
-        matches!(admitted_next, CodeIndexSearchOutcomeV1::Complete(_)),
-        "the permit released by the expired request admits the next request: {admitted_next:?}"
+        matches!(admitted, CodeIndexSearchOutcomeV1::Complete(_)),
+        "the expired request released what the next request needs: {admitted:?}"
     );
+}
+
+/// A request whose dispatch deadline expires while its search is parked in
+/// generation resolution must release the execution permit to the next
+/// request.
+///
+/// Generation resolution runs with the single execution permit already held
+/// and consults no control: it parks on the scheduler's mounted map and, when
+/// nothing is servable, on the in-flight decode. Holding that map is exactly
+/// the window a busy daemon spends there. Before the permit followed request
+/// settlement, an expired request left the permit held by work nobody was
+/// waiting for, and the retry its `retryable=true` refusal invited was refused
+/// `search_capacity_unavailable` for as long as the abandoned scan sat there.
+///
+/// The map cannot simply be held for the whole test: an admitted search reads
+/// its ranking authority off that same map *before* it takes the permit, so a
+/// map held from the start parks the request short of the permit and deadlocks
+/// any second request issued to observe it. The hold is therefore staged
+/// through the map's own queue, so the request passes the pre-permit read,
+/// takes the permit, and only then finds the map gone.
+#[tokio::test]
+async fn expired_request_parked_in_generation_resolution_releases_the_permit() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, executor, admitted) =
+        map_reporting_search_executor(&fixture, &store, "deadline").await;
+
+    let admission_resolution = Arc::clone(&registry.mounted).lock_owned().await;
+
+    // Observing the scope-resolution report proves the request is queued for
+    // the map behind this hold.
+    let abandoned = tokio::spawn(executor(expiring_request(fixture.path())));
+    admitted.notified().await;
+
+    // Queued behind the request, so the map is taken again the instant the
+    // request's authority read releases it — the control-free window,
+    // reproduced with the permit already held.
+    let (map_queued, release_map, map_hold) = park_mounted_map_behind_current_waiters(&registry);
+    map_queued.notified().await;
+    drop(admission_resolution);
+
+    abandoned_request_reports_its_deadline(
+        abandoned,
+        "generation resolution, which holds the execution permit and consults no control",
+    )
+    .await;
+
+    release_map.notify_one();
+    map_hold.await.expect("the mounted-map hold joins");
+    next_request_is_admitted(&executor, fixture.path()).await;
+
+    registry.shutdown().await;
+}
+
+/// A request whose dispatch deadline expires before it is ever admitted must
+/// report that deadline, not wait out the daemon.
+///
+/// The ranking-authority read an admitted search takes before the execution
+/// permit parks on the same mounted map, and it consults no control either. A
+/// daemon holding that map across a mount, retire, or shutdown left a request
+/// whose caller had already given up waiting there with nothing to end it: the
+/// deadline it was dispatched under never became a bound on its own wait.
+#[tokio::test]
+async fn expired_request_parked_before_admission_reports_the_deadline() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, executor, admitted) =
+        map_reporting_search_executor(&fixture, &store, "admission").await;
+
+    // Held for the whole request: the authority read this request parks in
+    // runs before it is ever admitted, so nothing hands the map back.
+    let held_resolution = registry.mounted.lock().await;
+
+    let abandoned = tokio::spawn(executor(expiring_request(fixture.path())));
+    admitted.notified().await;
+
+    abandoned_request_reports_its_deadline(
+        abandoned,
+        "the mounted map, which pre-permit authority resolution takes with no control",
+    )
+    .await;
+
+    drop(held_resolution);
+    next_request_is_admitted(&executor, fixture.path()).await;
 
     registry.shutdown().await;
 }
