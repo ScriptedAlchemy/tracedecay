@@ -172,6 +172,12 @@ impl Ord for PreparedTermMergeCursorV1<'_> {
 struct PreparedTermInsertPlanV1<'a> {
     entries: Vec<PreparedTermInsertRefV1<'a>>,
     merge_heap: BinaryHeap<Reverse<PreparedTermMergeCursorV1<'a>>>,
+    /// The batch's distinct terms with the ids this plan content-addressed,
+    /// ascending by term text. `vocabulary` is interned in exactly that
+    /// order, so the sealed page layout does not depend on how the plan
+    /// collected them, and the intern step neither rewalks every posting nor
+    /// recomputes a digest this pass already produced.
+    interned_terms: Vec<(&'a str, i64)>,
 }
 
 // `exact_postings` shares `term_postings`'s clustered key shape (field,
@@ -259,6 +265,10 @@ impl Ord for PreparedExactMergeCursorV1<'_> {
 struct PreparedExactInsertPlanV1<'a> {
     entries: Vec<PreparedExactInsertRefV1<'a>>,
     merge_heap: BinaryHeap<Reverse<PreparedExactMergeCursorV1<'a>>>,
+    /// The batch's distinct exact terms with the ids this plan
+    /// content-addressed, ascending by id — the order `exact_vocabulary` was
+    /// always interned in.
+    interned_terms: Vec<(&'a [u8], i64)>,
 }
 
 const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 14] = [
@@ -2585,7 +2595,8 @@ fn prepare_term_insert_plan<'a>(
             }
         }
     }
-    drop(term_ids);
+    let mut interned_terms: Vec<(&str, i64)> = term_ids.into_iter().collect();
+    interned_terms.sort_unstable_by_key(|(term, _)| *term);
     for run in entries.chunks_mut(TERM_INSERT_SORT_RUN_ROWS) {
         checkpoint(control)?;
         run.sort_unstable_by_key(PreparedTermInsertRefV1::key);
@@ -2614,6 +2625,7 @@ fn prepare_term_insert_plan<'a>(
     Ok(PreparedTermInsertPlanV1 {
         entries,
         merge_heap,
+        interned_terms,
     })
 }
 
@@ -2701,22 +2713,35 @@ fn prepare_exact_insert_plan<'a>(
             "bounded lexical exact insert plan allocation failed: {error}"
         ))
     })?;
+    // One digest per distinct term rather than per posting: the same term
+    // repeats across documents, and the intern step needs the distinct set
+    // anyway.
+    let mut term_ids: HashMap<&[u8], i64> = HashMap::new();
     for page in pages {
         checkpoint(control)?;
         for document in &page.documents {
             checkpoint(control)?;
             for (field, term) in &document.exact_postings {
+                let term = term.as_slice();
+                let term_id = *term_ids
+                    .entry(term)
+                    .or_insert_with(|| stable_exact_term_id(term));
                 entries.push(PreparedExactInsertRefV1 {
                     document_id: document.document_id,
                     field: field.as_str(),
                     field_code: exact_field_code_from_encoded(field)?,
-                    term: term.as_slice(),
-                    term_id: stable_exact_term_id(term),
+                    term,
+                    term_id,
                     layout,
                 });
             }
         }
     }
+    let mut interned_terms: Vec<(&[u8], i64)> = term_ids.into_iter().collect();
+    // Ascending by id, then by bytes: two distinct terms sharing an id is the
+    // collision `intern_exact_terms` rejects, and it must reject the same one
+    // on every run rather than whichever the hash map happened to yield first.
+    interned_terms.sort_unstable_by_key(|(term, term_id)| (*term_id, *term));
     for run in entries.chunks_mut(EXACT_INSERT_SORT_RUN_ROWS) {
         checkpoint(control)?;
         run.sort_unstable_by(|left, right| left.key().cmp(&right.key()));
@@ -2745,6 +2770,7 @@ fn prepare_exact_insert_plan<'a>(
     Ok(PreparedExactInsertPlanV1 {
         entries,
         merge_heap,
+        interned_terms,
     })
 }
 
@@ -3385,22 +3411,22 @@ fn append_prepared_imports(
     page: &PreparedCodeLexicalArtifactPageV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut evidence = transaction
+        .prepare_cached("INSERT INTO import_evidence(canonical, evidence) VALUES (?1, ?1)")
+        .map_err(sqlite_error)?;
+    let mut integrity = transaction
+        .prepare_cached("INSERT INTO import_integrity(canonical, digest) VALUES (?1, ?2)")
+        .map_err(sqlite_error)?;
     for import in &page.imports {
         checkpoint(control)?;
-        transaction
-            .execute(
-                "INSERT INTO import_evidence(canonical, evidence) VALUES (?1, ?1)",
-                params![import.canonical.as_slice()],
-            )
+        evidence
+            .execute(params![import.canonical.as_slice()])
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        transaction
-            .execute(
-                "INSERT INTO import_integrity(canonical, digest) VALUES (?1, ?2)",
-                params![
-                    import.canonical.as_slice(),
-                    import.integrity_digest.as_str()
-                ],
-            )
+        integrity
+            .execute(params![
+                import.canonical.as_slice(),
+                import.integrity_digest.as_str()
+            ])
             .map_err(sqlite_error)?;
     }
     Ok(())
@@ -3416,12 +3442,12 @@ fn append_prepared_postings(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let term_ids = hotpath::measure_block!(
         "query.artifact.batch.postings.intern_terms",
-        intern_terms(transaction, pages, control)
+        intern_terms(transaction, &term_insert_plan.interned_terms, control)
     )?;
     if layout.interns_exact_terms() {
         hotpath::measure_block!(
             "query.artifact.batch.postings.intern_exact",
-            intern_exact_terms(transaction, pages, control)
+            intern_exact_terms(transaction, &exact_insert_plan.interned_terms, control)
         )?;
     }
     let mut term_insert = MultiRowInsertV1::new(
@@ -3610,8 +3636,11 @@ fn insert_prepared_source_page(
     page: &PreparedCodeLexicalArtifactPageV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     transaction
-        .execute(
+        .prepare_cached(
             "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .map_err(sqlite_error)?
+        .execute(
             params![
                 i64::try_from(page.page_ordinal).map_err(contract_number)?,
                 page.page_digest.as_str(),
