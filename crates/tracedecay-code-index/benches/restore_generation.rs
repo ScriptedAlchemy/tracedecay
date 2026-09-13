@@ -10,12 +10,18 @@
 //!
 //! ```text
 //! cargo bench -p tracedecay-code-index --features hotpath \
-//!   --bench restore_generation -- <dir>
+//!   --bench restore_generation -- <dir> [restores]
 //! ```
 //!
 //! `<dir>/manifest.json` is the generation file copied from
 //! `code-generations-v1/`, and `<dir>/segments/segment-<digest>.json` are the
 //! segments it names, copied from `code-generation-segments-v1/`.
+//!
+//! `[restores]` restores that generation from that many threads at once, which
+//! is what a daemon does when several retained scope roots come back together.
+//! It reports when the first and the last restore finished, so bounding
+//! concurrency shows up as the first root serving sooner rather than as less
+//! total work.
 
 use std::{
     error::Error,
@@ -27,6 +33,7 @@ use std::{
 };
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
 };
@@ -57,13 +64,32 @@ struct Measurement {
     /// below that width means the restore's serial stages, not the codec,
     /// decide how long a retained generation takes to come back.
     decode_cores_busy: f64,
+    /// How many restores ran at once, and how many the process ever let decode
+    /// simultaneously. Concurrent restores split one indexing pool and hold one
+    /// resident corpus each, so the second number is the bound under test.
+    concurrent_restores: usize,
+    peak_admitted_restores: usize,
+    /// Wall time from the batch starting to the first and to the last restore
+    /// completing. With restores queued the first equals a solo restore; with
+    /// them overlapped both approach the total.
+    first_restore_ns: u64,
+    last_restore_ns: u64,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let root = std::env::args_os()
-        .nth(1)
+    let mut arguments = std::env::args_os().skip(1);
+    let root = arguments
+        .next()
         .map(PathBuf::from)
-        .ok_or("usage: restore_generation <generation-directory>")?;
+        .ok_or("usage: restore_generation <generation-directory> [restores]")?;
+    let concurrent_restores = match arguments.next() {
+        Some(count) => count
+            .to_str()
+            .ok_or("restore count is not valid UTF-8")?
+            .parse::<usize>()?
+            .max(1),
+        None => 1,
+    };
     configure_hotpath();
     let manifest = std::fs::read(root.join("manifest.json"))?;
     let segments = root.join("segments");
@@ -74,19 +100,49 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build();
     let cpu_before = process_cpu_ns()?;
     let started = Instant::now();
-    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-        &manifest,
-        |request, buffer| read_segment(&segments, request, buffer),
-    )?
-    .ok_or("generation manifest is not a revision-7 partitioned manifest")?;
+    let restores = std::thread::scope(|scope| {
+        let threads = (0..concurrent_restores)
+            .map(|_| {
+                scope.spawn(|| {
+                    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+                        &manifest,
+                        |request, buffer| read_segment(&segments, request, buffer),
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        "generation manifest is not a partitioned manifest".to_owned()
+                    })?;
+                    let coverage = coverage_identity(&restored);
+                    black_box(restored);
+                    Ok::<_, String>((coverage, u64::try_from(started.elapsed().as_nanos())
+                        .unwrap_or(u64::MAX)))
+                })
+            })
+            .collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().map_err(|_| "a restore thread panicked".to_owned())?)
+            .collect::<Result<Vec<_>, String>>()
+    })?;
     let decode_wall_ns = u64::try_from(started.elapsed().as_nanos())?;
     let decode_cpu_ns = process_cpu_ns()?.saturating_sub(cpu_before);
     drop(guard);
 
-    let restored_files = restored.analysis_coverage().count();
+    // Every restore verified the same manifest's per-segment and aggregate
+    // digests, so a divergent restore would already have been refused. This
+    // pins the records that survived those checks to each other as well.
+    let (restored_files, expected) = &restores[0].0;
+    for (index, ((files, identity), _)) in restores.iter().enumerate() {
+        if files != restored_files || identity != expected {
+            return Err(format!("restore {index} returned different records").into());
+        }
+    }
+    let restored_files = *restored_files;
+    let mut completions = restores.iter().map(|(_, at)| *at).collect::<Vec<_>>();
+    completions.sort_unstable();
     let (file_segment_bytes, evidence_bytes) = directory_bytes(&segments)?;
     let measurement = Measurement {
-        schema_version: 1,
+        schema_version: 2,
         manifest_bytes: manifest.len(),
         file_segments: restored_files,
         file_segment_bytes,
@@ -96,13 +152,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         decode_cpu_ns,
         cpu_ns_per_file_segment: decode_cpu_ns / u64::try_from(restored_files.max(1))?,
         cpu_mib_per_second: (file_segment_bytes + evidence_bytes) as f64
+            * concurrent_restores as f64
             / 1_048_576.0
             / (decode_cpu_ns as f64 / 1e9),
         decode_cores_busy: decode_cpu_ns as f64 / decode_wall_ns as f64,
+        concurrent_restores,
+        peak_admitted_restores: tracedecay_code_index::parallelism::generation_restore_admission()
+            .peak_admitted,
+        first_restore_ns: completions.first().copied().unwrap_or(0),
+        last_restore_ns: completions.last().copied().unwrap_or(0),
     };
     println!("{}", serde_json::to_string_pretty(&measurement)?);
-    black_box(restored);
     Ok(())
+}
+
+/// A cheap witness that two restores produced the same records: the file count
+/// and a digest over every restored file's logical path in canonical order.
+fn coverage_identity(restored: &CodeIndexPublishedGenerationV1) -> (usize, String) {
+    let mut paths = restored
+        .analysis_coverage()
+        .map(|(path, _)| path.to_owned())
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    let mut identity = Sha256::new();
+    for path in &paths {
+        identity.update(path.as_bytes());
+        identity.update([0]);
+    }
+    (paths.len(), format!("{:x}", identity.finalize()))
 }
 
 fn read_segment(
