@@ -41,10 +41,14 @@ use crate::semantic_code::{
     ModelLifecycleErrorV1, ModelMemberSourceV1, SemanticModelLifecycleOwnerV1,
     production_fastembed_catalog,
 };
+use tracedecay_application::code_index::open_production_code_index_owner_v1;
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use tracedecay_application::semantic_runtime::{
     ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
     SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
+};
+use tracedecay_code_index_retention::code_index_generations::{
+    DurablePublicationPointerV1, acquire_code_generation_store_lock, code_text_artifacts_root,
 };
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use tracedecay_graph_db::NeverCancelled;
@@ -54,6 +58,7 @@ use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRunti
 use tracedecay_semantic_contracts::{DEFAULT_FASTEMBED_MODEL_ID, SemanticResourceCeilings};
 use tracedecay_semantic_contracts::{RerankCompatibilityPinsV1, SemanticFallbackReasonV1};
 
+use super::freshness_witness::RestoreFreshnessWitnessV1;
 use super::registry::{
     ColdMountOpenEventV1, ServingGenerationInstallationOutcomeV1,
     ServingGenerationRollbackOutcomeV1, dashboard_code_graph_serving,
@@ -64,6 +69,7 @@ use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
     GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
 };
+use crate::code_index::chunks::content_digest;
 use crate::code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
@@ -85,7 +91,7 @@ use tracedecay_query::retrieval::lexical::{
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, LexicalLaneRequest,
     LexicalRouteKindV1, LexicalRoutingV1,
 };
-use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
+use tracedecay_query::retrieval::ports::{RetrievalExecutionControl, RetrievalPortError};
 
 #[test]
 fn text_artifact_source_batches_scale_with_build_memory() {
@@ -315,7 +321,7 @@ fn scheduler(
 fn replace_scheduler_policy_revision(scheduler: &mut CodeIndexWorktreeSchedulerV1, revision: &str) {
     let mut config = scheduler.production_config.clone();
     config.policy_revision = PolicyRevisionId::new(revision).expect("policy revision");
-    scheduler.owner = super::open_production_code_index_owner_v1(
+    scheduler.owner = open_production_code_index_owner_v1(
         config.clone(),
         scheduler.publication.clone(),
         super::DaemonProjectionSinkV1,
@@ -331,7 +337,7 @@ fn replace_scheduler_chunker_revision(
 ) {
     let mut config = scheduler.production_config.clone();
     config.chunker_revision = ChunkerRevision::new(revision).expect("chunker revision");
-    scheduler.owner = super::open_production_code_index_owner_v1(
+    scheduler.owner = open_production_code_index_owner_v1(
         config.clone(),
         scheduler.publication.clone(),
         super::DaemonProjectionSinkV1,
@@ -1364,8 +1370,7 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
         .open_sealed_source(&identity, &UninterruptibleCodeIndexControlV1)
         .expect("open lazy source without retaining every file");
     let initial_cursor = source.cursor().clone();
-    let lock =
-        super::acquire_code_generation_store_lock(store.path()).expect("hold publication lock");
+    let lock = acquire_code_generation_store_lock(store.path()).expect("hold publication lock");
     let (sent, received) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let result = source.next_page(&UninterruptibleCodeIndexControlV1);
@@ -1435,7 +1440,7 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     assert!(
         matches!(
             super::map_sealed_page_source_error(error),
-            super::RetrievalPortError::Contract(_)
+            RetrievalPortError::Contract(_)
         ),
         "corrupt authority is terminal, never transient store contention"
     );
@@ -1681,10 +1686,7 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
         .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
         .expect_err("shutdown signalled mid-seal must stop the publication");
     assert!(
-        matches!(
-            error,
-            super::CodeIndexPublicationStoreErrorV1::CompareAndSwap
-        ),
+        matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
         "a cancelled seal is the same typed outcome as a retired fence: {error}"
     );
     assert_eq!(
@@ -6034,7 +6036,7 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
     // A request that fits the empty modeled ledger must still account the
     // process's freshly measured, unmodeled live set before allocating.
     if let Some(observed_bytes) = sampled_process_resident_bytes_v1() {
-        let build_bytes = u64::try_from(super::CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+        let build_bytes = u64::try_from(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
             .expect("build ceiling fits u64");
         let measured_limit = NonZeroU64::new(build_bytes.saturating_add(observed_bytes / 2))
             .expect("measured test limit");
@@ -9050,7 +9052,7 @@ fn advance_pointer_to_unseated_successor(scoped_store_root: &Path, drift_content
     use tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest;
 
     let pointer_path = scoped_store_root.join("active-code-generation-v1.json");
-    let mut pointer: super::DurablePublicationPointerV1 =
+    let mut pointer: DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
             .expect("decode active pointer");
     let predecessor_id = pointer.generation_id.clone();
@@ -11060,7 +11062,7 @@ fn clean_filtered_checkout_verifies_current_and_still_disproves_a_rewrite() {
         .clone();
     assert_eq!(
         sealed_digest,
-        super::content_digest(b"pub fn alpha() -> u32 { 1 }\n"),
+        content_digest(b"pub fn alpha() -> u32 { 1 }\n"),
         "the clean tree seals HEAD's LF blob, not the CRLF checkout bytes"
     );
 
@@ -11109,7 +11111,7 @@ fn restart_rejects_corrupt_sealed_generation() {
         );
         published(scheduler.reconcile_now().expect("initial publish"));
     }
-    let pointer: super::DurablePublicationPointerV1 = serde_json::from_slice(
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(store.path().join("active-code-generation-v1.json"))
             .expect("read active pointer"),
     )
@@ -11157,7 +11159,7 @@ fn restart_rejects_corrupt_partitioned_file_segment() {
         );
         published(scheduler.reconcile_now().expect("initial publish"));
     }
-    let pointer: super::DurablePublicationPointerV1 = serde_json::from_slice(
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(store.path().join("active-code-generation-v1.json"))
             .expect("read active pointer"),
     )
@@ -11217,7 +11219,7 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
         .latest_complete_already_decoded()
         .expect("published generation remains decoded");
     let pointer_path = store.path().join("active-code-generation-v1.json");
-    let pointer: super::DurablePublicationPointerV1 =
+    let pointer: DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
             .expect("decode active pointer");
     let generation_path = store
@@ -17201,7 +17203,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         decode_count, 0,
         "graph-off text serving must not decode the full generation"
     );
-    let artifact_names = std::fs::read_dir(super::code_text_artifacts_root(&scoped_store))
+    let artifact_names = std::fs::read_dir(code_text_artifacts_root(&scoped_store))
         .expect("read text artifact root")
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -17605,7 +17607,7 @@ fn graph_off_change_after_capture_refuses_stale_publication() {
     let refused = scheduler
         .finish_retained_reconcile(
             &metadata_a,
-            super::RestoreFreshnessWitnessV1::load(store.path()),
+            RestoreFreshnessWitnessV1::load(store.path()),
             stale_capture,
         )
         .expect("refuse superseded retained capture");
