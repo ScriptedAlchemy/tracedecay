@@ -30,10 +30,8 @@ use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 
 use super::ToolCallRegistryOptions;
 use super::tool_call_support::handle_retrieve;
-use super::{
-    admin_cli, admin_project, application_surface, automation_runs, dashboard, dispatch_controls,
-    edit, hook_runtime, info, skills, workflow,
-};
+use super::{admin_project, application_surface, dashboard, dispatch_controls, hook_runtime, info};
+use tracedecay_mcp::handlers::{admin_cli, automation_runs, edit, skills, workflow};
 
 mod health_dispatch;
 pub(super) use health_dispatch::dispatch_health_tools;

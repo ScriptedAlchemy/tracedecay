@@ -22,7 +22,6 @@ use tracedecay_domain::{CommitId, UtcMicros};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
-use crate::project::{TraceDecay, is_test_file};
 use tracedecay_application::diagnose::{Severity, parse_cargo_output};
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_application::diagnostics_query::DiagnosticsQuery;
@@ -32,16 +31,17 @@ use tracedecay_application::operation_stream::{
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::{TraceDecay, is_test_file};
 
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::handlers::{generic_tool_result, rendered_tool_result, unique_file_paths};
-use tracedecay_mcp::tools::render;
+use crate::ToolResult;
+use crate::handlers::{generic_tool_result, rendered_tool_result, unique_file_paths};
+use crate::tools::render;
 
 mod affected_test_failure;
 
 #[cfg(test)]
-use tracedecay_mcp::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
-use tracedecay_mcp::{
+use crate::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
+use crate::{
     RunAffectedArgs, TestProfile, TestRunControl, TestRunFailure, TestRunOutput, libtest_identity,
     parse_libtest_output, run_cargo_tests,
 };
@@ -123,7 +123,7 @@ fn test_target_key(node: &GraphTestSymbol) -> String {
     clippy::too_many_lines,
     reason = "Diagnose handling is one workflow match onto the live diagnostic readers."
 )]
-pub(super) async fn handle_diagnose(
+pub async fn handle_diagnose(
     cg: &TraceDecay,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -452,7 +452,7 @@ fn severity_string(s: Severity) -> &'static str {
 }
 
 /// Handles `tracedecay_run_affected_tests`.
-pub(super) async fn handle_run_affected_tests<F>(
+pub async fn handle_run_affected_tests<F>(
     cg: &TraceDecay,
     graph: F,
     args: Value,
@@ -647,7 +647,7 @@ where
             &test_names,
             truncated,
             &selected_targets,
-            managed_test_terminal(&emitter, &receipt)
+            &managed_test_terminal(&emitter, &receipt)
         )
     );
 
@@ -733,7 +733,7 @@ async fn begin_test_run(
             deadline,
         )
         .await
-        .map_err(test_run_event_error)
+        .map_err(|error| test_run_event_error(&error))
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.digests")]
@@ -805,13 +805,13 @@ async fn emit_observed_test_results(
         emitter
             .test_result(test.clone(), *passed)
             .await
-            .map_err(test_run_event_error)?;
+            .map_err(|error| test_run_event_error(&error))?;
     }
     emitter
         .progress(results.len() as u64, Some(requested_total as u64))
         .await
         .map(|_| ())
-        .map_err(test_run_event_error)
+        .map_err(|error| test_run_event_error(&error))
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.finish")]
@@ -847,11 +847,11 @@ async fn finish_test_run(
     emitter
         .terminal(receipt.clone())
         .await
-        .map_err(test_run_event_error)?;
+        .map_err(|error| test_run_event_error(&error))?;
     Ok(receipt)
 }
 
-fn test_run_event_error(error: OperationEventError) -> TraceDecayError {
+fn test_run_event_error(error: &OperationEventError) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("managed test-run lifecycle failed: {error}"),
     }
@@ -1104,12 +1104,12 @@ fn missing_requested_test<'a>(
 }
 
 fn run_affected_tests_body(
-    output: &tracedecay_mcp::TestRunOutput,
+    output: &crate::TestRunOutput,
     results: &[(String, bool)],
     test_names: &[String],
     truncated: bool,
     selected_targets: &[TestTarget],
-    terminal: Value,
+    terminal: &Value,
 ) -> Value {
     let passed = results.iter().filter(|(_, ok)| *ok).count();
     let failed = results.iter().filter(|(_, ok)| !*ok).count();

@@ -4,8 +4,6 @@
 //! the JSON arguments, calls the appropriate `TraceDecay` method, and
 //! formats the result.
 
-mod admin_cli;
-pub(crate) use admin_cli::handle_projectless_admin_cli;
 pub(crate) use hook_runtime::{
     HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
     admit_hook_v2_replayed_envelope_with_lifecycle, handle_projectless_hook_runtime,
@@ -14,7 +12,6 @@ pub(crate) use hook_runtime::{
 mod admin_project;
 mod analytics;
 mod application_surface;
-mod automation_runs;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -54,7 +51,6 @@ mod dispatch_test_support;
     clippy::uninlined_format_args
 )]
 mod dispatch_tests;
-pub mod edit;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -94,7 +90,6 @@ mod runtime_generation_census_dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod search_graph_independence_tests;
-pub mod skills;
 mod support;
 mod tool_call_support;
 #[cfg(test)]
@@ -124,7 +119,6 @@ mod verified_graph_query_authority_tests;
     clippy::uninlined_format_args
 )]
 mod work_dispatch_tests;
-pub mod workflow;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -138,7 +132,8 @@ mod workflow_dispatch_tests;
 use std::path::Path;
 use std::sync::Arc;
 pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
-pub(super) use tool_call_support::{json_result, text_tool_result};
+pub(super) use tool_call_support::text_tool_result;
+pub(super) use tracedecay_mcp::handlers::json_result;
 
 use serde_json::{Value, json};
 use tracedecay_contracts::RetainedSurfaceOperation;

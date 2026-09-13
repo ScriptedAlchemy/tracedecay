@@ -12,13 +12,13 @@ use tracedecay_contracts::session_sync::{
 use tracedecay_contracts::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_project::project::TraceDecay;
 
 use super::json_result;
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::handlers::SessionAuthorities;
+use crate::ToolResult;
+use crate::handlers::SessionAuthorities;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -229,7 +229,7 @@ impl<'a> AdminCliContext<'a> {
     clippy::too_many_arguments,
     reason = "CLI dispatch carries independently admitted store and sync authorities plus protocol request identity and controls"
 )]
-pub(super) async fn handle_admin_cli(
+pub async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDbLeaseV1>,
@@ -262,7 +262,7 @@ pub(super) async fn handle_admin_cli(
     .await
 }
 
-pub(crate) async fn handle_projectless_admin_cli(
+pub async fn handle_projectless_admin_cli(
     args: Value,
     global_db: &RegisteredGlobalDbLeaseV1,
     accounting_db: Option<&RegisteredGlobalDb>,
@@ -880,20 +880,21 @@ mod tests {
         project_id: &str,
     ) -> (
         TraceDecay,
-        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(root).unwrap();
-        let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-            profile,
-            root,
-            ProjectId::new(project_id).unwrap(),
-        )
-        .await
-        .unwrap();
+        let runtime =
+            tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile,
+                root,
+                ProjectId::new(project_id).unwrap(),
+            )
+            .await
+            .unwrap();
         let graph = runtime
             .initialize_project_graph_for_test(
                 root,
-                crate::project::TraceDecayOpenOptions {
+                tracedecay_project::project::TraceDecayOpenOptions {
                     profile_root: Some(profile.to_owned()),
                     global_db_path: None,
                 },

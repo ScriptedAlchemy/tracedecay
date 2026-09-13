@@ -50,6 +50,7 @@ tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite"] }
@@ -65,8 +66,10 @@ tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0"
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-mcp-catalog = { path = "../tracedecay-mcp-catalog", version = "0.1.0" }
 tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
+tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
@@ -79,6 +82,7 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracing = "0.1"
 tree-sitter = "0.26"
+url = "2"
 
 [dev-dependencies]
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
@@ -92,4 +96,8 @@ tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.
 tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+# The moved handler tests open projects through the registered test runtime
+# and the explicit `TraceDecay::*_for_test` constructors.
+tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }

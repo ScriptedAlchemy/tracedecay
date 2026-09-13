@@ -6760,6 +6760,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-automation-runtime",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-code-index-runtime",
@@ -6772,12 +6773,15 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-framing",
  "tracedecay-global-db",
+ "tracedecay-graph-db",
  "tracedecay-graph-query",
  "tracedecay-hooks",
  "tracedecay-host-admission",
  "tracedecay-lcm",
+ "tracedecay-maintenance",
  "tracedecay-mcp-catalog",
  "tracedecay-privacy",
+ "tracedecay-project",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
@@ -6790,6 +6794,7 @@ dependencies = [
  "tracedecay-tool-catalog",
  "tracing",
  "tree-sitter",
+ "url",
 ]
 
 [[package]]

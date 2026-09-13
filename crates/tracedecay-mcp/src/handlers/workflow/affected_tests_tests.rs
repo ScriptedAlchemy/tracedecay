@@ -267,7 +267,7 @@ fn push_fixture_symbol(
 
 #[tokio::test]
 async fn directly_changed_test_file_dispatches_each_full_test_identity() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -387,7 +387,7 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
 /// reporting success.
 #[tokio::test]
 async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src/auth")).unwrap();
@@ -482,7 +482,7 @@ async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
 
 #[tokio::test]
 async fn non_string_changed_paths_are_rejected_before_test_selection() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         dir.path(),
@@ -528,7 +528,7 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
 fn zero_max_tests_is_rejected_before_any_test_runner_can_start() {
     let result = RunAffectedArgs::parse(&json!({"max_tests": 0, "format": "json"}))
         .expect_err("zero max tests must not become an unfiltered cargo invocation");
-    let output = tool_result_body(result);
+    let output = tool_result_body(&result);
 
     assert_eq!(output["error"]["kind"], "invalid_request");
     assert_eq!(output["error"]["operation"], "max_tests");
@@ -541,7 +541,7 @@ fn timeout_above_the_managed_test_limit_is_rejected() {
         "format": "json"
     }))
     .expect_err("a managed test run cannot select an unbounded deadline");
-    let output = tool_result_body(result);
+    let output = tool_result_body(&result);
 
     assert_eq!(output["error"]["kind"], "invalid_request");
     assert_eq!(output["error"]["operation"], "timeout_secs");
@@ -551,7 +551,7 @@ fn timeout_above_the_managed_test_limit_is_rejected() {
 fn unsupported_profile_is_rejected_before_test_selection() {
     let result = RunAffectedArgs::parse(&json!({"profile": "bench", "format": "json"}))
         .expect_err("an unsupported profile must not silently become a debug test run");
-    let output = tool_result_body(result);
+    let output = tool_result_body(&result);
 
     assert_eq!(output["error"]["kind"], "invalid_request");
     assert_eq!(output["error"]["operation"], "profile");
@@ -559,7 +559,7 @@ fn unsupported_profile_is_rejected_before_test_selection() {
 
 #[tokio::test]
 async fn timed_out_test_runner_returns_a_terminal_receipt() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -628,7 +628,7 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
 
 #[tokio::test]
 async fn cancellation_retains_results_completed_before_the_later_test() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -694,7 +694,7 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
     )
     .await
     .unwrap();
-    let output = tool_result_body(result);
+    let output = tool_result_body(&result);
 
     assert_eq!(output["error"]["kind"], "cargo");
     assert_eq!(output["terminal"]["receipt"]["termination"], "cancelled");
@@ -708,7 +708,7 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
 
 #[tokio::test]
 async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -764,7 +764,7 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
     )
     .await
     .unwrap();
-    assert_failed_terminal(tool_result_body(vacuous));
+    assert_failed_terminal(&tool_result_body(&vacuous));
 
     let graph = verified_graph(&[FixtureSymbol {
         path: "tests/edited.rs",
@@ -788,14 +788,14 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
     )
     .await
     .unwrap();
-    assert_failed_terminal(tool_result_body(nonzero));
+    assert_failed_terminal(&tool_result_body(&nonzero));
 
     cg.close();
 }
 
 #[tokio::test]
 async fn reported_passing_and_failing_tests_complete_with_observed_results() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -858,7 +858,7 @@ async fn reported_passing_and_failing_tests_complete_with_observed_results() {
     )
     .await
     .unwrap();
-    let output = tool_result_body(result);
+    let output = tool_result_body(&result);
 
     assert_eq!(output["terminal"]["receipt"]["termination"], "completed");
     assert_eq!(output["exit_code"], 101);
@@ -1023,14 +1023,14 @@ fn scoped_file_symbol_page_needs_only_a_file_scale_budget() {
     );
 }
 
-fn tool_result_body(result: ToolResult) -> Value {
+fn tool_result_body(result: &ToolResult) -> Value {
     let text = result.value["content"][0]["text"]
         .as_str()
         .expect("json tool result");
     serde_json::from_str(text).expect("tool body")
 }
 
-fn assert_failed_terminal(output: Value) {
+fn assert_failed_terminal(output: &Value) {
     assert_eq!(output["error"]["kind"], "cargo");
     assert_eq!(output["terminal"]["receipt"]["termination"], "failed");
     assert!(output["note"].is_null());

@@ -25,10 +25,6 @@ pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
     text_result(text, Vec::new())
 }
 
-pub(in crate::mcp::tools) fn json_result(value: &Value) -> ToolResult {
-    text_tool_result(&value.to_string())
-}
-
 pub(super) fn boxed_send<'a, T, F>(
     future: F,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>
