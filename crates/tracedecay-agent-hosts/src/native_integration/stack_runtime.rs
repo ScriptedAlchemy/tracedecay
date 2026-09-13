@@ -31,8 +31,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, NativeIntegrationApprovalV1, NativeIntegrationSelectionV1,
-    NativeIntegrationTerminalOutcomeV1, ProjectId, StackDeliveryWatermarkId, StackSignalId,
-    StackSignalKindV1, UtcMicros, canonical_sha256,
+    NativeIntegrationTerminalOutcomeV1, NativeIntegrationUnavailabilityV1, ProjectId,
+    StackDeliveryWatermarkId, StackSignalId, StackSignalKindV1, UtcMicros, canonical_sha256,
 };
 
 use tracedecay_global_db::{
@@ -1090,6 +1090,11 @@ impl DaemonGitHubStackRuntimeV1 {
                         (
                             StackSignalKindV1::DependencyReady,
                             tracedecay_domain::NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
+                        ) | (
+                            StackSignalKindV1::DependencyReady,
+                            tracedecay_domain::NativeIntegrationPreviewDispositionV1::Partial {
+                                reason: NativeIntegrationUnavailabilityV1::DestinationOccupied,
+                            }
                         ) | (
                             StackSignalKindV1::ActualConflict,
                             tracedecay_domain::NativeIntegrationPreviewDispositionV1::NativeConflict { .. }
