@@ -60,6 +60,25 @@ def work_admission_priming(tool: str, arguments: dict) -> dict | None:
     return None
 
 
+def prepare_work_effect_journey(tool: str, call, fixture: dict | None = None):
+    """Prepare one Work effect journey against a scripted transport.
+
+    Yields the journeys module with the prepared journey so a caller can reach
+    `JourneyError` and the module's helpers without re-deriving the import.
+    """
+    runner = load_runner()
+    journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+    prepared = journeys._prepare_work_effect_journey(
+        tool,
+        work_product_fixture() if fixture is None else fixture,
+        call,
+        lambda _tool: 1_000,
+        {},
+        {},
+    )
+    return journeys, prepared
+
+
 class ArgumentTests(unittest.TestCase):
     def test_reads_phase_accepts_one_targeted_read(self) -> None:
         runner = load_runner()
@@ -1184,10 +1203,7 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertIn("synthesis admission", note)
 
     def test_generic_work_mutation_consumes_fresh_request_before_replay(self) -> None:
-        runner = load_runner()
-        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
         calls = []
-        fixture = work_product_fixture()
 
         def call(tool, arguments, _deadline_ms):
             calls.append((tool, dict(arguments)))
@@ -1198,13 +1214,8 @@ class MutationJourneyTests(unittest.TestCase):
             self.assertEqual(tool, "tracedecay_work_views")
             return {"tasks": [{"task_id": prepared_task_id}]}
 
-        prepared = journeys._prepare_work_effect_journey(
-            "tracedecay_work_mutate_graph",
-            fixture,
-            call,
-            lambda _tool: 1_000,
-            {},
-            {},
+        journeys, prepared = prepare_work_effect_journey(
+            "tracedecay_work_mutate_graph", call
         )
         prepared_task_id = next(
             value["task_id"]
@@ -1231,10 +1242,7 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertIn("replay and graph view", note)
 
     def test_execution_admission_consumes_fresh_request_before_replay(self) -> None:
-        runner = load_runner()
-        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
         calls = []
-        fixture = work_product_fixture()
 
         def call(tool, arguments, _deadline_ms):
             calls.append((tool, dict(arguments)))
@@ -1249,13 +1257,8 @@ class MutationJourneyTests(unittest.TestCase):
             self.assertEqual(tool, "tracedecay_work_views")
             return {"tasks": [{"task_id": admitted_task_id}]}
 
-        prepared = journeys._prepare_work_effect_journey(
-            "tracedecay_work_admit_execution",
-            fixture,
-            call,
-            lambda _tool: 1_000,
-            {},
-            {},
+        journeys, prepared = prepare_work_effect_journey(
+            "tracedecay_work_admit_execution", call
         )
         admitted_task_id = calls[1][1].get("task_id") or next(
             value["task_id"]
@@ -1277,8 +1280,6 @@ class MutationJourneyTests(unittest.TestCase):
 
     def test_execution_admission_requires_its_own_retained_receipt(self) -> None:
         """A stale answer to the admission's own replay is a journey failure."""
-        runner = load_runner()
-        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
 
         def call(tool, arguments, _deadline_ms):
             primed = work_admission_priming(tool, arguments)
@@ -1288,13 +1289,8 @@ class MutationJourneyTests(unittest.TestCase):
                 return {"problem": {"code": "work.graph_version_conflict"}}
             raise AssertionError(f"unexpected call after a stale replay: {tool}")
 
-        prepared = journeys._prepare_work_effect_journey(
-            "tracedecay_work_admit_execution",
-            work_product_fixture(),
-            call,
-            lambda _tool: 1_000,
-            {},
-            {},
+        journeys, prepared = prepare_work_effect_journey(
+            "tracedecay_work_admit_execution", call
         )
 
         with self.assertRaises(journeys.JourneyError) as raised:
