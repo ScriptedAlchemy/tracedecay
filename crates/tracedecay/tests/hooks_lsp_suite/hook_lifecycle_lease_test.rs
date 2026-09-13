@@ -316,11 +316,7 @@ fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
 
 #[test]
 fn native_hook_captures_only_bound_transport_spool_records() {
-    use tracedecay_hooks::{
-        HookCapabilityV1, HookConfigurationFileWriterV1, HookConfigurationPublisherV1,
-        HookConfigurationSnapshotV1, HookEventFamily, HookHostV1, HookScopeBindingV1,
-        HookSpoolConfigV1, HookSpoolV1,
-    };
+    use tracedecay_hooks::{HookHostV1, HookSpoolConfigV1, HookSpoolV1};
 
     let temp = tempfile::tempdir().unwrap();
     let opencode = include_str!(
@@ -330,7 +326,6 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         (
             "hook-claude-post-tool-use",
             HookHostV1::ClaudeCode,
-            HookEventFamily::ToolLifecycle,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
             )
@@ -339,21 +334,18 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         (
             "hook-stop",
             HookHostV1::ClaudeCode,
-            HookEventFamily::SessionBoundary,
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json")
                 .to_vec(),
         ),
         (
             "hook-codex-stop",
             HookHostV1::Codex,
-            HookEventFamily::SessionBoundary,
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json")
                 .to_vec(),
         ),
         (
             "hook-cursor-after-file-edit",
             HookHostV1::CursorDesktop,
-            HookEventFamily::SavedEdit,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
             )
@@ -362,7 +354,6 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         (
             "hook-cursor-stop",
             HookHostV1::CursorDesktop,
-            HookEventFamily::SessionBoundary,
             serde_json::to_vec(&serde_json::json!({
                 "hook_event_name": "stop",
                 "conversation_id": "cursor-stop-session",
@@ -376,7 +367,6 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         (
             "hook-hermes-terminal-receipt",
             HookHostV1::Hermes,
-            HookEventFamily::ToolLifecycle,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json"
             )
@@ -385,7 +375,6 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         (
             "hook-kimi-event",
             HookHostV1::KimiCode,
-            HookEventFamily::SavedEdit,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
             )
@@ -394,18 +383,16 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         (
             "hook-opencode-event",
             HookHostV1::OpenCode,
-            HookEventFamily::SessionBoundary,
             fixture_request(opencode, "stop"),
         ),
         (
             "hook-opencode-tool-after",
             HookHostV1::OpenCode,
-            HookEventFamily::SavedEdit,
             fixture_request(opencode, "post_tool_use"),
         ),
     ];
 
-    for (index, (hook, host, family, payload)) in cases.into_iter().enumerate() {
+    for (index, (hook, host, payload)) in cases.into_iter().enumerate() {
         let home = temp.path().join(format!("home-{index}"));
         let project = temp.path().join(format!("project-{index}"));
         std::fs::create_dir_all(&home).unwrap();
@@ -416,32 +403,18 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             &(project_id.clone()),
         )
         .unwrap();
-        let data_root = home.join(".tracedecay/projects").join(&project_id);
-        std::fs::create_dir_all(&data_root).unwrap();
-        let now = test_now();
-        let binding = HookScopeBindingV1 {
-            host,
-            project_id: [1; 16],
-            repository_id: [2; 16],
-            worktree_id: [3; 16],
-            worktree_epoch: 4,
-            binding_token: [5; 32],
-            capabilities: vec![HookCapabilityV1 {
-                family,
-                support: tracedecay_hooks::HookEventSupportV1::Native,
-            }],
-        };
-        HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(
-            tracedecay_hooks::hook_configuration_path(&data_root, [3; 16], host),
-        ))
-        .publish(HookConfigurationSnapshotV1 {
-            schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
-            revision: 1,
-            published_at: tracedecay_domain::UtcMicros(now.0 - 1_000_000),
-            expires_at: tracedecay_domain::UtcMicros(now.0 + 60_000_000),
-            binding,
-        })
+        let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+            &project,
+            &home.join(".tracedecay"),
+            &tracedecay_runtime_core::storage::EnrollmentMarker {
+                project_id,
+                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+            },
+        )
         .unwrap();
+        tracedecay_agent_hosts::hooks::publish_hook_bindings(&tracedecay::hook_runtime(), &layout)
+            .unwrap();
+        let data_root = layout.data_root;
 
         // Every response-capable handler resolves project identity from the
         // payload CWD rather than the process CWD, and deliberately refuses to

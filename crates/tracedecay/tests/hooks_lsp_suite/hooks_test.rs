@@ -305,9 +305,9 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
         "initialized workspaces should not be told to run init: {context}"
     );
     assert!(context.contains("TraceDecay project hint:"));
-    assert!(context.contains("ToolSearch"));
-    assert!(context.contains("tracedecay_find_exact_symbol"));
-    assert!(context.contains("tracedecay_test_map"));
+    assert!(context.contains("tracedecay_context"));
+    assert!(context.contains("tracedecay_search"));
+    assert!(context.contains("tracedecay_impact"));
 }
 
 #[test]
@@ -324,14 +324,12 @@ fn test_build_codex_session_context_carries_compact_steering() {
     );
     assert!(context.contains("TraceDecay project hint:"));
     assert!(context.contains("tracedecay_context"));
-    assert!(context.contains("ToolSearch"));
-    assert!(context.contains("tracedecay_find_exact_symbol"));
-    assert!(context.contains("tracedecay_test_map"));
+    assert!(context.contains("tracedecay_search"));
+    assert!(context.contains("tracedecay_impact"));
     assert!(context.contains("last indexed 2m ago"));
     assert!(context.contains("tracedecay_project_search"));
     assert!(context.contains("tracedecay_message_search"));
     assert!(context.contains("tracedecay_fact_store"));
-    assert!(context.contains("before asking the user to repeat"));
     let uninit = tracedecay_agent_hosts::hooks::build_codex_session_context(false, None);
     assert!(uninit.contains("tracedecay init"));
     assert!(uninit.contains("tracedecay_project_search"));
@@ -349,8 +347,7 @@ fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance(
     assert!(context.contains("tracedecay_lcm_expand_query"));
     assert!(context.contains("tracedecay_message_search"));
     assert!(context.contains("tracedecay_fact_store"));
-    assert!(context.contains("before asking the user to repeat"));
-    assert!(context.contains("Do NOT store secrets or credentials"));
+    assert!(context.contains("Do not store secrets"));
     assert!(
         !context.contains("tracedecay init"),
         "non-project chats should not be told to initialize a code graph: {context}"
@@ -564,18 +561,12 @@ fn test_codex_subagent_start_redirects_explore_research_agent() {
         v["hookSpecificOutput"]["hookEventName"].as_str(),
         Some("SubagentStart")
     );
-    assert!(
-        v["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("tracedecay MCP tools")
-    );
-    assert!(
-        v["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("tracedecay hint:")
-    );
+    let context = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(context.contains("tracedecay_context"));
+    assert!(context.contains("tracedecay_search"));
+    assert!(context.contains("tracedecay hint:"));
     // Must use the Codex output schema, not Cursor's `permission`/`user_message`.
     assert!(
         v.get("permission").is_none(),
@@ -624,7 +615,7 @@ fn test_codex_subagent_start_injects_context_for_new_no_history_agent() {
     );
     assert!(context.contains("new/no-history subagent"));
     assert!(context.contains("tracedecay_context"));
-    assert!(context.contains("tracedecay:exploring-code"));
+    assert!(context.contains("tracedecay_search"));
     assert!(context.contains("tracedecay_lcm_expand_query"));
     assert!(context.contains("tracedecay_message_search"));
     assert!(
@@ -699,7 +690,8 @@ fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context
     let context = v["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap_or_default();
-    assert!(context.contains("tracedecay MCP tools"));
+    assert!(context.contains("tracedecay_context"));
+    assert!(context.contains("tracedecay_search"));
     assert!(context.contains("tracedecay hint:"));
 }
 
