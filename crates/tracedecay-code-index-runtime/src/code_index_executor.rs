@@ -560,8 +560,7 @@ where
                     request.source_revision.as_ref(),
                     request.source_tree.as_ref(),
                 );
-                if !exact_source_bound
-                    && schedulers.automatic_admission_for_scope(&scope)
+                if schedulers.automatic_admission_for_scope(&scope)
                     == Some(
                         code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
                     )
