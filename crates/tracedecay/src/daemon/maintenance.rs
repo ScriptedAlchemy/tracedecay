@@ -40,6 +40,7 @@ async fn join_abandoned_maintenance_task(task: Option<JoinHandle<()>>, owner: &'
     }
 }
 
+#[hotpath::measure(label = "daemon.maintenance.registered_store_retention", future = true)]
 async fn run_registered_store_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &tracedecay_configuration::RetentionConfig,
@@ -142,6 +143,10 @@ async fn run_registered_store_retention(
     succeeded
 }
 
+#[hotpath::measure(
+    label = "daemon.maintenance.profile_observability_retention",
+    future = true
+)]
 async fn run_profile_observability_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
 ) -> bool {
