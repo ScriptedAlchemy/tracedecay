@@ -22,6 +22,44 @@ def load_runner():
     return module
 
 
+def work_product_fixture() -> dict:
+    """The prepared-create shape every Work graph journey derives its task from."""
+    return {
+        "work_selection": {"selection": "profile_owned_no_git"},
+        "work_prepare_create_arguments": {
+            "selection": {"selection": "profile_owned_no_git"},
+            "change": {
+                "initiative": {"id": "initiative.fixture"},
+                "plan": {"id": "plan.fixture"},
+                "milestone": {"id": "milestone.fixture"},
+                "item": {"input": {"task_id": "task.fixture"}},
+            },
+        },
+    }
+
+
+def work_admission_priming(tool: str, arguments: dict) -> dict | None:
+    """Answer the accepted-task priming an admission journey performs.
+
+    Returns `None` for any call past priming so each test decides what the
+    admission itself, its replay, and the settlement reads answer.
+    """
+    if tool == "tracedecay_work_prepare_graph_mutation":
+        change = arguments["change"]
+        if "initiative" in change:
+            return {"request": {"mutation_id": "mutation.create"}}
+        if change["change"] == "decide_proposal":
+            return {"request": {"mutation_id": "mutation.accept"}}
+        return {"request": {"mutation_id": "mutation.admit"}}
+    if tool == "tracedecay_work_create":
+        return {"replayed": False}
+    if tool == "tracedecay_work_generate_proposal":
+        return {"proposal": {"proposal_id": "proposal.fixture"}}
+    if tool == "tracedecay_work_accept_proposal":
+        return {"verified_graph_version": {"graph_version": 2}}
+    return None
+
+
 class ArgumentTests(unittest.TestCase):
     def test_reads_phase_accepts_one_targeted_read(self) -> None:
         runner = load_runner()
@@ -1149,18 +1187,7 @@ class MutationJourneyTests(unittest.TestCase):
         runner = load_runner()
         journeys = sys.modules[runner.prime_work_lifecycle.__module__]
         calls = []
-        fixture = {
-            "work_selection": {"selection": "profile_owned_no_git"},
-            "work_prepare_create_arguments": {
-                "selection": {"selection": "profile_owned_no_git"},
-                "change": {
-                    "initiative": {"id": "initiative.fixture"},
-                    "plan": {"id": "plan.fixture"},
-                    "milestone": {"id": "milestone.fixture"},
-                    "item": {"input": {"task_id": "task.fixture"}},
-                },
-            },
-        }
+        fixture = work_product_fixture()
 
         def call(tool, arguments, _deadline_ms):
             calls.append((tool, dict(arguments)))
@@ -1207,34 +1234,15 @@ class MutationJourneyTests(unittest.TestCase):
         runner = load_runner()
         journeys = sys.modules[runner.prime_work_lifecycle.__module__]
         calls = []
-        fixture = {
-            "work_selection": {"selection": "profile_owned_no_git"},
-            "work_prepare_create_arguments": {
-                "selection": {"selection": "profile_owned_no_git"},
-                "change": {
-                    "initiative": {"id": "initiative.fixture"},
-                    "plan": {"id": "plan.fixture"},
-                    "milestone": {"id": "milestone.fixture"},
-                    "item": {"input": {"task_id": "task.fixture"}},
-                },
-            },
-        }
+        fixture = work_product_fixture()
 
         def call(tool, arguments, _deadline_ms):
             calls.append((tool, dict(arguments)))
-            if tool == "tracedecay_work_prepare_graph_mutation":
-                change = arguments["change"]
-                if "initiative" in change:
-                    return {"request": {"mutation_id": "mutation.create"}}
-                if change["change"] == "decide_proposal":
-                    return {"request": {"mutation_id": "mutation.accept"}}
-                return {"request": {"mutation_id": "mutation.admit"}}
-            if tool == "tracedecay_work_create":
-                return {"replayed": False}
-            if tool == "tracedecay_work_generate_proposal":
-                return {"proposal": {"proposal_id": "proposal.fixture"}}
-            if tool == "tracedecay_work_accept_proposal":
-                return {"verified_graph_version": {"graph_version": 2}}
+            primed = work_admission_priming(tool, arguments)
+            if primed is not None:
+                return primed
+            if tool == "tracedecay_work_admit_execution":
+                return {"replayed": True}
             if tool == "tracedecay_work_mutate_graph":
                 self.assertEqual(arguments["mutation"], "admit_execution")
                 return {"replayed": True}
@@ -1257,7 +1265,41 @@ class MutationJourneyTests(unittest.TestCase):
         note = prepared.cleanup({"replayed": False})
 
         self.assertEqual(prepared.arguments, {"mutation_id": "mutation.admit"})
-        self.assertIn("graph replay/view", note)
+        self.assertEqual(
+            [tool for tool, _arguments in calls[-3:]],
+            [
+                "tracedecay_work_admit_execution",
+                "tracedecay_work_mutate_graph",
+                "tracedecay_work_views",
+            ],
+        )
+        self.assertIn("exact and graph replay/view", note)
+
+    def test_execution_admission_requires_its_own_retained_receipt(self) -> None:
+        """A stale answer to the admission's own replay is a journey failure."""
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+
+        def call(tool, arguments, _deadline_ms):
+            primed = work_admission_priming(tool, arguments)
+            if primed is not None:
+                return primed
+            if tool == "tracedecay_work_admit_execution":
+                return {"problem": {"code": "work.graph_version_conflict"}}
+            raise AssertionError(f"unexpected call after a stale replay: {tool}")
+
+        prepared = journeys._prepare_work_effect_journey(
+            "tracedecay_work_admit_execution",
+            work_product_fixture(),
+            call,
+            lambda _tool: 1_000,
+            {},
+            {},
+        )
+
+        with self.assertRaises(journeys.JourneyError) as raised:
+            prepared.cleanup({"replayed": False})
+        self.assertIn("did not replay its retained receipt", str(raised.exception))
 
     def test_work_adjudication_receipts_select_the_matching_nested_command(self) -> None:
         runner = load_runner()
