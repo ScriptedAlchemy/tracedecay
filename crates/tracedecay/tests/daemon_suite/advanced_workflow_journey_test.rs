@@ -707,6 +707,75 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         "catalog pin denial must report expected and observed digests: {stale_catalog_denial}"
     );
 
+    // Run admission compares the pinned policy and configuration digests
+    // against the registered daemon environment, so validation and activation
+    // admit the same pins: an Active definition whose environment pin drifted
+    // could never start a run, and the live digest is only discoverable
+    // through this typed denial.
+    let drifted_policy_digest: ManifestDigest =
+        id("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let stale_policy_definition_id: WorkflowDefinitionId =
+        id("workflow.advanced-production-journey.stale-policy");
+    let stale_policy_definition = WorkflowDefinition::new(
+        stale_policy_definition_id.clone(),
+        1,
+        project_id.clone(),
+        vec![WorkflowStep {
+            step_id: id("prepare"),
+            operation: id("operation.work.start_attempt"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fan_out: None,
+        }],
+        drifted_policy_digest.clone(),
+        definition.pinned_configuration_digest().clone(),
+        definition.pinned_catalog_digest().clone(),
+    )
+    .expect("stale-policy workflow definition");
+    let stale_policy_denial = client
+        .execute::<WorkflowValidateDefinition>(&WorkflowDefinitionValidateRequest {
+            definition: stale_policy_definition.clone(),
+        })
+        .expect_err("validation must name the stale policy pin");
+    assert!(
+        matches!(
+            stale_policy_denial,
+            ClientError::Problem(ref problem)
+                if problem.kind == "invalid_request"
+                    && problem.code == "workflow.policy.pin_mismatch"
+                    && problem.message.contains(&format!(
+                        "pinned_policy_digest expected {}",
+                        definition.pinned_policy_digest().as_str()
+                    ))
+                    && problem
+                        .message
+                        .contains(&format!("observed {}", drifted_policy_digest.as_str()))
+        ),
+        "policy pin denial must report expected and observed digests: {stale_policy_denial}"
+    );
+    client
+        .execute::<WorkflowRegisterDefinition>(&WorkflowDefinitionRegisterRequest {
+            definition: stale_policy_definition,
+        })
+        .expect("candidate registration stays lenient before activation");
+    let stale_policy_activation = client
+        .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
+            definition_id: stale_policy_definition_id,
+            definition_version: 1,
+            expected_revision: 1,
+        })
+        .expect_err("activation must refuse a definition no run could ever start");
+    assert!(
+        matches!(
+            stale_policy_activation,
+            ClientError::Problem(ref problem)
+                if problem.kind == "invalid_request"
+                    && problem.code == "workflow.policy.pin_mismatch"
+        ),
+        "activation pin denial must stay typed: {stale_policy_activation}"
+    );
+
     let activated = client
         .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
             definition_id: definition_id.clone(),
