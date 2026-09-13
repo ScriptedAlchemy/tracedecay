@@ -43,6 +43,46 @@ class ProblemCodeTests(unittest.TestCase):
         self.assertEqual(row["problem_code"], "resource.authority_unavailable")
         self.assertEqual(row["deadline_ms"], 30_000)
 
+    def test_journey_call_retries_the_products_transient_stale_graph_response(self) -> None:
+        runner = load_runner()
+        stale = {
+            "result": {
+                "_meta": {"duration_us": 5},
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": '{"failed":true,"message":"project route error (code-graph-stale): retry after the rebuild completes"}',
+                }],
+            }
+        }
+        claim_stale = {
+            "result": {
+                "_meta": {"duration_us": 6},
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": '{"problem":{"kind":"unavailable","code":"application.symbol-graph.claim-generation-stale"}}',
+                }],
+            }
+        }
+        settled = {
+            "result": {
+                "_meta": {"duration_us": 7},
+                "content": [{"type": "text", "text": '{"success":true}'}],
+            }
+        }
+
+        class Client:
+            def __init__(self):
+                self.responses = [stale, claim_stale, settled]
+
+            def call_tool(self, _tool, _arguments, _deadline_ms):
+                return self.responses.pop(0), 1
+
+        response = runner._journey_call(Client(), "tracedecay_replace_symbol", {}, 1_000)
+
+        self.assertIs(response, settled)
+
     def test_prompt_denial_retains_its_typed_problem_code(self) -> None:
         """A prompt failure must keep policy diagnosis in the aggregate artifact."""
         runner = load_runner()

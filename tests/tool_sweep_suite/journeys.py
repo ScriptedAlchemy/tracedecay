@@ -2869,37 +2869,28 @@ def _source_edit(
             renamed_node = _wait_for_code_symbol(
                 call, deadline, renamed_name, renamed_qualified,
             )
-            verified = call(
-                "tracedecay_rename_preview",
-                {
-                    "node_id": renamed_node["node_id"],
-                    "new_name": forward["old_name"],
-                    "format": "json",
-                },
-                deadline("tracedecay_rename_preview"),
+            inverse.update(
+                _rename_identity(
+                    call, deadline, renamed_node["node_id"], forward["old_name"],
+                )
             )
-            if not any(
-                value.get("qualified_name") == renamed_qualified
-                for value in objects(verified)
-            ):
-                raise JourneyError("rename preview did not resolve the reindexed symbol")
         replayed = call(name, apply, deadline(name))
         if not has_true(replayed, "replayed"):
             raise JourneyError(f"{name} idempotent retry did not replay its durable receipt")
         if first_value(replayed, {"effect_id"}) != effect_id:
             raise JourneyError(f"{name} idempotent retry changed its durable effect identity")
-        if name in {"tracedecay_move_symbol", "tracedecay_rename_symbol"}:
+        if name == "tracedecay_move_symbol":
             _rollback_effect(call, deadline, response, apply["idempotency_key"])
             _require_snapshot(fixture, original, f"{name} rollback")
-            if name == "tracedecay_rename_symbol":
-                _wait_for_code_symbol(
-                    call, deadline, forward["old_name"], forward["qualified_name"],
-                )
-                return "identity/dry-run/apply/reindex/replay/journaled rollback verified"
             return "preview/apply/consumer/journaled rollback verified"
         rollback_arguments = inverse
         _source_rollback(call, inverse_tool, rollback_arguments, deadline)
         _require_snapshot(fixture, original, f"{name} rollback")
+        if name == "tracedecay_rename_symbol":
+            _wait_for_code_symbol(
+                call, deadline, forward["old_name"], forward["qualified_name"],
+            )
+            return "identity/dry-run/apply/reindex/replay/inverse verified"
         return "preview/apply/consumer/rollback verified"
 
     return PreparedJourney(apply, cleanup)
