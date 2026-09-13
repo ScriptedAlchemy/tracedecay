@@ -118,10 +118,7 @@ const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
 /// live, so a repository created below it is observed immediately.
 pub fn repository_topology(path: &Path) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
     let slot = checkout_topology_slot(path);
-    let mut resolved = slot
-        .resolved
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(topology) = resolved.as_ref()
         && checkout_topology_is_live(topology)
     {
@@ -130,15 +127,54 @@ pub fn repository_topology(path: &Path) -> Result<Arc<GitRepositoryTopologyV1>, 
     *resolved = None;
     #[cfg(any(test, feature = "test-helpers"))]
     observe_topology_resolution(path);
-    let topology = Arc::new(GitRepositoryAuthority::discover(path)?.into_topology());
-    if topology
-        .worktree_root
-        .as_deref()
-        .is_some_and(|root| path.canonicalize().is_ok_and(|canonical| canonical == root))
-    {
-        *resolved = Some(Arc::clone(&topology));
+    let topology = Arc::new(
+        hotpath::measure_block!(
+            "runtime_core.git.topology.resolve",
+            GitRepositoryAuthority::discover_uncached(path)
+        )?
+        .into_topology(),
+    );
+    match topology.worktree_root.as_deref() {
+        Some(root) if path.canonicalize().is_ok_and(|canonical| canonical == root) => {
+            *resolved = Some(Arc::clone(&topology));
+        }
+        // Discovered from a subdirectory, a bare repository's control dir, or
+        // any other path the walk did not start at. The answer is not
+        // retainable *for this path* — a repository can appear between it and
+        // the root — but it is the complete, revalidatable answer for the root
+        // it names, so the next question about that root is already paid for.
+        Some(root) => publish_checkout_root_topology(root, &topology),
+        None => {}
     }
     Ok(topology)
+}
+
+/// Retain a topology under the worktree root it resolved, not the path it was
+/// discovered from.
+///
+/// Safe to call while holding another path's slot: the root's own resolution
+/// takes the retain arm above and never reaches for a second slot, so no
+/// thread holds these two locks in the opposite order.
+fn publish_checkout_root_topology(root: &Path, topology: &Arc<GitRepositoryTopologyV1>) {
+    let slot = checkout_topology_slot(root);
+    let mut resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
+    *resolved = Some(Arc::clone(topology));
+}
+
+/// A live retained topology for `path`, without resolving one.
+///
+/// Never creates a slot: a peek that inserted would let unresolvable paths
+/// evict the memo this exists to preserve.
+fn retained_checkout_topology(path: &Path) -> Option<Arc<GitRepositoryTopologyV1>> {
+    let slot = Arc::clone(
+        CHECKOUT_TOPOLOGY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)?,
+    );
+    let resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
+    let topology = resolved.as_ref()?;
+    checkout_topology_is_live(topology).then(|| Arc::clone(topology))
 }
 
 fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
@@ -237,8 +273,10 @@ pub fn observe_repository_discovery_for_test(root: &Path) {
     );
 }
 
-/// Make every discovery under `root` take `delay`, modelling a repository on a
-/// slow volume. Implies [`observe_repository_discovery_for_test`].
+/// Make every live discovery walk under `root` take `delay`, modelling a
+/// repository on a slow volume. A repository opened from a retained topology
+/// pays no walk and so is not delayed — which is exactly the convergence the
+/// deferral tests assert. Implies [`observe_repository_discovery_for_test`].
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn delay_repository_discovery_for_test(root: &Path, delay: std::time::Duration) {
     forget_retained_checkout_topology_for_test(root);
@@ -301,14 +339,55 @@ fn forget_retained_checkout_topology_for_test(root: &Path) {
 }
 
 impl GitRepositoryAuthority {
-    #[hotpath::measure(label = "runtime_core.git.repository_discover")]
+    /// Open the repository `path` belongs to.
+    ///
+    /// A retained topology answers the *where* half of a discovery — the
+    /// upward walk for `.git` and the canonical form of each directory it
+    /// names — so this opens the repository directly at its own Git directory
+    /// instead of walking the volume again. Live reads (HEAD, refs, status)
+    /// still come from a freshly opened repository.
+    ///
+    /// Live defect this exists for: the topology memo only short-circuited
+    /// `repository_topology`. Every HEAD read — one per route resolution, from
+    /// `current_branch` — still ran a complete `gix::discover`, so on a slow
+    /// volume a deferred route never converged: the memo was warm and the next
+    /// request paid the whole walk again anyway.
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
+        if let Some(topology) = retained_checkout_topology(path)
+            && let Some(authority) = Self::open_retained(&topology)
+        {
+            return Ok(authority);
+        }
+        Self::discover_uncached(path)
+    }
+
+    /// Open a repository whose topology is already known, or `None` when the
+    /// open fails and the full walk has to decide.
+    fn open_retained(topology: &GitRepositoryTopologyV1) -> Option<Self> {
+        let repository = hotpath::measure_block!(
+            "runtime_core.git.repository_open_retained",
+            gix::open_opts(&topology.git_dir, repository_open_options())
+        )
+        .ok()?;
+        Some(Self {
+            repository: repository.into_sync(),
+            worktree_root: topology.worktree_root.clone(),
+            git_dir: topology.git_dir.clone(),
+            common_dir: topology.common_dir.clone(),
+        })
+    }
+
+    #[hotpath::measure(label = "runtime_core.git.repository_discover")]
+    fn discover_uncached(path: &Path) -> Result<Self, GitRepositoryError> {
         #[cfg(any(test, feature = "test-helpers"))]
         observe_repository_discovery(path);
-        let repository = gix::discover_opts(
-            path,
-            gix::discover::upwards::Options::default(),
-            repository_open_options(),
+        let repository = hotpath::measure_block!(
+            "runtime_core.git.repository_discover.walk",
+            gix::discover_opts(
+                path,
+                gix::discover::upwards::Options::default(),
+                repository_open_options(),
+            )
         )
         .map_err(|error| match error {
             gix::discover::Error::Discover(gix::discover::upwards::Error::NoGitRepository {
@@ -321,15 +400,20 @@ impl GitRepositoryAuthority {
                 detail: error.to_string(),
             },
         })?;
-        let worktree_root = repository
-            .workdir()
-            .map(|path| canonical(path, "worktree root"))
-            .transpose()
-            .map_err(|error| repository_error(path, error))?;
-        let git_dir = canonical(repository.git_dir(), "Git directory")
-            .map_err(|error| repository_error(path, error))?;
-        let common_dir = canonical(repository.common_dir(), "Git common directory")
-            .map_err(|error| repository_error(path, error))?;
+        let (worktree_root, git_dir, common_dir) = hotpath::measure_block!(
+            "runtime_core.git.repository_discover.canonicalize",
+            (
+                repository
+                    .workdir()
+                    .map(|path| canonical(path, "worktree root"))
+                    .transpose(),
+                canonical(repository.git_dir(), "Git directory"),
+                canonical(repository.common_dir(), "Git common directory"),
+            )
+        );
+        let worktree_root = worktree_root.map_err(|error| repository_error(path, error))?;
+        let git_dir = git_dir.map_err(|error| repository_error(path, error))?;
+        let common_dir = common_dir.map_err(|error| repository_error(path, error))?;
         Ok(Self {
             repository: repository.into_sync(),
             worktree_root,
@@ -375,6 +459,7 @@ impl GitRepositoryAuthority {
     }
 
     /// Exact HEAD state for this repository or linked worktree.
+    #[hotpath::measure(label = "runtime_core.git.head")]
     pub fn head(&self) -> Result<GitHeadStateV1, GitRepositoryError> {
         let repository = self.repository.to_thread_local();
         head_from_gix(&repository)

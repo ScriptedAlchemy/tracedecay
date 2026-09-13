@@ -12,6 +12,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use tracedecay_runtime_core::git_discovery::identity_resolution_elapsed;
 use tracedecay_runtime_core::git_repository::{
     delay_repository_discovery_for_test, observe_repository_discovery_for_test,
     repository_discovery_count_for_test, repository_topology_resolution_count_for_test,
@@ -138,8 +139,9 @@ async fn concurrent_routes_resolve_one_repository_topology() {
         resolutions, 1,
         "{CONNECTIONS} concurrent routes must share one repository identity resolution"
     );
-    // HEAD is deliberately not retained, so one live branch read per route
-    // remains; the ancestor walk each of those reads used to repeat does not.
+    // Every route still reads HEAD live, but once the topology is published
+    // those reads open the repository at its own Git directory instead of
+    // walking the volume to find it.
     assert!(
         discoveries <= CONNECTIONS as u64 + 1,
         "{discoveries} live discoveries for {CONNECTIONS} routes: topology is being rediscovered"
@@ -183,5 +185,85 @@ async fn timed_out_repository_discovery_defers_the_route() {
     assert!(
         message.contains(crate::daemon::PROJECT_WARMING_RETRY_HINT),
         "a deferred discovery must stay retryable, got: {message}"
+    );
+    assert!(
+        message.contains("retry after"),
+        "a deferral must say when to come back, got: {message}"
+    );
+}
+
+/// A deferral has to converge. The resolution the refusal abandoned keeps
+/// running and publishes its result, so the next request decides the route from
+/// it instead of starting the walk over.
+///
+/// Live wedge this covers: on a slow volume every retry re-ran discovery, was
+/// deferred at the same budget, and the root stayed "warming" for as long as
+/// the client kept asking — minutes, with no path to a resolved route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deferred_discovery_converges_on_the_next_request() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join("profile");
+    let project = home.path().join("project");
+    committed_repository(&project);
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "converging discovery");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let handshake = handshake_for(&project, &profile_root);
+    // Warm the profile registry so only discovery is slow.
+    let _ = engine.cached_project_server(&handshake).await;
+
+    delay_repository_discovery_for_test(
+        &project,
+        crate::daemon::REPOSITORY_DISCOVERY_DEADLINE + Duration::from_millis(500),
+    );
+    let deferred = engine.cached_project_server(&handshake).await;
+    assert!(
+        deferred
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("repository discovery")),
+        "a discovery over budget must defer the route"
+    );
+
+    await_published_resolution(&project).await;
+    let resolutions = repository_topology_resolution_count_for_test(&project);
+    let converged = tokio::time::timeout(
+        crate::daemon::REPOSITORY_DISCOVERY_DEADLINE,
+        engine.cached_project_server(&handshake),
+    )
+    .await;
+    let converged_resolutions = repository_topology_resolution_count_for_test(&project);
+    reset_repository_discovery_for_test(&project);
+
+    let converged = converged.expect("a converged route must answer inside the discovery budget");
+    if let Err(error) = &converged {
+        let message = error.to_string();
+        assert!(
+            !message.contains("repository discovery"),
+            "the deferral repeated instead of converging: {message}"
+        );
+    }
+    assert_eq!(
+        converged_resolutions, resolutions,
+        "the converged route re-ran repository discovery instead of reading the published topology"
+    );
+}
+
+/// Wait for the resolution the deferral abandoned to retire its slot, which it
+/// does only after publishing into the retained topology.
+async fn await_published_resolution(project: &Path) {
+    let canonical = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
+    for _ in 0..400 {
+        if identity_resolution_elapsed(project).is_none()
+            && identity_resolution_elapsed(&canonical).is_none()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "the abandoned resolution for {} never published",
+        project.display()
     );
 }

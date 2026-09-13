@@ -97,11 +97,13 @@ pub const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
 /// Interval between branch-lock acquisition retries.
 pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Resolves the current branch name using `gix`. Linked worktrees use
-/// `git symbolic-ref HEAD` because gix can resolve their shared repository's
-/// primary HEAD instead of the worktree-specific HEAD.
+/// Resolves the current branch name using `gix`.
+///
+/// A linked worktree resolves its own HEAD because the authority is opened at
+/// that worktree's Git directory, not at the shared common directory.
 ///
 /// Returns `None` for detached HEAD or if the repository cannot be opened.
+#[hotpath::measure(label = "runtime_core.git.branch.current")]
 pub fn current_branch(project_root: &Path) -> Option<String> {
     #[cfg(any(test, feature = "test-helpers"))]
     {
