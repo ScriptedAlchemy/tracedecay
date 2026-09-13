@@ -3755,8 +3755,6 @@ def prepare(
         return _git_apply(call, deadline)
     if name in NATIVE_LIFECYCLE_EFFECTS:
         return _native_effect(name, fixture, call, deadline)
-    if name in NATIVE_LIFECYCLE_EFFECTS:
-        return _native_effect(name, fixture, call, deadline)
     if name.startswith("tracedecay_workflow_"):
         prepared = fixture.get("workflow_effect_journey")
         if isinstance(prepared, PreparedJourney):
