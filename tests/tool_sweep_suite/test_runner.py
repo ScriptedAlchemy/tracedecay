@@ -2044,6 +2044,38 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
         self.assertEqual(fixture["lcm_message_id"], "message.fixture")
 
+    def test_work_proposal_observes_the_committed_create(self) -> None:
+        runner = load_runner()
+        client = self.client([self.response('{"node_id":"function:fixture"}')])
+        original = client.call_tool
+        create_returned_at = 0
+
+        def record_create(name, arguments, deadline_ms):
+            nonlocal create_returned_at
+            response = original(name, arguments, deadline_ms)
+            if name == "tracedecay_work_create":
+                create_returned_at = int(runner.time.time() * 1_000_000)
+            return response
+
+        client.call_tool = record_create
+        fixture = {
+            "root": "/fixture/root",
+            "commit": "a" * 40,
+            "project_id": "project.fixture",
+            "repository_id": "repository.fixture",
+        }
+        runner.prime_work_lifecycle(
+            fixture,
+            lambda name, arguments, deadline_ms: client.call_tool(
+                name, arguments, deadline_ms
+            )[0],
+            lambda _name: 1_000,
+        )
+
+        self.assertGreaterEqual(
+            fixture["work_generate_arguments"]["occurred_at"], create_returned_at
+        )
+
     def test_effect_preparation_skips_read_only_automation_and_lcm_producers(self) -> None:
         runner = load_runner()
         client = self.client([self.response('{"node_id":"function:fixture"}')])

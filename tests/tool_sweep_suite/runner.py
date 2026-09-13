@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -432,6 +433,100 @@ def _run_checked(
     return completed
 
 
+def _seed_work_executable_binding(binary: Path, root: Path, parent: Path) -> None:
+    """Pin the disposable Work provider before the sweep runtime mounts."""
+    provider_command = shutil.which("codex")
+    if provider_command is None:
+        raise SweepError("the authentic Codex Work provider is not installed")
+    provider = Path(provider_command).resolve(strict=True)
+    artifact_digest = "sha256:" + hashlib.sha256(provider.read_bytes()).hexdigest()
+    setup = McpClient(binary, root, parent / "work-provider-setup.log")
+    try:
+        setup.initialize(AUXILIARY_SURFACE_DEADLINE_MS)
+        active = _producer_call(
+            setup,
+            "tracedecay_active_project",
+            {"format": "json"},
+            AUXILIARY_SURFACE_DEADLINE_MS,
+        )
+        project_id = first_value(active, {"project_id"})
+        if not isinstance(project_id, str) or not project_id:
+            raise SweepError("Work provider setup omitted the fixture project id")
+        key = "work.executable_bindings.v1"
+        current = _producer_call(
+            setup,
+            "tracedecay_configuration_get",
+            {"key": key, "format": "json"},
+            AUXILIARY_SURFACE_DEADLINE_MS,
+        )
+        revision = first_value(current, {"revision_id"})
+        if not isinstance(revision, str) or not revision:
+            raise SweepError("Work provider setup omitted the configuration revision")
+        seeded = _producer_call(
+            setup,
+            "tracedecay_configuration_set",
+            {
+                "layer": {"kind": "project", "project_id": project_id},
+                "key": key,
+                "value": {
+                    "kind": "work_executable_bindings",
+                    "value": [
+                        {
+                            "executable": {
+                                "executable_id": "executable.tool-sweep.codex-cli.v1",
+                                "artifact_digest": artifact_digest,
+                            },
+                            "canonical_path": str(provider),
+                            "capabilities": ["codex_cli_exec_json"],
+                            "routes": [
+                                {
+                                    "route_id": "route.tool-sweep.codex-cli.v1",
+                                    "provider_capability_id": "provider.work.codex-cli",
+                                    "model_id": "gpt-5.6-sol",
+                                    "effort": "standard",
+                                    "declared_budget_ceiling": 128000,
+                                    "content_location": "local",
+                                    "correctness": "high",
+                                    "sensitive_data_fitness": "high",
+                                    "latency": "moderate",
+                                    "cost": "moderate",
+                                    "autonomy": "high",
+                                    "evidence_quality": "high",
+                                    "execution": {
+                                        "sandbox": "required",
+                                        "approval": "never",
+                                        "filesystem": "workspace_write",
+                                        "egress": "deny",
+                                        "environment_allowlist": ["CODEX_HOME", "HOME"],
+                                        "credential_references": [],
+                                        "limits": {
+                                            "max_input_tokens": 128000,
+                                            "max_output_tokens": 8192,
+                                            "max_stdout_bytes": 65536,
+                                            "max_stderr_bytes": 65536,
+                                            "max_protocol_bytes": 65536,
+                                            "max_concurrency": 1,
+                                        },
+                                        "maximum_duration_micros": 600000000,
+                                        "fallback": {"kind": "disabled"},
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "expected_revision": revision,
+                "idempotency_key": "configuration.idempotency.tool-sweep.codex-cli.v1",
+                "format": "json",
+            },
+            AUXILIARY_SURFACE_DEADLINE_MS,
+        )
+        if not isinstance(first_value(seeded, {"result_revision_id"}), str):
+            raise SweepError("Work provider setup omitted its committed revision")
+    finally:
+        setup.close()
+
+
 def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     """Create a disposable project whose values are produced by normal product startup."""
     root = parent / "fixture"
@@ -499,6 +594,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     _run_checked(
         [str(binary), "init"], cleanup_root, "fixture cleanup tracedecay init", timeout_s=180
     )
+    _seed_work_executable_binding(binary, root, parent)
     session_id = f"tool-sweep-session-{os.getpid()}-{time.monotonic_ns()}"
     _run_checked(
         [str(binary), "hook-codex-session-start"],
@@ -1016,7 +1112,10 @@ def prime_fixture_values(
         project_id = first_value(active_project, {"project_id"})
         if not isinstance(project_id, str) or not project_id:
             raise SweepError("active project producer omitted the fixture project id")
-        fixture["project_id"] = project_id
+        repository_id = first_value(active_project, {"repository_id"})
+        if not isinstance(repository_id, str) or not repository_id:
+            raise SweepError("active project producer omitted the fixture repository id")
+        fixture.update({"project_id": project_id, "repository_id": repository_id})
         toggled = {
             "kind": "boolean",
             "value": not fixture["configuration_scalar_value"]["value"],
@@ -2358,7 +2457,22 @@ def run_phase(args: argparse.Namespace) -> int:
     }
     client: McpClient | None = None
     try:
-        root, fixture = create_fixture(args.bin, args.out)
+        fixture_path = args.out / "fixture.json"
+        if not fixture_path.is_file():
+            raise SweepError("the restarted phase has no prepared fixture")
+        fixture = json.loads(fixture_path.read_text())
+        if not isinstance(fixture, dict) or not isinstance(fixture.get("root"), str):
+            raise SweepError("the prepared fixture manifest is invalid")
+        root = Path(fixture["root"])
+        cleanup_root = fixture.get("cleanup_root")
+        if not isinstance(cleanup_root, str) or not cleanup_root:
+            raise SweepError("the prepared fixture omitted its cleanup worktree")
+        _run_checked(
+            [str(args.bin), "init"],
+            Path(cleanup_root),
+            "restarted fixture cleanup worktree admission",
+            timeout_s=180,
+        )
         client = McpClient(args.bin, root, args.out / "mcp-client.log")
         surfaces = client.initialize(AUXILIARY_SURFACE_DEADLINE_MS)
         tools = client.list_tools(AUXILIARY_SURFACE_DEADLINE_MS)
@@ -2421,11 +2535,24 @@ def run_phase(args: argparse.Namespace) -> int:
     return 0 if "fatal" not in report and report["summary"]["failed"] == 0 else 1
 
 
+def prepare_fixture(args: argparse.Namespace) -> int:
+    """Create and configure the fixture whose next daemon runs the sweep."""
+    try:
+        _root, fixture = create_fixture(args.bin, args.out)
+        (args.out / "fixture.json").write_text(
+            json.dumps(fixture, indent=2, sort_keys=True) + "\n"
+        )
+    except Exception as error:
+        (args.out / "prepare-error.txt").write_text(str(error) + "\n")
+        return 1
+    return 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Exercise one isolated negotiated MCP surface phase.")
     parser.add_argument("--bin", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--phase", choices=("discovery", "reads", "effect"), required=True)
+    parser.add_argument("--phase", choices=("prepare", "discovery", "reads", "effect"), required=True)
     parser.add_argument("--effect")
     parser.add_argument("--catalog", type=Path)
     args = parser.parse_args(argv)
@@ -2435,13 +2562,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--bin must name an executable release binary")
     if args.phase == "effect" and (not args.effect or args.catalog is None):
         parser.error("--phase effect requires --effect and --catalog")
-    if args.phase in {"discovery", "reads"} and (args.effect is not None or args.catalog is not None):
+    if args.phase in {"prepare", "discovery", "reads"} and (args.effect is not None or args.catalog is not None):
         parser.error("--effect/--catalog are only valid for --phase effect")
     return args
 
 
 def main(argv: list[str]) -> int:
-    return run_phase(parse_args(argv))
+    args = parse_args(argv)
+    return prepare_fixture(args) if args.phase == "prepare" else run_phase(args)
 
 
 if __name__ == "__main__":
