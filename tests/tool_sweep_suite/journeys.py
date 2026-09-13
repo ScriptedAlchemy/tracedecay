@@ -3445,8 +3445,8 @@ def profile_refresh_selectors(fixture: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def _refresh_payload(response: dict[str, Any], family: str) -> dict[str, Any]:
-    """Read the refresh payload through its canonical application envelope."""
+def _application_payload(response: dict[str, Any], family: str) -> dict[str, Any]:
+    """Read a payload through its canonical application envelope."""
     for value in objects(response):
         outcome = value.get("outcome")
         if not isinstance(outcome, dict) or outcome.get("outcome") != family:
@@ -3455,12 +3455,12 @@ def _refresh_payload(response: dict[str, Any], family: str) -> dict[str, Any]:
         payload = result.get("payload") if isinstance(result, dict) else None
         if isinstance(payload, dict):
             return payload
-    raise JourneyError(f"session refresh did not return a typed {family} payload")
+    raise JourneyError(f"application response did not return a typed {family} payload")
 
 
 def _terminal_refresh_state(response: dict[str, Any], operation_id: str) -> str:
     """The receipt-backed terminal state a durable cancel must return."""
-    payload = _refresh_payload(response, "effect")
+    payload = _application_payload(response, "effect")
     terminal_state = payload.get("outcome")
     receipt = payload.get("receipt")
     if (
@@ -3489,7 +3489,7 @@ def _require_settled_refresh(
         {"handle": handle, **selectors},
         deadline("tracedecay_session_refresh_status"),
     )
-    payload = _refresh_payload(settled, "evidence")
+    payload = _application_payload(settled, "evidence")
     receipt = payload.get("receipt")
     if (
         payload.get("outcome") != terminal_state
@@ -3502,7 +3502,7 @@ def _require_settled_refresh(
 
 def _begun_refresh(response: dict[str, Any]) -> tuple[str, str]:
     """The opaque handle and durable operation identity a begin must return."""
-    payload = _refresh_payload(response, "effect")
+    payload = _application_payload(response, "effect")
     outcome = payload.get("outcome")
     if outcome not in {"started", "joined"}:
         raise JourneyError(
@@ -3694,14 +3694,14 @@ def _prepare_context_scout(name: str, fixture: dict[str, Any], call: Call, deadl
                               "format": "json"}
         if name == "tracedecay_context_scout_delivery":
             def cleanup(response: dict[str, Any]) -> str:
-                receipt = _object_field(response, "receipt")
+                receipt = _object_field(_application_payload(response, "effect"), "receipt")
                 if not isinstance(receipt.get("receipt_id"), list):
                     raise JourneyError("Context Scout delivery omitted daemon receipt")
                 return "real claim lease produced a daemon delivery receipt"
             return PreparedJourney(delivery_arguments, cleanup, settlement="contained")
         delivered = call("tracedecay_context_scout_delivery", delivery_arguments,
                          deadline("tracedecay_context_scout_delivery"))
-        receipt = _object_field(delivered, "receipt")
+        receipt = _object_field(_application_payload(delivered, "effect"), "receipt")
         arguments = {"address": address, "receipt": receipt,
                      "feedback": {"receipt_id": receipt["receipt_id"], "kind": "explicitly_accepted"},
                      "idempotency_key": f"tool-sweep-scout-feedback-{nonce}", "format": "json"}

@@ -91,6 +91,49 @@ class ArgumentTests(unittest.TestCase):
                 "tracedecay_context_scout_recent", response, {"context_scout_work": work}
             )
 
+    def test_context_scout_delivery_uses_the_public_payload_receipt(self) -> None:
+        runner = load_runner()
+        receipt_id = [1] * 16
+
+        def response(payload):
+            return {
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(payload)}]
+                }
+            }
+
+        def call(tool, _arguments, _deadline_ms):
+            self.assertEqual(tool, "tracedecay_context_scout_claim")
+            return response({
+                "outcome": "claimed",
+                "claim": {"lease_id": [2] * 16},
+            })
+
+        prepared = runner.prepare_journey(
+            "tracedecay_context_scout_delivery",
+            object(),
+            {"context_scout_address": {"project_id": [3] * 16}},
+            lambda _tool: 1_000,
+            call,
+        )
+        wire_response = response({
+            "outcome": {
+                "outcome": "effect",
+                "value": {
+                    "payload": {
+                        "outcome": "stored",
+                        "receipt": {"receipt_id": receipt_id},
+                    },
+                    "receipt": {"outcome": "completed"},
+                },
+            }
+        })
+
+        self.assertEqual(
+            prepared.cleanup(wire_response),
+            "real claim lease produced a daemon delivery receipt",
+        )
+
 
 class ProblemCodeTests(unittest.TestCase):
     def test_problem_code_is_a_first_class_field_for_success_framed_unavailable(self) -> None:
