@@ -1218,16 +1218,14 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         (measurements.len(), reported, metric_names, stable)
     };
 
-    let anonymous = common::http_call_with_retry(
-        "anonymous operation.work.topology_metrics",
-        || {
+    let anonymous =
+        common::http_call_with_retry("anonymous operation.work.topology_metrics", || {
             agent
                 .post(&route)
                 .header("origin", &fixture.origin)
                 .content_type("application/json")
                 .send(request.to_string())
-        },
-    );
+        });
     assert_eq!(
         anonymous.status().as_u16(),
         StatusCode::UNAUTHORIZED.as_u16(),

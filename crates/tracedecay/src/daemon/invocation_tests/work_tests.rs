@@ -443,12 +443,16 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
              {replayed_admission:?}"
         );
     };
-    let replayed_admission = effect.payload.expect("replayed execution admission receipt");
+    let replayed_admission = effect
+        .payload
+        .expect("replayed execution admission receipt");
     assert!(replayed_admission.mutation.replayed());
-    assert_eq!(replayed_admission.mutation.event(), admitted.mutation.event());
     assert_eq!(
-        replayed_admission.execution_snapshot,
-        admitted.execution_snapshot,
+        replayed_admission.mutation.event(),
+        admitted.mutation.event()
+    );
+    assert_eq!(
+        replayed_admission.execution_snapshot, admitted.execution_snapshot,
         "the replayed admission must license the identical execution snapshot"
     );
 
