@@ -41,6 +41,37 @@ pub enum SemanticQualificationFailureV1 {
         evidence_digest: String,
         remedy: String,
     },
+    /// The packaged bytes predate the current asset schema, so they cannot be
+    /// read as evidence at all — distinct from evidence that was read and
+    /// refused. The methodology version is unreadable here because it lives
+    /// inside the shape that failed to decode.
+    #[error(
+        "qualification evidence for profile {profile_id} was written under packaged schema \
+         {packaged_schema_version}, which this build superseded with schema \
+         {current_schema_version}; {remedy}"
+    )]
+    SupersededSchema {
+        profile_id: String,
+        packaged_schema_version: u32,
+        current_schema_version: u32,
+        evidence_digest: Option<String>,
+        remedy: String,
+    },
+    /// The packaged bytes decode, but they were scored under a decision rule
+    /// this build no longer implements. Reinterpreting them under the current
+    /// rule would assert a measurement nobody made.
+    #[error(
+        "qualification evidence for profile {profile_id} was scored under methodology \
+         {packaged_methodology_version}, and this build decides under methodology \
+         {current_methodology_version}; {remedy}"
+    )]
+    SupersededMethodology {
+        profile_id: String,
+        packaged_methodology_version: u32,
+        current_methodology_version: u32,
+        evidence_digest: Option<String>,
+        remedy: String,
+    },
     #[error(
         "no valid qualification evidence for profile {profile_id} and workload \
          {current_workload_digest}: {detail}; {remedy}"

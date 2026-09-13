@@ -513,7 +513,11 @@ mod tests {
         assert!(matches!(
             status.qualification,
             tracedecay_contracts::SemanticQualificationStateV1::Unqualified {
-                failure: tracedecay_contracts::SemanticQualificationFailureV1::StaleWorkload { .. }
+                // The shipped asset predates the paired-effect schema, so the
+                // truthful state is that its decision rule was superseded —
+                // not that its workload binding drifted.
+                failure:
+                    tracedecay_contracts::SemanticQualificationFailureV1::SupersededSchema { .. }
             }
         ));
         assert!(matches!(

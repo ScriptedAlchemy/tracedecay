@@ -554,6 +554,12 @@ fn semantic_evaluation_rejection_problem(
             tracedecay_contracts::SemanticQualificationFailureV1::FailedQualification {
                 ..
             } => "semantic_qualification.failed_qualification",
+            tracedecay_contracts::SemanticQualificationFailureV1::SupersededSchema { .. } => {
+                "semantic_qualification.superseded_schema"
+            }
+            tracedecay_contracts::SemanticQualificationFailureV1::SupersededMethodology {
+                ..
+            } => "semantic_qualification.superseded_methodology",
             tracedecay_contracts::SemanticQualificationFailureV1::NoQualificationEvidence {
                 ..
             } => "semantic_qualification.no_qualification_evidence",

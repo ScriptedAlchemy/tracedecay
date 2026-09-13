@@ -1608,8 +1608,8 @@ mod tests {
             "semantic abstention must carry the same packaged-evidence state: {value}"
         );
         assert_eq!(
-            value["qualification"]["failure"]["reason"], "stale_workload",
-            "the checked-in PASS is for a superseded workload: {value}"
+            value["qualification"]["failure"]["reason"], "superseded_schema",
+            "the checked-in PASS predates the current qualification schema: {value}"
         );
     }
 
