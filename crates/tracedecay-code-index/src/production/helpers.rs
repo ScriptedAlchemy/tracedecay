@@ -270,8 +270,8 @@ where
     }
     let (by_simple_name, rust_files) =
         hotpath::measure_block!("code_index.seal.reference_index", {
-            let mut by_simple_name: BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> =
-                BTreeMap::new();
+            let mut by_simple_name: HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> =
+                HashMap::new();
             for (index, file) in files.iter().enumerate() {
                 for symbol in &file.as_ref().artifacts.symbols {
                     by_simple_name
@@ -346,7 +346,7 @@ where
 /// therefore decides exactly what the whole-repository serial loop decided.
 fn resolve_one_file_cross_file_references<T>(
     files: &[T],
-    by_simple_name: &BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
+    by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
     rust_files: &RustFileIndexV1,
     index: usize,
 ) -> Vec<CanonicalRelationEdgeV1>
@@ -403,11 +403,11 @@ pub(super) fn take_seal_reference_resolutions() -> usize {
 }
 
 type ResolvedReferenceCacheV1<'a> =
-    BTreeMap<(usize, &'a str, RelationEdgeKindV1), Option<(usize, SymbolOccurrenceId)>>;
+    HashMap<(usize, &'a str, RelationEdgeKindV1), Option<(usize, SymbolOccurrenceId)>>;
 
 fn resolve_cross_file_reference<T>(
     files: &[T],
-    by_simple_name: &BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
+    by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
     rust_files: &RustFileIndexV1,
     reexport_cache: &mut RustReexportCacheV1,
     index: usize,
@@ -540,7 +540,7 @@ fn unique_import<'a>(
     matches.next().is_none().then_some(binding)
 }
 
-type RustReexportCacheV1 = BTreeMap<(usize, usize, String, usize, String), bool>;
+type RustReexportCacheV1 = HashMap<(usize, usize, String, usize, String), bool>;
 
 struct RustResolutionContextV1<'a> {
     files: &'a RustFileIndexV1,
