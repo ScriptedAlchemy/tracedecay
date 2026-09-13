@@ -257,6 +257,76 @@ gate. Tools it guards that the root still serves (P0-1 leftovers): `tracedecay_r
 memory (`automation_run_*`, `analytics`, `skill_*`, `hermes_skill_bridge`), session-workflow
 (`diagnose`, `run_affected_tests`, `dashboard`), and every retained-application operation.
 
+## Lane status 2026-09-12 — fable/wave2-root-collapse (P0-1/P0-2 execution)
+
+Worktree `/fast/tmp/td-wave2-collapse-fable`, base `14de498296` (tip after #1252), target dir
+`/fast/tmp/td-target-wave2-collapse`. One PR per slice; the maintainer merges between slices.
+
+### Slice 1 — `src/mcp/` → `tracedecay-mcp` (three commits)
+
+Root `src/mcp/` 42,321 → 30,725 lines (−11,596); `tracedecay-mcp` 36,751 → 48,170. Test attributes
+conserved: root 951 → 862, mcp 232 → 320 (89 moved, 1 duplicate test deleted).
+
+1. **Pure moves** (`git mv`, `pub(crate)`→`pub` on the items the root reads, explicit exports):
+
+| root module | lines | new home |
+| --- | ---: | --- |
+| `tools/binding.rs` + `binding/{work,workflow}.rs` | 1,629 | `tracedecay_mcp::tools::binding` |
+| `tools/dispatch.rs`, `tools/catalog_discovery.rs` | 928 | `tracedecay_mcp::tools::{dispatch, catalog_discovery}` |
+| `tools/handlers/{session_authorities,dashboard_lcm,dashboard_delivery,dashboard_git_correlation}.rs` | 1,787 | `tracedecay_mcp::handlers::*` |
+| `tool_analytics.rs`, `scope.rs` | 1,006 | `tracedecay_mcp::{tool_analytics, scope}` |
+| `server/{session_refresh,project_host_admission_replay}.rs` | 705 | `tracedecay_mcp::server::*` |
+| `dispatch_groups.rs` ceiling block (`TOOL_DISPATCH_CEILING`, `tool_dispatch_{ceiling,budget,deadline_error}`) | 92 | `tracedecay_mcp::tools::dispatch_ceiling` (item cut, needed by the binding table) |
+| `project_route.rs::{ProjectRouteFailure, ProjectRouteFailureKind}` | 72 | `tracedecay_mcp::project_route` (item cut, needed by `scope.rs`; the `McpServer`-holding cache stays) |
+| `tool_call_support.rs::INTERNAL_DAEMON_TOOL_NAMES` | 7 | beside the binding table |
+
+2. **Duplicates deleted** (bodies diffed identical before deletion): `binding.rs::multi_root_operation_for_tool`
+   (ripwire type-2 clone of `handlers::multi_root::operation_for_tool`, 45 tokens — the binding table now
+   reads the handler-owned lookup like it does for work/workflow), and nine result-shaping helpers plus
+   `CONTEXT_MEMORY_ANALYTICS_KEY` and one unit test in root `handlers/support.rs` that re-implemented
+   `tracedecay_mcp::handlers::support` byte-for-byte. Root `support.rs` 243 → 77 lines (selector validation only).
+
+3. **Handler families whose only root dependency was `TraceDecay`** (`edit`, `workflow` + `workflow/`,
+   `admin_cli`, `automation_runs`, `skills`; 5,156 lines, 35 tests) → `tracedecay_mcp::handlers::*`. The
+   root dispatch arms (still bound to `ToolCallRegistryOptions`) call them by path. `json_result` joined
+   the shared support helpers. Five helpers now borrow an argument they never consumed
+   (`needless_pass_by_value`; the root allows it, `tracedecay-mcp` does not).
+
+Edges added to `tracedecay-mcp` (each checked with `cargo tree -p <crate> -e normal | rg tracedecay-mcp`
+→ empty before adding): agent-hosts, automation, automation-runtime, daemon-service, host-admission,
+lcm, maintenance, project, session-runtime; `futures-util`, `hex`, `sha2`, `url`. Dev: dashboard-api
+`test-transport`, graph-db, project `test-helpers`. Root re-exports of moved items: none — every root,
+CLI, bench, and suite caller retargets to `tracedecay_mcp::…`.
+
+**Reclassified from the plan's (b) rows — not movable yet:** `server/routing.rs` (holds
+`Arc<McpServer>`, `RetainedProjectServerResolver`, and the `WorkspaceProjectRoute` cache),
+`server/status_resource.rs` (`impl McpServer`), `hook_runtime/envelope.rs` (calls
+`tracedecay_agent_hosts::hooks::protected_native_session_id`; agent-hosts depends on hooks, so a
+hooks-crate home would be a cycle — it moves with `hook_runtime/` once `context_scout_lifecycle`
+is in daemon-service). `admin_project.rs` waits on the root `bench` runner (used by the CLI too).
+
+**`LegacyToolCompatibilityOwner` still guards root-only arms:** `tracedecay_retrieve`
+(`tool_call_support.rs`, project-route resolver → `McpServer`), `tracedecay_status`/`remote_status`/
+`active_project`/`project_*`/`admin_sync`/`runtime` (`info/`, `CodeIndexReconcileSink` and the other
+`crate::mcp::server` port aliases), `tracedecay_hook_runtime` (`crate::daemon::context_scout_lifecycle`
+→ slice 2), `tracedecay_admin_project` (`bench`), `tracedecay_analytics`
+(`crate::daemon::retained_owner::open_project_retained_memory_target` → slice 2/3),
+`tracedecay_dashboard` (`crate::daemon::dashboard_automation`, root `dashboard`/`hooks`, server ports),
+and the retained-application family (`retained_catalog.rs`, `ToolCallRegistryOptions`). The owner
+itself goes with `handlers/mod.rs` in slice 3.
+
+### Tip-side / environment reds observed (not this lane's)
+
+- `hooks_lsp_suite::hooks_test::test_codex_{workspace_status_distinguishes_generic_and_project_like_dirs,
+  user_prompt_submit_records_workspace_status_and_missing_session_hint}` fail on this machine because a
+  stray `/tmp/package.json` makes every `tempdir()` "project-like"; both pass with
+  `TMPDIR=/fast/tmp/td-wave2-clean-tmp` (cc-19166).
+- Clippy with `--features tracedecay/test-transport` (not CI's shape) hits `clippy::too_many_lines`
+  on `McpServer::new_with_registered_test_context` (104/100 lines, untouched here); CI's
+  `cargo clippy --workspace --all-targets -- -D warnings` shape is green.
+- `tracedecay-mcp::workflow::test_runner::tests::cargo_runner_*` ×3 fail when the nested cargo they
+  spawn contends for the target-dir lock with other test binaries (#1251 saw the same); green alone.
+
 ## P0-1/P0-2 collapse plan
 
 ### Dependency direction (cargo tree, normal edges)
@@ -422,7 +492,9 @@ their two `crate::mcp` uses are typed.
    (`tracedecay-mcp-catalog`).
 2. ~~New `tracedecay-project`~~ — done, see above (also took `product_runtime.rs`, `version.rs`, and the
    host-admission test runtime).
-3. `src/mcp` (b) rows, one commit per target crate; then (c) into tracedecay-mcp behind `McpToolContext`.
+3. ~~`src/mcp` (b) rows~~ and the `TraceDecay`-only handler families — done in slice 1 of
+   fable/wave2-root-collapse (see above); the remaining (c) rows wait on `McpServer` /
+   `ToolCallRegistryOptions` and move in slice 3.
 4. `src/daemon` (b) rows into daemon-service; then (c) as `tracedecay-daemon-service::composition`.
 5. Delete `src/mcp/` and `src/daemon/`; the root keeps `lib.rs` re-exports, `product_runtime`, `doctor`,
    `dashboard`, `version`, and the `test_support` fixture surface.
