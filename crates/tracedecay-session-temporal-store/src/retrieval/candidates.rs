@@ -817,7 +817,7 @@ pub(super) fn fts_phrase(value: &str) -> String {
 /// them, in which case that operator stands. Each term is quoted, so a term
 /// FTS5 would otherwise read as syntax (`NEAR`, `(`, `*`) matches as the word
 /// it is.
-fn fts_all_terms(value: &str) -> String {
+pub(super) fn fts_all_terms(value: &str) -> String {
     let mut expression = String::new();
     let mut term_precedes = false;
     for token in value.split_whitespace() {

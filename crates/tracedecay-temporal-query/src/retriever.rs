@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use tracedecay_domain::{
-    CompactCandidate, ComponentRevision, CursorPayloadDigest, EvidenceRole, FixedPointScore,
-    FreshnessCompatibilityV1, LogicalEvidenceId, ManifestDigest, RetrievalAnchorId,
-    RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverKind, ScoreDomainId,
-    SessionId, SessionOrThreadId, SourceFreshness, SourceInstanceKey, SourceNamespace,
-    SourceOccurrenceId, TemporalCandidateChannelV1, TemporalCandidateContributionV1,
-    TemporalLaneEvidenceV1, canonical_sha256,
+    CompactCandidate, CompactContextOmissionV1, ComponentRevision, ContextOmissionReasonV1,
+    CursorPayloadDigest, EvidenceRole, FixedPointScore, FreshnessCompatibilityV1,
+    LogicalEvidenceId, ManifestDigest, RetrievalAnchorId, RetrievalRequest, RetrieverBatch,
+    RetrieverContinuation, RetrieverKind, ScoreDomainId, SessionId, SessionOrThreadId,
+    SourceFreshness, SourceInstanceKey, SourceNamespace, SourceOccurrenceId,
+    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
+    canonical_sha256,
 };
 
 use super::context::VersionedTokenEstimator;
@@ -366,12 +367,13 @@ pub async fn hydrate_temporal_candidate_export(
         snapshot,
         ranked,
         next_cursor,
-        coverage: _,
+        coverage: candidate_coverage,
         result_eligible_anchors,
         visible_anchors,
         resolution,
         summaries,
         summary_eligibility,
+        strict_population,
     } = export;
     check_control(&snapshot)?;
     let ranked_anchors = ranked
@@ -386,7 +388,7 @@ pub async fn hydrate_temporal_candidate_export(
         .await
         .map_err(map_hydration_error)?;
     check_control(&snapshot)?;
-    let frames = temporal_context_frames(
+    let mut frames = temporal_context_frames(
         &result_eligible_anchors,
         &visible_anchors,
         &resolution,
@@ -396,6 +398,20 @@ pub async fn hydrate_temporal_candidate_export(
         &ranked_anchors,
         &summary_eligibility,
     );
+    if let Some(population) = strict_population {
+        frames.coverage.visible = candidate_coverage.eligible;
+        frames.coverage.hidden = candidate_coverage.excluded;
+        frames.coverage.unknown = population.lower_bound().saturating_sub(
+            candidate_coverage
+                .eligible
+                .saturating_add(candidate_coverage.excluded),
+        );
+        frames.coverage.redacted = 0;
+        frames.omissions.push(CompactContextOmissionV1 {
+            anchor_id: None,
+            reason: ContextOmissionReasonV1::RootContinuationUnavailable,
+        });
+    }
     let context = assemble_context_with_frames_controlled(
         &hydration,
         snapshot.grain(),

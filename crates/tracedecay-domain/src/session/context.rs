@@ -54,6 +54,7 @@ pub enum ContextOmissionReasonV1 {
     Unavailable,
     SummaryHorizonMismatch,
     DuplicateRepresentative,
+    RootContinuationUnavailable,
 }
 
 impl ContextOmissionReasonV1 {
@@ -69,6 +70,7 @@ impl ContextOmissionReasonV1 {
             Self::Unavailable => "unavailable",
             Self::SummaryHorizonMismatch => "summary_horizon_mismatch",
             Self::DuplicateRepresentative => "duplicate_representative",
+            Self::RootContinuationUnavailable => "root_continuation_unavailable",
         }
     }
 }

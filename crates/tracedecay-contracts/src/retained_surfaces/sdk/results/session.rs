@@ -107,6 +107,22 @@ pub struct TemporalOmissionV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TemporalCoverageOmissionV1 {
+    RootContinuationUnavailable {
+        strict_population: TemporalPopulationCountV1,
+        detail: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TemporalPopulationCountV1 {
+    Exact { count: u64 },
+    AtLeast { count: u64 },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSourceCoverageV1 {
     pub source_id: String,
@@ -199,6 +215,8 @@ pub struct TemporalMetadataV1 {
     pub explanations: Vec<TemporalExplanationV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub omissions: Vec<TemporalOmissionV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_omissions: Vec<TemporalCoverageOmissionV1>,
     pub next_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<TemporalFreshnessV1>,
