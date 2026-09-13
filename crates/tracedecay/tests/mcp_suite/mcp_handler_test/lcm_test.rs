@@ -15,7 +15,10 @@ use tracedecay_domain::sha256_hex_suffix;
 #[cfg(feature = "test-transport")]
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 #[cfg(feature = "test-transport")]
-use tracedecay_lcm::{LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay_lcm::{
+    LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef,
+    LcmSummaryNodeDraft,
+};
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
@@ -872,7 +875,11 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
     assert_eq!(grep_payload["status"], "partial");
     assert_eq!(grep_payload["count"], 1);
-    assert_eq!(grep_payload["omitted"], 3);
+    // Coverage counts the query-relevant result-eligible population, not a
+    // census of every seeded message: the single filtered hit is the only
+    // eligible anchor, and its unresolved provenance is the one omission.
+    assert_eq!(grep_payload["omitted"], 1, "payload: {grep_payload}");
+    assert_eq!(grep_payload["temporal"]["coverage"]["unknown"], 1);
     assert_eq!(
         grep_payload["hits"][0]["message_id"],
         "lcm-native-old-cli-assistant"
@@ -977,7 +984,7 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
     let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
     assert_eq!(payload["status"], "partial", "payload: {payload}");
     assert_eq!(payload["count"], 1);
-    assert_eq!(payload["omitted"], 3);
+    assert_eq!(payload["omitted"], 1, "payload: {payload}");
     assert_eq!(
         payload["hits"][0]["message_id"],
         "lcm-string-timestamps-target"
@@ -1035,7 +1042,7 @@ async fn lcm_grep_accepts_relative_time_filters() {
     let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
     assert_eq!(payload["status"], "partial", "payload: {payload}");
     assert_eq!(payload["count"], 1);
-    assert_eq!(payload["omitted"], 2);
+    assert_eq!(payload["omitted"], 1, "payload: {payload}");
     assert_eq!(
         payload["hits"][0]["message_id"],
         "lcm-relative-timestamps-new"
@@ -1171,11 +1178,9 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         payload["prompt"],
         "Summarize oversized expand-query evidence"
     );
-    assert!(
-        payload["synthesis_prompt"]["system"]
-            .as_str()
-            .unwrap()
-            .contains("expanded LCM retrieval context")
+    assert_eq!(
+        payload["synthesis_prompt"]["system"],
+        LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT
     );
     assert!(
         payload["synthesis_prompt"]["user"]
