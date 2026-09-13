@@ -84,11 +84,12 @@ pub async fn discover_repository_identity(
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
     }
 
-    if !repository_control_may_exist(directory) {
-        return GitRepositoryIdentityOutcome::NotRepository;
-    }
-    if let Some(identity) = repository_identity_from_authority(directory) {
-        return identity;
+    match authority_identity_off_executor(directory, deadline, cancellation).await {
+        AuthorityProbe::Decided(outcome) => return outcome,
+        AuthorityProbe::Interrupted(reason) => {
+            return GitRepositoryIdentityOutcome::Unknown(reason);
+        }
+        AuthorityProbe::Unreadable => {}
     }
 
     let Ok(mut command) = async_repository_identity_command(directory) else {
@@ -117,6 +118,58 @@ pub async fn discover_repository_identity(
             )
         }
         Ok(_) | Err(_) => GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed),
+    }
+}
+
+/// What the in-process authority probe decided, or why it could not.
+enum AuthorityProbe {
+    Decided(GitRepositoryIdentityOutcome),
+    /// The repository exists but its authority is unreadable, so the `git`
+    /// helper is still worth asking.
+    Unreadable,
+    Interrupted(GitDiscoveryUnknown),
+}
+
+/// Run the ancestor walk and repository open on the blocking pool.
+///
+/// Live defect this exists for: this function promises discovery "without
+/// blocking the async executor", but the in-process authority probe ran inline
+/// on the calling worker with no bound at all — only the `git` subprocess
+/// fallback below ever observed the deadline. On a slow volume every tokio
+/// worker serving daemon connections sat inside `gix` discovery at once, so
+/// the accept loop was never polled and the listening socket refused new
+/// clients while the process stayed alive.
+///
+/// The blocking task cannot be interrupted once started, but the caller is:
+/// an elapsed deadline or a cancelled token returns the typed uncertainty the
+/// module contract already defines, and the abandoned probe finishes on the
+/// blocking pool without holding a worker.
+async fn authority_identity_off_executor(
+    directory: &Path,
+    deadline: MonotonicDeadline,
+    cancellation: &CancellationToken,
+) -> AuthorityProbe {
+    let path = directory.to_path_buf();
+    let probe = tokio::task::spawn_blocking(move || {
+        if !repository_control_may_exist(&path) {
+            return Some(GitRepositoryIdentityOutcome::NotRepository);
+        }
+        repository_identity_from_authority(&path)
+    });
+    tokio::pin!(probe);
+    tokio::select! {
+        biased;
+        probed = &mut probe => match probed {
+            Ok(Some(outcome)) => AuthorityProbe::Decided(outcome),
+            Ok(None) => AuthorityProbe::Unreadable,
+            Err(_) => AuthorityProbe::Interrupted(GitDiscoveryUnknown::ProbeFailed),
+        },
+        () = cancellation.cancelled() => {
+            AuthorityProbe::Interrupted(GitDiscoveryUnknown::Cancelled)
+        }
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.instant())) => {
+            AuthorityProbe::Interrupted(GitDiscoveryUnknown::DeadlineExceeded)
+        }
     }
 }
 
@@ -234,16 +287,16 @@ fn git_control_exists_or_unknown(candidate: &Path) -> bool {
 }
 
 fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryIdentityOutcome> {
-    match crate::git_repository::GitRepositoryAuthority::discover(directory) {
-        Ok(repository) => {
-            let Some(worktree_root) = repository.worktree_root() else {
+    match crate::git_repository::repository_topology(directory) {
+        Ok(topology) => {
+            let Some(worktree_root) = topology.worktree_root.clone() else {
                 return Some(GitRepositoryIdentityOutcome::NotRepository);
             };
             Some(GitRepositoryIdentityOutcome::Resolved(
                 GitRepositoryIdentity {
-                    worktree_root: worktree_root.to_path_buf(),
-                    git_dir: repository.git_dir().to_path_buf(),
-                    common_dir: repository.common_dir().to_path_buf(),
+                    worktree_root,
+                    git_dir: topology.git_dir.clone(),
+                    common_dir: topology.common_dir.clone(),
                 },
             ))
         }
