@@ -767,6 +767,27 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "tool_sweep.effect_journey_unavailable")
 
+    def test_a_cataloged_journey_reports_its_priming_failure_not_a_missing_recipe(self) -> None:
+        """A Work journey exists; when its fixture never mints, say exactly that."""
+        runner = load_runner()
+        policy = runner.ToolPolicy(
+            name="tracedecay_work_synthesize", availability="available", effect="administrative", deadline_ms=2_000
+        )
+
+        row = runner.missing_effect_journey_row(
+            policy,
+            {"work": {"type": "JourneyError", "message": "producer failed: work.invalid_request"}},
+        )
+
+        self.assertEqual(row["verdict"], "FAIL")
+        self.assertEqual(row["problem_code"], "tool_sweep.effect_journey_fixture_unavailable")
+        self.assertIn("work.invalid_request", row["note"])
+        # Another group's failure says nothing about this journey's fixture.
+        unrelated = runner.missing_effect_journey_row(
+            policy, {"graph": {"type": "SweepError", "message": "code-graph-unavailable"}}
+        )
+        self.assertEqual(unrelated["problem_code"], "tool_sweep.effect_journey_unavailable")
+
     def test_work_mutation_replay_stays_bound_to_the_shared_attempt(self) -> None:
         runner = load_runner()
         fixture = {

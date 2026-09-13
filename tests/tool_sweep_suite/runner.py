@@ -2207,8 +2207,36 @@ def _resolve_ref(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]
     return value
 
 
-def missing_effect_journey_row(policy: ToolPolicy) -> dict[str, Any]:
+# The priming group each cataloged journey family draws its fixture from, so a
+# journey that could not be prepared reports why rather than claiming it was
+# never written.
+EFFECT_JOURNEY_PRIMING_GROUPS: dict[str, str] = {
+    "tracedecay_work_": "work",
+    "tracedecay_workflow_": "workflow",
+    "tracedecay_context_scout_": "context_scout",
+}
+
+
+def missing_effect_journey_row(
+    policy: ToolPolicy, priming_errors: dict[str, dict[str, str]] | None = None
+) -> dict[str, Any]:
     """Keep an advertised mutation visible until it has a real reversible journey."""
+    for prefix, group in EFFECT_JOURNEY_PRIMING_GROUPS.items():
+        if not policy.name.startswith(prefix):
+            continue
+        failure = (priming_errors or {}).get(group)
+        if failure is None:
+            continue
+        # The journey is cataloged; its fixture never minted. Reporting a
+        # missing journey here would send a reader looking for code that
+        # already exists.
+        return _failure_row(
+            "tool",
+            policy.name,
+            policy.deadline_ms,
+            "tool_sweep.effect_journey_fixture_unavailable",
+            f"{group} journey fixture failed to prime: {failure['type']}: {failure['message']}",
+        )
     return _failure_row(
         "tool",
         policy.name,
@@ -2435,7 +2463,7 @@ def execute_effect(
             lambda tool, arguments, deadline_ms: _journey_call(client, tool, arguments, deadline_ms),
         )
         if prepared is None:
-            return missing_effect_journey_row(policy)
+            return missing_effect_journey_row(policy, fixture.get("priming_errors"))
         response, elapsed_ms = client.call_tool(policy.name, prepared.arguments, policy.deadline_ms)
         row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
         if row["verdict"] == "PASS" and duration_us(response) is None:
