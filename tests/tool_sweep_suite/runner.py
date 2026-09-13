@@ -2514,7 +2514,62 @@ def _read_tool_row(
                     "note": str(error),
                 }
             )
+    if row["verdict"] == "PASS" and policy.name.startswith("tracedecay_context_scout_"):
+        try:
+            validate_context_scout_read_response(policy.name, response, fixture)
+        except SweepError as error:
+            row.update(
+                {
+                    "verdict": "FAIL",
+                    "problem_code": "tool_sweep.consumer_unverified",
+                    "note": str(error),
+                }
+            )
     return row
+
+
+def validate_context_scout_read_response(
+    name: str, response: dict[str, Any], fixture: dict[str, Any]
+) -> None:
+    values = list(_objects(response))
+    if name == "tracedecay_context_scout_recent":
+        work = fixture["context_scout_work"]
+        if not any(
+            isinstance(value.get("pending"), list)
+            and any(isinstance(item, dict) and item.get("work") == work for item in value["pending"])
+            for value in values
+        ):
+            raise SweepError("Context Scout recent omitted the producer-minted pending work")
+        return
+    if name == "tracedecay_context_scout_explain":
+        if not any(
+            isinstance(value.get("status"), dict) and isinstance(value.get("recent"), dict)
+            for value in values
+        ):
+            raise SweepError("Context Scout explain omitted status or recent state")
+        return
+    if name == "tracedecay_context_scout_status":
+        if not any(
+            value.get("state") == "active"
+            and isinstance(value.get("limits"), dict)
+            and isinstance(value.get("active_suggestions"), int)
+            for value in values
+        ):
+            raise SweepError("Context Scout status omitted active typed state")
+        return
+    if name == "tracedecay_context_scout_capability":
+        if not any(
+            value.get("state") == "active"
+            and value.get("deterministic_available") is True
+            for value in values
+        ):
+            raise SweepError("Context Scout capability omitted deterministic availability")
+        return
+    if name == "tracedecay_context_scout_budget" and not any(
+        isinstance(value.get("limits"), dict) and isinstance(value.get("exhausted"), bool)
+        for value in values
+    ):
+        raise SweepError("Context Scout budget omitted limits or exhaustion state")
 
 
 def _require_navigation_evidence(
@@ -2625,12 +2680,21 @@ def run_phase(args: argparse.Namespace) -> int:
             client,
             fixture,
             policy_index,
-            args.effect if args.phase == "effect" else None,
+            args.effect if args.phase == "effect" else args.read,
         )
         if fixture["priming_errors"]:
             report["priming_errors"] = fixture["priming_errors"]
         if args.phase == "reads":
-            for definition, policy in policies:
+            selected_reads = [
+                (definition, policy)
+                for definition, policy in policies
+                if args.read is None or policy.name == args.read
+            ]
+            if args.read is not None and (
+                len(selected_reads) != 1 or selected_reads[0][1].effect not in READ_EFFECTS
+            ):
+                raise SweepError(f"selected read is not uniquely available: {args.read}")
+            for definition, policy in selected_reads:
                 if policy.availability == "unavailable":
                     report["entries"].append(_unavailable_tool_row(client, policy))
                 elif policy.effect in READ_EFFECTS:
@@ -2686,6 +2750,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--bin", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--phase", choices=("prepare", "discovery", "reads", "effect"), required=True)
+    parser.add_argument("--read")
     parser.add_argument("--effect")
     parser.add_argument("--catalog", type=Path)
     args = parser.parse_args(argv)
@@ -2695,8 +2760,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--bin must name an executable release binary")
     if args.phase == "effect" and (not args.effect or args.catalog is None):
         parser.error("--phase effect requires --effect and --catalog")
-    if args.phase in {"prepare", "discovery", "reads"} and (args.effect is not None or args.catalog is not None):
-        parser.error("--effect/--catalog are only valid for --phase effect")
+    if args.phase == "reads" and args.catalog is not None:
+        parser.error("--catalog is only valid for --phase effect")
+    if args.phase in {"prepare", "discovery"} and (
+        args.read is not None or args.effect is not None or args.catalog is not None
+    ):
+        parser.error("--read/--effect/--catalog are only valid for execution phases")
+    if args.phase == "reads" and args.effect is not None:
+        parser.error("--effect is only valid for --phase effect")
+    if args.phase == "effect" and args.read is not None:
+        parser.error("--read is only valid for --phase reads")
     return args
 
 

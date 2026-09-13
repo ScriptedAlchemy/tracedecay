@@ -22,6 +22,27 @@ def load_runner():
     return module
 
 
+class ArgumentTests(unittest.TestCase):
+    def test_reads_phase_accepts_one_targeted_read(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as raw_out:
+            args = runner.parse_args(
+                [
+                    "--bin",
+                    sys.executable,
+                    "--out",
+                    raw_out,
+                    "--phase",
+                    "reads",
+                    "--read",
+                    "tracedecay_context_scout_status",
+                ]
+            )
+
+        self.assertEqual(args.read, "tracedecay_context_scout_status")
+        self.assertIsNone(args.effect)
+
+
 class ProblemCodeTests(unittest.TestCase):
     def test_problem_code_is_a_first_class_field_for_success_framed_unavailable(self) -> None:
         """A rendered unavailable result must not become an apparently clean response."""
