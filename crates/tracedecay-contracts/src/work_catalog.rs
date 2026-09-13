@@ -801,7 +801,7 @@ mod tests {
         );
         assert_eq!(
             admit.result_schema().rust_type_path(),
-            "tracedecay_contracts::WorkProductMutationReceiptV1"
+            "tracedecay_contracts::AdmittedWorkExecutionV1"
         );
     }
 }
