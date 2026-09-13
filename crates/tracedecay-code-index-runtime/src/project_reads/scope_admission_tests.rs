@@ -113,7 +113,7 @@ impl Fixture {
 /// terminal the retained scope gets) instead of the scope denial a foreign
 /// worktree receives. The full served moved-label journey is proven against
 /// real activation by
-/// `daemon::code_index_scheduler::tests::moved_reference_label_still_serves_the_exact_worktree_as_current`.
+/// `code_index_scheduler::tests::serving::moved_reference_label_still_serves_the_exact_worktree_as_current`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn moved_branch_label_still_opens_the_exact_checkouts_graph_read() {
     let fixture = Fixture::mount().await;
