@@ -3,8 +3,9 @@
 use super::*;
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
-    ContextScoutMutationBindingV1, ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
-    ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
+    ContextScoutExplanationV1, ContextScoutMutationBindingV1, ContextScoutMutationOperationV1,
+    ContextScoutMutationResultV1, ContextScoutMutationSettlementOutcomeV1,
+    ContextScoutPublicMutationV1, ContextScoutRecentStateV1,
 };
 use tracedecay_application::primitives::{
     ProductionPrimitiveOpenRequestV1, open_production_primitive_runtime,
@@ -13,8 +14,8 @@ use tracedecay_contracts::CallableCodeSurfaceRequest;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimResultV1,
     ContextScoutControlRequestV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryResultV1,
-    ContextScoutEvidenceProjectionV1, ContextScoutSuggestionProjectionV1,
-    ContextScoutSurfaceRequestV1,
+    ContextScoutEvidenceProjectionV1, ContextScoutRecentResultV1,
+    ContextScoutSuggestionProjectionV1, ContextScoutSurfaceRequestV1,
 };
 use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -615,12 +616,13 @@ pub(super) async fn execute_context_scout(
             .recent_exact(request.address, request.limit)
             .await
             .ok()
+            .map(public_context_scout_recent)
             .and_then(|recent| serde_json::to_value(recent).ok()),
         ContextScoutSurfaceRequestV1::Explain(request) => owner
             .explain_exact(request.address, request.limit)
             .await
             .ok()
-            .and_then(|explanation| serde_json::to_value(explanation).ok()),
+            .map(public_context_scout_explanation),
         ContextScoutSurfaceRequestV1::Capability(_) => owner
             .capability()
             .await
@@ -914,7 +916,6 @@ fn public_context_scout_claim(
 ) -> ContextScoutClaimResultV1 {
     let entry = &claim.entry;
     let envelope = &entry.envelope;
-    let candidate = &envelope.candidate;
     ContextScoutClaimResultV1::Claimed {
         claim: Box::new(ContextScoutClaimHandleV1 {
             work: entry.work,
@@ -922,32 +923,71 @@ fn public_context_scout_claim(
             lease_id: claim.lease.lease_id,
             lease_expires_at: claim.lease.expires_at,
         }),
-        suggestion: Box::new(ContextScoutSuggestionProjectionV1 {
-            work: entry.work,
-            envelope_id: envelope.envelope_id,
-            configuration_revision: envelope.configuration_revision,
-            delivery_window: envelope.delivery_window,
-            route: entry.route,
-            model_outcome: entry.model_outcome,
-            model_receipt: entry.model_receipt.clone(),
-            dedupe_key: candidate.dedupe_key,
-            category: candidate.category,
-            relevance_score: candidate.relevance_score,
-            suggestion_text: candidate.suggestion_text.clone(),
-            evidence: ContextScoutEvidenceProjectionV1 {
-                content_generation: candidate.evidence.code_generation_id.clone(),
-                availability: candidate.evidence.availability,
-                anchor_ids: candidate
-                    .evidence
-                    .sources
-                    .iter()
-                    .flat_map(|source| source.anchors.iter().cloned())
-                    .collect(),
-                claim_digest: candidate.evidence.claim_digest.clone(),
-            },
-            expires_at: candidate.expires_at,
-        }),
+        suggestion: Box::new(public_context_scout_suggestion(entry)),
     }
+}
+
+fn public_context_scout_suggestion(
+    entry: &tracedecay_contracts::context_scout::ContextScoutDurableQueueEntryV1,
+) -> ContextScoutSuggestionProjectionV1 {
+    let envelope = &entry.envelope;
+    let candidate = &envelope.candidate;
+    ContextScoutSuggestionProjectionV1 {
+        work: entry.work,
+        envelope_id: envelope.envelope_id,
+        configuration_revision: envelope.configuration_revision,
+        delivery_window: envelope.delivery_window,
+        route: entry.route,
+        model_outcome: entry.model_outcome,
+        model_receipt: entry.model_receipt.clone(),
+        dedupe_key: candidate.dedupe_key,
+        category: candidate.category,
+        relevance_score: candidate.relevance_score,
+        suggestion_text: candidate.suggestion_text.clone(),
+        evidence: ContextScoutEvidenceProjectionV1 {
+            content_generation: candidate.evidence.code_generation_id.clone(),
+            availability: candidate.evidence.availability,
+            anchor_ids: candidate
+                .evidence
+                .sources
+                .iter()
+                .flat_map(|source| source.anchors.iter().cloned())
+                .collect(),
+            claim_digest: candidate.evidence.claim_digest.clone(),
+        },
+        expires_at: candidate.expires_at,
+    }
+}
+
+fn public_context_scout_recent(recent: ContextScoutRecentStateV1) -> ContextScoutRecentResultV1 {
+    ContextScoutRecentResultV1 {
+        configuration_revision: recent.configuration_revision,
+        observed_at: recent.observed_at,
+        pending: recent
+            .pending
+            .iter()
+            .map(public_context_scout_suggestion)
+            .collect(),
+        deliveries: recent
+            .deliveries
+            .iter()
+            .map(
+                |delivery| tracedecay_contracts::context_scout::ContextScoutRecentDeliveryV1 {
+                    suggestion: public_context_scout_suggestion(&delivery.entry),
+                    receipt: delivery.receipt.clone(),
+                    feedback: delivery.feedback,
+                },
+            )
+            .collect(),
+        omitted: recent.omitted,
+    }
+}
+
+fn public_context_scout_explanation(explanation: ContextScoutExplanationV1) -> serde_json::Value {
+    serde_json::json!({
+        "status": explanation.status,
+        "recent": public_context_scout_recent(explanation.recent),
+    })
 }
 
 #[hotpath::measure(label = "daemon.service.context_scout.transition", future = true)]
