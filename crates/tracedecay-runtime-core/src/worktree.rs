@@ -41,10 +41,10 @@ pub struct WorktreeIndexMismatch {
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    crate::git_repository::GitRepositoryAuthority::discover(dir)
+    crate::git_repository::repository_topology(dir)
         .ok()?
-        .worktree_root()
-        .map(Path::to_path_buf)
+        .worktree_root
+        .clone()
 }
 
 /// Absolute, symlink-resolved path to the repository's git common directory.
@@ -52,9 +52,9 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    crate::git_repository::GitRepositoryAuthority::discover(dir)
+    crate::git_repository::repository_topology(dir)
         .ok()
-        .map(|repository| repository.common_dir().to_path_buf())
+        .map(|topology| topology.common_dir.clone())
 }
 
 /// Stable repository locator digest for a registered project root.
@@ -126,25 +126,25 @@ pub fn primary_checkout_root(
 /// inside a monorepo is its own project), is outside git, or has a repository
 /// shape whose primary checkout cannot be derived safely.
 pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
-    let worktree_root = git_worktree_root(dir)?;
+    let topology = crate::git_repository::repository_topology(dir).ok()?;
+    let worktree_root = topology.worktree_root.as_deref()?;
     // Only a worktree ROOT inherits repository identity. Without this check a
     // subdirectory indexed as its own project would be absorbed into the
     // enclosing repository's store.
     if worktree_root != realpath(dir)? {
         return None;
     }
-    let common_dir = git_common_dir(dir)?;
-    primary_checkout_root(&worktree_root, Some(&common_dir))
+    primary_checkout_root(worktree_root, Some(&topology.common_dir))
 }
 
 /// Returns whether `dir` resolves to a linked worktree root.
 pub fn is_linked_worktree(dir: &Path) -> bool {
-    let Ok(repository) = crate::git_repository::GitRepositoryAuthority::discover(dir) else {
+    let Ok(topology) = crate::git_repository::repository_topology(dir) else {
         return false;
     };
-    repository.worktree_root().is_some_and(|root| {
+    topology.worktree_root.as_deref().is_some_and(|root| {
         realpath(dir).is_some_and(|canonical_dir| canonical_dir.starts_with(root))
-            && repository.git_dir() != repository.common_dir()
+            && topology.git_dir != topology.common_dir
     })
 }
 
@@ -161,9 +161,9 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     if !is_detached_linked_worktree(dir) {
         return None;
     }
-    let repository = crate::git_repository::GitRepositoryAuthority::discover(dir).ok()?;
-    let git_dir = repository.git_dir();
-    let common_dir = repository.common_dir();
+    let topology = crate::git_repository::repository_topology(dir).ok()?;
+    let git_dir = topology.git_dir.as_path();
+    let common_dir = topology.common_dir.as_path();
     let identity = git_dir.strip_prefix(common_dir).unwrap_or(git_dir);
     let mut hasher = Sha256::new();
     hasher.update(crate::os_str_bytes::native_os_str_bytes(
