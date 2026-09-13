@@ -273,7 +273,6 @@ async fn open_scope_set_cas_projects<'a>(
     cancellation: &tracedecay_contracts::CancellationContext,
     request_id: &str,
     request_cancellation: &CancellationToken,
-    project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     mut open_project: impl FnMut(DaemonHandshake) -> ProjectOpenFuture<'a>,
 ) -> std::result::Result<Vec<Arc<crate::mcp::McpServer>>, DaemonInvocationResponse> {
     if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
@@ -293,50 +292,6 @@ async fn open_scope_set_cas_projects<'a>(
     let mut servers = Vec::with_capacity(scope_set_request.roots.len());
     for selector in &scope_set_request.roots {
         let selected_handshake = selected_root_handshake(handshake, &selector.root);
-        let project_server = await_lsp_route_rejoin(
-            deadline,
-            request_cancellation,
-            open_project(selected_handshake.clone()),
-        )
-        .await;
-        match project_server {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
-                return Err(DaemonInvocationResponse::problem(
-                    request_id.to_owned(),
-                    project_open_problem(&error, false, false),
-                ));
-            }
-            Err(problem) => {
-                return Err(DaemonInvocationResponse::application_problem(
-                    request_id.to_owned(),
-                    problem,
-                ));
-            }
-        }
-        let root = selector.root.canonicalize().map_err(|_| {
-            DaemonInvocationResponse::problem(
-                request_id.to_owned(),
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            )
-        })?;
-        let route = ProjectRouteKey::from_handshake(&root, &selected_handshake).map_err(|_| {
-            DaemonInvocationResponse::problem(
-                request_id.to_owned(),
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            )
-        })?;
-        let wait = await_lsp_project_open_upgrade(
-            project_open_gates,
-            &route,
-            deadline,
-            request_cancellation,
-        )
-        .await;
-        if let Some(response) = lsp_project_open_wait_response(request_id, wait, false, false) {
-            return Err(response);
-        }
         let project_server = await_lsp_route_rejoin(
             deadline,
             request_cancellation,
@@ -580,7 +535,6 @@ pub(super) async fn execute_portable_daemon_invocation(
                 cancellation,
                 &request_id,
                 request_cancellation,
-                &lsp_project_open_gates,
                 |selected_handshake| {
                     let lifecycle = lifecycle.clone();
                     let store_administration = store_administration.clone();
@@ -597,7 +551,7 @@ pub(super) async fn execute_portable_daemon_invocation(
                             invocation,
                             http_application_registry,
                             &selected_handshake,
-                            ProjectServerRequirement::Core,
+                            ProjectServerRequirement::RegisteredHostIngest,
                             #[cfg(test)]
                             project_open_attempts,
                         )
@@ -976,13 +930,12 @@ pub(super) async fn execute_daemon_invocation(
                 cancellation,
                 &request_id,
                 request_cancellation,
-                &engine.project_open_gates,
                 |selected_handshake| {
                     Box::pin(async move {
                         engine
                             .project_server_for_request(
                                 &selected_handshake,
-                                ProjectServerRequirement::Core,
+                                ProjectServerRequirement::RegisteredHostIngest,
                             )
                             .await
                     })
