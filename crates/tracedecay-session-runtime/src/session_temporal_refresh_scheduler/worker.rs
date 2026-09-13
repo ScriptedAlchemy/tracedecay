@@ -359,6 +359,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
             if let Some(class) = report.retry_class {
                 retry_attempt = retry_attempt.saturating_add(1);
+                tracing::warn!(
+                    ?class,
+                    retry_attempt,
+                    error = report.last_error.as_deref(),
+                    "session temporal refresh pass will retry"
+                );
                 observe_retry(class, retry_attempt);
                 state.mark_recovering(class.into(), class);
                 state.requeue_projection();
@@ -624,6 +630,7 @@ pub async fn process_refresh_begin_requests(
                 }
             }
             Err(error) if error.is_storage() => {
+                report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
                 break;
@@ -665,6 +672,7 @@ pub async fn begin_admitted_session_refreshes(
         Ok(page) => page,
         Err(error) => {
             if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
+                report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
             } else {
@@ -829,6 +837,7 @@ async fn project_running_refresh(
             label = "daemon.scheduler.session_temporal.projector_cancel"
         ) => return,
         () = &mut deadline => {
+            report.last_error = Some("projector_deadline_exceeded".to_string());
             report.deadline_errors += 1;
             report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
             return;
@@ -894,11 +903,57 @@ async fn project_running_refresh(
             label = "daemon.scheduler.session_temporal.effect_apply_cancel"
         ) => {}
         () = &mut deadline => {
+            report.last_error = Some("effect_apply_deadline_exceeded".to_string());
             report.deadline_errors += 1;
             report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
         }
         () = apply_refresh_effect(store, state, recovery, effect, report) => {}
     }
+}
+
+async fn running_refreshes(
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    report: &mut SessionTemporalRefreshPassReport,
+) -> Option<Vec<SessionRefreshRecoveryV1>> {
+    match store.running_session_refreshes().await {
+        Ok(recoveries) => Some(recoveries),
+        Err(error) => {
+            report.last_error = Some(format!("{error:?}"));
+            if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
+                report.retryable_errors += 1;
+                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
+            } else {
+                report.terminal_errors += 1;
+            }
+            None
+        }
+    }
+}
+
+async fn recoveries_for_pass(
+    database: &RegisteredGlobalDbLeaseV1,
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    state: &SessionTemporalRefreshWakeState,
+    policy: SessionTemporalRefreshPolicy,
+    report: &mut SessionTemporalRefreshPassReport,
+) -> Option<Vec<SessionRefreshRecoveryV1>> {
+    let mut recoveries = running_refreshes(store, report).await?;
+    if !recoveries.is_empty() {
+        // Existing durable work owns this pass. Rediscovery scans the complete
+        // observation-effect index, so defer it until these recoveries drain.
+        report.saturated = true;
+        return Some(recoveries);
+    }
+    begin_admitted_session_refreshes(
+        database,
+        store,
+        state,
+        policy.max_begin_requests_per_pass,
+        report,
+    )
+    .await;
+    recoveries = running_refreshes(store, report).await?;
+    Some(recoveries)
 }
 
 fn recovery_key(recovery: &SessionRefreshRecoveryV1) -> String {
@@ -927,25 +982,10 @@ pub async fn run_session_temporal_refresh_pass(
         &mut report,
     )
     .await;
-    begin_admitted_session_refreshes(
-        database,
-        &store,
-        state,
-        policy.max_begin_requests_per_pass,
-        &mut report,
-    )
-    .await;
-    let mut recoveries = match store.running_session_refreshes().await {
-        Ok(recoveries) => recoveries,
-        Err(error) => {
-            if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
-                report.retryable_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-            } else {
-                report.terminal_errors += 1;
-            }
-            return report;
-        }
+    let Some(mut recoveries) =
+        recoveries_for_pass(database, &store, state, policy, &mut report).await
+    else {
+        return report;
     };
     recoveries.sort_by_cached_key(recovery_key);
     state.observe_durable_backlog(recoveries.len());
@@ -996,6 +1036,7 @@ pub async fn run_session_temporal_refresh_pass(
                 .await
                 .is_err()
                 {
+                    report.last_error = Some("completion_deadline_exceeded".to_string());
                     report.deadline_errors += 1;
                     report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
                 }
@@ -1015,6 +1056,9 @@ pub async fn run_session_temporal_refresh_pass(
             }
         }
         selection.complete(&operation);
+        if report.retry_class.is_some() {
+            break;
+        }
     }
     let terminal = report
         .completed
