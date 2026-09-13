@@ -87,7 +87,7 @@ impl McpConnectionContext for TestContext {
         request: McpDispatchRequest<'a>,
         _timings_enabled: bool,
         _connection: &'a mut Self::Connection,
-        _pre_cancelled: bool,
+        _cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Option<JsonRpcResponse>> + Send + 'a>> {
         Box::pin(async move {
             let id = request.cloned_id()?;

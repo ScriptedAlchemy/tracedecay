@@ -59,12 +59,12 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
         request: tracedecay_mcp::server::McpDispatchRequest<'a>,
         timings_enabled: bool,
         connection: &'a mut Self::Connection,
-        pre_cancelled: bool,
+        cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<JsonRpcResponse>> + Send + 'a>>
     {
         Box::pin(
             self.server
-                .dispatch_envelope(request, timings_enabled, connection, pre_cancelled),
+                .dispatch_envelope(request, timings_enabled, connection, cancellation),
         )
     }
 

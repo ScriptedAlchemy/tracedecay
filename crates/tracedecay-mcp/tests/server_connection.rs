@@ -128,11 +128,11 @@ impl McpConnectionContext for TestContext {
         request: McpDispatchRequest<'a>,
         _timings_enabled: bool,
         _connection: &'a mut Self::Connection,
-        pre_cancelled: bool,
+        cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Option<JsonRpcResponse>> + Send + 'a>> {
         Box::pin(async move {
             let id = request.cloned_id()?;
-            if pre_cancelled {
+            if cancellation.is_cancelled() {
                 return Some(JsonRpcResponse::error(
                     id,
                     tracedecay_mcp::ErrorCode::RequestCancelled,

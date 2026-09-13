@@ -60,12 +60,14 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     fn max_concurrent_reads(&self) -> usize;
     fn tool_is_read_only(&self, tool_name: &str) -> bool;
     fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool;
+    /// The token is sticky across asynchronous route resolution and must be
+    /// sampled immediately before dispatch admission.
     fn dispatch<'a>(
         &'a self,
         request: McpDispatchRequest<'a>,
         timings_enabled: bool,
         connection: &'a mut Self::Connection,
-        pre_cancelled: bool,
+        cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Option<JsonRpcResponse>> + Send + 'a>>;
     fn cancel_request(&self, id: &Value, connection_scope: &str) -> bool;
     fn cancellation_registered(&self) -> &tokio::sync::Notify;
@@ -110,14 +112,14 @@ where
         request: &'a JsonRpcRequest,
         timings_enabled: bool,
         connection: &'a mut C::Connection,
-        pre_cancelled: bool,
+        cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> Option<JsonRpcResponse> {
         self.context
             .dispatch(
                 McpDispatchRequest::from_legacy(request),
                 timings_enabled,
                 connection,
-                pre_cancelled,
+                cancellation,
             )
             .await
     }
@@ -358,7 +360,7 @@ where
             &request,
             timings_enabled,
             &mut connection,
-            cancellation.is_cancelled(),
+            cancellation.clone(),
         ));
         tokio::pin!(handling);
         let mut cancellation_waiting_for_registration = false;
@@ -522,14 +524,17 @@ where
             .as_ref()
             .and_then(|id| application_surface_request_id(id, &connection_scope))
             .is_some_and(|key| pending_cancellations.remove(&key));
+        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+        if pre_cancelled {
+            cancellation.cancel();
+        }
         let handling = Box::pin(self.handle_request_for_connection(
             request,
             timings_enabled,
             connection,
-            pre_cancelled,
+            cancellation.clone(),
         ));
         tokio::pin!(handling);
-        let mut current_cancellation: Option<Value> = None;
         // One-shot clients (the CLI and the stdio proxy) shut down their write
         // half once the request is on the wire, so end-of-input means "no more
         // requests", not "peer is gone". Stop watching for cancellations and
@@ -539,25 +544,6 @@ where
             std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
         > = None;
         loop {
-            let cancellation_id = current_cancellation.clone();
-            let wait_for_current_cancellation_registration = async {
-                let Some(cancellation_id) = cancellation_id.as_ref() else {
-                    std::future::pending::<()>().await;
-                    return;
-                };
-                loop {
-                    // Register interest *before* re-probing so a registration
-                    // between the probe and the await cannot be missed.
-                    let registered = self.context.cancellation_registered().notified();
-                    tokio::pin!(registered);
-                    registered.as_mut().enable();
-                    if self.cancel_application_surface_request(cancellation_id, &connection_scope) {
-                        return;
-                    }
-                    registered.await;
-                }
-            };
-            tokio::pin!(wait_for_current_cancellation_registration);
             if let Some(peer_close_check) = peer_close_check.as_mut() {
                 tokio::select! {
                     biased;
@@ -566,9 +552,6 @@ where
                             let _ = self.cancel_application_surface_request(id, &connection_scope);
                         }
                         return Ok((None, true));
-                    }
-                    () = &mut wait_for_current_cancellation_registration => {
-                        current_cancellation = None;
                     }
                     response = &mut handling => return Ok((response, false)),
                     () = peer_close_check => {
@@ -586,9 +569,6 @@ where
                         let _ = self.cancel_application_surface_request(id, &connection_scope);
                     }
                     return Ok((None, true));
-                }
-                () = &mut wait_for_current_cancellation_registration => {
-                    current_cancellation = None;
                 }
                 response = &mut handling => return Ok((response, false)),
                 incoming = read_inflight_connection_line(transport) => {
@@ -630,7 +610,7 @@ where
                             )
                             .is_some()
                             {
-                                current_cancellation = Some(id.clone());
+                                cancellation.cancel();
                             } else if pending_cancellations.len()
                                     < MAX_PENDING_CANCELLABLE_REQUEST_LINES
                                 && let Some(key) = queued_cancellable_request_key(
@@ -679,7 +659,7 @@ where
             request,
             timings_enabled,
             connection,
-            false,
+            tracedecay_session_memory::context::CancellationToken::new(),
         ));
         tokio::pin!(handling);
         let mut peer_close_check: Option<
