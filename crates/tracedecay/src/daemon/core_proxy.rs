@@ -535,7 +535,7 @@ pub(super) async fn bounded_repository_identity(
     path: &Path,
 ) -> tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome {
     let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
-        std::time::Instant::now() + Duration::from_secs(2),
+        std::time::Instant::now() + super::REPOSITORY_DISCOVERY_DEADLINE,
     );
     tracedecay_runtime_core::git_discovery::discover_repository_identity(
         path,

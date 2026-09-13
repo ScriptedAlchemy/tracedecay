@@ -62,6 +62,14 @@ const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
 const MAX_CACHED_PROJECT_OPEN_FAILURES: usize = 64;
 const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
+/// One budget for every blocking repository probe a route resolution runs.
+///
+/// Route resolution reads the repository's topology, enrollment marker, and
+/// HEAD. Those are filesystem operations whose cost belongs to the volume the
+/// checkout lives on, not to this daemon, so they run off the async workers
+/// and a probe that outlives this budget becomes the retryable deferred
+/// discovery refusal instead of holding the caller.
+const REPOSITORY_DISCOVERY_DEADLINE: Duration = Duration::from_secs(2);
 const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 const PROJECT_OPEN_RESOURCE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// Backoff for a persisted-row authority defect, which only an operator can
@@ -351,7 +359,8 @@ use project_routing::portable_database_owner_reconciler;
 #[cfg(unix)]
 use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
-    bind_authenticated_profile_identity, cached_or_bind_ready_project_server,
+    bind_authenticated_profile_identity, bounded_repository_probe,
+    cached_or_bind_ready_project_server,
     prefer_recorded_open_failure, project_open_cancellation_checkpoint,
     project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
     project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
