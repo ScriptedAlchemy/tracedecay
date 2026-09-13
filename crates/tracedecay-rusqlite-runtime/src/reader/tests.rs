@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -563,6 +563,52 @@ fn application_telemetry_port_reads_real_store_size() {
     assert!(sample.page_size_bytes > 0);
     assert!(sample.page_count > 0);
     assert!(sample.freelist_pages <= sample.page_count);
+}
+
+#[test]
+fn application_telemetry_wait_does_not_block_the_async_runtime() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let handle = crate::exact_sql::ExactSqlHandle::attach_read_only(&pool);
+    let health_snapshot = handle
+        .begin_health_read_snapshot(Duration::from_secs(1))
+        .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        handle,
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let runtime_advanced = Arc::new(AtomicBool::new(false));
+
+    runtime.block_on(async {
+        let runtime_advanced = Arc::clone(&runtime_advanced);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            runtime_advanced.store(true, Ordering::SeqCst);
+        });
+        let read = port
+            .table_growth(&context, &StoreKeyV1::new("reader.db").unwrap())
+            .await;
+        assert!(matches!(read, TableGrowthTelemetryReadV1::Unknown { .. }));
+    });
+
+    assert!(
+        runtime_advanced.load(Ordering::SeqCst),
+        "waiting for SQLite telemetry must yield the async runtime"
+    );
+    drop(health_snapshot);
 }
 
 #[test]

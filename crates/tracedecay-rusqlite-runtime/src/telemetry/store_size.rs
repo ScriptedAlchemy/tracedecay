@@ -113,9 +113,13 @@ impl SqliteStoreSizeTelemetryPort {
                     store: store.clone(),
                 };
             }
-            let Ok(current) = self
-                .handle
-                .table_size_telemetry(self.reader_wait, || interruption(context))
+            let handle = self.handle.clone();
+            let reader_wait = self.reader_wait;
+            let context = context.clone();
+            let Ok(Ok(current)) = tokio::task::spawn_blocking(move || {
+                handle.table_size_telemetry(reader_wait, || interruption(&context))
+            })
+            .await
             else {
                 return TableGrowthTelemetryReadV1::Unknown {
                     store: store.clone(),
@@ -158,10 +162,14 @@ impl StoreSizeTelemetryPort for SqliteStoreSizeTelemetryPort {
                     store: store.clone(),
                 };
             }
-            let result = self
-                .handle
-                .store_size_telemetry(self.reader_wait, || interruption(context));
-            let Ok(sample) = result else {
+            let handle = self.handle.clone();
+            let reader_wait = self.reader_wait;
+            let context = context.clone();
+            let Ok(Ok(sample)) = tokio::task::spawn_blocking(move || {
+                handle.store_size_telemetry(reader_wait, || interruption(&context))
+            })
+            .await
+            else {
                 return StorageTelemetryReadV1::Unknown {
                     store: store.clone(),
                 };
