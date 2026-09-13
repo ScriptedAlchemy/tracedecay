@@ -555,6 +555,21 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         Ok(relations)
     }
 
+    /// The daemon-owned relation graph the read and hydration ports bind.
+    fn relation_authority(
+        &self,
+    ) -> Result<
+        (
+            relations::SessionRelationScope,
+            relations::SessionRelationGraphStore,
+        ),
+        SessionTemporalExecutionError,
+    > {
+        self.db.session_relation_store().map_err(|error| {
+            SessionTemporalExecutionError::storage("open session relation store", error)
+        })
+    }
+
     /// The directory external payloads live beside the store's database file.
     fn payload_storage_root(&self) -> Result<&std::path::Path, SessionTemporalExecutionError> {
         self.db.db_path().parent().ok_or_else(|| {
@@ -774,12 +789,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             }
         }
         let storage_root = self.payload_storage_root()?;
-        let (relation_scope, relation_store) = self
-            .db
-            .session_relation_store()
-            .map_err(|error| {
-                SessionTemporalExecutionError::storage("open session relation store", error)
-            })?;
+        let (relation_scope, relation_store) = self.relation_authority()?;
         let authority = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
             &read_snapshot,
             storage_root,
@@ -1002,12 +1012,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
                     SessionTemporalExecutionError::storage("resolve cursor signing authority", error)
                 })?;
         let storage_root = self.payload_storage_root()?;
-        let (relation_scope, relation_store) = self
-            .db
-            .session_relation_store()
-            .map_err(|error| {
-                SessionTemporalExecutionError::storage("open session relation store", error)
-            })?;
+        let (relation_scope, relation_store) = self.relation_authority()?;
         let kernel_request = request.into_kernel_request(snapshot);
         let read = SessionTemporalReadPort::new_registered_with_relations(
             &read_snapshot,
@@ -1035,7 +1040,12 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             let source_coverage = result
                 .snapshot
                 .source_coverage()
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+                .map_err(|error| {
+                    SessionTemporalExecutionError::storage(
+                        "derive source coverage receipt",
+                        error,
+                    )
+                })?;
             Ok(SessionTemporalExecutionReport::from_source_coverage(
                 result,
                 source_coverage,
@@ -1079,12 +1089,10 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
                 &snapshot,
             )
             .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            let storage_root = self
-                .db
-                .db_path()
-                .parent()
-                .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            .map_err(|error| {
+                SessionTemporalExecutionError::storage("resolve cursor signing authority", error)
+            })?;
+            let storage_root = self.payload_storage_root()?;
             let relation_authority = self.db.session_relation_store().ok();
             let kernel_request = request.temporal().clone().into_kernel_request(snapshot);
             let read = match &relation_authority {
@@ -1189,7 +1197,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
             let source_coverage = result
                 .snapshot
                 .source_coverage()
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+                .map_err(|error| {
+                    SessionTemporalExecutionError::storage(
+                        "derive source coverage receipt",
+                        error,
+                    )
+                })?;
             Ok(TaskSessionTemporalExecutionOutcomeV1::Complete(Box::new(
                 TaskSessionTemporalExecutionReportV1 {
                     binding: request.binding().clone(),
@@ -1244,22 +1257,20 @@ fn map_kernel_execution_error(
     use tracedecay_temporal_query::TemporalKernelError;
     use tracedecay_temporal_query::context::ContextError;
     use tracedecay_temporal_query::hydration::HydrationError;
-    use tracedecay_temporal_query::ports::TemporalPortError;
 
-    if matches!(
-        &error,
-        TemporalKernelError::Port(TemporalPortError::ResetRequired { .. })
-            | TemporalKernelError::Hydration(HydrationError::ResetRequired { .. })
-            | TemporalKernelError::Hydration(HydrationError::Interrupted(
-                TemporalPortError::ResetRequired { .. }
-            ))
-            | TemporalKernelError::Context(ContextError::Interrupted(
-                TemporalPortError::ResetRequired { .. }
-            ))
-    ) {
-        SessionTemporalExecutionError::ResetRequired
-    } else {
-        SessionTemporalExecutionError::Kernel(error)
+    // Every port failure the kernel surfaces already has a typed store state;
+    // wrapping them all as `Kernel` is what made a budget refusal, a cancel, and
+    // a broken read indistinguishable to the application surface.
+    match error {
+        TemporalKernelError::Port(port)
+        | TemporalKernelError::Hydration(HydrationError::Interrupted(port))
+        | TemporalKernelError::Context(ContextError::Interrupted(port)) => {
+            map_control_error(port)
+        }
+        TemporalKernelError::Hydration(HydrationError::ResetRequired { .. }) => {
+            SessionTemporalExecutionError::ResetRequired
+        }
+        error => SessionTemporalExecutionError::Kernel(error),
     }
 }
 
@@ -1305,26 +1316,15 @@ async fn session_record_from_frozen_read(
         .map_err(|error| {
             SessionTemporalExecutionError::storage("read retained payload descriptor", error)
         })?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
-    else {
+    let read_row = |error| SessionTemporalExecutionError::storage("read session record", error);
+    let Some(row) = rows.next().await.map_err(read_row)? else {
         return Ok(None);
     };
     Ok(Some(SessionRecord {
-        provider: row
-            .get(0)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
-        session_id: row
-            .get(1)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
-        project_key: row
-            .get(2)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
-        project_path: row
-            .get(3)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        provider: row.get(0).map_err(read_row)?,
+        session_id: row.get(1).map_err(read_row)?,
+        project_key: row.get(2).map_err(read_row)?,
+        project_path: row.get(3).map_err(read_row)?,
         title: row.get(4).ok(),
         started_at: row.get(5).ok(),
         ended_at: row.get(6).ok(),
