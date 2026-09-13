@@ -858,12 +858,13 @@ def prime_context_scout(
     if not isinstance(revision, str) or not revision:
         raise SweepError("Context Scout activation omitted its configuration revision")
 
-    source = Path(fixture["root"]) / "src/scout_error.rs"
-    source.write_text('pub fn scout_type_error() -> i32 { "not an integer" }\n')
+    source = Path(fixture["root"]) / "src/lib.rs"
+    original = source.read_text()
+    source.write_text(original + '\npub fn scout_type_error() -> i32 { "not an integer" }\n')
     try:
         _prime_context_scout_diagnostic(client, fixture, deadline, revision, source)
     finally:
-        source.unlink(missing_ok=True)
+        source.write_text(original)
 
 
 def _prime_context_scout_diagnostic(
@@ -873,6 +874,67 @@ def _prime_context_scout_diagnostic(
     revision: str,
     source: Path,
 ) -> None:
+    _run_checked(
+        [fixture["binary"], "sync"],
+        Path(fixture["root"]),
+        "Context Scout diagnostic index producer",
+        timeout_s=180,
+    )
+    try:
+        compiled = subprocess.run(
+            ["cargo", "check", "--message-format=short"],
+            cwd=fixture["root"],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SweepError("Context Scout compiler diagnostic producer failed") from error
+    cargo_output = f"{compiled.stdout}\n{compiled.stderr}"
+    if compiled.returncode == 0 or "src/lib.rs" not in cargo_output:
+        raise SweepError("Context Scout compiler producer returned no source diagnostic")
+
+    diagnostic_at = time.monotonic() + 60
+    while True:
+        diagnostic = _producer_call(
+            client,
+            "tracedecay_diagnose",
+            {
+                "cargo_output": cargo_output,
+                "severity": "error",
+                "include_callers": True,
+                "max_diagnostics": 8,
+                "format": "json",
+            },
+            deadline("tracedecay_diagnose"),
+        )
+        publication = next(
+            (
+                value["published"]
+                for value in _objects(diagnostic)
+                if isinstance(value.get("published"), dict)
+            ),
+            None,
+        )
+        if (
+            publication is not None
+            and publication.get("status") == "published"
+            and isinstance(publication.get("inserted"), int)
+            and publication["inserted"] > 0
+        ):
+            break
+        reason = publication.get("reason") if publication is not None else None
+        if reason not in {
+            "code-index-generation-unavailable",
+            "no-resolvable-diagnostics",
+        } or time.monotonic() >= diagnostic_at:
+            raise SweepError(
+                "Context Scout compiler diagnostic was not published against the "
+                f"current code generation: {reason or 'missing publication receipt'}"
+            )
+        time.sleep(MOUNT_RETRY_DELAY_S)
+
     session_id = f"tool-sweep-scout-{os.getpid()}-{time.monotonic_ns()}"
     payload = json.dumps(
         {
@@ -880,7 +942,7 @@ def _prime_context_scout_diagnostic(
                 "tool": "apply_patch",
                 "sessionID": session_id,
                 "callID": "scout-producer",
-                "args": {"patchText": "*** Begin Patch\n*** Add File: src/scout_error.rs\n*** End Patch"},
+                "args": {"patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"},
             },
             "output": {
                 "title": "Added Scout diagnostic fixture",
@@ -888,8 +950,8 @@ def _prime_context_scout_diagnostic(
                     "files": [
                         {
                             "filePath": str(source),
-                            "relativePath": "src/scout_error.rs",
-                            "type": "add",
+                            "relativePath": "src/lib.rs",
+                            "type": "modify",
                             "additions": 1,
                             "deletions": 0,
                         }

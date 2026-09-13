@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{UtcMicros, encode_lowercase_hex};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, read_bounded};
 
 use crate::{HookHostV1, HookScopeBindingV1};
@@ -18,8 +18,15 @@ pub const HOOK_CONFIGURATION_SCHEMA_VERSION: u16 = 1;
 pub const MAX_HOOK_CONFIGURATION_BYTES: usize = 64 * 1024;
 const DIRECTORY_SYNC_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
-pub fn hook_configuration_path(data_root: &Path, host: HookHostV1) -> PathBuf {
-    data_root.join(format!("hook-config-{}.json", host.hook_key()))
+pub fn hook_configuration_path(
+    data_root: &Path,
+    worktree_id: [u8; 16],
+    host: HookHostV1,
+) -> PathBuf {
+    data_root
+        .join("hook-configurations")
+        .join(encode_lowercase_hex(&worktree_id))
+        .join(format!("{}.json", host.hook_key()))
 }
 
 /// Daemon-issued configuration that a hook process can consume. All identity
@@ -203,6 +210,13 @@ impl HookConfigurationPublicationStoreV1 for HookConfigurationFileWriterV1 {
         snapshot: HookConfigurationSnapshotV1,
     ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError> {
         snapshot.validate()?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or(HookConfigurationPublicationError::Unavailable)?;
+        std::fs::create_dir_all(parent)
+            .and_then(|_| tracedecay_private_fs::make_private_directory(parent).map(drop))
+            .map_err(|_| HookConfigurationPublicationError::Unavailable)?;
         let current = match read_snapshot(&self.path) {
             Ok(current) => current,
             // This writer is the sole daemon-owned publication authority. A
@@ -471,5 +485,45 @@ mod tests {
                 .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Corrupted
         );
+    }
+
+    /// Linked worktrees share their project's `data_root`, and each project
+    /// runtime publishes with `revision = now`, so the worktree opened later
+    /// always carries the higher revision. A publication authority keyed only
+    /// by host would let that later worktree replace the earlier one's binding
+    /// in place, and every hook in the earlier worktree would then read — and
+    /// stamp its envelopes with — a foreign worktree identity.
+    #[test]
+    fn a_later_worktree_publication_does_not_replace_an_earlier_worktree_binding() {
+        let data_root = TestDir::new();
+        let host = HookHostV1::ClaudeCode;
+        let earlier = snapshot(10, 100);
+        let mut later = snapshot(11, 100);
+        later.binding.worktree_id = [7; 16];
+        assert_ne!(earlier.binding.worktree_id, later.binding.worktree_id);
+        assert!(earlier.revision < later.revision);
+
+        for snapshot in [earlier.clone(), later.clone()] {
+            let path =
+                hook_configuration_path(&data_root.path, snapshot.binding.worktree_id, host);
+            assert_eq!(
+                HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(path))
+                    .publish(snapshot)
+                    .unwrap(),
+                HookConfigurationPublicationOutcomeV1::Published
+            );
+        }
+
+        for expected in [earlier, later] {
+            let path =
+                hook_configuration_path(&data_root.path, expected.binding.worktree_id, host);
+            assert_eq!(
+                HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(path))
+                    .load_current(host, UtcMicros(2)),
+                HookConfigurationReadOutcomeV1::Bound(expected.clone()),
+                "worktree {:?} must keep its own live binding",
+                expected.binding.worktree_id
+            );
+        }
     }
 }

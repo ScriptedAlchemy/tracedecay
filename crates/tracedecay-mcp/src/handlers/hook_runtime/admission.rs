@@ -49,7 +49,11 @@ pub(super) fn hook_v2_binding_admission(
     let layout = cg.hook_store_layout();
     let subscriber = tracedecay_hooks::HookConfigurationSubscriberV1::new(
         tracedecay_hooks::HookConfigurationFileReaderV1::new(
-            tracedecay_hooks::hook_configuration_path(&layout.data_root, envelope.producer),
+            tracedecay_hooks::hook_configuration_path(
+                &layout.data_root,
+                envelope.worktree_id,
+                envelope.producer,
+            ),
         ),
     );
     classify_hook_v2_binding(envelope, subscriber.load_current(envelope.producer, now))

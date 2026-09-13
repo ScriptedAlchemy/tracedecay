@@ -142,8 +142,13 @@ async fn authentic_callback_to_all_delivery_surfaces() {
         decode_native_hook_event(HookHostV1::ClaudeCode, callback).expect("authentic callback");
 
     let layout = project_runtime.store_layout();
+    let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
+        &tracedecay::hook_runtime(),
+        layout,
+    )
+    .expect("production worktree identity");
     let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
-        hook_configuration_path(&layout.data_root, HookHostV1::ClaudeCode),
+        hook_configuration_path(&layout.data_root, worktree_id, HookHostV1::ClaudeCode),
     ));
     let now = UtcMicros(
         SystemTime::now()

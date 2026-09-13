@@ -1,11 +1,10 @@
 //! Durable, bounded Hook V2 admission idempotency ledger.
 //!
 //! This is deliberately *not* an event store. It persists only the identity of
-//! an already-authorized envelope (`event_id`) plus a digest over the exact
-//! canonical envelope bytes, so the daemon can answer three questions across a
-//! restart:
+//! an already-authorized envelope (`event_id`) plus a digest over its canonical
+//! event material, so the daemon can answer three questions across a restart:
 //!
-//! * has this exact envelope already been admitted? (`ExactDuplicate`)
+//! * has this exact native event already been admitted? (`ExactDuplicate`)
 //! * has this identity already been admitted carrying *different* bytes?
 //!   (`Conflict`)
 //! * otherwise: this is a first admission.
@@ -138,13 +137,17 @@ struct LedgerEntry {
     order: u64,
 }
 
-/// Digest over the exact canonical envelope bytes. Two envelopes with the same
-/// `event_id` and different digests are a genuine producer conflict.
+/// Digest over canonical native-event material. A provider retry observes the
+/// same stable event at a later local instant, so `observed_at` is not part of
+/// admission identity. Every authoritative scope, binding, ordering, and event
+/// field remains covered; differences there are genuine producer conflicts.
 pub fn hook_admission_digest(
     envelope: &HookEventEnvelopeV2,
 ) -> Result<[u8; DIGEST_BYTES], HookAdmissionLedgerError> {
+    let mut identity = envelope.clone();
+    identity.observed_at = UtcMicros(0);
     let bytes =
-        canonical_json_bytes(envelope).map_err(|_| HookAdmissionLedgerError::RecordUnencodable)?;
+        canonical_json_bytes(&identity).map_err(|_| HookAdmissionLedgerError::RecordUnencodable)?;
     Ok(frame_checksum(&bytes))
 }
 
@@ -689,6 +692,25 @@ mod tests {
             ledger.admit(&envelope(9, 6), UtcMicros(3)).unwrap(),
             HookAdmissionDecisionV1::Conflict
         );
+    }
+
+    #[test]
+    fn same_native_event_observed_again_is_an_exact_duplicate() {
+        let root = TestDir::new("ledger-native-redelivery");
+        let mut ledger = open(root.path(), UtcMicros(1));
+        let admitted = envelope(9, 5);
+        let mut redelivered = admitted.clone();
+        redelivered.observed_at = UtcMicros(12);
+
+        assert_eq!(
+            ledger.admit(&admitted, UtcMicros(2)).unwrap(),
+            HookAdmissionDecisionV1::Admitted
+        );
+        assert_eq!(
+            ledger.admit(&redelivered, UtcMicros(3)).unwrap(),
+            HookAdmissionDecisionV1::ExactDuplicate
+        );
+        assert!(ledger.mark_work_completed(&redelivered).unwrap());
     }
 
     #[test]

@@ -76,11 +76,12 @@ pub fn hook_v2_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
 
 pub fn published_hook_scope_binding(
     data_root: &Path,
+    worktree_id: [u8; 16],
     host: HookHostV1,
     now: UtcMicros,
 ) -> Option<HookScopeBindingV1> {
     let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
-        hook_configuration_path(data_root, host),
+        hook_configuration_path(data_root, worktree_id, host),
     ));
     match subscriber.load_current(host, now) {
         HookConfigurationReadOutcomeV1::Bound(snapshot) => Some(snapshot.binding),
@@ -377,6 +378,7 @@ mod tests {
 
     const HOST: HookHostV1 = HookHostV1::ClaudeCode;
     const PROJECT_ID: [u8; 16] = [1; 16];
+    const WORKTREE_ID: [u8; 16] = [3; 16];
 
     #[test]
     fn cursor_native_identities_use_distinct_canonical_spool_roots() {
@@ -397,7 +399,7 @@ mod tests {
             host: HOST,
             project_id: PROJECT_ID,
             repository_id: [2; 16],
-            worktree_id: [3; 16],
+            worktree_id: WORKTREE_ID,
             worktree_epoch: epoch,
             binding_token: [4; 32],
             capabilities: [
@@ -437,7 +439,7 @@ mod tests {
 
     fn publish_binding(data_root: &Path, binding: &HookScopeBindingV1, now: UtcMicros) {
         HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(
-            hook_configuration_path(data_root, HOST),
+            hook_configuration_path(data_root, binding.worktree_id, HOST),
         ))
         .publish(HookConfigurationSnapshotV1 {
             schema_version: HOOK_CONFIGURATION_SCHEMA_VERSION,
@@ -494,7 +496,7 @@ mod tests {
         drain_host_spool_once(
             open_admitted_spool(data_root, now),
             PROJECT_ID,
-            published_hook_scope_binding(data_root, HOST, now).as_ref(),
+            published_hook_scope_binding(data_root, WORKTREE_ID, HOST, now).as_ref(),
             now,
             admit,
         )
@@ -799,7 +801,7 @@ mod tests {
         let report = drain_host_spool_once(
             open_admitted_spool(root.path(), now),
             [9; 16],
-            published_hook_scope_binding(root.path(), HOST, now).as_ref(),
+            published_hook_scope_binding(root.path(), binding.worktree_id, HOST, now).as_ref(),
             now,
             |_, _| async move { admitted() },
         )
