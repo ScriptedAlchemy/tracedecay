@@ -1018,7 +1018,7 @@ def _prime_context_scout_diagnostic(
         recent = _producer_call(
             client,
             "tracedecay_context_scout_recent",
-            {"address": address, "limit": 8},
+            {"address": address, "limit": 8, "format": "json"},
             deadline("tracedecay_context_scout_recent"),
         )
         pending = next(
@@ -1820,9 +1820,9 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         "tracedecay_context_scout_capability",
         "tracedecay_context_scout_budget",
     }:
-        return {"address": fixture["context_scout_address"]}
+        return {"address": fixture["context_scout_address"], "format": "json"}
     if name in {"tracedecay_context_scout_recent", "tracedecay_context_scout_explain"}:
-        return {"address": fixture["context_scout_address"], "limit": 8}
+        return {"address": fixture["context_scout_address"], "limit": 8, "format": "json"}
     if isinstance(name, str) and name in fixture.get("fact_read_arguments", {}):
         return dict(fixture["fact_read_arguments"][name])
     if name == "tracedecay_api_migration_plan":
