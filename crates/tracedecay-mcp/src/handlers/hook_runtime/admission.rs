@@ -254,10 +254,12 @@ pub enum HookV2AdmissionOutcomeV1 {
         github_stack_signal_available: bool,
     },
     /// This exact envelope was already admitted; no work is repeated. A retry
-    /// may receive the Scout address mounted by completed producer work.
+    /// may receive the Scout address and guidance retained before a bounded
+    /// host response was lost.
     ExactDuplicate {
         context_scout_address:
             Option<Box<tracedecay_contracts::context_scout::ContextScoutAddressV1>>,
+        ready_guidance: Value,
     },
     /// The same event identity previously carried different bytes.
     Conflict,
@@ -266,6 +268,105 @@ pub enum HookV2AdmissionOutcomeV1 {
     /// Idempotency could not be recorded, so nothing was admitted.
     Backpressured,
     Unavailable,
+}
+
+fn retain_or_reuse_hook_v2_delivery_claim(
+    project_id: [u8; 16],
+    claim: tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+    now: UtcMicros,
+) -> std::result::Result<(), Box<tracedecay_contracts::context_scout::ContextScoutDurableClaimV1>> {
+    let envelope_id = claim.entry.envelope.envelope_id;
+    match retain_hook_v2_delivery_claim(project_id, claim, now) {
+        Ok(()) => Ok(()),
+        Err(claim)
+            if lookup_hook_v2_delivery_claim(project_id, envelope_id).as_ref()
+                == Some(claim.as_ref()) =>
+        {
+            Ok(())
+        }
+        Err(claim) => Err(claim),
+    }
+}
+
+async fn retain_ready_guidance(
+    owner: &tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1,
+    project_id: [u8; 16],
+    guidance: tracedecay_hooks::HookReadyGuidanceV1,
+    claim: tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+    now: UtcMicros,
+) -> Value {
+    let envelope_id = claim.entry.envelope.envelope_id;
+    match retain_or_reuse_hook_v2_delivery_claim(project_id, claim, now) {
+        Ok(()) => match serde_json::to_value(guidance) {
+            Ok(guidance) => guidance,
+            Err(_) => {
+                if let Some(claim) = lookup_hook_v2_delivery_claim(project_id, envelope_id) {
+                    remove_hook_v2_delivery_claim(project_id, envelope_id);
+                    let _ = owner.requeue(claim).await;
+                }
+                Value::Null
+            }
+        },
+        Err(claim) => {
+            let _ = owner.requeue(*claim).await;
+            Value::Null
+        }
+    }
+}
+
+fn ready_guidance_from_retained_claim(
+    hook: &tracedecay_hooks::HookEventEnvelopeV2,
+    entry: &tracedecay_contracts::context_scout::ContextScoutDurableQueueEntryV1,
+    claim: tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+    configuration_revision: u64,
+    now: UtcMicros,
+) -> Option<(
+    tracedecay_hooks::HookReadyGuidanceV1,
+    tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+)> {
+    (claim.entry == *entry
+        && claim.lease.lease_id == hook.event_id
+        && claim.lease.expires_at.0 > now.0
+        && entry.work.address.project_id == hook.project_id
+        && entry.work.address.protected_session_id == hook.protected_session_id
+        && entry.envelope.candidate.expires_at.0 > now.0)
+        .then(|| {
+            (
+                tracedecay_hooks::HookReadyGuidanceV1 {
+                    guidance_id: entry.envelope.envelope_id,
+                    event_id: hook.event_id,
+                    configuration_revision,
+                    expires_at: entry.envelope.candidate.expires_at,
+                    text: entry.envelope.candidate.suggestion_text.clone(),
+                },
+                claim,
+            )
+        })
+}
+
+async fn retained_ready_guidance(
+    owner: &tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1,
+    project_id: [u8; 16],
+    hook: &tracedecay_hooks::HookEventEnvelopeV2,
+    address: tracedecay_contracts::context_scout::ContextScoutAddressV1,
+    input_watermark: [u8; 32],
+    configuration_revision: u64,
+    now: UtcMicros,
+) -> Option<(
+    tracedecay_hooks::HookReadyGuidanceV1,
+    tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+)> {
+    owner
+        .recent_exact(address, 1)
+        .await
+        .ok()?
+        .pending
+        .into_iter()
+        .find(|entry| entry.work.input_watermark == input_watermark)
+        .and_then(|entry| {
+            let claim = lookup_hook_v2_delivery_claim(project_id, entry.envelope.envelope_id)?;
+            ready_guidance_from_retained_claim(hook, &entry, claim, configuration_revision, now)
+        })
 }
 
 fn cursor_stack_wakeup_allowed(
@@ -368,21 +469,67 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             return HookV2AdmissionOutcomeV1::Backpressured;
         };
         cleanup();
-        let context_scout_address = if host_response_available {
+        let claim_authority = if host_response_available {
             let lifecycle =
                 hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
             match lifecycle.as_ref() {
-                Some(lifecycle) => cg
-                    .resolve_mounted_context_scout_claim_authority(lifecycle)
-                    .await
-                    .map(|(address, _)| Box::new(address)),
+                Some(lifecycle) => {
+                    cg.resolve_mounted_context_scout_claim_authority(lifecycle)
+                        .await
+                }
                 None => None,
             }
         } else {
             None
         };
+        let context_scout_address = claim_authority
+            .as_ref()
+            .map(|(address, _)| Box::new(*address));
+        let ready_guidance = match (cg.context_scout_owner(), claim_authority) {
+            (Some(owner), Some((address, input_watermark))) => {
+                if let Some((guidance, claim)) = retained_ready_guidance(
+                    owner.as_ref(),
+                    envelope.project_id,
+                    envelope,
+                    address,
+                    input_watermark,
+                    snapshot.revision,
+                    now,
+                )
+                .await
+                {
+                    retain_ready_guidance(owner.as_ref(), envelope.project_id, guidance, claim, now)
+                        .await
+                } else {
+                    match owner
+                        .claim_ready_guidance_exact(
+                            envelope,
+                            address,
+                            input_watermark,
+                            snapshot.revision,
+                            now,
+                        )
+                        .await
+                    {
+                        Some((guidance, claim)) => {
+                            retain_ready_guidance(
+                                owner.as_ref(),
+                                envelope.project_id,
+                                guidance,
+                                claim,
+                                now,
+                            )
+                            .await
+                        }
+                        None => Value::Null,
+                    }
+                }
+            }
+            _ => Value::Null,
+        };
         return HookV2AdmissionOutcomeV1::ExactDuplicate {
             context_scout_address,
+            ready_guidance,
         };
     }
     if let Some(mount) = mount.as_ref()
@@ -411,6 +558,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     {
         return HookV2AdmissionOutcomeV1::ExactDuplicate {
             context_scout_address: None,
+            ready_guidance: Value::Null,
         };
     }
     let completion = if requires_producer_work {
@@ -482,25 +630,8 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             .await
         {
             Some((guidance, claim)) => {
-                let envelope_id = claim.entry.envelope.envelope_id;
-                match retain_hook_v2_delivery_claim(envelope.project_id, claim, now) {
-                    Ok(()) => match serde_json::to_value(guidance) {
-                        Ok(guidance) => guidance,
-                        Err(_) => {
-                            if let Some(claim) =
-                                lookup_hook_v2_delivery_claim(envelope.project_id, envelope_id)
-                            {
-                                remove_hook_v2_delivery_claim(envelope.project_id, envelope_id);
-                                let _ = owner.requeue(claim).await;
-                            }
-                            Value::Null
-                        }
-                    },
-                    Err(claim) => {
-                        let _ = owner.requeue(*claim).await;
-                        Value::Null
-                    }
-                }
+                retain_ready_guidance(owner.as_ref(), envelope.project_id, guidance, claim, now)
+                    .await
             }
             None => Value::Null,
         },
@@ -600,11 +731,13 @@ pub(super) async fn hook_v2_admit(
             }),
             HookV2AdmissionOutcomeV1::ExactDuplicate {
                 context_scout_address,
+                ready_guidance,
             } => json!({
                 "action": action,
                 "status": "exact_duplicate",
                 "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
                 "context_scout_address": context_scout_address,
+                "ready_guidance": ready_guidance,
             }),
             HookV2AdmissionOutcomeV1::Conflict => json!({
                 "action": action,

@@ -185,6 +185,31 @@ fn completed_restart_duplicate_cleans_pending_without_work_redrive() {
 }
 
 #[test]
+fn exact_event_lease_reconstructs_retained_guidance() {
+    let now = UtcMicros(999);
+    let claim = retained_claim(41);
+    let envelope_id = claim.entry.envelope.envelope_id;
+    let mut hook = admission_test_envelope(41, 7);
+    hook.project_id = claim.entry.work.address.project_id;
+    hook.protected_session_id = claim.entry.work.address.protected_session_id;
+
+    let mut foreign_hook = hook.clone();
+    foreign_hook.event_id = [42; 16];
+    assert!(
+        ready_guidance_from_retained_claim(&foreign_hook, &claim.entry, claim.clone(), 7, now,)
+            .is_none(),
+        "another event must not receive the retained response"
+    );
+
+    let (guidance, replayed_claim) =
+        ready_guidance_from_retained_claim(&hook, &claim.entry, claim.clone(), 7, now)
+            .expect("the exact event lease replays its retained guidance");
+    assert_eq!(guidance.guidance_id, envelope_id);
+    assert_eq!(guidance.event_id, hook.event_id);
+    assert_eq!(replayed_claim, claim);
+}
+
+#[test]
 fn bounded_snapshot_deferral_is_typed_retryable_backpressure() {
     let deferred = complete_ingest_admission(
         HostAdmissionOutcome::accepted_for_replay(),
