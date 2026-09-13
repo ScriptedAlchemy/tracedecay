@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{UtcMicros, encode_lowercase_hex};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, read_bounded};
 
 use crate::{HookHostV1, HookScopeBindingV1};
@@ -18,8 +18,15 @@ pub const HOOK_CONFIGURATION_SCHEMA_VERSION: u16 = 1;
 pub const MAX_HOOK_CONFIGURATION_BYTES: usize = 64 * 1024;
 const DIRECTORY_SYNC_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
-pub fn hook_configuration_path(data_root: &Path, host: HookHostV1) -> PathBuf {
-    data_root.join(format!("hook-config-{}.json", host.hook_key()))
+pub fn hook_configuration_path(
+    data_root: &Path,
+    worktree_id: [u8; 16],
+    host: HookHostV1,
+) -> PathBuf {
+    data_root
+        .join("hook-configurations")
+        .join(encode_lowercase_hex(&worktree_id))
+        .join(format!("{}.json", host.hook_key()))
 }
 
 /// Daemon-issued configuration that a hook process can consume. All identity
@@ -203,6 +210,13 @@ impl HookConfigurationPublicationStoreV1 for HookConfigurationFileWriterV1 {
         snapshot: HookConfigurationSnapshotV1,
     ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError> {
         snapshot.validate()?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or(HookConfigurationPublicationError::Unavailable)?;
+        std::fs::create_dir_all(parent)
+            .and_then(|_| tracedecay_private_fs::make_private_directory(parent).map(drop))
+            .map_err(|_| HookConfigurationPublicationError::Unavailable)?;
         let current = match read_snapshot(&self.path) {
             Ok(current) => current,
             // This writer is the sole daemon-owned publication authority. A
@@ -470,6 +484,39 @@ mod tests {
             HookConfigurationSubscriberV1::new(reader)
                 .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Corrupted
+        );
+    }
+
+    #[test]
+    fn linked_worktree_publication_preserves_root_worktree_binding() {
+        let directory = TestDir::new();
+        let root_worktree_id = [3; 16];
+        let linked_worktree_id = [7; 16];
+        let root_path =
+            hook_configuration_path(&directory.path, root_worktree_id, HookHostV1::ClaudeCode);
+        let linked_path =
+            hook_configuration_path(&directory.path, linked_worktree_id, HookHostV1::ClaudeCode);
+        let root_snapshot = snapshot(10, 100);
+        let mut linked_snapshot = snapshot(11, 100);
+        linked_snapshot.binding.worktree_id = linked_worktree_id;
+
+        HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&root_path))
+            .publish(root_snapshot.clone())
+            .unwrap();
+        HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&linked_path))
+            .publish(linked_snapshot.clone())
+            .unwrap();
+
+        assert_ne!(root_path, linked_path);
+        assert_eq!(
+            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(root_path))
+                .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+            HookConfigurationReadOutcomeV1::Bound(root_snapshot)
+        );
+        assert_eq!(
+            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(linked_path))
+                .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+            HookConfigurationReadOutcomeV1::Bound(linked_snapshot)
         );
     }
 }
