@@ -54,6 +54,7 @@ pub enum NativeHookCaptureOutcomeV1 {
 #[hotpath::measure(label = "hooks.capture.native_event")]
 pub fn capture_native_event_for_replay(
     data_root: &Path,
+    worktree_id: [u8; 16],
     source: NativeHookCaptureSourceV1,
     payload: &[u8],
     material: NativeEnvelopeMaterialV1,
@@ -62,6 +63,7 @@ pub fn capture_native_event_for_replay(
 ) -> NativeHookCaptureOutcomeV1 {
     let outcome = capture_native_event_for_replay_inner(
         data_root,
+        worktree_id,
         source,
         payload,
         material,
@@ -88,6 +90,7 @@ pub fn capture_native_event_for_replay(
 
 fn capture_native_event_for_replay_inner(
     data_root: &Path,
+    worktree_id: [u8; 16],
     source: NativeHookCaptureSourceV1,
     payload: &[u8],
     material: NativeEnvelopeMaterialV1,
@@ -110,7 +113,7 @@ fn capture_native_event_for_replay_inner(
         Err(_) => return NativeHookCaptureOutcomeV1::Rejected,
     };
     let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
-        hook_configuration_path(data_root, host),
+        hook_configuration_path(data_root, worktree_id, host),
     ));
     let HookConfigurationReadOutcomeV1::Bound(snapshot) = subscriber.load_current(host, now) else {
         return NativeHookCaptureOutcomeV1::Unbound;

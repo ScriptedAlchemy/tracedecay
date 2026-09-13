@@ -273,44 +273,51 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
             match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
                 &project_root,
             ) {
-                Ok(Some(layout)) => match current_time() {
-                    Some(now) => {
-                        match tracedecay_agent_hosts::hooks::native_capture_material(
-                            source, &payload, now,
-                        ) {
-                            Ok(material) => {
-                                let outcome = tracedecay_hooks::capture_native_event_for_replay(
-                                    &layout.data_root,
-                                    source,
-                                    &payload,
-                                    material,
-                                    now,
-                                    tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-                                );
-                                if outcome == NativeHookCaptureOutcomeV1::Captured {
-                                    match open_delivery_receipt_spool(
+                Ok(Some(layout)) => {
+                    let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
+                        &tracedecay::hook_runtime(),
+                        &layout,
+                    );
+                    match (current_time(), worktree_id) {
+                        (Some(now), Ok(worktree_id)) => {
+                            match tracedecay_agent_hosts::hooks::native_capture_material(
+                                source, &payload, now,
+                            ) {
+                                Ok(material) => {
+                                    let outcome = tracedecay_hooks::capture_native_event_for_replay(
                                         &layout.data_root,
-                                        source.host(),
-                                    ) {
-                                        Ok(writer) => delivery_writer = Some(writer),
-                                        Err(error) => delivery_open_error = Some(error),
+                                        worktree_id,
+                                        source,
+                                        &payload,
+                                        material,
+                                        now,
+                                        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+                                    );
+                                    if outcome == NativeHookCaptureOutcomeV1::Captured {
+                                        match open_delivery_receipt_spool(
+                                            &layout.data_root,
+                                            source.host(),
+                                        ) {
+                                            Ok(writer) => delivery_writer = Some(writer),
+                                            Err(error) => delivery_open_error = Some(error),
+                                        }
+                                        delivery_material = Some(material);
                                     }
-                                    delivery_material = Some(material);
+                                    outcome
                                 }
-                                outcome
-                            }
-                            Err(
-                                tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeEvent
-                                | tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeFamily,
-                            ) => NativeHookCaptureOutcomeV1::Unsupported,
-                            Err(error) => {
-                                rejection = Some(error.to_string());
-                                NativeHookCaptureOutcomeV1::Rejected
+                                Err(
+                                    tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeEvent
+                                    | tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeFamily,
+                                ) => NativeHookCaptureOutcomeV1::Unsupported,
+                                Err(error) => {
+                                    rejection = Some(error.to_string());
+                                    NativeHookCaptureOutcomeV1::Rejected
+                                }
                             }
                         }
+                        _ => NativeHookCaptureOutcomeV1::Unavailable,
                     }
-                    None => NativeHookCaptureOutcomeV1::Unavailable,
-                },
+                }
                 Ok(None) => NativeHookCaptureOutcomeV1::Unbound,
                 Err(_) => NativeHookCaptureOutcomeV1::Unavailable,
             }

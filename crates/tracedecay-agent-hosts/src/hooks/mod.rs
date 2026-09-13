@@ -36,6 +36,7 @@ pub use dispatch::project_and_worktree_locators_for_scope as hook_scope_locators
 pub use dispatch::project_id_for_layout as hook_project_id_for_layout;
 pub use dispatch::protected_session_id_for_native as protected_native_session_id;
 pub use dispatch::publish_daemon_bindings as publish_hook_bindings;
+pub use dispatch::worktree_id_for_layout as hook_worktree_id_for_layout;
 pub use tracedecay_hooks::NativeContextScoutLifecycleV1;
 
 pub use claude::{
