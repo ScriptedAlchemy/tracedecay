@@ -409,7 +409,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
         let dispatch = DaemonToolDispatch::for_tool(
             Some("/explicit/project".to_owned()),
             tool_name,
-            &json!({ "scope": { "kind": "profile", "profile_id": "profile.refresh" } }),
+            &json!({ "scope": { "kind": "profile" } }),
         );
         assert_eq!(dispatch.project_path, None, "{tool_name}");
         assert!(!dispatch.allow_init, "{tool_name}");
@@ -417,7 +417,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
         let project_scoped = DaemonToolDispatch::for_tool(
             Some("/explicit/project".to_owned()),
             tool_name,
-            &json!({ "scope": { "kind": "project", "project": { "id": "project.refresh" } } }),
+            &json!({ "scope": { "kind": "project" } }),
         );
         assert_eq!(
             project_scoped.project_path,
@@ -1178,53 +1178,44 @@ fn transport_equivalent_requests() -> Vec<TransportEquivalentRequest> {
 /// decodes exactly this shape on every transport; the CLI and MCP arguments
 /// are the HTTP body plus the presentation-only `format`.
 fn session_refresh_equivalent_requests() -> Vec<TransportEquivalentRequest> {
-    let session = |store_id: &str, root_id: &str| json!({ "id": "session.refresh", "store_id": store_id, "root_id": root_id });
+    let session = json!({ "id": "session.refresh" });
     let target = json!({
         "temporal_mode": { "kind": "current" },
         "grain": "logical_message",
         "frontier": { "observed_through": 9, "committed_through": 4 }
     });
-    let profile_scope = json!({ "kind": "profile", "profile_id": "profile.refresh" });
-    let project_scope = json!({
-        "kind": "project",
-        "project": {
-            "id": "project.refresh",
-            "profile_id": "profile.refresh",
-            "repository_id": "repository.refresh",
-            "worktree_id": "/worktree/refresh",
-            "branch_id": "branch.refresh"
-        }
-    });
+    let profile_scope = json!({ "kind": "profile" });
+    let project_scope = json!({ "kind": "project" });
     let mut requests = Vec::new();
     for (tool_name, scope, session, handle) in [
         (
             "tracedecay_session_refresh_begin",
             profile_scope.clone(),
-            session("store.profile.refresh", "root.profile.refresh"),
+            session.clone(),
             Value::Null,
         ),
         (
             "tracedecay_session_refresh_status",
             profile_scope.clone(),
-            session("store.profile.refresh", "root.profile.refresh"),
+            session.clone(),
             json!("srh_profile"),
         ),
         (
             "tracedecay_session_refresh_cancel",
             profile_scope,
-            session("store.profile.refresh", "root.profile.refresh"),
+            session.clone(),
             json!("srh_profile"),
         ),
         (
             "tracedecay_session_refresh_begin",
             project_scope.clone(),
-            session("store.project.refresh", "branch.refresh"),
+            session.clone(),
             Value::Null,
         ),
         (
             "tracedecay_session_refresh_status",
             project_scope,
-            session("store.project.refresh", "branch.refresh"),
+            session,
             json!("srh_project"),
         ),
     ] {

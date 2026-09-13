@@ -1,13 +1,14 @@
 ---
 name: tracedecay-fix-build
-description: Fix build and type errors by running or parsing diagnostics, mapping them to symbols with callers, then fixing.
+description: Diagnose and fix build or type errors with source and dependency evidence.
 ---
 
 # /tracedecay-fix-build
 
 Use `tracedecay:fixing-build-and-type-errors`.
 
-- **Args:** if `$ARGUMENTS` contains pasted `cargo`/`clippy` output, route it to `tracedecay_diagnose`; otherwise run `tracedecay_diagnostics` (scoped to a directory if one was given).
-- Prefer pasted output when available. `tracedecay_diagnostics` reads retained evidence; after fixing, run the applicable native build/typecheck and relevant behavioral checks, respecting Cursor approval/run-mode.
-
-Output: grouped diagnostics with enclosing symbols + callers, the applied fix, and a clean re-check.
+Map compiler output in `$ARGUMENTS` with `tracedecay_diagnose`; otherwise inspect
+retained diagnostics for the requested scope. Fix the root failing contract and
+relevant callers. Retained diagnostics do not verify edits, so respect Cursor
+approval and run mode while completing the native build or typecheck and
+relevant behavioral checks.

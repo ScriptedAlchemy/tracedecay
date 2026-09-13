@@ -164,7 +164,8 @@ pub(in crate::retrieval) fn load_record_relations(
                     .map_or(0, str::len);
                 if source_bytes > request.max_item_bytes() {
                     return Err(TemporalPortError::BudgetExceeded {
-                        resource: "summary source bytes", accounting: None,
+                        resource: "summary source bytes",
+                        accounting: None,
                     });
                 }
                 relation_bytes = relation_bytes.saturating_add(source_bytes);
@@ -252,7 +253,8 @@ pub(in crate::retrieval) fn load_record_relations(
                 .saturating_add(valid_time_json.len());
             if copy_bytes > request.max_item_bytes() {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "record relation bytes", accounting: None,
+                    resource: "record relation bytes",
+                    accounting: None,
                 });
             }
             relation_bytes = relation_bytes.saturating_add(copy_bytes);
@@ -269,7 +271,8 @@ pub(in crate::retrieval) fn load_record_relations(
     }
     if relation_bytes > request.page_total_byte_limit() {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "record relation batch bytes", accounting: None,
+            resource: "record relation batch bytes",
+            accounting: None,
         });
     }
     control.checkpoint()?;

@@ -178,4 +178,3 @@ CREATE TRIGGER projection_output_audit_invalidate_delete_v1
                 DELETE FROM authority_audit_checkpoints
                 WHERE audit_name = 'observation-authority';
             END;
-

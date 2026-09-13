@@ -334,6 +334,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             .expect("proposal route"),
         "Admit the explicitly declared Work task".to_owned(),
         proposal_digest,
+        configuration_digest.clone(),
     )
     .expect("proposal");
     let prepared_accept = invoke!(
@@ -412,7 +413,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
         panic!("execution admission must return a product mutation effect: {admitted:?}");
     };
     let admitted = effect.payload.expect("execution admission receipt");
-    assert!(!admitted.replayed());
+    assert!(!admitted.mutation.replayed());
 
     let prepared_task_acceptance = invoke!(
         "request.work.prepare-accept-task",

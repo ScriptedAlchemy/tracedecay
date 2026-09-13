@@ -6,9 +6,8 @@ use tempfile::TempDir;
 use tracedecay_contracts::retained_surfaces::{
     RetainedSurfaceOperation, RetainedSurfaceRequestV1, SessionRefreshActionRequestV1,
     SessionRefreshActionV1, SessionRefreshFrontierV1, SessionRefreshGrainV1,
-    SessionRefreshProjectV1, SessionRefreshRequestV1, SessionRefreshScopeV1,
-    SessionRefreshSessionV1, SessionRefreshSourceV1, SessionRefreshTargetV1,
-    SessionRefreshTemporalModeV1,
+    SessionRefreshRequestV1, SessionRefreshScopeV1, SessionRefreshSessionV1,
+    SessionRefreshSourceV1, SessionRefreshTargetV1, SessionRefreshTemporalModeV1,
 };
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemKind, CancellationContext, CancellationSignal,
@@ -172,19 +171,9 @@ impl RetiredRefreshFixture {
         SessionRefreshRequestV1::with_action(
             action,
             SessionRefreshActionRequestV1 {
-                scope: SessionRefreshScopeV1::Project {
-                    project: SessionRefreshProjectV1 {
-                        id: self.project_id.as_str().to_owned(),
-                        profile_id: self.profile_id.as_str().to_owned(),
-                        repository_id: self.repository_id.as_str().to_owned(),
-                        worktree_id: self.worktree_id.as_str().to_owned(),
-                        branch_id: BRANCH_ID.to_owned(),
-                    },
-                },
+                scope: SessionRefreshScopeV1::Project {},
                 session: SessionRefreshSessionV1 {
                     id: session_id.as_str().to_owned(),
-                    store_id: self.session_store_id.as_str().to_owned(),
-                    root_id: self.session_root_id.as_str().to_owned(),
                 },
                 source: SessionRefreshSourceV1 {
                     scope: "cursor".to_owned(),
@@ -220,19 +209,18 @@ fn owner_for(database: &RegisteredGlobalDb, project_id: &ProjectId) -> StoreOwne
 }
 
 fn application_context(
+    fixture: &RetiredRefreshFixture,
     request: &SessionRefreshRequestV1,
     request_id: &str,
 ) -> (RequestContext, CancellationSignal) {
-    let SessionRefreshScopeV1::Project { project: route } = &request.request.scope else {
+    let SessionRefreshScopeV1::Project {} = &request.request.scope else {
         panic!("effect fixtures are project-scoped");
     };
     let scope = tracedecay_contracts::ResolvedScope::new(
-        ProjectId::new(route.id.clone()).expect("scope project"),
-        RepositoryId::new(route.repository_id.clone()).expect("scope repository"),
-        WorktreeId::new(route.worktree_id.clone()).expect("scope worktree"),
-        Some(
-            RefId::new(format!("refs/heads/{}", route.branch_id)).expect("scope branch reference"),
-        ),
+        fixture.project_id.clone(),
+        fixture.repository_id.clone(),
+        fixture.worktree_id.clone(),
+        Some(RefId::new(format!("refs/heads/{BRANCH_ID}")).expect("scope branch reference")),
     )
     .expect("project scope");
     let operation = retained_surface_application_operation(request.operation())
@@ -367,7 +355,7 @@ async fn retained_begin_and_join_report_partial_effect_and_restart_recovers_same
         let fixture = RetiredRefreshFixture::open(&temp, label).await;
         let request = fixture.request(SessionRefreshActionV1::Begin, &session_id, None);
         let public_request = RetainedSurfaceRequestV1::SessionRefresh(request.clone());
-        let (context, signal) = application_context(&request, "request.retained.begin");
+        let (context, signal) = application_context(&fixture, &request, "request.retained.begin");
         let first_problem = fixture
             .application
             .execute(&context, &signal, UtcMicros(2), &public_request)
@@ -386,7 +374,7 @@ async fn retained_begin_and_join_report_partial_effect_and_restart_recovers_same
         );
 
         let (joined_context, joined_signal) =
-            application_context(&request, "request.retained.join");
+            application_context(&fixture, &request, "request.retained.join");
         let joined_problem = fixture
             .application
             .execute(
@@ -414,7 +402,7 @@ async fn retained_begin_and_join_report_partial_effect_and_restart_recovers_same
         );
 
         let (direct_context, direct_signal) =
-            application_context(&request, "request.retained.join-direct");
+            application_context(&fixture, &request, "request.retained.join-direct");
         let command = admitted_session_refresh_command(
             &request,
             &direct_context,
@@ -445,7 +433,7 @@ async fn retained_cancel_reports_partial_effect_with_canonical_cancelled_receipt
     let session_id = SessionId::new("session.retained.cancel").expect("session id");
     let begin = fixture.request(SessionRefreshActionV1::Begin, &session_id, None);
     let (begin_context, begin_signal) =
-        application_context(&begin, "request.retained.cancel-begin");
+        application_context(&fixture, &begin, "request.retained.cancel-begin");
     let begin_command = admitted_session_refresh_command(
         &begin,
         &begin_context,
@@ -465,7 +453,7 @@ async fn retained_cancel_reports_partial_effect_with_canonical_cancelled_receipt
     let cancel = fixture.request(SessionRefreshActionV1::Cancel, &session_id, Some(handle));
     let public_cancel = RetainedSurfaceRequestV1::SessionRefresh(cancel.clone());
     let (cancel_context, cancel_signal) =
-        application_context(&cancel, "request.retained.cancel-effect");
+        application_context(&fixture, &cancel, "request.retained.cancel-effect");
     let problem = fixture
         .application
         .execute(

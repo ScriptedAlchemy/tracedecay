@@ -555,7 +555,13 @@ where
                         return code_index_scope_unavailable();
                     }
                 };
-                if schedulers.automatic_admission_for_scope(&scope)
+                let exact_source_bound = code_index_task_support::exact_source_is_complete(
+                    request.source_reference.as_ref(),
+                    request.source_revision.as_ref(),
+                    request.source_tree.as_ref(),
+                );
+                if !exact_source_bound
+                    && schedulers.automatic_admission_for_scope(&scope)
                     == Some(
                         code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
                     )
@@ -563,6 +569,18 @@ where
                     return code_index_search_unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled,
                         "linked_worktree_disabled",
+                    );
+                }
+                if exact_source_bound
+                    && schedulers.query_authority_for_scope(&scope).await.is_none()
+                    && schedulers
+                        .mount_query_authority_from_project_peer(&request.project_root, &scope)
+                        .await
+                        .is_err()
+                {
+                    return code_index_search_unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        "query_authority_unavailable",
                     );
                 }
                 let admission = match admission_provider.admit_current(&scope) {

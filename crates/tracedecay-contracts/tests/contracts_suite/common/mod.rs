@@ -383,6 +383,7 @@ impl WorkProductAttemptStore {
             WorkRouteDecisionV1::abstain("fixture route").expect("fixture route is valid"),
             format!("Proposal for {task_id}"),
             digest_char('b'),
+            digest_char('c'),
         )
         .expect("fixture proposal is valid");
         append_seed_change(

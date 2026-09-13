@@ -188,7 +188,13 @@ pub(crate) fn validate_work_executable_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ManifestDigest, WorkContentLocationClassV1, WorkEffortClassV1, WorkOrdinalBandV1};
+    use std::collections::BTreeSet;
+
+    use crate::{
+        ManifestDigest, WorkApprovalPolicy, WorkContentLocationClassV1, WorkEffortClassV1,
+        WorkEgressPolicy, WorkExecutionLimits, WorkFallbackTopology, WorkFilesystemPolicy,
+        WorkOrdinalBandV1, WorkRouteExecutionProfileV1, WorkSandboxPolicy,
+    };
 
     fn reference(id: &str, byte: char) -> WorkExecutableReference {
         WorkExecutableReference::new(
@@ -216,6 +222,17 @@ mod tests {
             cost: WorkOrdinalBandV1::Moderate,
             autonomy: WorkOrdinalBandV1::High,
             evidence_quality: WorkOrdinalBandV1::High,
+            execution: WorkRouteExecutionProfileV1 {
+                sandbox: WorkSandboxPolicy::Required,
+                approval: WorkApprovalPolicy::Never,
+                filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+                egress: WorkEgressPolicy::Deny,
+                environment_allowlist: BTreeSet::new(),
+                credential_references: BTreeSet::new(),
+                limits: WorkExecutionLimits::new(1, 1, 1, 1, 1, 1).unwrap(),
+                maximum_duration_micros: 1,
+                fallback: WorkFallbackTopology::Disabled,
+            },
         }
     }
 

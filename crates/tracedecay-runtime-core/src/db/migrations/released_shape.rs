@@ -112,9 +112,7 @@ fn failure(message: String) -> TraceDecayError {
 /// absent, the schema installs are `CREATE ... IF NOT EXISTS`, and the row
 /// moves are the same resumable statements the registered stores converge
 /// with.
-pub(super) async fn converge_released_project_schema(
-    conn: &(impl Executor + Sync),
-) -> Result<()> {
+pub(super) async fn converge_released_project_schema(conn: &(impl Executor + Sync)) -> Result<()> {
     for group in RELEASED_V34_REBUILDS {
         rebuild_released_group(conn, group).await?;
     }
@@ -230,16 +228,19 @@ async fn stored_object_sql(conn: &impl QueryExecutor, name: &str) -> Result<Opti
         )
         .await
         .map_err(|error| failure(format!("failed to read the stored DDL of {name}: {error}")))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| failure(format!("failed to decode the stored DDL of {name}: {error}")))?
+    let Some(row) = rows.next().await.map_err(|error| {
+        failure(format!(
+            "failed to decode the stored DDL of {name}: {error}"
+        ))
+    })?
     else {
         return Ok(None);
     };
-    row.get::<String>(0)
-        .map(Some)
-        .map_err(|error| failure(format!("failed to decode the stored DDL of {name}: {error}")))
+    row.get::<String>(0).map(Some).map_err(|error| {
+        failure(format!(
+            "failed to decode the stored DDL of {name}: {error}"
+        ))
+    })
 }
 
 /// Every trigger defined on one table, in catalog order.
@@ -258,10 +259,10 @@ async fn table_triggers(conn: &impl QueryExecutor, table: &str) -> Result<Vec<St
         .await
         .map_err(|error| failure(format!("failed to read the triggers of {table}: {error}")))?
     {
-        triggers.push(
-            row.get::<String>(0)
-                .map_err(|error| failure(format!("failed to decode a {table} trigger: {error}")))?,
-        );
+        triggers
+            .push(row.get::<String>(0).map_err(|error| {
+                failure(format!("failed to decode a {table} trigger: {error}"))
+            })?);
     }
     Ok(triggers)
 }

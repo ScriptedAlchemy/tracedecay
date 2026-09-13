@@ -2665,7 +2665,9 @@ async fn derived_candidate_reads_only_its_boundary_occurrences() {
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
             .await
             .expect("registered profile runtime");
-        runtime.seed_wide_span_record_fixture_for_test(members).await;
+        runtime
+            .seed_wide_span_record_fixture_for_test(members)
+            .await;
         let read = runtime.retrieval_read_for_test().await;
         let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
         let mut candidate = candidate_for_anchor("derived-span-anchor");

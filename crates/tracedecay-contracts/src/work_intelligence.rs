@@ -965,6 +965,7 @@ fn canonical_product_proposal(
         route,
         explanation,
         decision.input_digest.clone(),
+        decision.configuration_digest.clone(),
     )
     .map_err(|_| WorkProductApplicationErrorV1::ProposalAuthorityUnavailable)
 }

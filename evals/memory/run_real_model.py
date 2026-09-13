@@ -39,6 +39,7 @@ RUNS_DIR = EVAL_DIR / "runs"
 
 DEFAULT_HERMES_DIR = Path.home() / "hermes-agent"
 DEFAULT_MODEL = "gpt-5.4-mini"
+DEFAULT_CURSOR_MODEL = "composer-2.5"
 
 # Provider API keys forwarded from the real user's ~/.hermes/.env into the
 # isolated eval HOME. Keys only — never logged.
@@ -80,7 +81,7 @@ def parse_args(argv):
         "--driver",
         choices=("hermes", "cursor-agent"),
         default="hermes",
-        help="Agent driver. cursor-agent support is experimental.",
+        help="Agent driver. Cursor Composer uses its cursor-agent CLI.",
     )
     parser.add_argument("--agent-turn", action="store_true", help="Actually run real agent turns.")
     parser.add_argument(
@@ -88,7 +89,7 @@ def parse_args(argv):
         action="store_true",
         help="Acknowledge that real turns consume model credits/quota.",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model override for the agent.")
+    parser.add_argument("--model", help="Model override for the agent.")
     parser.add_argument(
         "--provider",
         help="Hermes inference provider (e.g. openai-codex, zai). Default: profile config.",
@@ -110,7 +111,10 @@ def parse_args(argv):
         action="store_true",
         help="Keep the throwaway fixture project for inspection.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.model is None:
+        args.model = DEFAULT_CURSOR_MODEL if args.driver == "cursor-agent" else DEFAULT_MODEL
+    return args
 
 
 @dataclass
@@ -404,16 +408,30 @@ def read_hermes_usage(profile_dir, started_after):
 
 
 def drive_cursor_agent(args, scenario, fixture, log_dir, eval_env):
-    """Experimental: drives `cursor-agent -p` against the profile MCP setup."""
+    """Drive Cursor Composer through `cursor-agent -p` and the profile plugin."""
     run(
         [args.tracedecay_bin, "install", "--agent", "cursor"],
         cwd=fixture,
         env=eval_env,
         timeout=120,
     )
+    plugin_dir = Path(eval_env["HOME"]) / ".cursor/plugins/local/tracedecay"
     transcripts = []
     for index, prompt in enumerate(scenario["real_model"]["prompts"], start=1):
-        cmd = ["cursor-agent", "-p", "--output-format", "text", "--model", args.model, prompt]
+        cmd = [
+            "cursor-agent",
+            "-p",
+            "--output-format",
+            "text",
+            "--plugin-dir",
+            str(plugin_dir),
+            "--approve-mcps",
+            "--force",
+            "--trust",
+            "--model",
+            args.model,
+            prompt,
+        ]
         started = datetime.datetime.now(datetime.timezone.utc)
         result = run(cmd, cwd=fixture, env=eval_env, timeout=900, check=False)
         elapsed = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()

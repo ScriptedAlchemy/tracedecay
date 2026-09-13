@@ -10,9 +10,7 @@ use tempfile::TempDir;
 use crate::db::engine::TestConnection;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
-use super::super::{
-    PAYLOAD_DIGEST_STEP_SOURCE_VERSION, SCHEMA_VERSION, create_schema_connection,
-};
+use super::super::{PAYLOAD_DIGEST_STEP_SOURCE_VERSION, SCHEMA_VERSION, create_schema_connection};
 
 #[derive(Debug, PartialEq, Eq)]
 struct StoreSnapshot {
@@ -186,20 +184,23 @@ fn seeded_project_rows(path: &Path) -> Vec<String> {
         // Only the seeded key: the step journals its own backfill receipt
         // here, which is a migration record rather than retained content.
         "SELECT json_array(key, value) FROM metadata
-         WHERE key = 'mac.profile'".to_owned(),
+         WHERE key = 'mac.profile'"
+            .to_owned(),
         format!(
             "SELECT json_array(binding_id, native_object_digest, partition_digest,
                     mutation_digest)
              FROM {mutations} ORDER BY binding_id, native_object_digest"
         ),
         "SELECT json_array(generation_id, record_state, state_generation, published_at)
-         FROM diagnostic_generation_publications ORDER BY generation_id".to_owned(),
+         FROM diagnostic_generation_publications ORDER BY generation_id"
+            .to_owned(),
         "SELECT json_array(diagnostic_anchor, generation_id, repository, file_occurrence_id,
                 content_digest, span_start, span_end, code, severity, message,
                 message_digest, producer_kind, producer, analyzer_revision,
                 configuration_revision, evidence_class, collected_at, record_state,
                 state_generation, persisted_at)
-         FROM generation_diagnostics ORDER BY diagnostic_anchor".to_owned(),
+         FROM generation_diagnostics ORDER BY diagnostic_anchor"
+            .to_owned(),
     ] {
         let mut statement = connection
             .prepare(&sql)

@@ -410,24 +410,6 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     }
 }
 
-/// The daemon's durable profile identity, read back after the daemon has
-/// published it. `--profile-id` must name exactly this authority; the test
-/// never fabricates one.
-fn daemon_profile_id(home: &Path) -> String {
-    let profile_root = profile_root(home);
-    let started = Instant::now();
-    loop {
-        match tracedecay_daemon_identity::profile_identity::load_existing(&profile_root) {
-            Ok(identity) => return identity.profile_id().as_str().to_owned(),
-            Err(error) if started.elapsed() < Duration::from_secs(30) => {
-                let _ = error;
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => panic!("daemon never published its profile identity: {error}"),
-        }
-    }
-}
-
 fn refresh_json(output: &Output, step: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -451,10 +433,8 @@ fn sessions_refresh_profile_scope_begins_reads_and_cancels_through_the_daemon() 
     let home = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    let profile_id = daemon_profile_id(home.path());
     let selectors = [
-        "--profile-id",
-        profile_id.as_str(),
+        "--profile",
         "--session-id",
         "session.cli.profile-refresh",
         "--provider",
@@ -541,34 +521,6 @@ fn sessions_refresh_profile_scope_begins_reads_and_cancels_through_the_daemon() 
     );
     assert_eq!(settled["receipt"]["state"], terminal_state, "{settled}");
 
-    // A handle from another owner's scope never resolves: the same handle
-    // presented under a foreign profile is refused before any store is read.
-    let mut foreign = tracedecay_command_without_daemon(home.path(), cwd.path());
-    foreign.args(["sessions", "refresh", "status"]).args([
-        "--profile-id",
-        "profile.someone-else",
-        "--session-id",
-        "session.cli.profile-refresh",
-        "--provider",
-        "codex",
-        "--source",
-        "0",
-        "--target",
-        "0",
-        "--handle",
-        &handle,
-    ]);
-    let refused = run_with_timeout(foreign, cli_timeout());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        !refused.status.success(),
-        "a foreign profile must not read this refresh\nstdout:\n{}\nstderr:\n{stderr}",
-        String::from_utf8_lossy(&refused.stdout)
-    );
-    assert!(
-        stderr.contains("not_found_or_not_authorized") || stderr.contains("refused"),
-        "{stderr}"
-    );
 }
 
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {
@@ -2582,7 +2534,9 @@ async fn automation_facts_list_reports_terminal_receipt_collection() {
 fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifacts() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    let caller = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
+    let caller_root = canonical_temp_path(caller.path());
     git(&project_root, &["init", "-b", "main"]);
     std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
     commit_all(&project_root, "initial commit");
@@ -2702,6 +2656,48 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
         "branch add must not create a per-branch database"
     );
 
+    git(
+        &project_root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "caller/linked",
+            caller_root.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let mut search = tracedecay_command_without_daemon(home.path(), &caller_root);
+    search.args([
+        "tool",
+        "branch_search",
+        "--args",
+        r#"{"branch":"feature/new","query":"indexed","limit":5,"format":"json"}"#,
+        "--json",
+    ]);
+    let search = run_with_timeout(search, cli_timeout());
+    assert!(
+        search.status.success(),
+        "a linked worktree must consume an explicitly published branch generation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&search.stdout),
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&search.stdout).expect("branch search MCP envelope");
+    let payload: serde_json::Value = serde_json::from_str(
+        envelope["content"][0]["text"]
+            .as_str()
+            .expect("branch search JSON content"),
+    )
+    .expect("branch search payload");
+    assert_eq!(payload["status"], "complete", "{payload:#}");
+    assert!(
+        payload["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty()),
+        "published branch search must return the indexed symbol: {payload:#}"
+    );
+
     drop(daemon);
     let _restarted_daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut list = tracedecay_command_without_daemon(home.path(), &project_root);
@@ -2754,6 +2750,92 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
             .expect("branch metadata after removal")
             .is_tracked("feature/new"),
         "branch remove must retire its metadata only after exact provenance cleanup is selected"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn branch_search_serves_a_committed_generation_behind_dirty_worktree_state() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    git(&project_root, &["init", "-b", "main"]);
+    std::fs::write(
+        project_root.join("lib.rs"),
+        "pub fn committed_anchor() -> usize { 1 }\n",
+    )
+    .unwrap();
+    commit_all(&project_root, "initial commit");
+    std::fs::write(
+        project_root.join("lib.rs"),
+        concat!(
+            "pub fn committed_anchor() -> usize { 1 }\n",
+            "pub fn dirty_anchor() -> usize { 2 }\n",
+        ),
+    )
+    .unwrap();
+    init_project_fixture(home.path(), &project_root);
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let ready_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut ready = tracedecay_command_without_daemon(home.path(), &project_root);
+        ready.args([
+            "tool",
+            "search",
+            "--args",
+            r#"{"query":"dirty_anchor","limit":5,"format":"json"}"#,
+            "--json",
+        ]);
+        let ready = run_with_timeout(ready, cli_timeout());
+        let dirty_generation_ready = ready.status.success()
+            && serde_json::from_slice::<serde_json::Value>(&ready.stdout)
+                .ok()
+                .and_then(|envelope| envelope["content"][0]["text"].as_str().map(str::to_owned))
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|payload| payload["results"].as_array().cloned())
+                .is_some_and(|results| !results.is_empty());
+        if dirty_generation_ready {
+            break;
+        }
+        assert!(
+            Instant::now() < ready_deadline,
+            "dirty worktree generation did not become queryable\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&ready.stdout),
+            String::from_utf8_lossy(&ready.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let mut search = tracedecay_command_without_daemon(home.path(), &project_root);
+    search.args([
+        "tool",
+        "branch_search",
+        "--args",
+        r#"{"branch":"main","query":"committed_anchor","limit":5,"format":"json"}"#,
+        "--json",
+    ]);
+    let search = run_with_timeout(search, cli_timeout());
+    assert!(
+        search.status.success(),
+        "branch search must derive a queryable text owner for the exact committed generation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&search.stdout),
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&search.stdout).expect("branch search MCP envelope");
+    let payload: serde_json::Value = serde_json::from_str(
+        envelope["content"][0]["text"]
+            .as_str()
+            .expect("branch search JSON content"),
+    )
+    .expect("branch search payload");
+    assert_eq!(payload["status"], "complete", "{payload:#}");
+    assert!(
+        payload["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty()),
+        "branch search must return the committed symbol: {payload:#}"
     );
 }
 

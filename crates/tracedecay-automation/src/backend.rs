@@ -266,11 +266,11 @@ pub fn task_key(task: AgentTaskKind) -> &'static str {
 
 pub fn prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
-        AgentTaskKind::MemoryCurator => "memory_curator:v1",
+        AgentTaskKind::MemoryCurator => "memory_curator:v2",
         AgentTaskKind::SessionReflector => "session_reflector:v2",
-        AgentTaskKind::SkillWriter => "skill_writer:v3",
-        AgentTaskKind::CombinedReview => "combined_review:v2",
-        AgentTaskKind::UserJob => "user_job:v1",
+        AgentTaskKind::SkillWriter => "skill_writer:v4",
+        AgentTaskKind::CombinedReview => "combined_review:v3",
+        AgentTaskKind::UserJob => "user_job:v2",
     }
 }
 

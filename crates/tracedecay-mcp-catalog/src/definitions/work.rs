@@ -47,7 +47,7 @@ pub(super) fn work_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
                 })?;
             Ok(ToolDefinition {
                 name: format!("tracedecay_work_{}", operation.operation_key()),
-                description: format!("Invoke the Work {} operation.", operation.operation_key()),
+                description: operation.description().to_owned(),
                 input_schema: binding.request_schema().body().clone(),
                 annotations: Some(json!({
                     "readOnlyHint": binding.effect().is_read_only(),
@@ -61,4 +61,45 @@ pub(super) fn work_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
 
 fn invalid_work_discovery(field: &'static str, reason: &'static str) -> crate::McpCatalogError {
     CatalogValidationError::InvalidValue { field, reason }.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::work_definitions;
+    use tracedecay_api::WorkOperation;
+
+    #[test]
+    fn discovery_uses_discriminating_work_descriptions() {
+        let definitions = work_definitions().expect("Work definitions");
+        assert_eq!(definitions.len(), WorkOperation::ALL.len());
+        assert!(definitions.iter().all(|definition| {
+            !definition.description.starts_with("Invoke the Work ")
+                && !definition.description.trim().is_empty()
+        }));
+
+        for (name, description) in [
+            (
+                "tracedecay_work_generate_proposal",
+                "Generate an evidence-calibrated proposal for one task against an exact current Work graph.",
+            ),
+            (
+                "tracedecay_work_resume_attempts",
+                "Recover open attempts after daemon restart and fence those that require an explicit retry.",
+            ),
+            (
+                "tracedecay_work_mutate_graph",
+                "Apply an exact prepared Work graph mutation using its preserved identity and revision pins.",
+            ),
+            (
+                "tracedecay_work_release_placement",
+                "Release or quarantine one run's placement at the expected authority version without deleting bytes.",
+            ),
+        ] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(definition.description, description);
+        }
+    }
 }

@@ -1491,7 +1491,7 @@ fn sessions_refresh_parses_exact_lifecycle_selectors() {
                 }
         }) if args.selectors.project_id.as_deref() == Some("project.tracedecay")
             && args.selectors.project_path.is_none()
-            && args.selectors.profile_id.is_none()
+            && !args.selectors.profile
             && args.selectors.session_id == "session.refresh"
             && args.selectors.provider == "cursor"
             && args.selectors.source == 4
@@ -1504,8 +1504,7 @@ fn sessions_refresh_parses_exact_lifecycle_selectors() {
         "sessions",
         "refresh",
         "status",
-        "--profile-id",
-        "profile.primary",
+        "--profile",
         "--session-id",
         "session.refresh",
         "--provider",
@@ -1527,7 +1526,7 @@ fn sessions_refresh_parses_exact_lifecycle_selectors() {
                 }
         }) if args.selectors.project_id.is_none()
             && args.selectors.project_path.is_none()
-            && args.selectors.profile_id.as_deref() == Some("profile.primary")
+            && args.selectors.profile
             && args.selectors.session_id == "session.refresh"
             && args.selectors.provider == "cursor"
             && args.selectors.source == 4
@@ -1565,7 +1564,7 @@ fn sessions_refresh_parses_exact_lifecycle_selectors() {
                 }
         }) if args.selectors.project_id.is_none()
             && args.selectors.project_path.as_deref() == Some("/repo/tracedecay")
-            && args.selectors.profile_id.is_none()
+            && !args.selectors.profile
             && args.handle == "refresh.abc"
             && args.json
     ));

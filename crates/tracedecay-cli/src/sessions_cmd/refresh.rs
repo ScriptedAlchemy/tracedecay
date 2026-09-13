@@ -2,10 +2,9 @@
 //!
 //! The CLI is one more transport for the canonical
 //! `tracedecay_session_refresh_{begin,status,cancel}` operations: it resolves
-//! the exact session-store owner (a registered project route or the profile's
-//! own store), builds the canonical [`SessionRefreshActionRequestV1`], and
-//! decodes the typed retained result. It never invents identity from the
-//! current directory and never falls back to a project for a profile refresh.
+//! the public project or profile route, builds the canonical
+//! [`SessionRefreshActionRequestV1`], and decodes the typed retained result.
+//! Exact store identity stays inside the mounted daemon authority.
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -17,9 +16,9 @@ use tracedecay_contracts::retained_surfaces::{
     RetainedErrorV1, RetainedOutcomeStatusV1, RetainedOutputFormatV1,
     SessionRefreshActionRequestV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
     SessionRefreshFrontierV1, SessionRefreshGrainV1, SessionRefreshProgressV1,
-    SessionRefreshProjectV1, SessionRefreshReceiptV1, SessionRefreshScopeV1,
-    SessionRefreshSessionV1, SessionRefreshSourceV1, SessionRefreshStatusResultV1,
-    SessionRefreshTargetV1, SessionRefreshTemporalModeV1,
+    SessionRefreshReceiptV1, SessionRefreshScopeV1, SessionRefreshSessionV1,
+    SessionRefreshSourceV1, SessionRefreshStatusResultV1, SessionRefreshTargetV1,
+    SessionRefreshTemporalModeV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -29,8 +28,7 @@ use crate::cli::{
 };
 use crate::commands::{daemon_tool_json, retained_effect_payload, retained_tool_payload};
 
-const REGISTRY_ADMIN_TOOL: &str = "tracedecay_admin_cli";
-const ACTIVE_PROJECT_TOOL: &str = "tracedecay_active_project";
+const PROJECT_CONTEXT_TOOL: &str = "tracedecay_project_context";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionRefreshOperation {
@@ -274,8 +272,6 @@ fn validated_refresh_handle(
 struct ResolvedSessionRefreshScope {
     project_root: Option<PathBuf>,
     scope: SessionRefreshScopeV1,
-    store_id: String,
-    root_id: String,
 }
 
 async fn resolve_session_refresh_scope<T>(
@@ -285,18 +281,23 @@ async fn resolve_session_refresh_scope<T>(
 where
     T: SessionRefreshDaemonTransport + ?Sized,
 {
-    if let Some(profile_id) = selectors.profile_id.as_deref() {
-        return profile_refresh_scope(profile_id);
+    if selectors.profile {
+        return Ok(ResolvedSessionRefreshScope {
+            project_root: None,
+            scope: SessionRefreshScopeV1::Profile {},
+        });
     }
-    let project_arg = match (
+    let context_arguments = match (
         selectors.project_id.as_deref(),
         selectors.project_path.as_deref(),
     ) {
-        (Some(project_id), None) => project_id,
-        (None, Some(project_path)) => project_path,
+        (Some(project_id), None) => {
+            json!({ "project_selector": { "project_id": project_id }, "format": "json" })
+        }
+        (None, Some(project_path)) => json!({ "path": project_path, "format": "json" }),
         (None, None) => {
             return Err(refresh_config_error(
-                "sessions refresh requires --project-id, --project-path, or --profile-id; it never falls back to the current directory",
+                "sessions refresh requires --project-id, --project-path, or --profile; it never falls back to the current directory",
             ));
         }
         (Some(_), Some(_)) => {
@@ -305,14 +306,8 @@ where
             ));
         }
     };
-    // The registry context carries the daemon's durable profile id alongside
-    // the registered project; the CLI never fabricates either.
     let context = transport
-        .call(
-            None,
-            REGISTRY_ADMIN_TOOL,
-            json!({ "action": "registry_context", "project_arg": project_arg }),
-        )
+        .call(None, PROJECT_CONTEXT_TOOL, context_arguments)
         .await?;
     if context.get("status").and_then(Value::as_str) != Some("ok") {
         return Err(refresh_config_error(
@@ -331,103 +326,9 @@ where
             "returned a non-absolute registered project root",
         ));
     }
-    let active = transport
-        .call(
-            Some(&project_root),
-            ACTIVE_PROJECT_TOOL,
-            json!({ "format": "json" }),
-        )
-        .await?;
-    resolve_project_refresh_scope(&context, &active)
-}
-
-fn profile_refresh_scope(profile_id: &str) -> Result<ResolvedSessionRefreshScope> {
-    let suffix = profile_id
-        .strip_prefix("profile.")
-        .filter(|suffix| !suffix.is_empty())
-        .ok_or_else(|| {
-            refresh_config_error("--profile-id must be the typed `profile.<id>` identity")
-        })?;
-    Ok(ResolvedSessionRefreshScope {
-        project_root: None,
-        scope: SessionRefreshScopeV1::Profile {
-            profile_id: profile_id.to_owned(),
-        },
-        store_id: format!("store.profile.{suffix}"),
-        root_id: format!("root.profile.{suffix}"),
-    })
-}
-
-fn resolve_project_refresh_scope(
-    context: &Value,
-    active: &Value,
-) -> Result<ResolvedSessionRefreshScope> {
-    let context_object = context
-        .as_object()
-        .ok_or_else(|| refresh_response_error("omitted registered project context"))?;
-    let profile_id = required_context_string(context_object, "profile_id")?;
-    let project = context
-        .get("project")
-        .and_then(Value::as_object)
-        .ok_or_else(|| refresh_response_error("omitted registered project context"))?;
-    let project_id = required_context_string(project, "project_id")?;
-    let project_root = PathBuf::from(required_context_string(project, "display_root")?);
-    if !project_root.is_absolute() {
-        return Err(refresh_response_error(
-            "returned a non-absolute registered project root",
-        ));
-    }
-    let worktree_id = project_root.to_string_lossy().into_owned();
-    let repository_id = required_context_string(project, "git_common_dir")?;
-    let branch = active
-        .get("branch")
-        .and_then(Value::as_object)
-        .ok_or_else(|| refresh_response_error("omitted active project branch context"))?;
-    let branch_name = required_context_string(branch, "current_branch")?;
-
-    let stores = context
-        .get("stores")
-        .and_then(Value::as_array)
-        .ok_or_else(|| refresh_response_error("omitted registered project stores"))?;
-    let mut matches = stores.iter().filter_map(|store_context| {
-        let store = store_context.get("store")?.as_object()?;
-        let store_id = store.get("store_id")?.as_str()?;
-        let graph_scope = store_context
-            .get("graph_scopes")?
-            .as_array()?
-            .iter()
-            .find(|scope| {
-                scope.get("branch_name").and_then(Value::as_str) == Some(branch_name.as_str())
-                    && scope.get("store_id").and_then(Value::as_str) == Some(store_id)
-                    && scope.get("writable").and_then(Value::as_bool) != Some(false)
-            })?;
-        Some((
-            store_id.to_owned(),
-            graph_scope.get("graph_scope_id")?.as_str()?.to_owned(),
-        ))
-    });
-    let (store_id, branch_id) = matches.next().ok_or_else(|| {
-        refresh_response_error("did not identify a writable session store for the project branch")
-    })?;
-    if matches.next().is_some() {
-        return Err(refresh_response_error(
-            "returned ambiguous session stores for the project branch",
-        ));
-    }
-
     Ok(ResolvedSessionRefreshScope {
         project_root: Some(project_root),
-        scope: SessionRefreshScopeV1::Project {
-            project: SessionRefreshProjectV1 {
-                id: project_id,
-                profile_id,
-                repository_id,
-                worktree_id,
-                branch_id: branch_id.clone(),
-            },
-        },
-        store_id,
-        root_id: branch_id,
+        scope: SessionRefreshScopeV1::Project {},
     })
 }
 
@@ -453,8 +354,6 @@ fn session_refresh_request(
         scope: scope.scope.clone(),
         session: SessionRefreshSessionV1 {
             id: selectors.session_id.clone(),
-            store_id: scope.store_id.clone(),
-            root_id: scope.root_id.clone(),
         },
         source: SessionRefreshSourceV1 {
             scope: selectors.provider.clone(),

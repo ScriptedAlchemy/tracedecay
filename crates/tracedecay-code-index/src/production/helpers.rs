@@ -589,12 +589,9 @@ impl RustFileIndexV1 {
                 );
             }
             if relative == "lib.rs"
-                && let Some(crate_name) = Path::new(source_root)
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|name| name.to_str())
+                && let Some(crate_name) = rust_crate_name(files, source_root)
             {
-                insert_unique_index(&mut crate_roots, crate_name.replace('-', "_"), index);
+                insert_unique_index(&mut crate_roots, crate_name, index);
             }
         }
         Self {
@@ -614,6 +611,40 @@ impl RustFileIndexV1 {
     fn crate_root(&self, crate_name: &str) -> Option<usize> {
         self.crate_roots.get(crate_name).copied().flatten()
     }
+}
+
+fn rust_crate_name<T>(files: &[T], source_root: &str) -> Option<String>
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let manifest = Path::new(source_root)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("Cargo.toml");
+    let manifest = manifest.to_str()?;
+    files
+        .iter()
+        .find(|file| file.as_ref().authority.logical_path == manifest)
+        .and_then(|file| {
+            file.as_ref().artifacts.symbols.iter().find(|symbol| {
+                symbol.simple_name == "name" && symbol.qualified_name.ends_with("::package::name")
+            })
+        })
+        .and_then(|symbol| symbol.signature.as_deref())
+        .and_then(|signature| toml::from_str::<toml::Value>(signature).ok())
+        .and_then(|pair| {
+            pair.get("name")
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            Path::new(source_root)
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .map(|name| name.replace('-', "_"))
 }
 
 fn insert_unique_index<K: Ord>(index: &mut BTreeMap<K, Option<usize>>, key: K, value: usize) {

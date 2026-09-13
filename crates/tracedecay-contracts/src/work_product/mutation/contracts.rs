@@ -6,8 +6,8 @@ use thiserror::Error;
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, ManifestDigest,
     PolicyRevisionId, ProposalId, TaskEvidenceLinkId, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkCommandId, WorkGraphVersionV1, WorkHandoffV1, WorkInitiativeV1, WorkItemV1,
-    WorkMilestoneV1, WorkPlanV1, WorkProductEventEvidenceV1, WorkProductEventId,
+    WorkCommandId, WorkExecutionSnapshot, WorkGraphVersionV1, WorkHandoffV1, WorkInitiativeV1,
+    WorkItemV1, WorkMilestoneV1, WorkPlanV1, WorkProductEventEvidenceV1, WorkProductEventId,
     WorkProductEventPayloadV1, WorkProductEventV1, WorkProductGraphV1, WorkProductProfileScopeV1,
     WorkProductSourceWatermarkV1, WorkProposalDispositionV1, WorkProposalV1,
     WorkRelationReplanProposalV1,
@@ -233,6 +233,15 @@ impl WorkProductMutationReceiptV1 {
     }
 }
 
+/// Execution admission together with the immutable provider snapshot licensed
+/// by the accepted proposal and current configuration authority.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedWorkExecutionV1 {
+    pub mutation: WorkProductMutationReceiptV1,
+    pub execution_snapshot: WorkExecutionSnapshot,
+}
+
 macro_rules! mutation_request {
     ($name:ident { $($field:ident : $ty:ty),+ $(,)? }) => {
         #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -259,6 +268,59 @@ mutation_request!(DecideWorkProposalRequestV1 {
     proposal: WorkProposalV1,
     disposition: WorkProposalDispositionV1,
 });
+
+/// The only non-accepting dispositions the proposal-review operation can
+/// commit. The broader decision request remains available to the graph
+/// mutation operation, which owns all decision forms.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewWorkProposalDispositionV1 {
+    Rejected,
+    Superseded,
+}
+
+/// The accept-proposal operation can commit acceptance only.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptWorkProposalDispositionV1 {
+    Accepted,
+}
+
+mutation_request!(ReviewWorkProposalRequestV1 {
+    proposal: WorkProposalV1,
+    disposition: ReviewWorkProposalDispositionV1,
+});
+mutation_request!(AcceptWorkProposalRequestV1 {
+    proposal: WorkProposalV1,
+    disposition: AcceptWorkProposalDispositionV1,
+});
+
+impl From<ReviewWorkProposalRequestV1> for DecideWorkProposalRequestV1 {
+    fn from(request: ReviewWorkProposalRequestV1) -> Self {
+        Self {
+            selection: request.selection,
+            proposal: request.proposal,
+            disposition: match request.disposition {
+                ReviewWorkProposalDispositionV1::Rejected => WorkProposalDispositionV1::Rejected,
+                ReviewWorkProposalDispositionV1::Superseded => {
+                    WorkProposalDispositionV1::Superseded
+                }
+            },
+            mutation: request.mutation,
+        }
+    }
+}
+
+impl From<AcceptWorkProposalRequestV1> for DecideWorkProposalRequestV1 {
+    fn from(request: AcceptWorkProposalRequestV1) -> Self {
+        Self {
+            selection: request.selection,
+            proposal: request.proposal,
+            disposition: WorkProposalDispositionV1::Accepted,
+            mutation: request.mutation,
+        }
+    }
+}
 mutation_request!(DecideWorkRelationReplanRequestV1 {
     proposal: WorkRelationReplanProposalV1,
     disposition: WorkProposalDispositionV1,

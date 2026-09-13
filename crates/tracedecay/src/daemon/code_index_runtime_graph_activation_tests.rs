@@ -1426,12 +1426,42 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
         "graph reads must name the retained generation"
     );
 
-    release_projection
-        .send(())
-        .expect("release the held text projection");
     release_successor
         .send(())
         .expect("release the successor after the seat observation");
+    assert!(
+        registry
+            .request_complete_generation(&canonical_fixture)
+            .await,
+        "branch publication demand reaches the mounted retained owner"
+    );
+    let complete_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(complete) = registry.latest_complete_serving_for_scope(&scope).await {
+            assert_eq!(
+                complete.generation().manifest().generation_id,
+                seeded_generation_id,
+                "late complete demand must seat the recovered generation"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= complete_deadline,
+            "complete demand that arrived during retained text projection stayed stranded"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        registry
+            .latest_text_serving_for_root(&canonical_fixture)
+            .await
+            .is_none(),
+        "complete generation replay must not fabricate finished lexical projection"
+    );
+
+    release_projection
+        .send(())
+        .expect("release the held text projection");
     let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(ready) = registry
