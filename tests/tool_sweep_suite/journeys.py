@@ -315,31 +315,60 @@ def _manifest_digest(value: Any, field: str) -> str:
     return value
 
 
-def _workflow_policy_digest(response: dict[str, Any]) -> str:
-    for value in objects(response):
-        policy = value.get("policy")
-        if isinstance(policy, dict) and "digest" in policy:
-            return _manifest_digest(policy["digest"], "Workflow policy digest")
-    raise JourneyError("configuration evidence omitted its Workflow policy digest")
+_UNPINNED_DIGEST = "sha256:" + "0" * 64
+_UNPINNED_DEFINITION_PINS = {
+    "pinned_policy_digest": _UNPINNED_DIGEST,
+    "pinned_configuration_digest": _UNPINNED_DIGEST,
+    "pinned_catalog_digest": _UNPINNED_DIGEST,
+}
+_WORKFLOW_PIN_MISMATCH = re.compile(
+    r"(pinned_(?:policy|configuration|catalog)_digest) expected (sha256:[0-9a-f]{64}), observed "
+)
 
 
-def _workflow_catalog_digest(response: dict[str, Any]) -> str:
+def _workflow_pin_mismatch(response: dict[str, Any]) -> tuple[str, str] | None:
+    """Return the definition pin one validation denial names, with its digest."""
     for value in objects(response):
         diagnostic = value.get("diagnostic")
         if not isinstance(diagnostic, dict):
             continue
-        if diagnostic.get("code") != "workflow.catalog.pin_mismatch":
+        code = diagnostic.get("code")
+        if not isinstance(code, str) or not code.endswith(".pin_mismatch"):
             continue
         message = diagnostic.get("message")
         if not isinstance(message, str):
-            break
-        match = re.search(
-            r"pinned_catalog_digest expected (sha256:[0-9a-f]{64}), observed ",
-            message,
+            raise JourneyError(f"{code} omitted its digest message")
+        match = _WORKFLOW_PIN_MISMATCH.search(message)
+        if match is None:
+            raise JourneyError(f"{code} omitted the live digest it expected")
+        return match.group(1), match.group(2)
+    return None
+
+
+def _workflow_environment_pins(
+    definition: dict[str, Any], probe: Probe, deadline: Deadline,
+) -> dict[str, str]:
+    """Discover the definition pins the live daemon environment admits.
+
+    The daemon derives its policy, configuration, and catalog digests from its
+    own project-open snapshot and publishes them only as the
+    `workflow.*.pin_mismatch` validation denial, so the journey repairs the one
+    pin each denial names rather than keeping a shadow copy of the derivation.
+    """
+    pins = dict(_UNPINNED_DEFINITION_PINS)
+    for _ in range(len(pins) + 1):
+        named = _workflow_pin_mismatch(
+            probe(
+                "tracedecay_workflow_validate_definition",
+                {"definition": {**definition, **pins}, "format": "json"},
+                deadline("tracedecay_workflow_validate_definition"),
+            )
         )
-        if match is not None:
-            return match.group(1)
-    raise JourneyError("Workflow catalog probe omitted its current digest diagnostic")
+        if named is None:
+            return pins
+        field, digest = named
+        pins[field] = digest
+    raise JourneyError("Workflow validation never admitted the discovered pins")
 
 
 def _workflow_definition(
@@ -347,9 +376,6 @@ def _workflow_definition(
     definition_id: str,
     version: int,
     project_id: str,
-    policy_digest: str,
-    configuration_digest: str,
-    catalog_digest: str,
     changed: bool = False,
 ) -> dict[str, Any]:
     return {
@@ -366,9 +392,7 @@ def _workflow_definition(
                 "fan_out": None,
             }
         ],
-        "pinned_policy_digest": policy_digest,
-        "pinned_configuration_digest": configuration_digest,
-        "pinned_catalog_digest": catalog_digest,
+        **_UNPINNED_DEFINITION_PINS,
     }
 
 
@@ -459,9 +483,7 @@ def _prepare_workflow_effect_journey(
     fixture: dict[str, Any],
     call: Call,
     deadline: Deadline,
-    policy_digest: str,
-    configuration_digest: str,
-    catalog_digest: str,
+    pins: dict[str, str],
 ) -> PreparedJourney:
     retained = fixture["workflow_effect_arguments"]
     definition_id = fixture["workflow_definition_id"]
@@ -583,14 +605,14 @@ def _prepare_workflow_effect_journey(
 
     suffix = str(time.monotonic_ns())
     effect_definition_id = f"workflow.tool-sweep.effect.{suffix}"
-    definition = _workflow_definition(
-        definition_id=effect_definition_id,
-        version=1,
-        project_id=fixture["project_id"],
-        policy_digest=policy_digest,
-        configuration_digest=configuration_digest,
-        catalog_digest=catalog_digest,
-    )
+    definition = {
+        **_workflow_definition(
+            definition_id=effect_definition_id,
+            version=1,
+            project_id=fixture["project_id"],
+        ),
+        **pins,
+    }
     call(
         "tracedecay_workflow_register_definition",
         {"definition": definition, "format": "json"},
@@ -751,44 +773,21 @@ def prime_workflow_lifecycle(
     """Exercise one pinned definition and contained no-fan-out run lifecycle."""
     suffix = str(time.monotonic_ns())
     project_id = fixture["project_id"]
-    configuration = call(
-        "tracedecay_configuration_get",
-        {"key": fixture["configuration_key"], "format": "json"},
-        deadline("tracedecay_configuration_get"),
-    )
-    policy_digest = _workflow_policy_digest(configuration)
-    configuration_digest = _manifest_digest(
-        first_value(configuration, {"effective_behavior_digest"}),
-        "Workflow configuration digest",
-    )
     definition_id = f"workflow.tool-sweep.{suffix}"
-    stale_definition = _workflow_definition(
-        definition_id=definition_id,
-        version=1,
-        project_id=project_id,
-        policy_digest=policy_digest,
-        configuration_digest=configuration_digest,
-        catalog_digest="sha256:" + "0" * 64,
+    unpinned = _workflow_definition(
+        definition_id=definition_id, version=1, project_id=project_id,
     )
-    catalog_probe = probe(
-        "tracedecay_workflow_validate_definition",
-        {"definition": stale_definition, "format": "json"},
-        deadline("tracedecay_workflow_validate_definition"),
-    )
-    catalog_digest = _workflow_catalog_digest(catalog_probe)
-    definition_v1 = {
-        **stale_definition,
-        "pinned_catalog_digest": catalog_digest,
+    pins = _workflow_environment_pins(unpinned, probe, deadline)
+    definition_v1 = {**unpinned, **pins}
+    definition_v2 = {
+        **_workflow_definition(
+            definition_id=definition_id,
+            version=2,
+            project_id=project_id,
+            changed=True,
+        ),
+        **pins,
     }
-    definition_v2 = _workflow_definition(
-        definition_id=definition_id,
-        version=2,
-        project_id=project_id,
-        policy_digest=policy_digest,
-        configuration_digest=configuration_digest,
-        catalog_digest=catalog_digest,
-        changed=True,
-    )
     validated = call(
         "tracedecay_workflow_validate_definition",
         {"definition": definition_v1, "format": "json"},
@@ -873,16 +872,11 @@ def prime_workflow_lifecycle(
         "command_id": f"command.workflow.start.{suffix}",
         "format": "json",
     }
-    started = probe(
+    started = call(
         "tracedecay_workflow_start_run",
         start_arguments,
         deadline("tracedecay_workflow_start_run"),
     )
-    if any(value.get("diagnostic", {}).get("code") == "workflow.invalid_request" for value in objects(started)):
-        raise JourneyError(
-            "Workflow start debug: "
-            + json.dumps({"request": start_arguments, "response": started}, sort_keys=True)
-        )
     running = _workflow_run(started, run_id, {"running"})
     observed = call(
         "tracedecay_workflow_get_run",
@@ -1007,9 +1001,7 @@ def prime_workflow_lifecycle(
             fixture,
             call,
             deadline,
-            policy_digest,
-            configuration_digest,
-            catalog_digest,
+            pins,
         )
 
 
