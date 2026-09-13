@@ -186,6 +186,15 @@ pub(super) fn prepare_execution_snapshot(
                 tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
             )
         })?;
+    // An abstained proposal recommends no provider route, so no execution
+    // snapshot exists to admit. Every routing authority is mounted and
+    // readable, and no delay can produce a route the proposal never named, so
+    // this is a request to correct rather than an authority to retry.
+    if proposal.route().recommended().is_none() {
+        return Err(work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::InvalidRequest,
+        ));
+    }
     registered
         .proposal_routing
         .execution_snapshot(
