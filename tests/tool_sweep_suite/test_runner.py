@@ -1842,6 +1842,9 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_work_cancel_attempt": cls.response(
                 '{"identity":{"attempt_id":"attempt.fixture"},"state":"cancelled"}'
             ),
+            "tracedecay_work_views": cls.response(
+                '{"snapshot":{"verified_version":{"graph_version":5}}}'
+            ),
         }
 
         class Client:

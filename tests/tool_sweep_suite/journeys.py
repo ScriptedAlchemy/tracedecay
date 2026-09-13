@@ -1265,6 +1265,18 @@ def prime_work_lifecycle(
         },
         deadline("tracedecay_work_cancel_attempt"),
     )
+    current_graph = call(
+        "tracedecay_work_views",
+        {
+            "selection": selection,
+            "mode": {"mode": "current"},
+            "continuation": None,
+            "observed_at": int(time.time() * 1_000_000),
+            "format": "json",
+        },
+        deadline("tracedecay_work_views"),
+    )
+    current_version = _object_field(_object_field(current_graph, "snapshot"), "verified_version")
 
     fixture.update(
         {
@@ -1274,6 +1286,7 @@ def prime_work_lifecycle(
             "work_attempt_id": attempt_id,
             "work_initial_version": initial_version,
             "work_admitted_version": admitted_version,
+            "work_current_version": current_version,
             "work_execution_snapshot": execution_snapshot,
             "work_prepare_create_arguments": prepare_create,
             "work_generate_arguments": generate_arguments,
