@@ -30,6 +30,11 @@ pub(crate) struct DoctorRuntimeRequest {
     doctor_report_requested: bool,
 }
 
+pub(super) struct CoreDoctorStatusV1 {
+    pub project_open: Option<ProjectOpenStatusV1>,
+    pub git_watcher_health: Option<serde_json::Value>,
+}
+
 impl DoctorRuntimeRequest {
     pub(crate) fn doctor_report_requested(&self) -> bool {
         self.doctor_report_requested
@@ -576,10 +581,9 @@ pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     transport: &mut T,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
-    project_open: Option<ProjectOpenStatusV1>,
+    status: CoreDoctorStatusV1,
     setup_activity: DaemonActivity,
     first_request: &super::AuthenticatedFirstRequest,
-    git_watcher_health: Option<serde_json::Value>,
     doctor_report_ready: Probe,
 ) -> Result<Option<DaemonActivity>>
 where
@@ -588,7 +592,7 @@ where
     ProbeFuture: std::future::Future<Output = Result<bool>>,
 {
     if let Some(id) = status_request_id(first_request.parsed())
-        && let Some(project_open) = project_open.as_ref()
+        && let Some(project_open) = status.project_open.as_ref()
         && project_open.state != ProjectOpenStatusStateV1::Completed
     {
         drop(setup_activity);
@@ -616,9 +620,9 @@ where
         transport,
         handshake,
         store_administration,
-        project_open,
+        status.project_open,
         request,
-        git_watcher_health,
+        status.git_watcher_health,
     ))
     .await?;
     Ok(None)
@@ -634,7 +638,8 @@ mod doctor_runtime_route_tests {
     use rusqlite::Connection;
 
     use super::{
-        cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
+        CoreDoctorStatusV1, cold_doctor_runtime_value, doctor_runtime_coverage,
+        doctor_runtime_request,
         serve_core_doctor_runtime_request,
     };
     use crate::daemon::{
@@ -894,10 +899,12 @@ mod doctor_runtime_route_tests {
             &mut transport,
             &handshake,
             &store_administration,
-            Some(project_open),
+            CoreDoctorStatusV1 {
+                project_open: Some(project_open),
+                git_watcher_health: None,
+            },
             setup_activity,
             &first_request,
-            None,
             || async { panic!("status must not probe the project owner") },
         )
         .await
@@ -937,14 +944,16 @@ mod doctor_runtime_route_tests {
             &mut transport,
             &handshake,
             &store_administration,
-            None,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                git_watcher_health: Some(serde_json::json!({
+                    "status": "degraded",
+                    "coverage": "degraded_poll",
+                    "reason": "watch_capacity_reached",
+                })),
+            },
             setup_activity,
             &first_request,
-            Some(serde_json::json!({
-                "status": "degraded",
-                "coverage": "degraded_poll",
-                "reason": "watch_capacity_reached",
-            })),
             || async { Ok(false) },
         )
         .await
@@ -988,10 +997,12 @@ mod doctor_runtime_route_tests {
             &mut transport,
             &handshake,
             &store_administration,
-            None,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                git_watcher_health: None,
+            },
             setup_activity,
             &first_request,
-            None,
             || async { Ok(true) },
         )
         .await
