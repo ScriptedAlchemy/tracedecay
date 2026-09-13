@@ -37,6 +37,35 @@ fn exact_retained_claim_lookup_commits_beyond_thirty_two_entries() {
 }
 
 #[test]
+fn exact_event_claim_lookup_is_unique_and_unexpired() {
+    let _guard = RETAINED_CLAIM_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let project_id = [201; 16];
+    let now = UtcMicros(999);
+    let claim = retained_claim(41);
+    let event_id = claim.lease.lease_id;
+
+    assert!(lookup_hook_v2_delivery_claim_for_event(project_id, event_id, now).is_none());
+    assert!(retain_hook_v2_delivery_claim(project_id, claim.clone(), now).is_ok());
+    assert_eq!(
+        lookup_hook_v2_delivery_claim_for_event(project_id, event_id, now),
+        Some(claim.clone())
+    );
+
+    let mut ambiguous = retained_claim(42);
+    ambiguous.lease.lease_id = event_id;
+    assert!(retain_hook_v2_delivery_claim(project_id, ambiguous.clone(), now).is_ok());
+    assert!(lookup_hook_v2_delivery_claim_for_event(project_id, event_id, now).is_none());
+    remove_hook_v2_delivery_claim(project_id, ambiguous.entry.envelope.envelope_id);
+    assert!(
+        lookup_hook_v2_delivery_claim_for_event(project_id, event_id, claim.lease.expires_at)
+            .is_none()
+    );
+    remove_hook_v2_delivery_claim(project_id, claim.entry.envelope.envelope_id);
+}
+
+#[test]
 fn retained_claims_backpressure_at_a_deterministic_bound() {
     let _guard = RETAINED_CLAIM_TEST_LOCK
         .lock()
