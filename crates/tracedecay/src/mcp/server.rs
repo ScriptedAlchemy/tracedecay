@@ -689,62 +689,11 @@ impl McpServer {
         // the active project as unmounted.
         let active_server_slot: Arc<std::sync::OnceLock<std::sync::Weak<McpServer>>> =
             Arc::new(std::sync::OnceLock::new());
-        let resolver_slot = Arc::clone(&active_server_slot);
-        let active_root =
-            tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&retained_root);
-        let resolver: RetainedProjectServerResolver =
-            install_retained_project_server_resolver(move |request| {
-                let retained_servers = retained_servers.clone();
-                let resolver_slot = Arc::clone(&resolver_slot);
-                let active_root = active_root.clone();
-                Box::pin(async move {
-                    let requested = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                        &request.requested_worktree_root,
-                    );
-                    let registered =
-                        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                            &request.registered_root,
-                        );
-                    let project_id = request
-                        .owner
-                        .as_ref()
-                        .map(|owner| owner.project.project_id.as_str());
-                    let mut matches = Vec::new();
-                    for server in &retained_servers {
-                        let graph = server.cg_snapshot().await;
-                        let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                            graph.project_root(),
-                        );
-                        let identity_matches = project_id.is_none_or(|project_id| {
-                            graph.store_layout().identity.project_id.as_deref() == Some(project_id)
-                        });
-                        if (root == requested || root == registered) && identity_matches {
-                            matches.push(Arc::clone(server));
-                        }
-                    }
-                    if matches.len() == 1 {
-                        return Ok(matches.pop());
-                    }
-                    if !matches.is_empty() {
-                        return Err(tracedecay_domain::errors::TraceDecayError::project_route(
-                            "project_route_ambiguous",
-                            false,
-                            "multiple retained test servers match one registered project route",
-                        ));
-                    }
-                    let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
-                    let Some(active) = active else {
-                        return Ok(None);
-                    };
-                    let graph = active.cg_snapshot().await;
-                    let identity_matches = project_id.is_none_or(|project_id| {
-                        graph.store_layout().identity.project_id.as_deref() == Some(project_id)
-                    });
-                    Ok(((active_root == requested || active_root == registered)
-                        && identity_matches)
-                        .then_some(active))
-                })
-            });
+        let resolver = retained_test_project_server_resolver(
+            retained_servers,
+            Arc::clone(&active_server_slot),
+            &retained_root,
+        );
         context = context.with_retained_project_server_resolver(resolver);
         let server = Self::new_with_context(context).await;
         if let Some(transport) = retained_owner_transport {
@@ -1533,3 +1482,68 @@ mod staleness_banner_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod writer_test_support;
+
+/// Routes a registered project request to the retained test server whose
+/// checkout and project identity match it, or to the active server when no
+/// retained server does.
+#[cfg(any(test, feature = "test-transport"))]
+fn retained_test_project_server_resolver(
+    retained_servers: Vec<Arc<McpServer>>,
+    resolver_slot: Arc<std::sync::OnceLock<std::sync::Weak<McpServer>>>,
+    retained_root: &std::path::Path,
+) -> RetainedProjectServerResolver {
+    let active_root =
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(retained_root);
+    install_retained_project_server_resolver(move |request| {
+        let retained_servers = retained_servers.clone();
+        let resolver_slot = Arc::clone(&resolver_slot);
+        let active_root = active_root.clone();
+        Box::pin(async move {
+            let requested = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                &request.requested_worktree_root,
+            );
+            let registered = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                &request.registered_root,
+            );
+            let project_id = request
+                .owner
+                .as_ref()
+                .map(|owner| owner.project.project_id.as_str());
+            let mut matches = Vec::new();
+            for server in &retained_servers {
+                let graph = server.cg_snapshot().await;
+                let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                    graph.project_root(),
+                );
+                let identity_matches = project_id.is_none_or(|project_id| {
+                    graph.store_layout().identity.project_id.as_deref() == Some(project_id)
+                });
+                if (root == requested || root == registered) && identity_matches {
+                    matches.push(Arc::clone(server));
+                }
+            }
+            if matches.len() == 1 {
+                return Ok(matches.pop());
+            }
+            if !matches.is_empty() {
+                return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                    "project_route_ambiguous",
+                    false,
+                    "multiple retained test servers match one registered project route",
+                ));
+            }
+            let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
+            let Some(active) = active else {
+                return Ok(None);
+            };
+            let graph = active.cg_snapshot().await;
+            let identity_matches = project_id.is_none_or(|project_id| {
+                graph.store_layout().identity.project_id.as_deref() == Some(project_id)
+            });
+            Ok(
+                ((active_root == requested || active_root == registered) && identity_matches)
+                    .then_some(active),
+            )
+        })
+    })
+}

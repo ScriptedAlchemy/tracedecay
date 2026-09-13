@@ -639,8 +639,7 @@ mod doctor_runtime_route_tests {
 
     use super::{
         CoreDoctorStatusV1, cold_doctor_runtime_value, doctor_runtime_coverage,
-        doctor_runtime_request,
-        serve_core_doctor_runtime_request,
+        doctor_runtime_request, serve_core_doctor_runtime_request,
     };
     use crate::daemon::{
         AuthenticatedFirstRequest, DaemonHandshake, DaemonLifecycle, StoreAdministration,

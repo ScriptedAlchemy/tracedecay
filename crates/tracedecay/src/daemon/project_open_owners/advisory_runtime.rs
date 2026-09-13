@@ -967,12 +967,10 @@ async fn run_production_hook_cycle(
                 ("outcome", "no_selection_candidates".to_owned()),
                 (
                     "findings",
-                    canonical
-                        .latest_publication
-                        .as_ref()
-                        .map_or_else(|| "unmatched".to_owned(), |publication| {
-                            publication.result.findings.len().to_string()
-                        }),
+                    canonical.latest_publication.as_ref().map_or_else(
+                        || "unmatched".to_owned(),
+                        |publication| publication.result.findings.len().to_string(),
+                    ),
                 ),
                 ("candidates", canonical.candidates.len().to_string()),
             ],

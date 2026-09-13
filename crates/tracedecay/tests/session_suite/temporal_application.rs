@@ -23,11 +23,11 @@ use tracedecay_session_memory::context::{
 use tracedecay_session_memory::session::{
     AuthorizationGrantId, AuthorizedTemporalExecutionRequest, SessionAccess,
     SessionAuthorizationError, SessionAuthorizationGrant, SessionDataFreshness,
-    SessionRequestBinding, SessionRetrievalBudgetAccountingV1,
-    SessionRetrievalBudgetObservationV1, SessionRetrievalBudgetStageV1, SessionRetrievalConfiguration,
-    SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionError,
-    SessionTemporalExecutionPort, SessionTemporalExecutionReport, SessionTemporalQuery,
+    SessionRequestBinding, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
+    SessionRetrievalBudgetStageV1, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalExecutionPort,
+    SessionTemporalExecutionReport, SessionTemporalQuery,
 };
 use tracedecay_temporal_query::context::{
     CompactContext, ContextBudget, TokenPolicy, VersionedTokenEstimator,

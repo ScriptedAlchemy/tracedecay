@@ -223,8 +223,8 @@ pub(super) async fn resolved_project_server_key(
     let data_root = layout.data_root.clone();
     let (graph_db_path, fallback_warning) =
         bounded_repository_probe(canonical_project_path, move || {
-            let graph_scope = tracedecay_runtime_core::branch::current_branch(&probe_path)
-                .or_else(|| {
+            let graph_scope =
+                tracedecay_runtime_core::branch::current_branch(&probe_path).or_else(|| {
                     tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
                 });
             let (graph_db_path, _, fallback_warning) =
