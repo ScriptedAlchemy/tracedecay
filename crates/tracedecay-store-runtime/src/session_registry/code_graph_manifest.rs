@@ -391,35 +391,8 @@ fn decode_verified_seal(
     )
 }
 
-/// Snapshot replay restores a whole generation, so it queues behind any other
-/// root's restore instead of splitting the indexing pool with it.
-///
-/// Admission is taken while this caller already holds its own store's bundle
-/// lock. That cannot deadlock: an admitted restore holds only the bundle lock
-/// it arrived with and never acquires another store's, and two readers of the
-/// same store root are already serialized by that lock before they get here.
-fn decode_verified_seal_with_bundle_barrier(
-    path: &std::path::Path,
-    segment_roots: &[PathBuf],
-    expected_digest: &str,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-    lifetime_lock: CodeGenerationStoreLockV1,
-    bundle_barrier: impl FnOnce(),
-) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
-    tracedecay_code_index::parallelism::with_generation_restore_admission(|| {
-        decode_admitted_verified_seal(
-            path,
-            segment_roots,
-            expected_digest,
-            check,
-            lifetime_lock,
-            bundle_barrier,
-        )
-    })
-}
-
 #[hotpath::measure(label = "daemon.session_registry.seal.decode")]
-fn decode_admitted_verified_seal(
+fn decode_verified_seal_with_bundle_barrier(
     path: &std::path::Path,
     segment_roots: &[PathBuf],
     expected_digest: &str,

@@ -550,84 +550,6 @@ impl std::error::Error for CodeIndexParallelismErrorV1 {}
 /// 0 means "use the configured host width".
 static FORCED_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
-/// Admission for whole-generation restores, and the witnesses an operator
-/// reads it through.
-static GENERATION_RESTORE_ADMISSION: Mutex<()> = Mutex::new(());
-static GENERATION_RESTORES_ADMITTED: AtomicUsize = AtomicUsize::new(0);
-static GENERATION_RESTORES_WAITING: AtomicUsize = AtomicUsize::new(0);
-static GENERATION_RESTORE_PEAK_ADMITTED: AtomicUsize = AtomicUsize::new(0);
-
-thread_local! {
-    /// Whether this thread already holds restore admission, so a nested
-    /// restore runs inline instead of waiting on itself.
-    static GENERATION_RESTORE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// How many whole-generation restores are decoding, how many are queued behind
-/// them, and the highest concurrency this process has admitted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CodeIndexGenerationRestoreAdmissionV1 {
-    pub admitted: usize,
-    pub waiting: usize,
-    pub peak_admitted: usize,
-}
-
-#[must_use]
-pub fn generation_restore_admission() -> CodeIndexGenerationRestoreAdmissionV1 {
-    CodeIndexGenerationRestoreAdmissionV1 {
-        admitted: GENERATION_RESTORES_ADMITTED.load(Ordering::Acquire),
-        waiting: GENERATION_RESTORES_WAITING.load(Ordering::Acquire),
-        peak_admitted: GENERATION_RESTORE_PEAK_ADMITTED.load(Ordering::Acquire),
-    }
-}
-
-/// Releases restore admission on return, cancellation, or unwind.
-struct AdmittedGenerationRestoreV1<'a> {
-    _admission: std::sync::MutexGuard<'a, ()>,
-}
-
-impl Drop for AdmittedGenerationRestoreV1<'_> {
-    fn drop(&mut self) {
-        GENERATION_RESTORES_ADMITTED.fetch_sub(1, Ordering::AcqRel);
-        GENERATION_RESTORE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-    }
-}
-
-/// Restore one whole generation at a time.
-///
-/// A restore fans its per-file segment decode out over the entire indexing
-/// pool and holds the decoded corpus plus the evidence stream it is reading
-/// resident while its serial stages run. Several worktree schedulers restoring
-/// their retained generations at once therefore finish no sooner: they split
-/// one pool N ways, multiply the resident restore working set by N, and every
-/// root's time to serving grows together. Queueing them keeps each restore at
-/// the pool's full width and at one generation's working set, and leaves the
-/// root that asked first — the serving one — ready first.
-///
-/// This is admission for one coarse operation, not a second CPU meter: the
-/// per-file units inside a restore still meter against
-/// [`with_background_cpu_permits`], and a nested restore on this thread runs
-/// inline rather than waiting on the admission it already holds.
-pub fn with_generation_restore_admission<R>(operation: impl FnOnce() -> R) -> R {
-    if GENERATION_RESTORE_DEPTH.with(std::cell::Cell::get) > 0 {
-        return operation();
-    }
-    let waiting = GENERATION_RESTORES_WAITING.fetch_add(1, Ordering::AcqRel) + 1;
-    hotpath::gauge!("code_index.generation.restore.waiting").set(waiting);
-    let admission = GENERATION_RESTORE_ADMISSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    GENERATION_RESTORES_WAITING.fetch_sub(1, Ordering::AcqRel);
-    let admitted = GENERATION_RESTORES_ADMITTED.fetch_add(1, Ordering::AcqRel) + 1;
-    GENERATION_RESTORE_PEAK_ADMITTED.fetch_max(admitted, Ordering::AcqRel);
-    GENERATION_RESTORE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
-    hotpath::gauge!("code_index.generation.restore.admitted").set(admitted);
-    let _admitted = AdmittedGenerationRestoreV1 {
-        _admission: admission,
-    };
-    operation()
-}
-
 /// Indexing width callers should fan out to. A width below 2 means "run
 /// inline".
 #[must_use]
@@ -734,7 +656,6 @@ fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 
     #[test]
@@ -816,68 +737,6 @@ mod tests {
                 memory_safe_workers: 8,
             }
         );
-    }
-
-    /// Concurrent restores must run one at a time, and every one of them must
-    /// still run: a queued restore is delayed, never dropped.
-    #[test]
-    fn whole_generation_restores_are_admitted_one_at_a_time() {
-        let overlapping = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let completed = Arc::new(AtomicUsize::new(0));
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                let overlapping = Arc::clone(&overlapping);
-                let peak = Arc::clone(&peak);
-                let completed = Arc::clone(&completed);
-                scope.spawn(move || {
-                    with_generation_restore_admission(|| {
-                        let inside = overlapping.fetch_add(1, Ordering::AcqRel) + 1;
-                        peak.fetch_max(inside, Ordering::AcqRel);
-                        // A nested restore on this thread must not wait on the
-                        // admission this thread already holds.
-                        with_generation_restore_admission(|| {
-                            std::thread::sleep(Duration::from_millis(5));
-                        });
-                        overlapping.fetch_sub(1, Ordering::AcqRel);
-                        completed.fetch_add(1, Ordering::AcqRel);
-                    });
-                });
-            }
-        });
-
-        assert_eq!(
-            peak.load(Ordering::Acquire),
-            1,
-            "restores must not decode concurrently"
-        );
-        assert_eq!(
-            completed.load(Ordering::Acquire),
-            8,
-            "every queued restore must still run"
-        );
-        assert!(
-            generation_restore_admission().peak_admitted >= 1,
-            "the process witness must record the admitted restores"
-        );
-        assert_eq!(
-            generation_restore_admission().admitted,
-            0,
-            "admission must be released when a restore returns"
-        );
-    }
-
-    /// A panicking restore must release admission, or the next root's restore
-    /// never starts.
-    #[test]
-    fn a_panicking_restore_releases_its_admission() {
-        let panicked = std::panic::catch_unwind(|| {
-            with_generation_restore_admission(|| panic!("restore unwound"));
-        });
-
-        assert!(panicked.is_err(), "the panic must propagate to the caller");
-        assert_eq!(generation_restore_admission().admitted, 0);
-        with_generation_restore_admission(|| ());
     }
 
     #[test]
