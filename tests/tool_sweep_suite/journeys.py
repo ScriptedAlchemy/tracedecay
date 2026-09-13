@@ -1632,12 +1632,21 @@ def _prepare_work_effect_journey(
         def cleanup(response: dict[str, Any]) -> str:
             if has_true(response, "replayed"):
                 raise JourneyError("fresh execution admission unexpectedly replayed")
-            replay = call(
+            # Committing the admission advances the head past the version the
+            # command pinned, so the byte-identical resubmission must still
+            # hand back the retained receipt rather than report staleness.
+            replay = call(name, arguments, deadline(name))
+            if not has_true(replay, "replayed"):
+                raise JourneyError(
+                    "execution admission did not replay its retained receipt: "
+                    + repr(replay)[:2_000]
+                )
+            graph_replay = call(
                 "tracedecay_work_mutate_graph",
                 {"mutation": "admit_execution", "request": arguments},
                 deadline("tracedecay_work_mutate_graph"),
             )
-            if not has_true(replay, "replayed"):
+            if not has_true(graph_replay, "replayed"):
                 raise JourneyError(
                     "execution admission did not replay through the graph authority"
                 )
@@ -1654,7 +1663,7 @@ def _prepare_work_effect_journey(
             )
             if not any(value.get("task_id") == task_id for value in objects(views)):
                 raise JourneyError("execution admission view lost its task identity")
-            return "accepted task/admission/graph replay/view verified"
+            return "accepted task/admission/exact and graph replay/view verified"
 
         return PreparedJourney(arguments, cleanup, "contained")
 
