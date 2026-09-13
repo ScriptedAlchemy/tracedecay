@@ -65,9 +65,8 @@ tool (the MCP tool surface for retrieval and editing).";
 const SEMANTIC_LONG_ABOUT: &str = "\
 Operates semantic retrieval for the selected project through the daemon. \
 `activate` runs the full activation journey as one typed daemon operation: \
-it evaluates the named profile with the native FastEmbed evaluator (the \
-current+10x workload; typically minutes), publishes the accepted evaluation, \
-and compare-and-swaps the result into `active_profile` of the project's \
+it validates packaged native qualification evidence for the named profile, \
+publishes the accepted evaluation, and compare-and-swaps the result into `active_profile` of the project's \
 `semantic.runtime.v1` configuration. The daemon composes the installed-model \
 material and the configuration revision itself. Requires the selected \
 semantic model to be installed (`tracedecay tool runtime` shows the model \
@@ -76,16 +75,15 @@ profile is active.";
 
 const SEMANTIC_AFTER_HELP: &str = "\
 Examples:
-  tracedecay semantic activate                         Evaluate + activate hybrid-conservative
+  tracedecay semantic activate                         Validate + activate hybrid-conservative
   tracedecay semantic activate --profile hybrid-conservative --project /path/to/project
   tracedecay semantic activate --json                  One canonical JSON receipt line
   tracedecay semantic activate --no-rollback           Do not record the prior profile
 
-Failure states are typed: an uninstalled model refuses fast with the
-lifecycle state that blocks activation, an evaluation failure names the
-evaluator's rejection, and a lost configuration compare-and-swap reports a
-retryable conflict. Watch progress in another terminal with
-`tracedecay tool runtime` (semantic_runtime.state).
+Failure states are typed: an uninstalled model refuses fast, qualification
+distinguishes stale workload, failed qualification, and missing evidence, and a
+lost configuration compare-and-swap reports a retryable conflict. Inspect
+model, qualification, and activation separately with `tracedecay tool runtime`.
 
 Related: tracedecay tool runtime (semantic runtime state), tracedecay tool
 configuration_get (the semantic.runtime.v1 setting).";

@@ -129,6 +129,10 @@ fn semantic_status_value(
             "status": "unavailable",
             "mode": mode,
             "reason": reason,
+            "qualification": (reason == &"calibration_unavailable").then(
+                tracedecay_query::search_quality::packaged_native_qualification_state
+            ),
+            "fallback": (mode == "fallback_allowed").then_some("lexical"),
         }),
     }
 }
@@ -1585,6 +1589,27 @@ mod tests {
             render_search_md(&with),
             render_search_md(&without),
             "warm coverage must be additive metadata, never rendered output"
+        );
+    }
+
+    #[test]
+    fn calibration_unavailable_names_qualification_and_lexical_fallback() {
+        let value = semantic_status_value(
+            tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed,
+            &tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
+                reason: "calibration_unavailable",
+            },
+        );
+
+        assert_eq!(value["reason"], "calibration_unavailable");
+        assert_eq!(value["fallback"], "lexical");
+        assert_eq!(
+            value["qualification"]["state"], "unqualified",
+            "semantic abstention must carry the same packaged-evidence state: {value}"
+        );
+        assert_eq!(
+            value["qualification"]["failure"]["reason"], "stale_workload",
+            "the checked-in PASS is for a superseded workload: {value}"
         );
     }
 

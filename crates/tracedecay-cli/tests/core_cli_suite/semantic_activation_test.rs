@@ -292,7 +292,7 @@ fn configuration_tool(
 
 #[test]
 #[ignore = "requires the byte-pinned FastEmbed distribution fixture"]
-fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
+fn shipped_cli_refuses_stale_qualification_without_removing_installed_model() {
     let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
         .map(std::path::PathBuf::from)
         .expect("distribution acceptance must provide TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE");
@@ -356,6 +356,22 @@ fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
         initial_runtime["semantic_runtime"]["state"]["state"], "ready",
         "fresh runtime must not claim semantic serving readiness: {initial_runtime}"
     );
+    assert_eq!(
+        initial_runtime["semantic_runtime"]["qualification"]["state"],
+        "unqualified"
+    );
+    assert_eq!(
+        initial_runtime["semantic_runtime"]["qualification"]["failure"]["reason"],
+        "stale_workload"
+    );
+    let packaged_workload =
+        initial_runtime["semantic_runtime"]["qualification"]["failure"]["packaged_workload_digest"]
+            .as_str()
+            .expect("packaged workload digest");
+    let current_workload =
+        initial_runtime["semantic_runtime"]["qualification"]["failure"]["current_workload_digest"]
+            .as_str()
+            .expect("current workload digest");
 
     let project_arg = project.to_string_lossy();
     let activation = run_cli(
@@ -372,54 +388,27 @@ fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
             "--json",
         ],
     );
+    assert!(!activation.status.success());
+    let activation_error = String::from_utf8_lossy(&activation.stderr);
     assert!(
-        activation.status.success(),
-        "semantic activate failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&activation.stdout),
-        String::from_utf8_lossy(&activation.stderr)
-    );
-    let receipt: Value = serde_json::from_slice(&activation.stdout)
-        .expect("semantic activate --json must emit one receipt");
-    assert!(
-        receipt["profile_digest"]
-            .as_str()
-            .is_some_and(|v| v.starts_with("sha256:"))
-    );
-    assert!(
-        receipt["report_digest"]
-            .as_str()
-            .is_some_and(|v| v.starts_with("sha256:"))
-    );
-    assert!(
-        receipt["configuration_revision"]
-            .as_str()
-            .is_some_and(|v| !v.is_empty())
-    );
-    assert_eq!(receipt["rollback_profile_id"], Value::Null);
-    assert!(
-        receipt["runtime_state"]["state"].is_string(),
-        "activation receipt must carry a typed runtime state: {receipt}"
+        activation_error.contains("semantic_qualification_stale_workload")
+            && activation_error.contains(packaged_workload)
+            && activation_error.contains(current_workload)
+            && activation_error.contains("qualify-native"),
+        "stale qualification denial must name type, identities, and remedy: {activation_error}"
     );
 
-    let ready_runtime = common::poll_until(
-        Instant::now() + Duration::from_secs(60),
-        Duration::from_millis(100),
-        || {
-            let runtime = tool(&binary, &home, &project, "runtime", r#"{"format":"json"}"#);
-            if !runtime.status.success() {
-                return None;
-            }
-            let payload = tool_payload(&runtime);
-            (payload["semantic_runtime"]["state"]["state"] == "ready").then_some(payload)
-        },
-        || "activated semantic runtime did not publish typed ready state".to_owned(),
-    );
+    let after = tool(&binary, &home, &project, "runtime", r#"{"format":"json"}"#);
+    assert!(after.status.success());
+    let after = tool_payload(&after);
     assert!(
-        ready_runtime["semantic_runtime"]["state"]["receipt"]["activated_generation"]
-            .as_str()
-            .is_some_and(|generation| generation.starts_with("sha256:")),
-        "ready runtime must receipt its active vector generation: {ready_runtime}"
+        matches!(
+            after["semantic_model"]["state"]["state"].as_str(),
+            Some("installed" | "ready")
+        ),
+        "qualification denial must retain installed model bytes: {after}"
     );
+    assert_ne!(after["semantic_runtime"]["state"]["state"], "ready");
 
     let strict = tool(
         &binary,
@@ -434,20 +423,29 @@ fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
         })
         .to_string(),
     );
-    assert!(strict.status.success());
+    assert!(!strict.status.success());
     let strict = tool_payload(&strict);
-    assert_eq!(strict["semantic"]["status"], "complete");
-    let probe = strict["results"]
-        .as_array()
-        .and_then(|results| {
-            results
-                .iter()
-                .find(|result| result["display"]["name"] == PROBE_SYMBOL)
-        })
-        .expect("strict search must return the probe");
-    assert!(
-        probe["candidate"]["contributions"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item["retriever"] == "semantic"))
+    assert_eq!(strict["semantic"]["reason"], "calibration_unavailable");
+    assert_eq!(
+        strict["semantic"]["qualification"]["failure"]["reason"],
+        "stale_workload"
     );
+
+    let fallback = tool(
+        &binary,
+        &home,
+        &project,
+        "search",
+        &json!({
+            "query": PROBE_SYMBOL,
+            "limit": 10,
+            "format": "json",
+            "semantic_mode": "fallback_allowed",
+        })
+        .to_string(),
+    );
+    assert!(fallback.status.success());
+    let fallback = tool_payload(&fallback);
+    assert_eq!(fallback["semantic"]["fallback"], "lexical");
+    assert!(!fallback["results"].as_array().unwrap().is_empty());
 }

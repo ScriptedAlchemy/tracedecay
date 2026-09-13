@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::{ResolvedScope, SemanticQualificationStateV1};
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
 use tracedecay_domain::{
     EmbeddingExecutionProviderV1, FusionProfileId, ManifestDigest, RetrievalAnchorId, UtcMicros,
@@ -606,6 +606,7 @@ pub enum SemanticRuntimeRouteV1 {
 #[serde(deny_unknown_fields)]
 pub struct SemanticRuntimeStatusV1 {
     pub configuration: Option<SemanticConfigurationPinV1>,
+    pub qualification: SemanticQualificationStateV1,
     pub state: SemanticRuntimeStateV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_provider: Option<EmbeddingExecutionProviderV1>,
@@ -618,6 +619,7 @@ impl SemanticRuntimeStatusV1 {
     ) -> Self {
         Self {
             configuration,
+            qualification: tracedecay_query::search_quality::packaged_native_qualification_state(),
             state,
             execution_provider: None,
         }

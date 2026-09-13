@@ -34,15 +34,14 @@ async fn activate(
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     if json {
         eprintln!(
-            "semantic activate: evaluating profile '{profile}' natively for {} \
-             (current+10x workload; typically minutes)",
+            "semantic activate: validating packaged qualification for profile '{profile}' at {}",
             project_root.display()
         );
     } else {
         println!(
-            "Evaluating semantic profile '{profile}' for {} with the native \
-             FastEmbed evaluator (current+10x workload; this typically takes \
-             minutes). Watch `tracedecay tool runtime` for the runtime state.",
+            "Validating packaged semantic qualification for profile '{profile}' at {}. \
+             Activation never runs a live evaluation; use `tracedecay tool runtime` \
+             to inspect model, qualification, and activation states.",
             project_root.display()
         );
     }
