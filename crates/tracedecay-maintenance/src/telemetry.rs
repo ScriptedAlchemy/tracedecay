@@ -120,9 +120,13 @@ impl GuardedStoreTelemetryPort {
                         store: store.clone(),
                     };
                 }
-                let Ok(current) = self
-                    .handle
-                    .table_size_telemetry(self.reader_wait, || telemetry_interruption(context))
+                let handle = self.handle.clone();
+                let reader_wait = self.reader_wait;
+                let context = context.clone();
+                let Ok(Ok(current)) = tokio::task::spawn_blocking(move || {
+                    handle.table_size_telemetry(reader_wait, || telemetry_interruption(&context))
+                })
+                .await
                 else {
                     return TableGrowthTelemetryReadV1::Unknown {
                         store: store.clone(),
@@ -168,9 +172,13 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
                         store: store.clone(),
                     };
                 }
-                let Ok(sample) = self
-                    .handle
-                    .store_size_telemetry(self.reader_wait, || telemetry_interruption(context))
+                let handle = self.handle.clone();
+                let reader_wait = self.reader_wait;
+                let context = context.clone();
+                let Ok(Ok(sample)) = tokio::task::spawn_blocking(move || {
+                    handle.store_size_telemetry(reader_wait, || telemetry_interruption(&context))
+                })
+                .await
                 else {
                     return StorageTelemetryReadV1::Unknown {
                         store: store.clone(),

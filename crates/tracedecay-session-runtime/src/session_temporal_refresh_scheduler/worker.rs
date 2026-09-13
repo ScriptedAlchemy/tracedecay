@@ -683,7 +683,9 @@ pub async fn begin_admitted_session_refreshes(
     };
     let (requests, active_scanned_through, has_more) = page.into_parts();
     for request in requests.into_iter().rev() {
-        state.requeue_request(request);
+        if !state.suppresses_discovered_request(&request) {
+            state.requeue_request(request);
+        }
     }
     state.update_projection_discovery_cursor(active_scanned_through);
     report.saturated |= has_more;
@@ -793,6 +795,7 @@ pub async fn apply_refresh_effect(
             match store.fail_session_refresh(request).await {
                 Ok(_) => {
                     report.failed += 1;
+                    state.record_terminal_discovery_failure(recovery);
                 }
                 Err(error) if error.is_storage() => {
                     report.last_error = Some(format!("{error:?}"));
@@ -936,13 +939,12 @@ async fn recoveries_for_pass(
     state: &SessionTemporalRefreshWakeState,
     policy: SessionTemporalRefreshPolicy,
     report: &mut SessionTemporalRefreshPassReport,
-) -> Option<Vec<SessionRefreshRecoveryV1>> {
+) -> Option<(Vec<SessionRefreshRecoveryV1>, bool)> {
     let mut recoveries = running_refreshes(store, report).await?;
     if !recoveries.is_empty() {
         // Existing durable work owns this pass. Rediscovery scans the complete
         // observation-effect index, so defer it until these recoveries drain.
-        report.saturated = true;
-        return Some(recoveries);
+        return Some((recoveries, true));
     }
     begin_admitted_session_refreshes(
         database,
@@ -953,7 +955,7 @@ async fn recoveries_for_pass(
     )
     .await;
     recoveries = running_refreshes(store, report).await?;
-    Some(recoveries)
+    Some((recoveries, false))
 }
 
 fn recovery_key(recovery: &SessionRefreshRecoveryV1) -> String {
@@ -982,7 +984,7 @@ pub async fn run_session_temporal_refresh_pass(
         &mut report,
     )
     .await;
-    let Some(mut recoveries) =
+    let Some((mut recoveries, discovery_deferred)) =
         recoveries_for_pass(database, &store, state, policy, &mut report).await
     else {
         return report;
@@ -1064,6 +1066,7 @@ pub async fn run_session_temporal_refresh_pass(
         .completed
         .saturating_add(report.failed)
         .saturating_add(report.cancelled);
+    report.saturated |= discovery_deferred && (report.projected_batches > 0 || terminal > 0);
     report.backlog = Some(
         recoveries_by_key
             .len()

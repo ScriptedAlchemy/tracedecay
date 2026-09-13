@@ -2304,6 +2304,16 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     let (_, route) =
         super::super::DaemonEngine::project_route(&ordinary_handshake).expect("project route");
     let tasks = super::super::project_open_tasks(&engine.project_open_gates).await;
+    // The terminal watch value is visible before the spawned route task's
+    // JoinHandle necessarily reports finished. Let pruning observe both
+    // before this fixture claims the same route for its controlled open.
+    while tasks.status(&route).is_some() {
+        assert!(
+            tokio::time::Instant::now() < warmup_give_up,
+            "the warm-up route task did not finish after publishing its refusal"
+        );
+        tokio::task::yield_now().await;
+    }
     let (release, blocked) = tokio::sync::oneshot::channel();
     let inflight = match tasks.start_cancellable(route, move |_| async move {
         blocked.await.expect("release ordinary open");

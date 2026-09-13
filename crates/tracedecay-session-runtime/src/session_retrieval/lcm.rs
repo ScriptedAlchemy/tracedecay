@@ -790,11 +790,11 @@ fn describe_execution_error(
         SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
             LcmDescribeServiceOutcome::TimedOut
         }
-        SessionTemporalExecutionError::Storage { .. } => LcmDescribeServiceOutcome::Unavailable(
-            SessionRetrievalUnavailable::without_worker(
+        SessionTemporalExecutionError::Storage { .. } => {
+            LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
-            ),
-        ),
+            ))
+        }
         SessionTemporalExecutionError::Stale { generation_lag } => {
             LcmDescribeServiceOutcome::Stale {
                 temporal,
@@ -833,11 +833,11 @@ fn expand_execution_error(
         SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
             LcmExpandServiceOutcome::TimedOut
         }
-        SessionTemporalExecutionError::Storage { .. } => LcmExpandServiceOutcome::Unavailable(
-            SessionRetrievalUnavailable::without_worker(
+        SessionTemporalExecutionError::Storage { .. } => {
+            LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
-            ),
-        ),
+            ))
+        }
         SessionTemporalExecutionError::Stale { generation_lag } => LcmExpandServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(LcmDataFreshness::Stored { generation_lag }),

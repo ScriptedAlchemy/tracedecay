@@ -412,17 +412,20 @@ impl MeasuredTemporalValue for RankingCandidate {
         };
         if self.stable_id.len() > caps.stable_id_bytes() {
             return Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate stable id bytes", accounting: None,
+                resource: "candidate stable id bytes",
+                accounting: None,
             });
         }
         if self.anchor_id.to_string().len() > caps.anchor_id_bytes() {
             return Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate anchor id bytes", accounting: None,
+                resource: "candidate anchor id bytes",
+                accounting: None,
             });
         }
         if self.retriever_record_id.len() > caps.metadata_field_bytes() {
             return Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate retriever record id bytes", accounting: None,
+                resource: "candidate retriever record id bytes",
+                accounting: None,
             });
         }
         for field in [
@@ -437,7 +440,8 @@ impl MeasuredTemporalValue for RankingCandidate {
                 .is_some_and(|value| value.len() > caps.metadata_field_bytes())
             {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "candidate metadata field bytes", accounting: None,
+                    resource: "candidate metadata field bytes",
+                    accounting: None,
                 });
             }
         }
@@ -550,7 +554,8 @@ fn measured_json_bytes(
     match serde_json::to_writer(&mut counter, value) {
         Ok(()) => Ok(counter.count),
         Err(_) if counter.count > MAX_READ_ITEM_BYTES => Err(TemporalPortError::BudgetExceeded {
-            resource: "encoded item bytes", accounting: None,
+            resource: "encoded item bytes",
+            accounting: None,
         }),
         Err(error) => Err(TemporalPortError::Read {
             operation,

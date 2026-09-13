@@ -469,3 +469,77 @@ async fn retained_invocation_while_owners_mount_is_retryable_not_unmounted() {
         "the retained owner must shut down cleanly: {shutdown:?}"
     );
 }
+
+/// Primitive reads belong to the admitted core route and must not wait for
+/// later configuration, retained, native-integration, or Work owners. Hold
+/// configuration publication after primitive registration and prove a status
+/// read is already served while the overall project publication is warming.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn primitive_invocation_serves_while_later_owners_mount() {
+    let (_temp, _database_scope, engine, handshake) =
+        unopened_committed_fixture("primitive-invocation-while-later-owners-mount").await;
+    let canonical_project = handshake
+        .project_path
+        .as_deref()
+        .expect("project alias")
+        .canonicalize()
+        .expect("canonical project root");
+    let registration = engine
+        .invocation
+        .service
+        .pause_configuration_runtime_registration(canonical_project.clone())
+        .await;
+    let opening_engine = engine.clone();
+    let opening_handshake = handshake.clone();
+    let opening =
+        tokio::spawn(async move { opening_engine.project_server(&opening_handshake).await });
+    tokio::time::timeout(
+        std::time::Duration::from_mins(1),
+        registration.before_registration,
+    )
+    .await
+    .expect("project open must reach the later owner registration gate")
+    .expect("owner registration gate sender");
+    assert_eq!(
+        engine
+            .invocation
+            .service
+            .project_runtimes
+            .publication_state(&canonical_project),
+        Some(ProjectRuntimePublicationStateV1::Warming),
+        "later owners must still be publishing"
+    );
+
+    let observed_at = tracedecay_contracts::clock::now_micros();
+    assert_primitive_routes_mounted(
+        &engine,
+        &handshake,
+        observed_at,
+        Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
+            .expect("daemon invocation deadline"),
+        CancellationContext::active("cancel.primitive-while-later-owners-mount")
+            .expect("daemon invocation cancellation"),
+    )
+    .await;
+
+    registration
+        .allow_registration
+        .send(())
+        .expect("release configuration registration");
+    tokio::time::timeout(
+        std::time::Duration::from_mins(1),
+        registration.after_registration,
+    )
+    .await
+    .expect("configuration owner must publish")
+    .expect("configuration registration publication sender");
+    registration
+        .allow_return
+        .send(())
+        .expect("release project-open owner setup");
+    opening
+        .await
+        .expect("project-open task")
+        .expect("project opens once its owners are registered");
+    engine.shutdown_all().await;
+}

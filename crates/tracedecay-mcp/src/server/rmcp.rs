@@ -396,18 +396,27 @@ where
         connection: &mut C::Connection,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let pre_cancelled = request_cancellation.is_cancelled();
+        let dispatch_cancellation = tracedecay_session_memory::context::CancellationToken::new();
+        if pre_cancelled {
+            dispatch_cancellation.cancel();
+        }
         // The legacy MCP route already erases this shared dispatch authority
         // before awaiting it. Keep the typed RMCP route at the same ownership
         // boundary: the cancellation combinator otherwise stores the complete
         // catalog-dispatch future inline in rmcp's generated request future.
-        let handling =
-            self.context
-                .dispatch(request, self.timings_enabled, connection, pre_cancelled);
+        let handling = self.context.dispatch(
+            request,
+            self.timings_enabled,
+            connection,
+            dispatch_cancellation.clone(),
+        );
         let response = if pre_cancelled {
             Some(handling.await)
         } else {
             await_dispatch_with_cancellation(handling, request_cancellation.cancelled(), || {
-                self.context.cancel_request(&id, &self.memory_request_scope)
+                dispatch_cancellation.cancel();
+                let _ = self.context.cancel_request(&id, &self.memory_request_scope);
+                true
             })
             .await
         }
@@ -459,7 +468,7 @@ where
                 McpDispatchRequest::from_legacy(&request),
                 self.timings_enabled,
                 &mut connection,
-                false,
+                tracedecay_session_memory::context::CancellationToken::new(),
             )
             .await;
     }

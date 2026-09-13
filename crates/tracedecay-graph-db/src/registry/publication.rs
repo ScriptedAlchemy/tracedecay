@@ -352,36 +352,13 @@ impl GraphDbRegistry {
         // artifact may stand in for the staging rows: normally the verified
         // head, or the unique cleanup tombstone for a shipped legacy
         // per-generation projection after its head and replay were retired.
-        // The runtime
-        // verifies the sealed store's recovered digest against that evidence,
-        // opens the staging engine if it is hibernated, releases, and
-        // re-hibernates. Requiring an installed lease here left every scope a
-        // freshly opened daemon had not activated (only the memory head and
-        // the serving generation are) answering NoVerifiedLease forever,
-        // which is how a multi-gigabyte staging container accumulated fifteen
-        // sealed generations' rows.
+        // The runtime verifies the sealed store's recovered digest against
+        // that evidence, opens the staging engine if it is hibernated,
+        // releases, and re-hibernates. The staging commit is enough to adopt
+        // an existing sealed artifact without replaying the canonical source:
+        // cleanup must stay bounded and leave artifact repair to activation.
         if database.installed_verified_generation(&locator)?.is_none() {
-            if relational_head.is_some() {
-                let recovered = self.recover_verified_snapshot(
-                    registration.clone(),
-                    authority,
-                    context,
-                    projection,
-                );
-                match recovered {
-                    Ok(snapshot) => drop(snapshot),
-                    // Recovery may quarantine the generation durably on its
-                    // way to this error; a sweep that swallowed it left no
-                    // record at the site that asked for it.
-                    Err(error) => tracing::warn!(
-                        event = "graph_staging_release_recovery_failed",
-                        projection = %locator.projection,
-                        generation = locator.generation.as_str(),
-                        error = %error,
-                        "sealed-row release could not recover the verified head; rows stay retained"
-                    ),
-                }
-            } else if let Some(commit) = database.staging_generation_commit(&locator)? {
+            if let Some(commit) = database.staging_generation_commit(&locator)? {
                 let identity = GraphGenerationManifestIdentity::new(
                     locator.projection.clone(),
                     locator.generation.clone(),
@@ -392,12 +369,12 @@ impl GraphDbRegistry {
                 database.open_sealed_generation_store_if_present(
                     &identity,
                     &relational_recovered_digest,
+                    &|| check_all(&registration, context, "generation.release_sealed_staging"),
                 )?;
             } else if database.sealed_generation_reader(&locator).is_none() {
-                // No staging trace and no installed reader: the retired
-                // generation was sealed straight from its manifest, or its
-                // rows were already released. Either way there is nothing
-                // left in the staging database for this sweep to delete.
+                // No staging commit means there are no rows for this sweep:
+                // the generation was sealed straight from its manifest, or a
+                // prior release already removed them.
                 return Ok(SealedStagingRelease::AlreadyReleased);
             }
         }
@@ -1878,6 +1855,7 @@ impl GraphDbRegistry {
                                         database.open_sealed_generation_store_if_present(
                                             &identity,
                                             sealed_digest,
+                                            &check,
                                         )?;
                                         (commit, recovered)
                                     }
@@ -2550,7 +2528,11 @@ impl GraphDbRegistry {
                     message: "dependency-bearing graph generation lost its staging rows; republish from the canonical manifest".to_owned(),
                 });
             }
-            database.open_sealed_generation_store_if_present(&identity, &head.recovered_digest)?;
+            database.open_sealed_generation_store_if_present(
+                &identity,
+                &head.recovered_digest,
+                &check,
+            )?;
             let sealed = database.sealed_generation_reader(&locator).ok_or_else(|| {
                 GraphDbError::ResetRequired {
                     message: "graph generation has neither a complete staged row set nor a usable sealed artifact; republish from the canonical manifest".to_owned(),
@@ -2601,7 +2583,11 @@ impl GraphDbRegistry {
         // Recovery adopts a matching sealed compact artifact from disk when
         // one exists; anything stale or unreadable is discarded and reads
         // stay on the staging rows just verified above.
-        database.open_sealed_generation_store_if_present(&identity, &head.recovered_digest)?;
+        database.open_sealed_generation_store_if_present(
+            &identity,
+            &head.recovered_digest,
+            &check,
+        )?;
         let lease = generation_lease(&identity, head, dependencies);
         database.remember_verified_generation(&lease)?;
         visiting.remove(&locator);

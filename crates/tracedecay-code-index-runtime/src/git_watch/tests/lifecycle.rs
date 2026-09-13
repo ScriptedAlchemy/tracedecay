@@ -660,11 +660,6 @@ async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
         futures_util::poll!(&mut first_admission).is_pending(),
         "replacement must wait while joining the retired supervisor"
     );
-    let retained_task_present = stale.has_retained_task();
-    assert!(
-        !retained_task_present,
-        "the retired supervisor must be retained by the joining admission"
-    );
     let mut racing_admission = Box::pin(watcher.ensure_watching(&linked));
     assert!(
         futures_util::poll!(&mut racing_admission).is_pending(),
@@ -682,6 +677,10 @@ async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
     .expect("both admissions complete once the retired supervisor is joined");
     assert_eq!(first_admission, GitWatcherAdmission::Ready);
     assert_eq!(racing_admission, GitWatcherAdmission::Ready);
+    assert!(
+        !stale.has_retained_task(),
+        "replacement must join the retired supervisor before admission completes"
+    );
     let active = ready_registered_state(&watcher, &linked).await;
     assert!(
         !Arc::ptr_eq(&active, &stale),

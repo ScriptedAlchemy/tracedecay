@@ -154,7 +154,11 @@ fn restore_concurrently(
             .collect::<Vec<_>>();
         threads
             .into_iter()
-            .map(|thread| thread.join().map_err(|_| "a restore thread panicked".to_owned())?)
+            .map(|thread| {
+                thread
+                    .join()
+                    .map_err(|_| "a restore thread panicked".to_owned())?
+            })
             .collect::<Result<Vec<_>, String>>()
     })?;
     let (expected, _) = &restores[0];
@@ -179,12 +183,12 @@ fn restore_once(
     segments: &Path,
     started: Instant,
 ) -> Result<(Vec<String>, u64), String> {
-    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-        manifest,
-        |request, buffer| read_segment(segments, request, buffer),
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "generation manifest is not a partitioned manifest".to_owned())?;
+    let restored =
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
+            read_segment(segments, request, buffer)
+        })
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "generation manifest is not a partitioned manifest".to_owned())?;
     let mut coverage = restored
         .analysis_coverage()
         .map(|(path, _)| path.to_owned())

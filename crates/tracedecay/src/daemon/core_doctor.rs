@@ -84,14 +84,18 @@ pub(crate) fn doctor_runtime_request(
     })
 }
 
-fn status_request_id(request: Option<&JsonRpcRequest>) -> Option<serde_json::Value> {
+fn core_status_request_id(request: Option<&JsonRpcRequest>) -> Option<serde_json::Value> {
     let request = request?;
     if request.method != "tools/call" {
         return None;
     }
-    let (tool_name, _) = projectless_tool_call(request.params.as_ref()).ok()?;
-    (tool_name == "tracedecay_status")
-        .then(|| request.id.clone().unwrap_or(serde_json::Value::Null))
+    let (tool_name, arguments) = projectless_tool_call(request.params.as_ref()).ok()?;
+    (tool_name == "tracedecay_status"
+        && arguments
+            .get("include_branch_diagnostics")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true))
+    .then(|| request.id.clone().unwrap_or(serde_json::Value::Null))
 }
 
 fn project_open_status_value(
@@ -591,7 +595,7 @@ where
     Probe: FnOnce() -> ProbeFuture,
     ProbeFuture: std::future::Future<Output = Result<bool>>,
 {
-    if let Some(id) = status_request_id(first_request.parsed())
+    if let Some(id) = core_status_request_id(first_request.parsed())
         && let Some(project_open) = status.project_open.as_ref()
         && project_open.state != ProjectOpenStatusStateV1::Completed
     {
@@ -638,8 +642,8 @@ mod doctor_runtime_route_tests {
     use rusqlite::Connection;
 
     use super::{
-        CoreDoctorStatusV1, cold_doctor_runtime_value, doctor_runtime_coverage,
-        doctor_runtime_request, serve_core_doctor_runtime_request,
+        CoreDoctorStatusV1, cold_doctor_runtime_value, core_status_request_id,
+        doctor_runtime_coverage, doctor_runtime_request, serve_core_doctor_runtime_request,
     };
     use crate::daemon::{
         AuthenticatedFirstRequest, DaemonHandshake, DaemonLifecycle, StoreAdministration,
@@ -778,6 +782,24 @@ mod doctor_runtime_route_tests {
             },
         })
         .to_string()
+    }
+
+    #[test]
+    fn status_with_explicit_branch_diagnostics_waits_for_project_owner() {
+        let request = AuthenticatedFirstRequest::new(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_status",
+                    "arguments": { "include_branch_diagnostics": true },
+                },
+            })
+            .to_string(),
+        );
+
+        assert!(core_status_request_id(request.parsed()).is_none());
     }
 
     fn filesystem_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {

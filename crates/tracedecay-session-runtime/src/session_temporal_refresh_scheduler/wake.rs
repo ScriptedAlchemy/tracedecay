@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -124,6 +124,7 @@ macro_rules! define_wake_state {
             pub(super) projection_discovery_after: std::sync::Mutex<Option<SessionId>>,
             pub(super) projection_discovery_active_turn: AtomicBool,
             pub(super) terminal_attempts: std::sync::Mutex<HashSet<String>>,
+            terminal_discovery_failures: std::sync::Mutex<HashMap<String, (u64, u64)>>,
             pub(super) recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
             pub(super) busy: AtomicBool,
             pub(super) history_retry_pending: AtomicBool,
@@ -157,6 +158,7 @@ impl Default for SessionTemporalRefreshWakeState {
             projection_discovery_after: std::sync::Mutex::new(None),
             projection_discovery_active_turn: AtomicBool::new(true),
             terminal_attempts: std::sync::Mutex::new(HashSet::new()),
+            terminal_discovery_failures: std::sync::Mutex::new(HashMap::new()),
             recovery_cycle_pending: std::sync::Mutex::new(VecDeque::new()),
             busy: AtomicBool::new(false),
             history_retry_pending: AtomicBool::new(false),
@@ -311,6 +313,31 @@ impl SessionTemporalRefreshWakeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(recovery.operation_id().as_str());
+    }
+
+    pub(super) fn record_terminal_discovery_failure(&self, recovery: &SessionRefreshRecoveryV1) {
+        let frontier = recovery.target_frontier();
+        self.terminal_discovery_failures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                recovery.session_id().as_str().to_owned(),
+                (frontier.observed_through(), frontier.committed_through()),
+            );
+    }
+
+    pub(super) fn suppresses_discovered_request(
+        &self,
+        request: &SessionRefreshBeginOrJoinRequestV1,
+    ) -> bool {
+        let frontier = request.target_frontier();
+        self.terminal_discovery_failures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(request.session_id().as_str())
+            .is_some_and(|retained| {
+                *retained == (frontier.observed_through(), frontier.committed_through())
+            })
     }
 
     pub fn wake(&self) {

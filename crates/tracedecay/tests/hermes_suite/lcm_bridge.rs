@@ -1986,12 +1986,17 @@ fn generated_skill_mirrors_session_context_retrieval_contract() {
         .chain(hermes_manual_markers.iter())
         .copied()
         .collect();
-    let repository_skill =
-        include_str!("../../../../plugin/skills/managing-session-context/SKILL.md");
+    let repository_skill = format!(
+        "{}\n{}",
+        include_str!("../../../../plugin/skills/managing-session-context/SKILL.md"),
+        include_str!(
+            "../../../../plugin/skills/managing-session-context/references/refresh-and-health.md"
+        )
+    );
     for (label, skill, markers) in [
         (
             "repository managing-session-context skill",
-            repository_skill,
+            repository_skill.as_str(),
             &shared_markers[..],
         ),
         ("Hermes template", template, &hermes_markers[..]),

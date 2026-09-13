@@ -589,8 +589,7 @@ mod tests {
             .expect("write decoy generation");
         }
 
-        let registry =
-            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
@@ -896,8 +895,7 @@ mod tests {
         )
         .expect("dirty worktree source");
 
-        let registry =
-            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
@@ -1021,8 +1019,7 @@ mod tests {
         drop(dirty);
         drop(scheduler);
 
-        let registry =
-            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
@@ -1209,8 +1206,7 @@ mod tests {
             .clone();
         drop(scheduler);
 
-        let registry =
-            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
@@ -1330,8 +1326,7 @@ mod tests {
         git(project.path(), &["branch", "-q", "-D", "main"]);
         latch_generation_index_truncation(&scoped_store);
 
-        let registry =
-            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),

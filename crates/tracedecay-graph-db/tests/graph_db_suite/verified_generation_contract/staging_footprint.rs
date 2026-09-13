@@ -703,6 +703,57 @@ fn sealed_generations_release_staging_rows_without_a_resident_lease() {
     );
 }
 
+/// A maintenance sweep after restart adopts the verified sealed artifact from
+/// the staging commit instead of hydrating the canonical generation replay.
+#[test]
+fn restarted_release_adopts_sealed_artifact_without_replaying_the_generation() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("code:restart-release", "code");
+    let manifest = rich_manifest(identity, "restart-release-g1", "restart-release");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:restart-release-g1",
+        None,
+        '7',
+    );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
+    drop(publish_sealed(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &record,
+        &manifest,
+    ));
+    assert!(registered.close().unwrap());
+    drop(registered);
+
+    // The default registry cannot hydrate a sealed code generation. Success
+    // therefore proves release used the existing artifact rather than replay.
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    assert_eq!(
+        release_sealed_head(
+            &registered,
+            temp.path(),
+            &mut authority,
+            &record.publication.key.projection,
+        ),
+        SealedStagingRelease::Released {
+            entities: 2,
+            relations: 1,
+        }
+    );
+    assert_eq!(
+        probe_lease(&registered, temp.path())
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (0, 0)
+    );
+}
+
 /// Every published generation is retained as a sealed reader, but at most one
 /// of those readers may hold a materialized native engine.
 ///

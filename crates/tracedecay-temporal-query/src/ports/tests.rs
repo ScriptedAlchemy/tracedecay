@@ -1219,19 +1219,22 @@ fn page_limits_reject_zero_inverted_and_absolute_ceilings() {
     assert_eq!(
         PageLimits::new(0, 1024, 1024, 1),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "item count", accounting: None
+            resource: "item count",
+            accounting: None
         })
     );
     assert_eq!(
         PageLimits::new(1, 0, 1024, 1),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "total bytes", accounting: None
+            resource: "total bytes",
+            accounting: None
         })
     );
     assert_eq!(
         PageLimits::new(1, 1024, 0, 1),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "item bytes", accounting: None
+            resource: "item bytes",
+            accounting: None
         })
     );
     assert_eq!(
@@ -1245,7 +1248,10 @@ fn page_limits_reject_zero_inverted_and_absolute_ceilings() {
         PageLimits::new(usize::MAX, 1024, 1024, 1),
         Err(TemporalPortError::BudgetExceeded {
             resource: "item count",
-            accounting: Some(ReadBudgetAccounting::requested(MAX_READ_ITEMS as u64, usize::MAX as u64)),
+            accounting: Some(ReadBudgetAccounting::requested(
+                MAX_READ_ITEMS as u64,
+                usize::MAX as u64
+            )),
         })
     );
     assert_eq!(
@@ -1287,7 +1293,8 @@ fn execution_limits_reject_zero_and_absolute_ceilings() {
     assert_eq!(
         zero.validate(),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "record item bytes", accounting: None
+            resource: "record item bytes",
+            accounting: None
         })
     );
     assert!(ExecutionLimits::default().validate().is_ok());
@@ -1552,7 +1559,8 @@ fn candidate_pull_observes_post_authorization_tightening() {
             )
             .await,
             Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate stable id bytes", accounting: None
+                resource: "candidate stable id bytes",
+                accounting: None
             })
         );
     });
@@ -1605,9 +1613,24 @@ fn pull_rejects_read_state_looser_than_tightened_snapshot() {
         // The refusal names the admitted ceiling and what the state asked for,
         // so a caller can correct the request instead of guessing at a name.
         let candidate_cases = [
-            ("candidate item count", PageLimits::new(2, 128, 64, 1), ADMITTED_ITEMS, 2),
-            ("candidate total bytes", PageLimits::new(1, 129, 64, 1), ADMITTED_BYTES, 129),
-            ("candidate item bytes", PageLimits::new(1, 128, 65, 1), ADMITTED_ITEM_BYTES, 65),
+            (
+                "candidate item count",
+                PageLimits::new(2, 128, 64, 1),
+                ADMITTED_ITEMS,
+                2,
+            ),
+            (
+                "candidate total bytes",
+                PageLimits::new(1, 129, 64, 1),
+                ADMITTED_BYTES,
+                129,
+            ),
+            (
+                "candidate item bytes",
+                PageLimits::new(1, 128, 65, 1),
+                ADMITTED_ITEM_BYTES,
+                65,
+            ),
         ];
         for (resource, limits, admitted, asked) in candidate_cases {
             let limits = limits.expect("looser page limits");
@@ -1628,9 +1651,24 @@ fn pull_rejects_read_state_looser_than_tightened_snapshot() {
         }
 
         let record_cases = [
-            ("record item count", PageLimits::new(2, 128, 64, 1), ADMITTED_ITEMS, 2),
-            ("record total bytes", PageLimits::new(1, 129, 64, 1), ADMITTED_BYTES, 129),
-            ("record item bytes", PageLimits::new(1, 128, 65, 1), ADMITTED_ITEM_BYTES, 65),
+            (
+                "record item count",
+                PageLimits::new(2, 128, 64, 1),
+                ADMITTED_ITEMS,
+                2,
+            ),
+            (
+                "record total bytes",
+                PageLimits::new(1, 129, 64, 1),
+                ADMITTED_BYTES,
+                129,
+            ),
+            (
+                "record item bytes",
+                PageLimits::new(1, 128, 65, 1),
+                ADMITTED_ITEM_BYTES,
+                65,
+            ),
         ];
         for (resource, limits, admitted, asked) in record_cases {
             let limits = limits.expect("looser page limits");

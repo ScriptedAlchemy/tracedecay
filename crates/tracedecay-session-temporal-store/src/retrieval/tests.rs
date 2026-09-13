@@ -19,12 +19,11 @@ use tracedecay_temporal_query::plan_temporal_candidates;
 use tracedecay_temporal_query::ports::{
     BindingDigest, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, ExecutionControl,
     ExecutionLimits, KernelVersions, PageLimits, PageRequest, PageStatus, ReadBudgetAccounting,
-    TemporalAuthorizedRoot,
-    TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
-    TemporalParticipantManifest, TemporalPortError, TemporalPreparedCandidateCohort,
-    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
-    TemporalWatermarks, await_controlled, begin_prepared_candidate_pull,
-    commit_prepared_candidate_pull,
+    TemporalAuthorizedRoot, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalPortError,
+    TemporalPreparedCandidateCohort, TemporalRecord, TemporalRetrievalScope,
+    TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks, await_controlled,
+    begin_prepared_candidate_pull, commit_prepared_candidate_pull,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};

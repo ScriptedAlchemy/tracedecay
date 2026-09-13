@@ -211,9 +211,7 @@ use tracedecay_automation_runtime::automation::config::{AutomationBackend, Autom
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
 use tracedecay_contracts::doctor::DoctorReportV1;
-use tracedecay_contracts::storage::{
-    SchemaConvergenceFindingV1, TableGrowthDoctorEvidenceV1,
-};
+use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, TableGrowthDoctorEvidenceV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -391,10 +389,7 @@ impl AdmittedDoctorReportV1 {
         self
     }
 
-    pub fn with_schema_convergences(
-        mut self,
-        findings: Vec<SchemaConvergenceFindingV1>,
-    ) -> Self {
+    pub fn with_schema_convergences(mut self, findings: Vec<SchemaConvergenceFindingV1>) -> Self {
         self.schema_convergences = findings;
         self
     }

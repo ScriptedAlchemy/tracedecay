@@ -324,10 +324,7 @@ async fn capture_cursor_profile(
         )
         .await
         .map_err(|error| map_transcript_ingest_error(&error))?;
-    Ok(TranscriptCaptureOutcome {
-        messages_upserted: stats.messages_upserted,
-        ..TranscriptCaptureOutcome::default()
-    })
+    Ok(cursor_capture_outcome(stats))
 }
 
 async fn capture_hermes_profile(
@@ -444,10 +441,17 @@ async fn capture_cursor_project(
     )
     .await
     .map_err(|error| map_transcript_ingest_error(&error))?;
-    Ok(TranscriptCaptureOutcome {
+    Ok(cursor_capture_outcome(stats))
+}
+
+fn cursor_capture_outcome(
+    stats: tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats,
+) -> TranscriptCaptureOutcome {
+    TranscriptCaptureOutcome {
         messages_upserted: stats.messages_upserted,
+        source_deferred: stats.source_deferred,
         ..TranscriptCaptureOutcome::default()
-    })
+    }
 }
 
 /// Commits one Hermes turn the host inlined in the request.
@@ -558,4 +562,23 @@ async fn capture_kiro_project(
         snapshot: Some(capture),
         ..TranscriptCaptureOutcome::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_capture_preserves_deferred_projection() {
+        let outcome = cursor_capture_outcome(
+            tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats {
+                messages_upserted: 3,
+                source_deferred: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(outcome.messages_upserted, 3);
+        assert!(outcome.source_deferred);
+    }
 }

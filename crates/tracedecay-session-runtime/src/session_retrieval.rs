@@ -283,7 +283,10 @@ impl DaemonSessionRetrievalRoot {
                     && scope.store_id == store.store.store_id
                     && scope.store_id == serving.store_id.as_str()
                     && scope.graph_scope_id == serving.root_id.as_str()
-                    && profile_root.join(&scope.db_relpath) == serving.serving_db
+                    && tracedecay_runtime_core::path_safety::same_canonical_path(
+                        &profile_root.join(&scope.db_relpath),
+                        &serving.serving_db,
+                    )
                 {
                     if selected.is_some() {
                         return None;

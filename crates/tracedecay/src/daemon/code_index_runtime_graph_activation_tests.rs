@@ -957,20 +957,16 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
                         now_micros(),
                     ))
                     .await;
-                if matches!(
-                    stale_read
-                        .as_ref()
-                        .map(tracedecay_graph_query::VerifiedCodeGraphRead::freshness),
-                    Ok(CodeGraphReadFreshnessV1::LastCompleteStale { .. })
-                ) {
-                    let retained = registry
-                        .latest_text_serving_for_scope(&scope)
-                        .await
-                        .expect("recovered retained text owner");
+                if let Ok(stale_read) = stale_read.as_ref()
+                    && matches!(
+                        stale_read.freshness(),
+                        CodeGraphReadFreshnessV1::LastCompleteStale { .. }
+                    )
+                {
                     assert_eq!(
-                        retained.metadata().manifest().generation_id,
-                        seeded_generation_id,
-                        "the stale graph service must still belong to the retained generation"
+                        stale_read.generation(),
+                        &seeded_generation_id,
+                        "the stale graph read must still belong to the retained generation"
                     );
                     break;
                 }

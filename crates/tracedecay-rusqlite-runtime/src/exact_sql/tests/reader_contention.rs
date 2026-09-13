@@ -31,7 +31,9 @@ fn seeded() -> (Fixture, Arc<ExactSqlHandle>) {
     let fixture = fixture('a', 'a');
     let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
         .unwrap()
-        .with_write_authority(Arc::new(AtomicWriteAuthority(Arc::new(AtomicBool::new(true)))))
+        .with_write_authority(Arc::new(AtomicWriteAuthority(Arc::new(AtomicBool::new(
+            true,
+        )))))
         .unwrap();
     handle
         .execute_batch(

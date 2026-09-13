@@ -143,11 +143,11 @@ const TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
 /// generation, so a complete sealed generation sat on disk with zero seat
 /// attempts and no log line, because a missing prepare is not a refusal. The
 /// gate is now the text owner, not the tree: a publication prepares on its own
-/// pass once its lightweight text owner has reopened, and an unchanged pass
-/// prepares as soon as a retained owner exists to recover a head from. Both
-/// project text on their own task, concurrently with the graph decode and
-/// activation, so neither seat waits for the lexical artifact. Every skip
-/// names itself.
+/// pass once its lightweight text owner has finished, and an unchanged pass
+/// prepares as soon as a retained owner exists to recover a verified head.
+/// Fresh graph publication and any retained full replay follow text projection
+/// because both are corpus-sized consumers of the sealed source and process
+/// memory. Every skip names itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphSeatGateV1 {
     /// Prepare, decode, activate, and swap this generation into serving.
@@ -158,7 +158,7 @@ pub enum GraphSeatGateV1 {
     ReconcileUnfinished,
     /// A retryable activation failure holds seating until its scheduled retry.
     ActivationDeferred,
-    /// A publication whose replacement text owner did not reopen.
+    /// A publication whose replacement text owner did not become ready.
     PublishedTextOwnerUnavailable,
     /// An unchanged pass with no retained owner to recover a head from.
     RetainedGenerationUnavailable,
@@ -222,17 +222,17 @@ fn record_semantic_candidate_refusal(
 }
 
 impl GraphSeatGateV1 {
-    /// `text_owner_present` names the owner of the generation this pass would
-    /// seat: a publication's reopened replacement owner, or the restored
-    /// retained owner. Both carry the sealed manifest the seat reads; neither
-    /// needs to have finished its lexical projection.
+    /// `text_owner_admitted_for_graph` means a publication's replacement
+    /// owner is ready, or an unchanged pass has a retained owner from which it
+    /// can first try to recover an already-verified graph head. A retained full
+    /// replay is gated separately on text readiness after that recovery attempt.
     #[hotpath::skip]
     pub const fn decide(
         activation_enabled: bool,
         activation_deferred: bool,
         reconcile_is_terminal: bool,
         published_pass: bool,
-        text_owner_present: bool,
+        text_owner_admitted_for_graph: bool,
     ) -> Self {
         if !activation_enabled {
             return Self::Disabled;
@@ -255,7 +255,7 @@ impl GraphSeatGateV1 {
         // while `code_symbol_search` refused with
         // `lsp-code-index-generation-unavailable` and code-generation
         // retention degraded on an incomplete vector census (issue #1244).
-        if text_owner_present {
+        if text_owner_admitted_for_graph {
             return Self::Prepare;
         }
         if published_pass {
@@ -2070,12 +2070,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// advance at a time, until exact and lexical serving are ready or the
     /// projection stops typed.
     ///
-    /// Runs on its own task, concurrently with the same pass's graph prepare
-    /// and native activation: text and graph both consume the sealed
-    /// generation and neither depends on the other until the seat, which
-    /// joins this task. The advance itself is single-flight on the owner's
-    /// projection slot, so scheduler wakes that race it wait, never double
-    /// drive.
+    /// The caller chooses ordering. Fresh publications await this before graph
+    /// work because text and graph compete for the same sealed source and
+    /// resident-memory headroom. Retained owners may still run on their own
+    /// task while the scheduler recovers an already-verified graph head. The
+    /// advance itself is single-flight on the owner's projection slot, so
+    /// scheduler wakes that race it wait, never double drive.
     ///
     /// `installed` is the worktree's text slot for an owner that is already
     /// installed there. A cancelled advance latches that handle, so the slot

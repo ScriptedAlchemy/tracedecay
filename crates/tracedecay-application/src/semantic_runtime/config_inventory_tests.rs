@@ -3,10 +3,19 @@ use std::collections::BTreeMap;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
 use tracedecay_domain::{
-    CalibrationProfileId, DiversityPolicy, FusionProfile, ManifestDigest, ProjectId, RepositoryId,
-    RetrievalBudget, RetrieverKind, UtcMicros, VectorGenerationIdV1, WorktreeId,
+    CalibrationProfileId, ChunkerRevision, ComponentRevision, DiversityPolicy,
+    EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+    EmbeddingTruncationSideV1, FusionProfile, ManifestDigest, PrivacyDomainId, ProjectId,
+    RepositoryId, RetrievalBudget, RetrieverKind, UtcMicros, VectorGenerationIdV1, WorktreeId,
+    canonical_sha256,
 };
+use tracedecay_global_db::configuration::GlobalDbConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::ConfigurationControlStore;
+use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
+use tracedecay_global_db::configuration::resolver::resolve_configuration;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_query::search_quality::{
     DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
     DirectQualityMetricsV1, DirectRatioMetricV1, EvaluationExecutionContractV1,
@@ -16,12 +25,14 @@ use tracedecay_query::search_quality::{
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
     RetrievalProfileCasV1, RetrievalProfileCommitMetadataV1, RetrievalProfileMutationCapabilityV1,
-    RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
+    RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1, SemanticCompatibilityPinsV1,
+    SemanticResourceRequirementV1,
 };
 use crate::semantic_runtime::{
-    ProductionSemanticRetrievalConfigurationStoreV1, SemanticConfigurationBackendErrorV1,
+    ProductionSemanticRetrievalConfigurationStoreV1, SemanticActivationCommandV1,
+    SemanticActivationReceiptV1, SemanticActivationRequestV1, SemanticConfigurationBackendErrorV1,
     SemanticConfigurationInventoryPageRequestV1, SemanticConfigurationPinV1,
-    SemanticConfiguredVectorRootPageRequestV1,
+    SemanticConfiguredVectorRootPageRequestV1, SemanticRetrievalConfigurationPortV1,
 };
 
 fn typed<T>(value: &str) -> T
@@ -258,6 +269,196 @@ fn compat(state: &RetrievalProfileStateV1) -> RetrievalRuntimeCompatibilityV1 {
         rerank: None,
         rerank_ceiling: None,
     }
+}
+
+fn semantic_pins(label: &str, digest_byte: char) -> SemanticCompatibilityPinsV1 {
+    let digest = |byte: char| {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+    };
+    let artifact = digest(digest_byte);
+    let resources = SemanticResourceRequirementV1 {
+        model_bytes: 10,
+        tokenizer_bytes: 5,
+        resident_bytes: 20,
+        threads: 2,
+        max_concurrent_sessions: 1,
+        batch_size: 4,
+        sequence_length: 128,
+        load_deadline_ms: 1_000,
+    };
+    let projection = EmbeddingProjectionKeyV1 {
+        model_artifact_digest: artifact.clone(),
+        tokenizer_digest: digest('2'),
+        config_digest: digest('3'),
+        query_instruction_digest: None,
+        document_instruction_digest: None,
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
+        pooling: EmbeddingPoolingV1::Mean,
+        truncation_side: EmbeddingTruncationSideV1::Right,
+        truncation_length: 128,
+        inference_batch_size: 8,
+        inference_batch_bytes: 4 * 1024,
+        runtime_backend: "fastembed-ort".to_owned(),
+        runtime_build_revision: "runtime.scope-cas.v1".to_owned(),
+        device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
+        dimensions: 4,
+        metric: EmbeddingMetricV1::Cosine,
+        normalization: EmbeddingNormalizationV1::L2,
+        precision: EmbeddingPrecisionV1::Fp32,
+        chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+        chunker_revision: typed::<ChunkerRevision>("chunker.scope-cas.v1"),
+        privacy_domain: typed::<PrivacyDomainId>("privacy.scope-cas.v1"),
+        privacy_key_epoch: 1,
+    }
+    .admit()
+    .expect("admitted projection");
+    let vector_generation_id = VectorGenerationIdV1::new(digest(digest_byte));
+    SemanticCompatibilityPinsV1 {
+        implementation_revision: ComponentRevision::new("semantic.scope-cas.v1")
+            .expect("semantic implementation revision"),
+        fusion_revision: ComponentRevision::new("fusion.scope-cas.v1").expect("fusion revision"),
+        artifact_manifest_digest: artifact,
+        runtime_compatibility_digest: digest('4'),
+        search_index_key: tracedecay_domain::SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+            .expect("semantic search index key"),
+        calibration: SemanticCalibrationProfileV1 {
+            calibration_profile_id: typed(&format!("calibration.scope-cas.{label}")),
+            cohort_digest: digest('5'),
+            projection_key: projection.projection_key().clone(),
+            vector_generation: vector_generation_id.clone(),
+            capability_manifest_digest: digest('6'),
+            maximum_distance_micros: 2_000_000,
+            minimum_margin_micros: 0,
+        },
+        projection,
+        vector_generation_id,
+        resources,
+    }
+}
+
+fn semantic_profile(
+    label: &str,
+    digest_byte: char,
+) -> (AcceptedRetrievalProfileV1, RetrievalRuntimeCompatibilityV1) {
+    let (_, fallback) = initial_state(label);
+    let pins = semantic_pins(label, digest_byte);
+    let mut profile = fallback.active().profile().clone();
+    profile.calibrations.insert(
+        RetrieverKind::Semantic,
+        pins.calibration.calibration_profile_id.clone(),
+    );
+    profile.weights_micros.insert(RetrieverKind::Semantic, 1);
+    let accepted = AcceptedRetrievalProfileV1::new(
+        profile,
+        fallback.active().diversity().clone(),
+        None,
+        RetrievalCompatibilityPinsV1 {
+            semantic: Some(pins.clone()),
+            rerank: None,
+        },
+        fallback.active().evaluation().clone(),
+    )
+    .expect("accepted semantic profile");
+    let runtime = RetrievalRuntimeCompatibilityV1 {
+        retrieval_ceiling: fallback.active().profile().retrieval_budget,
+        semantic: Some(pins.clone()),
+        semantic_ceiling: Some(pins.resources),
+        rerank: None,
+        rerank_ceiling: None,
+    };
+    (accepted, runtime)
+}
+
+fn direct_capability(
+    project: &ProjectId,
+    revision: ConfigurationRevisionId,
+    label: &str,
+) -> (
+    RetrievalProfileMutationCapabilityV1,
+    tracedecay_global_db::configuration::contracts::ConfigurationMutationAuthority,
+) {
+    use tracedecay_domain::configuration::{
+        ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
+        ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
+        ConfigurationMutationSinkV1,
+    };
+    use tracedecay_global_db::configuration::contracts::{
+        ConfigurationMutationAuthority, CurrentConfigurationMutationAuthorizationV1,
+    };
+
+    let layer = ConfigurationLayerIdV1::Project {
+        project_id: project.clone(),
+    };
+    let scope_digest =
+        canonical_sha256(&("tracedecay.configuration.direct-target-layer.v1", &layer))
+            .expect("direct mutation scope");
+    let policy_digest: tracedecay_domain::AccessPolicyDigest =
+        typed(&format!("sha256:{}", "b".repeat(64)));
+    let authority = ConfigurationMutationAuthority {
+        receipt: ConfigurationMutationGrantReceiptV1::issue(
+            typed(&format!("configuration.grant-receipt.{label}")),
+            typed(&format!("configuration.grant.{label}")),
+            typed("actor.scope-cas"),
+            ConfigurationMutationOperationV1::DirectMutation,
+            scope_digest.clone(),
+            revision,
+            1,
+            policy_digest.clone(),
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            Some(typed::<ConfigurationIdempotencyKey>(&format!(
+                "configuration.idempotency.{label}"
+            ))),
+            UtcMicros(1),
+            UtcMicros(100),
+        )
+        .expect("mutation grant"),
+    };
+    let capability = RetrievalProfileMutationCapabilityV1::from_current_authorization(
+        authority.clone(),
+        CurrentConfigurationMutationAuthorizationV1 {
+            grant_revision: 1,
+            grant_digest: scope_digest.clone(),
+            scope_digest,
+            policy_epoch: 1,
+            policy_digest,
+        },
+    )
+    .expect("current mutation capability");
+    (capability, authority)
+}
+
+fn activation_receipt(
+    transition: &crate::semantic_runtime::SemanticConfigurationTransitionV1,
+    activated_at: UtcMicros,
+) -> SemanticActivationReceiptV1 {
+    let request = SemanticActivationRequestV1::new(
+        transition
+            .result_active_semantic
+            .as_ref()
+            .expect("semantic activation")
+            .vector_generation_id
+            .clone(),
+        transition
+            .prior_active_semantic
+            .as_ref()
+            .map(|pins| pins.vector_generation_id.clone()),
+        transition
+            .prior_rollback_semantic
+            .as_ref()
+            .map(|pins| pins.vector_generation_id.clone()),
+    )
+    .expect("activation request");
+    let command = SemanticActivationCommandV1::new(transition.base_configuration.clone(), request)
+        .expect("activation command");
+    SemanticActivationReceiptV1::issue_transition(
+        &command,
+        transition.result_configuration.clone(),
+        activated_at,
+    )
+    .expect("activation receipt")
 }
 
 fn scope(project: &ProjectId, repository: &str, worktree: &str) -> ResolvedScope {
@@ -574,6 +775,172 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
             commit_metadata(revision, typed("configuration.stale-aba")),
         ),
         Err(RetrievalProfileActivationErrorV1::CasConflict),
+    );
+}
+
+#[tokio::test]
+async fn sibling_scope_activation_uses_its_own_cas_after_project_revision_advances() {
+    use tracedecay_domain::configuration::{
+        ConfigurationLayerIdV1, SEMANTIC_RUNTIME_SETTING_KEY, SettingKey,
+    };
+    use tracedecay_global_db::configuration::contracts::DirectConfigurationMutation;
+
+    let directory = tempfile::tempdir().expect("temporary profile");
+    let runtime = RegisteredGlobalDbTestRuntime::profile(&directory.path().join("profile"))
+        .await
+        .expect("open profile database");
+    let database = runtime.profile_database_arc();
+    let central = GlobalDbConfigurationControlStore::new_registered(database.as_ref());
+    let root_revision = typed::<ConfigurationRevisionId>("configuration.scope-cas-root");
+    let registry = ConfigurationRegistry::core().expect("configuration registry");
+    let resolution = resolve_configuration(&registry, &[]).expect("default configuration");
+    central
+        .initialize_canonical(&root_revision, &resolution, UtcMicros(1))
+        .await
+        .expect("initialize configuration");
+    let root = central.current().await.expect("root configuration");
+    let root_pin = SemanticConfigurationPinV1::from_current(&root).expect("root pin");
+
+    let project = ProjectId::new("project.scope-cas").expect("project");
+    let primary = ProductionSemanticRetrievalConfigurationStoreV1::open(
+        database.clone(),
+        scope(&project, "repository.scope-cas", "worktree.primary"),
+    )
+    .expect("primary configuration store");
+    let sibling = ProductionSemanticRetrievalConfigurationStoreV1::open(
+        database.clone(),
+        scope(&project, "repository.scope-cas", "worktree.sibling"),
+    )
+    .expect("sibling configuration store");
+    let (_, fallback) = initial_state("a-scope-cas-fallback");
+    let fallback_runtime = compat(&fallback);
+    let initial = RetrievalProfileStateV1::new(
+        root.revision_id.clone(),
+        fallback.active().clone(),
+        &fallback_runtime,
+    )
+    .expect("initial retrieval state");
+    primary
+        .install_initial_state(&root_pin, &initial)
+        .await
+        .expect("primary initial state");
+    sibling
+        .install_initial_state(&root_pin, &initial)
+        .await
+        .expect("sibling initial state");
+    let sibling_root_cas = cas(&initial);
+    let mutation = DirectConfigurationMutation::Unset {
+        layer: ConfigurationLayerIdV1::Project {
+            project_id: project.clone(),
+        },
+        key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).expect("semantic setting key"),
+    };
+
+    let (primary_profile, primary_runtime) = semantic_profile("b-scope-cas-primary", 'b');
+    let (primary_capability, primary_authority) =
+        direct_capability(&project, root.revision_id.clone(), "scope-cas-primary");
+    let primary_preview = primary
+        .preview_central_mutation(&primary_authority, &mutation, &root.revision_id)
+        .await
+        .expect("preview primary activation");
+    let primary_result =
+        SemanticConfigurationPinV1::from_current(&primary_preview.current).expect("primary result");
+    let primary_transition = primary
+        .stage_activation(
+            root_pin,
+            primary_result,
+            &primary_capability,
+            cas(&initial),
+            primary_profile,
+            &fallback_runtime,
+            &primary_runtime,
+            mutation.clone(),
+            ManifestDigest::new(format!("sha256:{}", "7".repeat(64))).expect("freshness"),
+            UtcMicros(2),
+        )
+        .await
+        .expect("stage primary activation");
+    let primary_receipt = activation_receipt(&primary_transition, UtcMicros(3));
+    primary
+        .commit_linked_transition(&primary_transition, Some(&primary_receipt))
+        .await
+        .expect("commit primary activation");
+    let after_primary = central
+        .current()
+        .await
+        .expect("configuration after primary");
+    assert_eq!(
+        after_primary.revision_id,
+        primary_transition.result_configuration.revision_id
+    );
+    assert_eq!(
+        sibling
+            .current_state_if_present()
+            .await
+            .expect("sibling state after primary")
+            .expect("sibling state"),
+        initial,
+        "the project commit must not rewrite the sibling scope token"
+    );
+
+    let (sibling_profile, sibling_runtime) = semantic_profile("c-scope-cas-sibling", 'c');
+    let (sibling_capability, sibling_authority) = direct_capability(
+        &project,
+        after_primary.revision_id.clone(),
+        "scope-cas-sibling",
+    );
+    let sibling_preview = sibling
+        .preview_central_mutation(&sibling_authority, &mutation, &after_primary.revision_id)
+        .await
+        .expect("preview sibling activation");
+    let sibling_result =
+        SemanticConfigurationPinV1::from_current(&sibling_preview.current).expect("sibling result");
+    let sibling_transition = sibling
+        .stage_activation(
+            SemanticConfigurationPinV1::from_current(&after_primary)
+                .expect("current project configuration"),
+            sibling_result,
+            &sibling_capability,
+            sibling_root_cas,
+            sibling_profile,
+            &fallback_runtime,
+            &sibling_runtime,
+            mutation,
+            ManifestDigest::new(format!("sha256:{}", "9".repeat(64))).expect("freshness"),
+            UtcMicros(4),
+        )
+        .await
+        .expect("the sibling scope CAS remains valid at the new project revision");
+    let sibling_receipt = activation_receipt(&sibling_transition, UtcMicros(5));
+    sibling
+        .commit_linked_transition(&sibling_transition, Some(&sibling_receipt))
+        .await
+        .expect("commit sibling activation");
+    let after_sibling = central
+        .current()
+        .await
+        .expect("configuration after sibling");
+    assert_eq!(
+        after_sibling.revision_id,
+        sibling_transition.result_configuration.revision_id
+    );
+    assert_eq!(
+        primary
+            .current_state_if_present()
+            .await
+            .expect("primary state")
+            .expect("primary installed state")
+            .configuration_revision(),
+        &primary_transition.result_configuration.revision_id
+    );
+    assert_eq!(
+        sibling
+            .current_state_if_present()
+            .await
+            .expect("sibling state")
+            .expect("sibling installed state")
+            .configuration_revision(),
+        &sibling_transition.result_configuration.revision_id
     );
 }
 

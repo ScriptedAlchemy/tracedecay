@@ -431,11 +431,15 @@ impl McpServer {
         connection: &mut ConnectionRouteState,
         pre_cancelled: bool,
     ) -> Option<JsonRpcResponse> {
+        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+        if pre_cancelled {
+            cancellation.cancel();
+        }
         Box::pin(self.dispatch_envelope(
             McpDispatchRequest::from_legacy(request),
             timings_enabled,
             connection,
-            pre_cancelled,
+            cancellation,
         ))
         .await
     }
@@ -452,7 +456,7 @@ impl McpServer {
         request: McpDispatchRequest<'_>,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
-        pre_cancelled: bool,
+        cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> Option<JsonRpcResponse> {
         // A response lease belongs to exactly one request. Production
         // transports take it before writing; direct callers drop it with this
@@ -521,7 +525,7 @@ impl McpServer {
                     request.into_tool_call(),
                     timings_enabled,
                     connection,
-                    pre_cancelled,
+                    cancellation,
                 ))
                 .await,
             ),
@@ -1553,11 +1557,11 @@ impl McpServer {
         params: ToolCallParams<'_>,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
-        pre_cancelled: bool,
+        cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> JsonRpcResponse {
         let started = timings_enabled.then(std::time::Instant::now);
         let mut response = self
-            .handle_tools_call_inner(id, params, timings_enabled, connection, pre_cancelled)
+            .handle_tools_call_inner(id, params, timings_enabled, connection, cancellation)
             .await;
         Self::attach_missing_response_timing(
             &mut response,
@@ -1577,7 +1581,7 @@ impl McpServer {
         params: ToolCallParams<'_>,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
-        pre_cancelled: bool,
+        cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> JsonRpcResponse {
         let PreparedToolCall {
             tool_name,
@@ -1636,7 +1640,7 @@ impl McpServer {
             &id,
             &tool_name,
             &memory_request_scope,
-            pre_cancelled,
+            cancellation.is_cancelled(),
             caller_deadline,
         ) {
             Ok(prepared) => prepared,

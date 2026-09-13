@@ -18,14 +18,10 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_domain::UtcMicros;
-use tracedecay_hooks::{
-    HOOK_CONFIGURATION_SCHEMA_VERSION, HookCapabilityV1, HookConfigurationFileWriterV1,
-    HookConfigurationPublisherV1, HookConfigurationSnapshotV1, HookEventFamily, HookEventSupportV1,
-    HookEventV2, HookHostV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolV1,
-    hook_configuration_path,
-};
+use tracedecay_hooks::{HookEventV2, HookHostV1, HookSpoolConfigV1, HookSpoolV1};
 use tracedecay_runtime_core::storage::{
-    default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
+    EnrollmentMarker, StorageMode, default_profile_project_id, pin_fixture_repository_identity,
+    profile_sharded_data_root, profile_sharded_layout,
 };
 use tracedecay_tool_catalog::SchemaId;
 
@@ -419,35 +415,52 @@ fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
     );
 }
 
-fn tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
+fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
     let project_arg = project.to_string_lossy().to_string();
-    let output = tracedecay_command_with_home(home)
-        .current_dir(project)
-        .args([
-            "tool",
-            "--project",
-            &project_arg,
-            "status",
-            "--json",
-            "--format",
-            "json",
-        ])
-        .output()
-        .expect("tracedecay tool status should run");
-    assert!(
-        output.status.success(),
-        "status should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let result: Value = serde_json::from_slice(&output.stdout).expect("tool result json");
-    let text = result["content"][0]["text"]
-        .as_str()
-        .expect("status result text");
-    let payload: Value = serde_json::from_str(text).expect("status payload json");
-    payload["server"]["tool_calls"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("missing server.tool_calls in {payload}"))
+    let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+    loop {
+        let output = tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args([
+                "tool",
+                "--project",
+                &project_arg,
+                "status",
+                "--json",
+                "--format",
+                "json",
+            ])
+            .output()
+            .expect("tracedecay tool status should run");
+        assert!(
+            output.status.success(),
+            "status should succeed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).expect("tool result json");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("status result text");
+        let payload: Value = serde_json::from_str(text).expect("status payload json");
+        if let Some(tool_calls) = payload["server"]["tool_calls"].as_u64() {
+            return tool_calls;
+        }
+        assert_eq!(
+            payload["project_open"]["state"], "converging",
+            "status without server stats must report typed project convergence: {payload}"
+        );
+        let retry_after = Duration::from_millis(
+            payload["project_open"]["retry_after_ms"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("converging status omitted retry delay: {payload}")),
+        );
+        assert!(
+            Instant::now() + retry_after <= deadline,
+            "project server did not converge before the CLI roundtrip deadline: {payload}"
+        );
+        std::thread::sleep(retry_after);
+    }
 }
 
 fn configuration_tool_success(
@@ -630,13 +643,7 @@ fn spawn_sentinel_daemon_with_notification(
 /// marker binds the project root to a profile shard, and a daemon-issued
 /// hook configuration binding is published under that shard's data root so
 /// `run_native_capture` resolves `Bound` instead of `Unbound`.
-fn enroll_native_capture_project(
-    home: &Path,
-    project: &Path,
-    project_id: &str,
-    host: HookHostV1,
-    families: &[HookEventFamily],
-) -> PathBuf {
+fn enroll_native_capture_project(home: &Path, project: &Path, project_id: &str) -> PathBuf {
     pin_fixture_repository_identity(project, project_id).unwrap();
     // An enrolled project always belongs to an installed profile: the prompt
     // callbacks stay quiet without a profile identity, so the fixture installs
@@ -644,35 +651,18 @@ fn enroll_native_capture_project(
     let profile_root = home.join(".tracedecay");
     tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("install fixture profile identity");
-    let data_root = profile_root.join("projects").join(project_id);
-    std::fs::create_dir_all(&data_root).unwrap();
-    let now = capture_test_now();
-    HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(hook_configuration_path(
-        &data_root, [3; 16], host,
-    )))
-    .publish(HookConfigurationSnapshotV1 {
-        schema_version: HOOK_CONFIGURATION_SCHEMA_VERSION,
-        revision: 1,
-        published_at: UtcMicros(now.0 - 1_000_000),
-        expires_at: UtcMicros(now.0 + 600_000_000),
-        binding: HookScopeBindingV1 {
-            host,
-            project_id: [1; 16],
-            repository_id: [2; 16],
-            worktree_id: [3; 16],
-            worktree_epoch: 4,
-            binding_token: [5; 32],
-            capabilities: families
-                .iter()
-                .map(|family| HookCapabilityV1 {
-                    family: *family,
-                    support: HookEventSupportV1::Native,
-                })
-                .collect(),
+    let layout = profile_sharded_layout(
+        project,
+        &profile_root,
+        &EnrollmentMarker {
+            project_id: project_id.to_owned(),
+            storage_mode: StorageMode::ProfileSharded,
         },
-    })
+    )
     .unwrap();
-    data_root
+    tracedecay_agent_hosts::hooks::publish_hook_bindings(&tracedecay::hook_runtime(), &layout)
+        .unwrap();
+    layout.data_root
 }
 
 fn capture_test_now() -> UtcMicros {
@@ -688,6 +678,7 @@ fn run_native_capture_hook(
 ) -> Output {
     let event = event.to_string();
     tracedecay_command_with_home(home)
+        .env_remove("RUST_LOG")
         .current_dir(project)
         .arg(command_arg)
         .stdin(Stdio::piped())
@@ -707,6 +698,17 @@ fn run_native_capture_hook(
 
 fn native_capture_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
     data_root.join("hook-v2-spool").join(host.hook_key())
+}
+
+fn native_capture_pending_records(data_root: &Path, host: HookHostV1) -> u32 {
+    HookSpoolV1::open(
+        native_capture_spool_root(data_root, host),
+        HookSpoolConfigV1::stock(host),
+        capture_test_now(),
+    )
+    .expect("open native capture spool")
+    .1
+    .pending_records
 }
 
 /// Assert the transport-only response contract shared by every native
@@ -744,8 +746,6 @@ fn cursor_after_file_edit_hook_captures_bound_spool_record() {
         &home_path,
         &project_path,
         "proj_cursor_after_file_edit_capture",
-        host,
-        &[HookEventFamily::SavedEdit],
     );
     std::fs::create_dir_all(project_path.join("src")).unwrap();
     let edited = project_path.join("src/lib.rs");
@@ -765,9 +765,10 @@ fn cursor_after_file_edit_hook_captures_bound_spool_record() {
         }),
     );
     assert_capture_transport_response("afterFileEdit rejected", &rejected, 1);
-    assert!(
-        !native_capture_spool_root(&data_root, host).exists(),
-        "rejected payload must not leave a spool artifact"
+    assert_eq!(
+        native_capture_pending_records(&data_root, host),
+        0,
+        "rejected payload must not enqueue a spool record"
     );
 
     // The authentic Cursor afterFileEdit shape (mirroring the checked-in
@@ -827,13 +828,8 @@ fn cursor_after_shell_hook_is_typed_unsupported_without_spool_record() {
     let host = HookHostV1::CursorDesktop;
     // Bind every family Cursor natively supports so the absence of a spool
     // record is attributable to the unsupported event, not a missing binding.
-    let data_root = enroll_native_capture_project(
-        &home_path,
-        &project_path,
-        "proj_cursor_after_shell_capture",
-        host,
-        &[HookEventFamily::SessionBoundary, HookEventFamily::SavedEdit],
-    );
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_cursor_after_shell_capture");
 
     let output = run_native_capture_hook(
         &home_path,
@@ -851,9 +847,10 @@ fn cursor_after_shell_hook_is_typed_unsupported_without_spool_record() {
     // is typed Unavailable), so the outcome is Unsupported: fail-open exit 0
     // and no spool artifact — command text can never enter the spool.
     assert_capture_transport_response("afterShellExecution unsupported", &output, 0);
-    assert!(
-        !native_capture_spool_root(&data_root, host).exists(),
-        "unsupported shell event must not leave a spool artifact"
+    assert_eq!(
+        native_capture_pending_records(&data_root, host),
+        0,
+        "unsupported shell event must not enqueue a spool record"
     );
 }
 
@@ -938,13 +935,7 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
     let host = HookHostV1::Kiro;
-    let data_root = enroll_native_capture_project(
-        &home_path,
-        &project_path,
-        "proj_kiro_capture",
-        host,
-        &[HookEventFamily::PromptBoundary],
-    );
+    let data_root = enroll_native_capture_project(&home_path, &project_path, "proj_kiro_capture");
     std::fs::create_dir_all(project_path.join("src")).unwrap();
     std::fs::write(
         project_path.join("src/lib.rs"),
@@ -968,9 +959,10 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
         }),
     );
     assert_capture_transport_response("Kiro postToolUse unsupported", &post_tool_use, 0);
-    assert!(
-        !native_capture_spool_root(&data_root, host).exists(),
-        "unsupported Kiro postToolUse must not leave a spool artifact"
+    assert_eq!(
+        native_capture_pending_records(&data_root, host),
+        0,
+        "unsupported Kiro postToolUse must not enqueue a spool record"
     );
 
     let prompt_submit = run_native_capture_hook(
@@ -1386,8 +1378,8 @@ fn daemon_reuses_project_engine_across_tool_clients() {
     init_project_with_cli(&home_path, &project_path);
     let _daemon = spawn_tracedecay_daemon(&home_path);
 
-    let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
-    let second_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let first_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
+    let second_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
 
     // `init` is brokered through the daemon now (`tracedecay_status` then
     // `tracedecay_admin_sync`), so the fixture has already spent tool calls on
@@ -1441,7 +1433,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     });
 
     let _daemon = spawn_tracedecay_daemon(&home_path);
-    let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let first_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
     let output = tracedecay_command_with_home(&home_path)
         .arg("doctor")
         .current_dir(&project_path)
@@ -1459,7 +1451,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         "doctor must stay read-only while daemon owns the database:\n{stderr}"
     );
 
-    let second_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let second_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
     assert!(
         second_tool_calls > first_tool_calls,
         "daemon project engine must remain usable after doctor"

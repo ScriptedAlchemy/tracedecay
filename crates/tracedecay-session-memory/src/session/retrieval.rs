@@ -598,7 +598,8 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 accounting,
             } => budget_exhausted(
                 SessionRetrievalBudgetStageV1::for_port_budget_resource(resource),
-                accounting.map(tracedecay_session_temporal_store::execution::port_budget_accounting),
+                accounting
+                    .map(tracedecay_session_temporal_store::execution::port_budget_accounting),
             ),
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
                 crate::session::hotpath_observe::session_retrieval_budget_stage(

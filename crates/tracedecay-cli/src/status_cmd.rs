@@ -576,8 +576,8 @@ async fn handle_status_command_within(
 mod tests {
     use super::{
         COUNTRY_FLAGS_MAX_AGE_SECS, OnlineRefresh, OnlineRefreshPlan, WORLDWIDE_TOTAL_MAX_AGE_SECS,
-        await_daemon_tool_result, await_online_refresh, reject_truncation_envelope,
-        project_open_line, schema_convergence_line, status_command_deadline_from,
+        await_daemon_tool_result, await_online_refresh, project_open_line,
+        reject_truncation_envelope, schema_convergence_line, status_command_deadline_from,
         status_server_request_budget,
     };
     use serde_json::json;

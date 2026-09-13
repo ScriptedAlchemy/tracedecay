@@ -557,9 +557,13 @@ async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
                         tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
                             .unwrap_or_else(|error| panic!("{label} status payload: {error}"));
                     last = status.to_string();
+                    if status["graph_statistics"]["freshness"]["state"] == "current" {
+                        return;
+                    }
                     match status["code_index_freshness"]["status"].as_str() {
-                        Some("current") => return,
-                        Some("warming") => tokio::time::sleep(Duration::from_millis(100)).await,
+                        Some("current" | "warming") => {
+                            tokio::time::sleep(Duration::from_millis(100)).await
+                        }
                         Some("stale")
                             if status["code_index_freshness"]["worktree"]["coverage"]
                                 == "partial_source_verification"
@@ -882,7 +886,6 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
         "request.memory-restart.second-project-b",
     )
     .await;
-    request_authoritative_reconcile(&restarted_a, "restarted A reconcile").await;
     wait_for_current_graph(&restarted_a, "restarted A verified graph").await;
 
     assert_eq!(
