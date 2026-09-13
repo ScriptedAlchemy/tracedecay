@@ -655,18 +655,16 @@ async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
         .await
         .insert(common, Arc::clone(&stale));
 
-    let first_admission = {
-        let watcher = watcher.clone();
-        let linked = linked.clone();
-        tokio::spawn(async move { watcher.ensure_watching(&linked).await })
-    };
-    tokio::time::timeout(TEST_READY_TIMEOUT, async {
-        while stale.has_retained_task() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("replacement starts by joining the retired supervisor");
+    let mut first_admission = Box::pin(watcher.ensure_watching(&linked));
+    assert!(
+        futures_util::poll!(&mut first_admission).is_pending(),
+        "replacement must wait while joining the retired supervisor"
+    );
+    let retained_task_present = stale.has_retained_task();
+    assert!(
+        !retained_task_present,
+        "the retired supervisor must be retained by the joining admission"
+    );
     let mut racing_admission = Box::pin(watcher.ensure_watching(&linked));
     assert!(
         futures_util::poll!(&mut racing_admission).is_pending(),
@@ -682,10 +680,7 @@ async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
     })
     .await
     .expect("both admissions complete once the retired supervisor is joined");
-    assert_eq!(
-        first_admission.expect("first admission task"),
-        GitWatcherAdmission::Ready
-    );
+    assert_eq!(first_admission, GitWatcherAdmission::Ready);
     assert_eq!(racing_admission, GitWatcherAdmission::Ready);
     let active = ready_registered_state(&watcher, &linked).await;
     assert!(
