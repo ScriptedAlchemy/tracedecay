@@ -976,10 +976,9 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "format": "json",
     })
     .to_string();
-    // The first tool call triggers the daemon's cold project open, and the
-    // hook tool surface deliberately returns the typed warming state instead
-    // of retrying internally. Waiting that documented retryable state out is
-    // the client protocol, so only a non-warming failure is a test failure.
+    // Project opening and observation projection are both deferred. Retry
+    // their typed progress states within the same fixed deadline; a terminal
+    // successful response must still prove that this pass committed data.
     let ingest_deadline = std::time::Instant::now() + Duration::from_secs(60);
     let output = loop {
         let output = common::tracedecay_command_with_home(environment.home())
@@ -996,17 +995,34 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             .output()
             .expect("invoke registered daemon observation path");
         if output.status.success() {
-            break output;
+            let response: Value =
+                serde_json::from_slice(&output.stdout).expect("registered daemon ingest response");
+            let payload: Value = serde_json::from_str(
+                response["content"][0]["text"]
+                    .as_str()
+                    .expect("registered daemon ingest response text"),
+            )
+            .expect("registered daemon ingest payload");
+            if payload["completed"] != false {
+                break output;
+            }
+            assert_eq!(
+                payload["admission"]["retryable"], true,
+                "incomplete ingest must carry a retryable admission: {response}"
+            );
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            assert!(
+                stderr.contains("is warming in the background"),
+                "registered daemon ingest failed\nstdout:\n{}\nstderr:\n{stderr}",
+                String::from_utf8_lossy(&output.stdout),
+            );
         }
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            stderr.contains("is warming in the background"),
-            "registered daemon ingest failed\nstdout:\n{}\nstderr:\n{stderr}",
-            String::from_utf8_lossy(&output.stdout),
-        );
         assert!(
             std::time::Instant::now() < ingest_deadline,
-            "registered daemon project stayed warming past the ingest deadline\nstderr:\n{stderr}",
+            "registered daemon ingest did not complete before its deadline\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
