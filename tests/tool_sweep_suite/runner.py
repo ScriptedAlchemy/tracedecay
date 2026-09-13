@@ -1863,7 +1863,7 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return {
             "selection": fixture["work_selection"],
             "task_id": fixture["work_task_id"],
-            "verified_version": fixture["work_admitted_version"],
+            "verified_version": fixture["work_current_version"],
             "evidence_not_before": 0,
             "expertise_categories": ["testing"],
             "limit": 10,
