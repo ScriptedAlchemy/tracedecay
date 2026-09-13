@@ -1914,7 +1914,8 @@ mod tests {
                 "EXPLAIN QUERY PLAN
                  SELECT observation_json
                  FROM observations
-                 WHERE json_extract(observation_json, '$.__retention_released') IS NULL
+                 WHERE json_valid(observation_json)
+                   AND json_extract(observation_json, '$.__retention_released') IS NULL
                    AND json_extract(
                         observation_json,
                         '$.identity.source.session_id'

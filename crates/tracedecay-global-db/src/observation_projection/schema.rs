@@ -326,11 +326,14 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
      ON observation_projection_rebuild_workflow_facts
         (projector_version, generation, provider, session_id, semantic_kind,
          provider_reference, observation_sequence);",
+    // Partial on json_valid: a malformed observation row must never make the
+    // index build (and with it the store's schema convergence) fail, and the
+    // lifecycle lookup restricts itself to valid rows so the index applies.
     "CREATE INDEX IF NOT EXISTS idx_observations_session_sequence
      ON observations (
         json_extract(observation_json, '$.identity.source.session_id'),
         sequence
-     );",
+     ) WHERE json_valid(observation_json);",
     "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
      ON observations (observation_id, receipt_id);",
     "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
