@@ -533,7 +533,8 @@ impl<'a> SessionTemporalReadPort<'a> {
             | CandidateChannel::Phrase
             | CandidateChannel::Entity
             | CandidateChannel::Time
-            | CandidateChannel::Lexical => (
+            | CandidateChannel::Lexical
+            | CandidateChannel::LexicalRelaxed => (
                 "SELECT observation.observation_json, occurrence.role
                  FROM session_occurrences occurrence
                  JOIN observations observation
@@ -1052,6 +1053,14 @@ impl<'a> SessionTemporalReadPort<'a> {
             control.checkpoint()?;
             let clause = &plan.clauses()[cursor.clause];
             validate_clause(clause, request)?;
+            // The relaxation tier is reached only after the strict tier was
+            // scanned to exhaustion under these filters and this snapshot and
+            // answered nothing. A refusal returns before advancing the clause,
+            // so a deadline or budget stop never arrives here.
+            if clause.channel == CandidateChannel::LexicalRelaxed && cursor.strict_lexical_matched {
+                cursor = cursor.advance_to_clause(cursor.clause + 1);
+                continue;
+            }
             let mut extra = false;
             let mut last_emitted = None;
             let mut scan_cursor = cursor.clone();
@@ -1118,6 +1127,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                         knowledge_at: candidate.knowledge_at_micros,
                         session_id: candidate.session.clone().unwrap_or_default(),
                         stable_id: candidate.retriever_record_id.clone(),
+                        strict_lexical_matched: cursor.strict_lexical_matched,
                     };
                     if !self
                         .candidate_matches_filter(
@@ -1145,6 +1155,10 @@ impl<'a> SessionTemporalReadPort<'a> {
                         break;
                     }
                     page_bytes += encoded;
+                    if clause.channel == CandidateChannel::Lexical {
+                        cursor.strict_lexical_matched = true;
+                        scan_cursor.strict_lexical_matched = true;
+                    }
                     last_emitted = Some(scan_cursor.clone());
                     sink.push(candidate)?;
                 }
@@ -1157,12 +1171,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                 sink.set_continuation_key(continuation.encode(request.max_key_bytes())?)?;
                 return Ok(PageStatus::More);
             }
-            cursor = CandidateCursor {
-                clause: cursor.clause + 1,
-                knowledge_at: i64::MAX,
-                session_id: String::new(),
-                stable_id: String::new(),
-            };
+            cursor = cursor.advance_to_clause(cursor.clause + 1);
             if sink.len() == bounds.items {
                 if cursor.clause < plan.clauses().len() {
                     sink.set_continuation_key(cursor.encode(request.max_key_bytes())?)?;

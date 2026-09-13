@@ -307,6 +307,7 @@ fn names_summary_record(candidate: &RankingCandidate) -> bool {
         | CandidateChannel::Entity
         | CandidateChannel::Time
         | CandidateChannel::Lexical
+        | CandidateChannel::LexicalRelaxed
         | CandidateChannel::Span
         | CandidateChannel::Burst => false,
     }

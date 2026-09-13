@@ -75,6 +75,7 @@ impl CandidateCursor {
                 knowledge_at: i64::MAX,
                 session_id: String::new(),
                 stable_id: String::new(),
+                strict_lexical_matched: false,
             }),
             |key| decode_cursor(key, CANDIDATE_OPERATION),
         )
@@ -82,6 +83,18 @@ impl CandidateCursor {
 
     pub(super) fn encode(&self, cap: usize) -> Result<PageKey, TemporalPortError> {
         encode_cursor(self, cap, CANDIDATE_OPERATION)
+    }
+
+    /// Restarts scanning at `clause` while keeping the ladder state the earlier
+    /// clauses established.
+    pub(super) fn advance_to_clause(&self, clause: usize) -> Self {
+        Self {
+            clause,
+            knowledge_at: i64::MAX,
+            session_id: String::new(),
+            stable_id: String::new(),
+            strict_lexical_matched: self.strict_lexical_matched,
+        }
     }
 }
 
@@ -135,6 +148,14 @@ pub(super) struct CandidateCursor {
     #[serde(default)]
     pub(super) session_id: String,
     pub(super) stable_id: String,
+    /// Whether the strict lexical clause has already answered, carried across
+    /// pages so a continuation that lands on the relaxation tier knows the
+    /// query was answered strictly and skips it.
+    ///
+    /// Absent from a key that never reached the strict tier, which keeps the
+    /// encoded size of every other cursor unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) strict_lexical_matched: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

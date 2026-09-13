@@ -378,6 +378,7 @@ impl MeasuredTemporalValue for RankingCandidate {
             CandidateChannel::Entity => "entity",
             CandidateChannel::Time => "time",
             CandidateChannel::Lexical => "lexical",
+            CandidateChannel::LexicalRelaxed => "lexical_relaxed",
             CandidateChannel::Summary => "summary",
             CandidateChannel::Span => "span",
             CandidateChannel::Burst => "burst",

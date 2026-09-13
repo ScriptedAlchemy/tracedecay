@@ -254,6 +254,9 @@ const fn temporal_channel(
         super::candidates::CandidateChannel::Entity => TemporalCandidateChannelV1::Entity,
         super::candidates::CandidateChannel::Time => TemporalCandidateChannelV1::Time,
         super::candidates::CandidateChannel::Lexical => TemporalCandidateChannelV1::Lexical,
+        super::candidates::CandidateChannel::LexicalRelaxed => {
+            TemporalCandidateChannelV1::LexicalRelaxed
+        }
         super::candidates::CandidateChannel::Summary => TemporalCandidateChannelV1::Summary,
         super::candidates::CandidateChannel::Span => TemporalCandidateChannelV1::Span,
         super::candidates::CandidateChannel::Burst => TemporalCandidateChannelV1::Burst,

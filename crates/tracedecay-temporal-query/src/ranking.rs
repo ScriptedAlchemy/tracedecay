@@ -414,6 +414,7 @@ const fn rank_tier(channel: CandidateChannel) -> RankTier {
         | CandidateChannel::Entity
         | CandidateChannel::Time
         | CandidateChannel::Lexical
+        | CandidateChannel::LexicalRelaxed
         | CandidateChannel::Summary => RankTier::Approximate,
     }
 }
