@@ -451,6 +451,8 @@ struct OpenedProjectGraph {
 /// server; the full server that replaces the core publishes the same ports.
 struct ProjectRoutePorts {
     code_index: ProjectCodeIndexAuthorities,
+    dashboard_doctor_report_reader:
+        Arc<std::sync::OnceLock<tracedecay_dashboard_api::DoctorReportReader>>,
     dashboard_code_index_freshness_reader:
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader,
@@ -499,7 +501,21 @@ impl ComposedCoreServer {
     ) -> crate::mcp::server::McpServerConstructionContext {
         let ports = &self.ports;
         let code_index = &ports.code_index;
+        let doctor_report_publication = Arc::clone(&ports.dashboard_doctor_report_reader);
+        let doctor_report_reader: tracedecay_dashboard_api::DoctorReportReader =
+            Arc::new(move || {
+                let reader = doctor_report_publication.get().cloned();
+                Box::pin(async move {
+                    let reader = reader.ok_or(
+                        tracedecay_contracts::ApplicationContractError::Inconsistent {
+                            field: "daemon Doctor report reader publication",
+                        },
+                    )?;
+                    reader().await
+                })
+            });
         let mut context = context
+            .with_dashboard_doctor_report_reader(doctor_report_reader)
             .with_dashboard_code_index_freshness_reader(Arc::clone(
                 &ports.dashboard_code_index_freshness_reader,
             ))
@@ -899,6 +915,7 @@ impl ProjectOpenInputs<'_> {
             semantic_runtime_readiness,
             ports: ProjectRoutePorts {
                 code_index,
+                dashboard_doctor_report_reader: Arc::new(std::sync::OnceLock::new()),
                 dashboard_code_index_freshness_reader: project_dashboard_freshness_reader(
                     self.invocation.code_index_schedulers.clone(),
                 ),
@@ -1359,6 +1376,13 @@ impl ProjectOpenInputs<'_> {
                 store_telemetry_sampling,
                 Arc::clone(cg.configuration_runtime()),
             );
+        core.ports
+            .dashboard_doctor_report_reader
+            .set(doctor_report_reader)
+            .map_err(|_| TraceDecayError::Config {
+                message: "project Doctor report reader was already published".to_owned(),
+            })?;
+        resolved.publish_doctor_report();
         let (delivery_settlement_authority, delivery_settlement_recorder) =
             project_delivery_settlement_ports(self.invocation, self.canonical_project_path).await?;
         let profile_session_refresh = self
@@ -1402,7 +1426,6 @@ impl ProjectOpenInputs<'_> {
                 self.invocation,
             )
             .with_remote_operational_status(remote_operational_status)
-            .with_dashboard_doctor_report_reader(doctor_report_reader)
             .with_startup_catch_up_enabled(self.runtime.startup_catch_up());
         project_open_cancellation_checkpoint(self.cancellation)?;
         let full_construction_started = Instant::now();
