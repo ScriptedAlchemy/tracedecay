@@ -46,7 +46,7 @@ fn write_wide_cycle(project: &std::path::Path, module_count: usize, prefix: &str
     let names: Vec<String> = (0..module_count)
         .map(|index| {
             format!(
-                "{prefix}_deeply_nested_workspace_module_with_a_realistically_long_name_{index:04}"
+                "{prefix}_workspace_module_workspace_module_workspace_module_workspace_module_{index:04}"
             )
         })
         .collect();
