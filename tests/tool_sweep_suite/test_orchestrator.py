@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 SUITE_DIR = Path(__file__).parent
@@ -25,6 +26,23 @@ def load_orchestrator():
 
 
 class WholeRunDeadlineTests(unittest.TestCase):
+    def test_codex_auth_is_staged_only_under_the_ephemeral_phase_root(self) -> None:
+        orchestrator = load_orchestrator()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_home = root / "source"
+            source_home.mkdir()
+            (source_home / "auth.json").write_text("credential")
+            with patch.dict("os.environ", {"CODEX_HOME": str(source_home)}):
+                destination_home = orchestrator._stage_codex_auth(root / "ephemeral")
+
+            self.assertEqual(
+                (destination_home / "auth.json").read_text(), "credential"
+            )
+            self.assertEqual(
+                (destination_home / "auth.json").stat().st_mode & 0o777, 0o600
+            )
+
     def test_expiring_process_is_cancelled_before_the_final_report(self) -> None:
         """The process group is stopped at the shared deadline, not left to CI's timeout."""
         orchestrator = load_orchestrator()
