@@ -998,6 +998,7 @@ impl GraphDb {
         &self,
         identity: &GraphGenerationManifestIdentity,
         expected: &GraphRecoveredGenerationDigestV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(), GraphDbError> {
         if sealed_store_disabled() {
             return Ok(());
@@ -1024,9 +1025,10 @@ impl GraphDb {
         let physical_namespace = identity.physical_namespace()?;
         let root = sealed_store_root(&database_path);
         let directory = sealed_generation_directory(&root, &physical_namespace);
-        match open_sealed_store(&directory, identity, expected) {
+        match open_sealed_store_checked(&directory, identity, expected, check) {
             Ok(Some(store)) => self.install_sealed_generation_store(locator, store),
             Ok(None) => Ok(()),
+            Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => Err(error),
             Err(_) => {
                 // A stale or corrupt artifact never outranks the verified
                 // staging rows; discard it so a later seal can rebuild.
@@ -1053,7 +1055,11 @@ impl GraphDb {
             commit.watermark,
             lease.dependency_identities.clone(),
         );
-        self.open_sealed_generation_store_if_present(&identity, &lease.head.recovered_digest)
+        self.open_sealed_generation_store_if_present(
+            &identity,
+            &lease.head.recovered_digest,
+            &|| Ok(()),
+        )
     }
 
     fn install_sealed_generation_store(
@@ -1666,6 +1672,15 @@ fn open_sealed_store(
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
 ) -> Result<Option<Arc<SealedGenerationStore>>, GraphDbError> {
+    open_sealed_store_checked(directory, identity, expected, &|| Ok(()))
+}
+
+fn open_sealed_store_checked(
+    directory: &Path,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Option<Arc<SealedGenerationStore>>, GraphDbError> {
     let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
     let database_path = directory.join(SEALED_STORE_DATABASE_FILE);
     let receipt_bytes = match std::fs::read(&receipt_path) {
@@ -1710,7 +1725,7 @@ fn open_sealed_store(
     // the full row proof and files the marker for the next open. `expected`
     // still comes from the relational authority, exactly as on the staging
     // container.
-    let canonical_bytes = match sealed_copy_proof(&database, identity, expected, &|| Ok(())) {
+    let canonical_bytes = match sealed_copy_proof(&database, identity, expected, check) {
         Ok(canonical_bytes) => canonical_bytes,
         Err(error) => {
             let _ = database.close();
