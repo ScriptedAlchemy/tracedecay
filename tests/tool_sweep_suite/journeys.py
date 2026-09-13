@@ -965,7 +965,16 @@ def prime_work_lifecycle(
     """Create, admit, start, inspect, and contain one real disposable Work task."""
     suffix = f"{time.monotonic_ns()}"
     occurred_at = int(time.time() * 1_000_000)
-    selection = {"selection": "profile_owned_no_git"}
+    selection = {
+        "selection": "relations",
+        "relation_scopes": [
+            {
+                "kind": "repository",
+                "project_id": fixture["project_id"],
+                "repository_id": fixture["repository_id"],
+            }
+        ],
+    }
     initiative_id = f"initiative.tool-sweep.{suffix}"
     plan_id = f"plan.tool-sweep.{suffix}"
     milestone_id = f"milestone.tool-sweep.{suffix}"
@@ -1043,7 +1052,10 @@ def prime_work_lifecycle(
         "selection": selection,
         "task_id": task_id,
         "proposal_id": proposal_id,
-        "occurred_at": occurred_at + 1,
+        # Current graph reads are bounded by this observation instant. Read
+        # after the create call has returned so its committed publication is
+        # inside the requested temporal window.
+        "occurred_at": int(time.time() * 1_000_000),
         "format": "json",
     }
     generated = call(
@@ -1102,12 +1114,12 @@ def prime_work_lifecycle(
         "task_id": task_id,
         "run_id": run_id,
         "target": {
-            "kind": "clean_in_place",
+            "kind": "no_managed_placement",
             "root": None,
             "network_free": True,
-            "in_place_acknowledged": True,
+            "in_place_acknowledged": False,
         },
-        "occurred_at": occurred_at + 2,
+        "occurred_at": int(time.time() * 1_000_000),
         "format": "json",
     }
     call(
@@ -1131,7 +1143,7 @@ def prime_work_lifecycle(
         "commit": fixture["commit"],
         "instructions": "Inspect the disposable fixture only.",
         "effect_state": "observational",
-        "occurred_at": occurred_at + 3,
+        "occurred_at": int(time.time() * 1_000_000),
         "format": "json",
     }
     started = call(
@@ -1158,7 +1170,7 @@ def prime_work_lifecycle(
     cancel_arguments = {
         **status_arguments,
         "request_id": f"cancel.tool-sweep.{suffix}",
-        "occurred_at": occurred_at + 4,
+        "occurred_at": int(time.time() * 1_000_000),
     }
     cancelled = call(
         "tracedecay_work_cancel_attempt",
@@ -1181,7 +1193,7 @@ def prime_work_lifecycle(
     duplicate_start = {
         **start_arguments,
         "attempt_id": duplicate_attempt_id,
-        "occurred_at": occurred_at + 5,
+        "occurred_at": int(time.time() * 1_000_000),
     }
     duplicate_started = call(
         "tracedecay_work_start_attempt",
@@ -1218,7 +1230,7 @@ def prime_work_lifecycle(
             "run_id": run_id,
             "attempt_id": duplicate_attempt_id,
             "request_id": f"cancel.duplicate-probe.tool-sweep.{suffix}",
-            "occurred_at": occurred_at + 6,
+            "occurred_at": int(time.time() * 1_000_000),
             "format": "json",
         },
         deadline("tracedecay_work_cancel_attempt"),
