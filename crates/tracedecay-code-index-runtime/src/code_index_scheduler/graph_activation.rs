@@ -9,14 +9,14 @@ use tracedecay_graph_db::GraphDbError;
 use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
 
 use super::{
-    CodeGraphProjectionError, CodeGraphServingAuthorityV1, CodeIndexProductionErrorV1,
-    CodeIndexPublicationStoreErrorV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
+    CodeGraphServingAuthorityV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
     DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
 };
 use crate::code_graph_seat::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
-use crate::code_index::graph_projection::CodeGraphProjectionStore;
+use crate::code_index::graph_projection::{CodeGraphProjectionError, CodeGraphProjectionStore};
+use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
 
 /// Test-only injected retryable activation failures, keyed by worktree id.
 /// The worktree id is unique per test fixture, while generation ids are
