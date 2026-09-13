@@ -230,8 +230,7 @@ impl Connection {
         Statement::for_connection(self, sql)
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn last_insert_rowid(&self) -> i64 {
+    pub(crate) fn last_insert_rowid(&self) -> i64 {
         self.runtime.last_insert_rowid()
     }
 
