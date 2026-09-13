@@ -1700,10 +1700,10 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 '{"identity":{"attempt_id":"attempt.fixture"}}'
             ),
             "tracedecay_work_attempt_status": cls.response(
-                '{"identity":{"attempt_id":"attempt.fixture"}}'
+                '{"identity":{"attempt_id":"attempt.fixture"},"state":"cancelled"}'
             ),
             "tracedecay_work_cancel_attempt": cls.response(
-                '{"identity":{"attempt_id":"attempt.fixture"}}'
+                '{"identity":{"attempt_id":"attempt.fixture"},"state":"cancelled"}'
             ),
         }
 
