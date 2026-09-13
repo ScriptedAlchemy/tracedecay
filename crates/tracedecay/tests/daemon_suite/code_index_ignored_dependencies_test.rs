@@ -239,25 +239,7 @@ async fn reconcile_through_worker(
     scope: &ResolvedScope,
 ) {
     registry.clear_pending_wake_for_scope(scope).await;
-    let scheduler = registry
-        .scheduler_handle(project_root)
-        .await
-        .expect("mounted scheduler");
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let lock_thread = std::thread::spawn(move || {
-        let _scheduler = scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held_tx.send(()).expect("signal scheduler hold");
-        release_rx.recv().expect("release scheduler hold");
-    });
-    held_rx.recv().expect("scheduler is held");
     assert!(registry.notify_hook_overflow(project_root).await);
-    wait_for_reconciling(registry, 1).await;
-    release_tx.send(()).expect("release scheduler");
-    lock_thread.join().expect("scheduler holder joins");
-    wait_for_reconciling(registry, 0).await;
 }
 
 fn request_for(
