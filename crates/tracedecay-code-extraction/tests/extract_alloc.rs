@@ -19,7 +19,10 @@ use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::incremental::{ParseChangedRange, ParsePoint};
-use tracedecay_code_extraction::parsed_extraction::{ParsedExtraction, ParsedExtractionScope};
+use tracedecay_code_extraction::parsed_extraction::{
+    ParsedExtraction, ParsedExtractionDisposition, ParsedExtractionResetReason,
+    ParsedExtractionScope,
+};
 use tracedecay_code_extraction::{
     BashExtractor, BatchExtractor, CExtractor, CSharpExtractor, ClojureExtractor, CobolExtractor,
     CppExtractor, DartExtractor, DockerfileExtractor, ElixirExtractor, ErlangExtractor,
@@ -526,7 +529,7 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
     }
 }
 
-/// Representative lite, medium, and full extractors must retain the caller's
+/// Representative changed-region extractors must retain the caller's
 /// source during a one-line incremental walk. The fixed allowance covers the
 /// canonical file/item rows; the variable allowance scales only with bytes in
 /// the selected syntax node, never with the 1–2 MiB source.
@@ -551,15 +554,6 @@ fn representative_language_walks_allocate_by_changed_region() {
             source: regional_fixture("func tiny() int { return 1 }\n"),
             needle: "func tiny",
             expected_digest: "7bc4d1d7e778bf2c40976672e63f12a7c5817dd8d8c34c28129105988dafef3c",
-        },
-        Case {
-            tier: "medium",
-            extractor: &BashExtractor,
-            file_path: "region.sh",
-            grammar_key: "bash",
-            source: regional_fixture("tiny() { :; }\n"),
-            needle: "tiny()",
-            expected_digest: "d1b8003a5b51fbeaa81bc03dc58ff38ad4f8ebd7af74533882cbabe8c47a2eb1",
         },
         Case {
             tier: "full",
@@ -660,6 +654,46 @@ fn representative_language_walks_allocate_by_changed_region() {
         }
     }
     assert!(over_budget.is_empty(), "{}", over_budget.join("\n"));
+}
+
+/// Bash rebuilds its document-spanning script module after an edit, but the
+/// reset walk must still borrow the caller's source instead of copying it.
+#[test]
+fn bash_changed_region_reset_walk_does_not_copy_source() {
+    let source = regional_fixture("tiny() { :; }\n");
+    let cold = BashExtractor.extract("region.sh", &source);
+    let tree = parse_with_grammar("bash", &source);
+    let region = trailing_region(&source, "tiny()");
+    let (incremental, walk_bytes) = measure_allocation(|| {
+        extract_parsed(
+            &BashExtractor,
+            "region.sh",
+            &source,
+            &tree,
+            ParsedExtractionScope::ChangedRegions(&[region]),
+        )
+    });
+
+    assert_eq!(
+        incremental.disposition,
+        ParsedExtractionDisposition::Reset {
+            reason: ParsedExtractionResetReason::ChangedRootIdentity,
+        }
+    );
+    assert_eq!(incremental.metrics.visited_bytes, source.len());
+    assert_eq!(
+        canonical_digest(&cold),
+        canonical_digest(&incremental.result)
+    );
+    assert_eq!(
+        canonical_digest(&cold),
+        "d1b8003a5b51fbeaa81bc03dc58ff38ad4f8ebd7af74533882cbabe8c47a2eb1"
+    );
+    assert!(
+        walk_bytes < source.len(),
+        "Bash reset walk allocated {walk_bytes} bytes for a {} byte source",
+        source.len()
+    );
 }
 
 /// One migrated language: extractor, fixture item, grammar, and the canonical
