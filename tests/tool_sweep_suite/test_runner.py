@@ -2624,16 +2624,26 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 raise AssertionError((run, expected))
 
         def probe(self, name, arguments, _deadline_ms):
+            """Admit definition pins the way the daemon does: one named denial."""
             self.calls.append((name, arguments))
-            return {
-                "diagnostic": {
-                    "code": "workflow.catalog.pin_mismatch",
-                    "message": (
-                        f"pinned_catalog_digest expected {self.owner.SHA_C}, "
-                        f"observed {arguments['definition']['pinned_catalog_digest']}"
-                    ),
+            definition = arguments["definition"]
+            for pin, live in (
+                ("catalog", self.owner.SHA_C),
+                ("policy", self.owner.SHA_A),
+                ("configuration", self.owner.SHA_B),
+            ):
+                if definition[f"pinned_{pin}_digest"] == live:
+                    continue
+                return {
+                    "diagnostic": {
+                        "code": f"workflow.{pin}.pin_mismatch",
+                        "message": (
+                            f"pinned_{pin}_digest expected {live}, "
+                            f"observed {definition[f'pinned_{pin}_digest']}"
+                        ),
+                    }
                 }
-            }
+            return self.response({"definition": definition})
 
     @staticmethod
     def fixture():
@@ -2660,7 +2670,11 @@ class WorkflowLifecycleTests(unittest.TestCase):
             "rejected",
         )
         self.assertEqual(
-            fixture["workflow_definition_v1"]["pinned_catalog_digest"], self.SHA_C
+            {
+                pin: fixture["workflow_definition_v1"][f"pinned_{pin}_digest"]
+                for pin in ("policy", "configuration", "catalog")
+            },
+            {"policy": self.SHA_A, "configuration": self.SHA_B, "catalog": self.SHA_C},
         )
         self.assertEqual(
             set(fixture["workflow_read_arguments"]),
@@ -2692,6 +2706,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
         self.assertEqual(effect_run["status"], "cancelled")
         self.assertIn("retired", note)
 
+
     def test_every_workflow_effect_has_a_contained_real_journey(self) -> None:
         runner = load_runner()
         for name in sorted(runner.WORKFLOW_LIFECYCLE_EFFECTS):
@@ -2708,6 +2723,64 @@ class WorkflowLifecycleTests(unittest.TestCase):
 
                 self.assertEqual(prepared.settlement, "contained")
                 self.assertTrue(note)
+
+
+class WorkflowPinDiscoveryTests(unittest.TestCase):
+    """The journey adopts definition pins from typed validation denials."""
+
+    Runtime = WorkflowLifecycleTests.Runtime
+    fixture = staticmethod(WorkflowLifecycleTests.fixture)
+    SHA_A = WorkflowLifecycleTests.SHA_A
+    SHA_B = WorkflowLifecycleTests.SHA_B
+    SHA_C = WorkflowLifecycleTests.SHA_C
+
+    def test_pins_come_only_from_typed_validation_denials(self) -> None:
+        """The journey learns the live pins instead of deriving a shadow copy."""
+        runner = load_runner()
+        runtime = self.Runtime(self)
+        fixture = self.fixture()
+
+        runner.prime_workflow_lifecycle(fixture, runtime.call, runtime.probe, lambda _name: 1_000)
+
+        registered = [
+            arguments["definition"]
+            for name, arguments in runtime.calls
+            if name == "tracedecay_workflow_register_definition"
+        ]
+        self.assertEqual(len(registered), 2)
+        for definition in registered:
+            self.assertEqual(definition["pinned_policy_digest"], self.SHA_A)
+            self.assertEqual(definition["pinned_configuration_digest"], self.SHA_B)
+            self.assertEqual(definition["pinned_catalog_digest"], self.SHA_C)
+        self.assertNotIn(
+            "tracedecay_configuration_get", {name for name, _ in runtime.calls}
+        )
+
+    def test_pin_discovery_that_cannot_settle_is_a_journey_error(self) -> None:
+        """An unnamed digest and a denial that never clears both stay typed."""
+        runner = load_runner()
+        messages = {
+            "unnamed digest": lambda _pinned: "the request is invalid",
+            "never settles": lambda pinned: (
+                f"pinned_policy_digest expected {self.SHA_A}, observed {pinned}"
+            ),
+        }
+        for label, message in messages.items():
+            with self.subTest(denial=label):
+                with self.assertRaises(runner.JourneyError):
+                    runner.prime_workflow_lifecycle(
+                        self.fixture(),
+                        self.Runtime(self).call,
+                        lambda _name, arguments, _deadline_ms: {
+                            "diagnostic": {
+                                "code": "workflow.policy.pin_mismatch",
+                                "message": message(
+                                    arguments["definition"]["pinned_policy_digest"]
+                                ),
+                            }
+                        },
+                        lambda _name: 1_000,
+                    )
 
 
 class MountRetryTests(unittest.TestCase):
