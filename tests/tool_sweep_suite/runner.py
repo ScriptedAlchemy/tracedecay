@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 from xml.sax.saxutils import escape
@@ -880,19 +881,31 @@ def _prime_context_scout_diagnostic(
         "Context Scout diagnostic index producer",
         timeout_s=180,
     )
+    rustc = shutil.which("rustc")
+    if rustc is None:
+        raise SweepError("Context Scout compiler diagnostic producer requires rustc")
     try:
-        compiled = subprocess.run(
-            ["cargo", "check", "--message-format=short"],
-            cwd=fixture["root"],
-            text=True,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="tracedecay-scout-rustc-") as output:
+            compiled = subprocess.run(
+                [
+                    rustc,
+                    "--crate-type=lib",
+                    "--edition=2024",
+                    "--emit=metadata",
+                    "--out-dir",
+                    output,
+                    "src/lib.rs",
+                ],
+                cwd=fixture["root"],
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise SweepError("Context Scout compiler diagnostic producer failed") from error
-    cargo_output = f"{compiled.stdout}\n{compiled.stderr}"
-    if compiled.returncode == 0 or "src/lib.rs" not in cargo_output:
+    compiler_output = f"{compiled.stdout}\n{compiled.stderr}"
+    if compiled.returncode == 0 or "src/lib.rs" not in compiler_output:
         raise SweepError("Context Scout compiler producer returned no source diagnostic")
 
     diagnostic_at = time.monotonic() + 60
@@ -901,7 +914,7 @@ def _prime_context_scout_diagnostic(
             client,
             "tracedecay_diagnose",
             {
-                "cargo_output": cargo_output,
+                "cargo_output": compiler_output,
                 "severity": "error",
                 "include_callers": True,
                 "max_diagnostics": 8,

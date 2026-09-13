@@ -224,11 +224,18 @@ def run_bounded_command(
 def _phase_environment(root: Path, *, temp_root: Path | None = None) -> dict[str, str]:
     """Build one hermetic phase environment with a pre-created short temp root."""
     tmp_root = temp_root or root / "tmp"
+    rustup_home = os.environ.get("RUSTUP_HOME")
+    if rustup_home is None:
+        user_home = os.environ.get("HOME")
+        if user_home and (Path(user_home) / ".rustup").is_dir():
+            rustup_home = str(Path(user_home) / ".rustup")
     environment = {
         key: value
         for key, value in os.environ.items()
         if value and (key in INHERITED_ENVIRONMENT or key.startswith("LC_"))
     }
+    if rustup_home is not None:
+        environment["RUSTUP_HOME"] = rustup_home
     environment.update(
         {
             "HOME": str(root / "home"),
