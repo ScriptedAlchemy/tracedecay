@@ -174,7 +174,7 @@ pub use projection::{
     ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     SESSION_MESSAGE_PROJECTOR_VERSION_V5, SessionMessageProjection, WorkflowFactProjection,
-    WorkflowFactRecord,
+    WorkflowFactRecord, message_output_digest,
 };
 pub use provider_descriptor::{
     ToolMetadataNormalizer, synthesizes_native_record_id, tool_metadata_normalizer,
