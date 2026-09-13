@@ -1,14 +1,29 @@
-#![cfg(feature = "test-transport")]
+#![cfg(all(feature = "test-transport", unix))]
 
 use crate::support::*;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracedecay_domain::configuration::{
+    ConfigurationValueV1, WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1,
+    WorkExecutableCapabilityV1,
+};
+use tracedecay_domain::{
+    ManifestDigestHasher, WorkApprovalPolicy, WorkContentLocationClassV1, WorkEffortClassV1,
+    WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits, WorkFallbackTopology,
+    WorkFilesystemPolicy, WorkOrdinalBandV1, WorkProviderBackendV1, WorkRouteCandidateV1,
+    WorkRouteExecutionProfileV1, WorkSandboxPolicy,
+};
+
+async fn call_envelope(server: &tracedecay::mcp::McpServer, tool: &str, arguments: Value) -> Value {
+    let result = handle_real_server_tool_call(server, tool, arguments).await;
+    serde_json::from_str(extract_real_server_text(&result))
+        .unwrap_or_else(|error| panic!("{tool} returned invalid JSON ({error}): {result}"))
+}
 
 async fn call(server: &tracedecay::mcp::McpServer, tool: &str, arguments: Value) -> Value {
-    let result = handle_real_server_tool_call(server, tool, arguments).await;
-    let decoded: Value = serde_json::from_str(extract_real_server_text(&result))
-        .unwrap_or_else(|error| panic!("{tool} returned invalid JSON ({error}): {result}"));
+    let decoded = call_envelope(server, tool, arguments).await;
     decoded
         .pointer("/value/outcome/value/payload")
         .cloned()
@@ -25,13 +40,130 @@ fn now_micros() -> i64 {
     .expect("current time fits UtcMicros")
 }
 
-/// A fresh provider attempt has no session association yet. The public Work
-/// reads must still project it from the authority that committed the attempt.
-#[tokio::test]
-async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
-    let production = production_composition_fixture().await;
+async fn configure_attempt_provider(production: &ProductionCompositionFixture) {
+    let executable_bytes = b"#!/bin/sh\nexit 0\n";
+    let isolation_root = production
+        .project_root
+        .parent()
+        .expect("production fixture isolation root");
+    let executable_path = isolation_root.join("work-attempt-provider");
+    std::fs::write(&executable_path, executable_bytes).expect("write Work provider executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(&executable_path)
+            .expect("Work provider executable metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable_path, permissions)
+            .expect("Work provider executable permissions");
+    }
+    let executable_path = executable_path
+        .canonicalize()
+        .expect("canonical Work provider executable");
+    let mut hasher = ManifestDigestHasher::new();
+    hasher.update(executable_bytes);
+    let executable = WorkExecutableReference::new(
+        "executable.work.mcp-attempt-provider".to_owned(),
+        hasher.finalize().expect("Work provider executable digest"),
+    )
+    .expect("Work provider executable reference");
+    let route = WorkRouteCandidateV1 {
+        route_id: "route.work.mcp-attempt-codex.v1".to_owned(),
+        provider_capability_id: WorkProviderBackendV1::CodexCli
+            .provider_id()
+            .as_str()
+            .to_owned(),
+        model_id: "gpt-5.6-sol".to_owned(),
+        effort: WorkEffortClassV1::Standard,
+        declared_budget_ceiling: 1,
+        content_location: WorkContentLocationClassV1::Local,
+        correctness: WorkOrdinalBandV1::High,
+        sensitive_data_fitness: WorkOrdinalBandV1::High,
+        latency: WorkOrdinalBandV1::Moderate,
+        cost: WorkOrdinalBandV1::Moderate,
+        autonomy: WorkOrdinalBandV1::High,
+        evidence_quality: WorkOrdinalBandV1::High,
+        execution: WorkRouteExecutionProfileV1 {
+            sandbox: WorkSandboxPolicy::Required,
+            approval: WorkApprovalPolicy::Never,
+            filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+            egress: WorkEgressPolicy::Deny,
+            environment_allowlist: BTreeSet::new(),
+            credential_references: BTreeSet::new(),
+            limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1)
+                .expect("Work provider execution limits"),
+            maximum_duration_micros: 60_000_000,
+            fallback: WorkFallbackTopology::Disabled,
+        },
+    };
+    let binding = WorkExecutableBindingV1::new(
+        executable,
+        executable_path,
+        vec![WorkExecutableCapabilityV1::CodexCliExecJson],
+        vec![route],
+    )
+    .expect("configured Work provider binding");
     let server = production
         .harness
+        .server(&production.project_root)
+        .expect("production MCP server");
+    let expected_revision = production
+        .harness
+        .configuration_revision(&production.project_root)
+        .await
+        .expect("fixture configuration revision");
+    let configured = call_envelope(
+        &server,
+        "tracedecay_configuration_set",
+        json!({
+            "layer": {
+                "kind": "project",
+                "project_id": production
+                    .harness
+                    .project_id(&production.project_root)
+                    .await
+                    .expect("registered fixture project")
+            },
+            "key": WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+            "value": serde_json::to_value(ConfigurationValueV1::WorkExecutableBindings(vec![
+                binding,
+            ]))
+            .expect("serialize Work provider binding"),
+            "expected_revision": expected_revision,
+            "idempotency_key": "configuration.idempotency.mcp-attempt-provider",
+            "format": "json"
+        }),
+    )
+    .await;
+    assert_eq!(
+        configured.pointer("/outcome/outcome"),
+        Some(&json!("effect")),
+        "Work provider configuration must commit: {configured}"
+    );
+    drop(server);
+}
+
+/// A fresh provider attempt has no session association yet. The public Work
+/// reads must still project it from the authority that committed the attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
+    let production = production_composition_fixture().await;
+    let project_root = production.project_root.clone();
+    let isolation_root = project_root
+        .parent()
+        .expect("production fixture isolation root")
+        .to_path_buf();
+    configure_attempt_provider(&production).await;
+    production.harness.shutdown().await;
+    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
+        &isolation_root,
+        [project_root.clone()],
+    )
+    .await
+    .expect("reopen production composition with Work provider");
+    let server = harness
         .server(&production.project_root)
         .expect("production MCP server");
     let occurred_at = now_micros();
@@ -140,7 +272,6 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         prepared_accept["request"].clone(),
     )
     .await;
-    let accepted_version = accepted["verified_graph_version"].clone();
     assert_eq!(accepted["replayed"], false, "{accepted}");
     let prepared_admit = call(
         &server,
@@ -149,8 +280,7 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
             "selection": selection,
             "change": {
                 "change": "admit_execution",
-                "task_id": "task.mcp-attempt-read",
-                "based_on_version": accepted_version["graph_version"]
+                "task_id": "task.mcp-attempt-read"
             },
             "evidence": []
         }),
@@ -196,7 +326,7 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
 
     let commit = Command::new(crate::common::git_program())
         .args(["rev-parse", "HEAD"])
-        .current_dir(&production.project_root)
+        .current_dir(&project_root)
         .output()
         .expect("read fixture commit");
     assert!(commit.status.success(), "git rev-parse must succeed");
@@ -210,7 +340,7 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         "run_id": "run.mcp-attempt-read",
         "attempt_id": "attempt.mcp-attempt-read",
         "operation": "operation.work.start_attempt",
-        "worktree_root": production.project_root,
+        "worktree_root": project_root,
         "commit": commit,
         "instructions": "Observe the fixture only.",
         "effect_state": "observational",
@@ -226,6 +356,30 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         started["identity"]["attempt_id"], "attempt.mcp-attempt-read",
         "{started}"
     );
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let status = call(
+                &server,
+                "tracedecay_work_attempt_status",
+                json!({
+                    "task_id": "task.mcp-attempt-read",
+                    "run_id": "run.mcp-attempt-read",
+                    "attempt_id": "attempt.mcp-attempt-read"
+                }),
+            )
+            .await;
+            match status["state"].as_str() {
+                Some("succeeded") => break status,
+                Some("leased" | "running") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                _ => panic!("Work provider must settle successfully: {status}"),
+            }
+        }
+    })
+    .await
+    .expect("Work provider did not settle within the fixture budget");
+    assert_eq!(settled["terminal"]["outcome"], "succeeded", "{settled}");
     let second_started = call(
         &server,
         "tracedecay_work_start_attempt",
@@ -252,9 +406,9 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
                 .find(|attempt| attempt["identity"] == started["identity"])
         })
         .expect("started attempt must be listed");
-    assert_eq!(listed_attempt["state"], "failed", "{attempts}");
+    assert_eq!(listed_attempt["state"], "succeeded", "{attempts}");
     assert_eq!(
-        listed_attempt["terminal"]["outcome"], "failed",
+        listed_attempt["terminal"]["outcome"], "succeeded",
         "{attempts}"
     );
 
