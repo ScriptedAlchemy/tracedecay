@@ -1,5 +1,6 @@
 use super::*;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_semantic_contracts::SemanticModelLifecycleStateV1;
 
 enum SemanticExecutionInputV1 {
     Qualify(String),
@@ -79,6 +80,191 @@ impl SemanticInvocationControlV1 {
             .map(|remaining| Duration::from_micros(remaining as u64))
             .ok_or_else(ApplicationProblem::timed_out_before_admission)
     }
+}
+
+/// Qualification needs verified model bytes, but it evaluates its own packaged
+/// corpus and must not wait for the mounted project's vector projection.
+async fn await_semantic_qualification_runtime(
+    lifecycle_owner: Option<&Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
+    control: &SemanticInvocationControlV1,
+    request_cancellation: &CancellationToken,
+) -> Result<(), ApplicationProblem> {
+    let owner = lifecycle_owner
+        .ok_or_else(|| semantic_runtime_unavailable("semantic model lifecycle is unavailable"))?;
+    let _ = owner.enqueue_demand_acquisition_if_needed();
+    let mut ready = owner.verified_ready_events();
+
+    loop {
+        if let Some(problem) = semantic_execution_interruption(control, request_cancellation) {
+            return Err(problem);
+        }
+        let acquisition_running = owner.background_acquisition_is_running();
+        let lifecycle = owner.status();
+        match lifecycle.state.as_ref() {
+            Some(
+                SemanticModelLifecycleStateV1::Installed { .. }
+                | SemanticModelLifecycleStateV1::Loading { .. }
+                | SemanticModelLifecycleStateV1::Indexing { .. }
+                | SemanticModelLifecycleStateV1::Ready { .. },
+            ) => return Ok(()),
+            Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
+                if !lifecycle.auto_download =>
+            {
+                return Err(semantic_runtime_unavailable(
+                    "the selected semantic model is not installed and auto-download is disabled",
+                ));
+            }
+            Some(SemanticModelLifecycleStateV1::Failed { detail, .. }) if !acquisition_running => {
+                return Err(semantic_runtime_unavailable(format!(
+                    "semantic model acquisition failed: {detail}"
+                )));
+            }
+            None => {
+                return Err(semantic_runtime_unavailable(
+                    "no semantic model is selected",
+                ));
+            }
+            _ => {}
+        }
+        let deadline = tokio::time::sleep(control.remaining(current_micros())?);
+        tokio::pin!(deadline);
+        tokio::select! {
+            () = request_cancellation.cancelled() => {}
+            () = &mut deadline => return Err(ApplicationProblem::timed_out_before_admission()),
+            result = ready.changed() => {
+                if result.is_err() {
+                    return Err(semantic_runtime_unavailable(
+                        "semantic model lifecycle notification authority closed",
+                    ));
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
+}
+
+/// Publication evaluates against the exact mounted vector generation and must
+/// wait for that generation before acquiring the evaluator permit.
+async fn await_semantic_evaluation_runtime(
+    project_root: &Path,
+    scheduler: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    lifecycle_owner: Option<&Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
+    control: &SemanticInvocationControlV1,
+    request_cancellation: &CancellationToken,
+) -> Result<(), ApplicationProblem> {
+    let owner = lifecycle_owner
+        .ok_or_else(|| semantic_runtime_unavailable("semantic model lifecycle is unavailable"))?;
+    let _ = owner.enqueue_demand_acquisition_if_needed();
+    let mut projection_offered = false;
+    let mut serving_seats = scheduler.subscribe_serving_seats();
+    let mut serving_changes = scheduler
+        .subscribe_serving_generation_changes(project_root)
+        .await;
+
+    loop {
+        if let Some(problem) = semantic_execution_interruption(control, request_cancellation) {
+            return Err(problem);
+        }
+        let acquisition_running = owner.background_acquisition_is_running();
+        let lifecycle = owner.status();
+        let mut waiting_for_serving = false;
+        match lifecycle.state.as_ref() {
+            Some(
+                SemanticModelLifecycleStateV1::Installed { .. }
+                | SemanticModelLifecycleStateV1::Ready { .. },
+            ) => {
+                if tracedecay_application::semantic_runtime::project_semantic_application_status(
+                    project_root,
+                    None,
+                )
+                .is_some_and(|status| {
+                    tracedecay_code_index_runtime::semantic_evaluation::semantic_publication_generation(
+                        &status.state,
+                    )
+                    .is_ok()
+                }) {
+                    return Ok(());
+                }
+                if !projection_offered {
+                    let outcome = scheduler.reschedule_semantic_generation(project_root).await;
+                    projection_offered = outcome.is_scheduled();
+                    waiting_for_serving = matches!(
+                        outcome,
+                        tracedecay_application::semantic_runtime::SavedGenerationScheduleOutcomeV1::NoServingGeneration
+                    );
+                    if waiting_for_serving
+                        && !scheduler.request_complete_generation(project_root).await
+                    {
+                        return Err(semantic_runtime_unavailable(
+                            "code-index scheduler is unavailable for semantic projection",
+                        ));
+                    }
+                }
+            }
+            Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
+                if !lifecycle.auto_download =>
+            {
+                return Err(semantic_runtime_unavailable(
+                    "the selected semantic model is not installed and auto-download is disabled"
+                        .to_owned(),
+                ));
+            }
+            Some(SemanticModelLifecycleStateV1::Failed { detail, .. }) => {
+                if !acquisition_running {
+                    return Err(semantic_runtime_unavailable(format!(
+                        "semantic model acquisition failed: {detail}"
+                    )));
+                }
+            }
+            None => {
+                return Err(semantic_runtime_unavailable(
+                    "no semantic model is selected",
+                ));
+            }
+            _ => {}
+        }
+        let deadline = tokio::time::sleep(control.remaining(current_micros())?);
+        tokio::pin!(deadline);
+        if waiting_for_serving {
+            match serving_changes.as_mut() {
+                Some(changes) => tokio::select! {
+                    () = request_cancellation.cancelled() => {}
+                    () = &mut deadline => return Err(ApplicationProblem::timed_out_before_admission()),
+                    result = changes.changed() => {
+                        if result.is_err() {
+                            return Err(semantic_runtime_unavailable(
+                                "code-index serving notification authority closed",
+                            ));
+                        }
+                    }
+                },
+                None => tokio::select! {
+                    () = request_cancellation.cancelled() => {}
+                    () = &mut deadline => return Err(ApplicationProblem::timed_out_before_admission()),
+                    result = serving_seats.changed() => {
+                        if result.is_err() {
+                            return Err(semantic_runtime_unavailable(
+                                "code-index serving notification authority closed",
+                            ));
+                        }
+                    }
+                },
+            }
+        } else {
+            tokio::select! {
+                () = request_cancellation.cancelled() => {}
+                () = &mut deadline => return Err(ApplicationProblem::timed_out_before_admission()),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
+    }
+}
+
+fn semantic_runtime_unavailable(detail: impl AsRef<str>) -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "semantic_evaluation.runtime_unavailable".to_owned(),
+        message: semantic_evaluation_rejection_message(detail.as_ref()),
+    })
 }
 
 impl DaemonInvocationService {
@@ -230,6 +416,35 @@ impl DaemonInvocationService {
                 );
             }
         };
+        let scope = registered.scope.clone();
+        let scheduler = self.code_index_schedulers.clone();
+        let workers = Arc::clone(&registered.semantic_evaluation_workers);
+        let lifecycle_owner = scheduler.semantic_lifecycle_owner_for_scope(&scope).await;
+        // Do not hold the evaluator permit while waiting for acquisition or
+        // the publication-only project projection that uses the same lane.
+        let prerequisite = match &input {
+            SemanticExecutionInputV1::Qualify(_) => {
+                await_semantic_qualification_runtime(
+                    lifecycle_owner.as_ref(),
+                    &control,
+                    &request_cancellation,
+                )
+                .await
+            }
+            SemanticExecutionInputV1::EvaluateAndPublish(_) => {
+                await_semantic_evaluation_runtime(
+                    &canonical_root,
+                    &scheduler,
+                    lifecycle_owner.as_ref(),
+                    &control,
+                    &request_cancellation,
+                )
+                .await
+            }
+        };
+        if let Err(problem) = prerequisite {
+            return application_problem(request_id, problem);
+        }
         let remaining = match control.remaining(current_micros()) {
             Ok(remaining) => remaining,
             Err(problem) => return application_problem(request_id, problem),
@@ -240,10 +455,6 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::InvalidRequest,
             );
         };
-        let scope = registered.scope.clone();
-        let scheduler = self.code_index_schedulers.clone();
-        let workers = Arc::clone(&registered.semantic_evaluation_workers);
-        let lifecycle_owner = scheduler.semantic_lifecycle_owner_for_scope(&scope).await;
         // Daemon-lifetime immutable projection payloads, shared by every
         // qualification request for this project (#838).
         let projection_batch_cache = workers.projection_batch_cache();
@@ -252,46 +463,18 @@ impl DaemonInvocationService {
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
                         async move {
-                            let candidate = tracedecay_code_index_runtime::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
-                                &canonical_root,
-                                &scope,
-                                &scheduler,
-                                &evaluated_profile_id,
-                                Arc::clone(&control),
-                            )
-                            .await?;
-                            let authority = tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
+                            let authority = tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticQualificationAuthorityV1::new(
                                 canonical_root.clone(),
                                 scope,
                                 scheduler,
-                                candidate.clone(),
+                                evaluated_profile_id,
                                 control,
                                 lifecycle_owner,
                                 projection_batch_cache,
                             );
-                            let qualification = tracedecay_application::semantic_runtime::ProductionSemanticConfigurationOperationV1::qualify_profile(
-                                &authority,
-                                &canonical_root,
-                                candidate.clone(),
-                            )
-                            .await?;
-                            if qualification.evaluated_profile_id() != candidate.evaluated_profile_id {
-                                return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
-                                    format!(
-                                        "semantic qualification evaluated profile {} instead of the requested {}",
-                                        qualification.evaluated_profile_id(),
-                                        candidate.evaluated_profile_id,
-                                    ),
-                                ));
-                            }
-                            let snapshot = qualification.snapshot().clone();
-                            let validated_candidate = qualification.candidate().clone();
-                            let evaluation = qualification.into_evaluation();
-                            let qualification_key = semantic_qualification_key(
-                                &validated_candidate,
-                                &snapshot,
-                                evaluation.report(),
-                            )?;
+                            let evaluation = authority.evaluate().await?;
+                            let qualification_key =
+                                authority.qualification_key(evaluation.report())?;
                             let qualification_bytes = tracedecay_query::search_quality::encode_packaged_native_qualification(
                                 evaluation,
                                 qualification_key,
@@ -379,68 +562,6 @@ fn semantic_execution_interruption(
             legal_actions: Vec::new(),
         })
         .or_else(|| control.interruption(current_micros()))
-}
-
-fn semantic_qualification_key(
-    candidate: &tracedecay_application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
-    snapshot: &tracedecay_application::semantic_runtime::SemanticEvaluationPublicationSnapshotV1,
-    report: &tracedecay_query::search_quality::DirectEvaluationReportV1,
-) -> Result<
-    tracedecay_query::search_quality::NativeQualificationKeyV1,
-    SemanticActivationCoordinationErrorV1,
-> {
-    let candidate_semantic = candidate
-        .compatibility
-        .semantic
-        .as_ref()
-        .ok_or(SemanticActivationCoordinationErrorV1::Rejected)?;
-    let current_semantic = snapshot
-        .runtime
-        .semantic
-        .as_ref()
-        .ok_or(SemanticActivationCoordinationErrorV1::Rejected)?;
-    let candidate_model =
-        tracedecay_query::search_quality::NativeQualificationModelKeyV1::from_admitted_projection(
-            &candidate_semantic.projection,
-        );
-    let current_model =
-        tracedecay_query::search_quality::NativeQualificationModelKeyV1::from_admitted_projection(
-            &current_semantic.projection,
-        );
-    if candidate_semantic.implementation_revision != current_semantic.implementation_revision
-        || candidate_semantic.fusion_revision != current_semantic.fusion_revision
-        || candidate_semantic.artifact_manifest_digest != current_semantic.artifact_manifest_digest
-        || candidate_semantic.runtime_compatibility_digest
-            != current_semantic.runtime_compatibility_digest
-        || candidate_semantic.search_index_key != current_semantic.search_index_key
-        || candidate_model != current_model
-    {
-        return Err(SemanticActivationCoordinationErrorV1::Rejected);
-    }
-    Ok(
-        tracedecay_query::search_quality::NativeQualificationKeyV1::new(
-            report,
-            candidate.evaluated_profile_id.clone(),
-            tracedecay_query::search_quality::NativeQualificationRuntimeKeyV1 {
-                implementation_revision: current_semantic.implementation_revision.clone(),
-                fusion_revision: current_semantic.fusion_revision.clone(),
-                runtime_compatibility_digest: current_semantic.runtime_compatibility_digest.clone(),
-                model: current_model,
-                search_index_key: current_semantic.search_index_key.clone(),
-                execution_resources:
-                    tracedecay_query::search_quality::NativeQualificationExecutionResourceKeyV1 {
-                        model_bytes: current_semantic.resources.model_bytes,
-                        tokenizer_bytes: current_semantic.resources.tokenizer_bytes,
-                        threads: current_semantic.resources.threads,
-                        max_concurrent_sessions: current_semantic.resources.max_concurrent_sessions,
-                        batch_size: current_semantic.resources.batch_size,
-                        sequence_length: current_semantic.resources.sequence_length,
-                        load_deadline_ms: current_semantic.resources.load_deadline_ms,
-                    },
-            },
-            tracedecay_query::search_quality::NativeQualificationPlatformV1::current(),
-        ),
-    )
 }
 
 fn semantic_execution_response(
@@ -536,8 +657,10 @@ fn semantic_evaluation_response(
             },
         ),
         Err(DaemonSemanticEvaluationExecutionErrorV1::Coordination(
-            SemanticActivationCoordinationErrorV1::Runtime(_)
-            | SemanticActivationCoordinationErrorV1::Unavailable,
+            SemanticActivationCoordinationErrorV1::Runtime(detail),
+        )) => application_problem(request_id, semantic_runtime_unavailable(detail)),
+        Err(DaemonSemanticEvaluationExecutionErrorV1::Coordination(
+            SemanticActivationCoordinationErrorV1::Unavailable,
         )) => DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable),
     }
 }
@@ -680,6 +803,30 @@ mod tests {
                 assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
             }
             other => panic!("expected typed conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_failure_names_the_missing_semantic_prerequisite() {
+        let response = semantic_evaluation_response(
+            "req-semantic-runtime".to_owned(),
+            Err(
+                tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1::Coordination(
+                    SemanticActivationCoordinationErrorV1::Runtime(
+                        "semantic model acquisition failed".to_owned(),
+                    ),
+                ),
+            ),
+        );
+
+        match response.outcome {
+            DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+                let diagnostic = problem.diagnostic().expect("runtime diagnostic");
+                assert_eq!(diagnostic.code, "semantic_evaluation.runtime_unavailable");
+                assert_eq!(diagnostic.message, "semantic model acquisition failed");
+            }
+            other => panic!("expected typed runtime problem, got {other:?}"),
         }
     }
 }

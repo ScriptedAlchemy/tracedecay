@@ -1,13 +1,11 @@
 //! Composed semantic activation journey: evaluate, publish, then activate.
 //!
-//! One typed daemon operation carries an operator from an installed model to
-//! an active semantic profile. The daemon composes the installed-model
-//! material and the configuration compare-and-swap itself, so no caller ever
-//! authors artifact digests or install paths over the wire. Every stage
-//! failure is the typed problem of the authority that refused it: evaluation
-//! problems come from the semantic evaluation route, activation problems from
-//! the configuration mutation route (a lost compare-and-swap stays a typed
-//! `Conflict` with `RetryDirective::AfterRevalidate`).
+//! One typed daemon operation carries an operator from the configured model to
+//! an active semantic profile. The evaluation route acquires and projects the
+//! model when needed; this route composes its verified material and the
+//! configuration compare-and-swap, so no caller authors artifact digests or
+//! install paths over the wire. Every stage failure is the typed problem of
+//! the authority that refused it.
 
 use super::*;
 
@@ -85,17 +83,6 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
-        // Preflight the installed material before the multi-minute native
-        // evaluation so a missing model is a fast typed refusal, not a
-        // late one.
-        let material = match semantic_activation_material(
-            tracedecay_application::semantic_runtime::project_lifecycle_status(&project_root_path)
-                .as_ref(),
-        ) {
-            Ok(material) => material,
-            Err(problem) => return application_problem(request_id, problem),
-        };
-
         let evaluation = self
             .execute_semantic_evaluation(
                 project_root,
@@ -125,6 +112,13 @@ impl DaemonInvocationService {
                     outcome,
                 };
             }
+        };
+        let material = match semantic_activation_material(
+            tracedecay_application::semantic_runtime::project_lifecycle_status(&project_root_path)
+                .as_ref(),
+        ) {
+            Ok(material) => material,
+            Err(problem) => return application_problem(request_id, problem),
         };
         let current = match registered.runtime.client().current().await {
             Ok(current) => current,

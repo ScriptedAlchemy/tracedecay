@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
-    CalibrationProfileId, CodeGenerationId, ComponentRevision, ManifestDigest,
-    SemanticSearchIndexProfileV1, VectorGenerationIdV1, canonical_sha256,
+    AdmittedEmbeddingProjectionKeyV1, CalibrationProfileId, CodeGenerationId, ComponentRevision,
+    ManifestDigest, SemanticSearchIndexProfileV1, VectorGenerationIdV1, canonical_sha256,
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -229,6 +229,24 @@ fn vector_runtime_identity_matches(
 ) -> bool {
     &observed.vector_generation_id == expected_generation
         && &observed.source_manifest_digest == expected_source_manifest
+}
+
+fn semantic_runtime_compatibility_digest(
+    projection: &AdmittedEmbeddingProjectionKeyV1,
+) -> Result<ManifestDigest, SemanticActivationCoordinationErrorV1> {
+    let embedding = projection.embedding_key();
+    canonical_sha256(&(
+        "tracedecay.semantic-runtime-compatibility.v1",
+        &embedding.runtime_backend,
+        &embedding.runtime_build_revision,
+        embedding.device_class,
+        embedding.precision,
+    ))
+    .map_err(|_| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation runtime compatibility digest is invalid".to_owned(),
+        )
+    })
 }
 
 pub async fn build_daemon_semantic_evaluation_candidate(
@@ -458,18 +476,8 @@ fn daemon_semantic_evaluation_candidate(
                 )
             })?;
     let embedding = vector.embedding_key().embedding_key();
-    let runtime_compatibility_digest = canonical_sha256(&(
-        "tracedecay.semantic-runtime-compatibility.v1",
-        &embedding.runtime_backend,
-        &embedding.runtime_build_revision,
-        embedding.device_class,
-        embedding.precision,
-    ))
-    .map_err(|_| {
-        SemanticActivationCoordinationErrorV1::RejectedDetail(
-            "semantic evaluation runtime compatibility digest is invalid".to_owned(),
-        )
-    })?;
+    let runtime_compatibility_digest =
+        semantic_runtime_compatibility_digest(vector.embedding_key())?;
     let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
         .and_then(|profile| profile.index_key())
         .map_err(|_| {
@@ -882,7 +890,8 @@ pub struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
     project_root: PathBuf,
     scope: ResolvedScope,
     scheduler: CodeIndexSchedulerRegistryV1,
-    candidate: SemanticEvaluationProfileCandidateV1,
+    candidate: Option<SemanticEvaluationProfileCandidateV1>,
+    evaluated_profile_id: String,
     control: Arc<DaemonSemanticEvaluationControlV1>,
     projection_batch_cache: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1>,
     prepared_native: Arc<
@@ -928,18 +937,183 @@ impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
         lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
         projection_batch_cache: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1>,
     ) -> Self {
+        let evaluated_profile_id = candidate.evaluated_profile_id.clone();
         Self {
             lifecycle_owner,
             project_root,
             scope,
             scheduler,
-            candidate,
+            candidate: Some(candidate),
+            evaluated_profile_id,
             control,
             projection_batch_cache,
             prepared_native: Arc::new(Mutex::new(BTreeMap::new())),
             projection_cases: Arc::new(Mutex::new(BTreeMap::new())),
             incremental_projections: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    fn qualification(
+        project_root: PathBuf,
+        scope: ResolvedScope,
+        scheduler: CodeIndexSchedulerRegistryV1,
+        evaluated_profile_id: String,
+        control: Arc<DaemonSemanticEvaluationControlV1>,
+        lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
+        projection_batch_cache: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1>,
+    ) -> Self {
+        Self {
+            lifecycle_owner,
+            project_root,
+            scope,
+            scheduler,
+            candidate: None,
+            evaluated_profile_id,
+            control,
+            projection_batch_cache,
+            prepared_native: Arc::new(Mutex::new(BTreeMap::new())),
+            projection_cases: Arc::new(Mutex::new(BTreeMap::new())),
+            incremental_projections: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    fn publication_candidate(
+        &self,
+    ) -> Result<&SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
+        self.candidate.as_ref().ok_or_else(|| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "portable qualification has no mounted publication candidate".to_owned(),
+            )
+        })
+    }
+}
+
+/// Read-only native qualification over the packaged evaluator corpus. This
+/// authority can load the configured model, but it carries no mounted vector
+/// generation, calibration, or publication capability.
+pub struct DaemonSemanticQualificationAuthorityV1 {
+    evaluation: DaemonSemanticEvaluationSnapshotAuthorityV1,
+}
+
+impl DaemonSemanticQualificationAuthorityV1 {
+    pub fn new(
+        project_root: PathBuf,
+        scope: ResolvedScope,
+        scheduler: CodeIndexSchedulerRegistryV1,
+        evaluated_profile_id: String,
+        control: Arc<DaemonSemanticEvaluationControlV1>,
+        lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
+        projection_batch_cache: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1>,
+    ) -> Self {
+        Self {
+            evaluation: DaemonSemanticEvaluationSnapshotAuthorityV1::qualification(
+                project_root,
+                scope,
+                scheduler,
+                evaluated_profile_id,
+                control,
+                lifecycle_owner,
+                projection_batch_cache,
+            ),
+        }
+    }
+
+    pub async fn evaluate(
+        &self,
+    ) -> Result<
+        crate::query::search_quality::DirectActivationEvaluationV1,
+        SemanticActivationCoordinationErrorV1,
+    > {
+        self.evaluation
+            .evaluate_default_candidate(&self.evaluation.evaluated_profile_id)
+            .await
+    }
+
+    pub fn qualification_key(
+        &self,
+        report: &tracedecay_query::search_quality::DirectEvaluationReportV1,
+    ) -> Result<
+        tracedecay_query::search_quality::NativeQualificationKeyV1,
+        SemanticActivationCoordinationErrorV1,
+    > {
+        self.evaluation.qualification_key(report)
+    }
+}
+
+impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
+    fn qualification_key(
+        &self,
+        report: &tracedecay_query::search_quality::DirectEvaluationReportV1,
+    ) -> Result<
+        tracedecay_query::search_quality::NativeQualificationKeyV1,
+        SemanticActivationCoordinationErrorV1,
+    > {
+        let prepared = self.prepared_native.lock().map_err(|_| {
+            SemanticActivationCoordinationErrorV1::Runtime(
+                "semantic evaluator generation cache is unavailable".to_owned(),
+            )
+        })?;
+        let projection = prepared
+            .values()
+            .next()
+            .map(|generation| generation.projection().clone())
+            .ok_or_else(|| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    "native semantic qualification prepared no semantic generation".to_owned(),
+                )
+            })?;
+        if prepared
+            .values()
+            .any(|generation| generation.projection() != &projection)
+        {
+            return Err(SemanticActivationCoordinationErrorV1::Conflict);
+        }
+        drop(prepared);
+
+        let runtime =
+            tracedecay_application::semantic_runtime::project_semantic_production_runtime(
+                &self.project_root,
+            )
+            .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+        let resources = runtime
+            .evaluation_target_resource_requirement()
+            .map_err(coordination_error_from_runtime)?;
+        let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        let runtime_compatibility_digest = semantic_runtime_compatibility_digest(&projection)?;
+        let implementation_revision = ComponentRevision::new("semantic.fastembed.production.v1")
+            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        let fusion_revision =
+            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+
+        Ok(
+            tracedecay_query::search_quality::NativeQualificationKeyV1::new(
+                report,
+                self.evaluated_profile_id.clone(),
+                tracedecay_query::search_quality::NativeQualificationRuntimeKeyV1 {
+                    implementation_revision,
+                    fusion_revision,
+                    runtime_compatibility_digest,
+                    model: tracedecay_query::search_quality::NativeQualificationModelKeyV1::from_admitted_projection(
+                        &projection,
+                    ),
+                    search_index_key,
+                    execution_resources:
+                        tracedecay_query::search_quality::NativeQualificationExecutionResourceKeyV1 {
+                            model_bytes: resources.model_bytes,
+                            tokenizer_bytes: resources.tokenizer_bytes,
+                            threads: resources.threads,
+                            max_concurrent_sessions: resources.max_concurrent_sessions,
+                            batch_size: resources.batch_size,
+                            sequence_length: resources.sequence_length,
+                            load_deadline_ms: resources.load_deadline_ms,
+                        },
+                },
+                tracedecay_query::search_quality::NativeQualificationPlatformV1::current(),
+            ),
+        )
     }
 }
 
@@ -1002,16 +1176,16 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 rerank: None,
             });
         }
-        let required = self
-            .candidate
-            .compatibility
-            .semantic
-            .as_ref()
-            .ok_or_else(|| {
-                CandidateOutputError::Contract(
-                    "semantic evaluator profile has no admitted production runtime".to_owned(),
-                )
-            })?;
+        let required = match self.candidate.as_ref() {
+            Some(candidate) => {
+                Some(candidate.compatibility.semantic.as_ref().ok_or_else(|| {
+                    CandidateOutputError::Contract(
+                        "semantic evaluator profile has no admitted production runtime".to_owned(),
+                    )
+                })?)
+            }
+            None => None,
+        };
         let mut prepared = self.prepared_native.lock().map_err(|_| {
             CandidateOutputError::Contract(
                 "semantic evaluator generation cache is unavailable".to_owned(),
@@ -1041,7 +1215,9 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 )
             })
             .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
-            if generation.projection() != &required.projection {
+            if let Some(required) = required
+                && generation.projection() != &required.projection
+            {
                 return Err(semantic_projection_pin_mismatch(
                     generation.projection(),
                     &required.projection,
@@ -1054,7 +1230,9 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 "semantic evaluator generation cache lost its prepared generation".to_owned(),
             )
         })?;
-        if generation.projection() != &required.projection {
+        if let Some(required) = required
+            && generation.projection() != &required.projection
+        {
             return Err(semantic_projection_pin_mismatch(
                 generation.projection(),
                 &required.projection,
@@ -1062,9 +1240,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
         }
         let rerank_authority = self
             .candidate
-            .compatibility
-            .rerank
             .as_ref()
+            .and_then(|candidate| candidate.compatibility.rerank.as_ref())
             .and_then(|pins| {
                 self.lifecycle_owner
                     .as_ref()
@@ -1089,8 +1266,12 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
         self.control.checkpoint().map_err(|_| {
             CandidateOutputError::Contract("semantic evaluation was cancelled".to_owned())
         })?;
-        let semantic_resources = self.candidate.compatibility.semantic.as_ref();
-        if let Some(required) = semantic_resources {
+        let required = self
+            .candidate
+            .as_ref()
+            .and_then(|candidate| candidate.compatibility.semantic.as_ref());
+        let semantic_enabled = self.candidate.is_none() || required.is_some();
+        if semantic_enabled {
             let mut prepared = self.prepared_native.lock().map_err(|_| {
                 CandidateOutputError::Contract(
                     "semantic evaluator generation cache is unavailable".to_owned(),
@@ -1120,7 +1301,9 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                     )
                 })
                 .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-                if generation.projection() != &required.projection {
+                if let Some(required) = required
+                    && generation.projection() != &required.projection
+                {
                     return Err(semantic_projection_pin_mismatch(
                         generation.projection(),
                         &required.projection,
@@ -1136,7 +1319,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             CandidateOutputError::Contract("semantic evaluation was cancelled".to_owned())
         })?;
         let process_resources = resource_window.and_then(LinuxProcessResourceWindowV1::finish);
-        let resources = if semantic_resources.is_some() {
+        let resources = if semantic_enabled {
             let prepared = self.prepared_native.lock().map_err(|_| {
                 CandidateOutputError::Contract(
                     "semantic evaluator generation cache is unavailable".to_owned(),
@@ -1303,23 +1486,23 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 .manifest_digest
         {
             Some("incremental_source_manifest_digest")
-        } else if semantic_resources.is_some() && resources.model_bytes == 0 {
+        } else if semantic_enabled && resources.model_bytes == 0 {
             Some("model_bytes")
-        } else if semantic_resources.is_some() && resources.tokenizer_bytes == 0 {
+        } else if semantic_enabled && resources.tokenizer_bytes == 0 {
             Some("tokenizer_bytes")
-        } else if semantic_resources.is_some() && resources.threads == 0 {
+        } else if semantic_enabled && resources.threads == 0 {
             Some("threads")
-        } else if semantic_resources.is_some() && resources.batch_size == 0 {
+        } else if semantic_enabled && resources.batch_size == 0 {
             Some("batch_size")
-        } else if semantic_resources.is_some() && resources.sequence_length == 0 {
+        } else if semantic_enabled && resources.sequence_length == 0 {
             Some("sequence_length")
-        } else if semantic_resources.is_some() && resources.load_deadline_ms == 0 {
+        } else if semantic_enabled && resources.load_deadline_ms == 0 {
             Some("load_deadline_ms")
-        } else if semantic_resources.is_some() && resources.cold_model_load_micros == 0 {
+        } else if semantic_enabled && resources.cold_model_load_micros == 0 {
             Some("cold_model_load_micros")
-        } else if semantic_resources.is_some() && resources.vector_bytes == 0 {
+        } else if semantic_enabled && resources.vector_bytes == 0 {
             Some("vector_bytes")
-        } else if semantic_resources.is_some() && resources.projection_cases.len() != 7 {
+        } else if semantic_enabled && resources.projection_cases.len() != 7 {
             Some("projection_cases")
         } else {
             None
@@ -1404,6 +1587,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
         Box::pin(hotpath::future!(
             async move {
                 self.control.checkpoint()?;
+                let candidate = self.publication_candidate()?;
                 let code = self
                     .control
                     .interruptible(hotpath::future!(
@@ -1421,10 +1605,10 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                     vector_generation_id,
                     semantic,
                     semantic_lifecycle_verification,
-                ) = match self.candidate.compatibility.semantic.as_ref() {
+                ) = match candidate.compatibility.semantic.as_ref() {
                     Some(candidate) => {
                         let semantic_source_manifest_digest = self
-                            .candidate
+                            .publication_candidate()?
                             .semantic_source_manifest_digest
                             .clone()
                             .ok_or_else(|| {
@@ -1476,7 +1660,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                 let evaluated = hotpath::measure_block!(
                     "daemon.semantic.evaluation.snapshot.profile_material",
                     crate::query::search_quality::load_default_evaluated_profile_material(
-                        &self.candidate.evaluated_profile_id,
+                        &candidate.evaluated_profile_id,
                     )
                 )
                 .map_err(|error| {
@@ -1502,7 +1686,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                             super::code_index_scheduler::queries::maximum_retrieval_budget(),
                         semantic,
                         semantic_ceiling,
-                        rerank: self.candidate.compatibility.rerank.clone(),
+                        rerank: candidate.compatibility.rerank.clone(),
                         rerank_ceiling: evaluated.rerank,
                     },
                 })

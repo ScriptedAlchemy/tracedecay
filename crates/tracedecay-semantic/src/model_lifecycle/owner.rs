@@ -851,6 +851,15 @@ impl SemanticModelLifecycleOwnerV1 {
         self.spawn_acquire(true, selected_model.as_deref())
     }
 
+    pub fn background_acquisition_is_running(&self) -> bool {
+        self.worker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .handle
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+    }
+
     pub fn retry(&self) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
         let status = self.status();
         if !status.remediation.retry {

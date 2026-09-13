@@ -65,14 +65,13 @@ tool (the MCP tool surface for retrieval and editing).";
 const SEMANTIC_LONG_ABOUT: &str = "\
 Operates semantic retrieval for the selected project through the daemon. \
 `activate` runs the full activation journey as one typed daemon operation: \
-it evaluates the named profile with the native FastEmbed evaluator (the \
-current+10x workload; typically minutes), publishes the accepted evaluation, \
-and compare-and-swaps the result into `active_profile` of the project's \
-`semantic.runtime.v1` configuration. The daemon composes the installed-model \
-material and the configuration revision itself. Requires the selected \
-semantic model to be installed (`tracedecay tool runtime` shows the model \
-lifecycle state); strict-semantic search reports `unavailable` until a \
-profile is active.";
+it acquires the selected model when needed, projects the current code \
+generation, evaluates the named profile with the native FastEmbed evaluator \
+(the current+10x workload; typically minutes), publishes the accepted \
+evaluation, and compare-and-swaps the result into `active_profile` of the \
+project's `semantic.runtime.v1` configuration. The daemon composes the model \
+material and configuration revision itself; strict-semantic search reports \
+`unavailable` until a profile is active.";
 
 const SEMANTIC_AFTER_HELP: &str = "\
 Examples:
@@ -81,10 +80,9 @@ Examples:
   tracedecay semantic activate --json                  One canonical JSON receipt line
   tracedecay semantic activate --no-rollback           Do not record the prior profile
 
-Failure states are typed: an uninstalled model refuses fast with the
-lifecycle state that blocks activation, an evaluation failure names the
-evaluator's rejection, and a lost configuration compare-and-swap reports a
-retryable conflict. Watch progress in another terminal with
+Failure states are typed: model acquisition and evaluation failures name the
+stage that blocked activation, and a lost configuration compare-and-swap
+reports a retryable conflict. Watch progress in another terminal with
 `tracedecay tool runtime` (semantic_runtime.state).
 
 Related: tracedecay tool runtime (semantic runtime state), tracedecay tool
