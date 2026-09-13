@@ -160,13 +160,51 @@ pub(super) async fn project_open_tasks(
     gates.lock().await.tasks.clone()
 }
 
+/// Run one blocking repository/filesystem probe off the async workers.
+///
+/// Live defect this exists for: a daemon connection resolved its route by
+/// running `gix` discovery, enrollment-marker reads, and a HEAD read inline on
+/// the tokio worker that was serving it. With sixteen clients arriving at once
+/// against a checkout on a slow volume, every worker sat inside that
+/// filesystem work, the accept loop was never polled, and the listening socket
+/// refused new connections while the process stayed alive and its other
+/// servers answered.
+///
+/// The probe itself cannot be interrupted once it starts, but the caller is
+/// bounded: a probe that outlives [`REPOSITORY_DISCOVERY_DEADLINE`] yields the
+/// same retryable deferred-discovery refusal a timed-out `git` helper does,
+/// and the abandoned probe finishes on the blocking pool without a worker.
+pub(super) async fn bounded_repository_probe<Probe, Value>(
+    project_path: &Path,
+    probe: Probe,
+) -> Result<Value>
+where
+    Probe: FnOnce() -> Value + Send + 'static,
+    Value: Send + 'static,
+{
+    let probe = tokio::task::spawn_blocking(probe);
+    match tokio::time::timeout(REPOSITORY_DISCOVERY_DEADLINE, probe).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(_)) => Err(super::core_proxy::repository_discovery_deferred(
+            project_path,
+            tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::ProbeFailed,
+        )),
+        Err(_) => Err(super::core_proxy::repository_discovery_deferred(
+            project_path,
+            tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
+        )),
+    }
+}
+
 #[hotpath::measure(label = "daemon.project.route.resolve", future = true)]
 pub(super) async fn resolved_project_server_key(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
 ) -> Result<Option<ProjectServerKey>> {
-    if !durable_enrollment_resolves_existing_store(store_administration, canonical_project_path) {
+    if !durable_enrollment_resolves_existing_store(store_administration, canonical_project_path)
+        .await?
+    {
         return Ok(None);
     }
     let registry_database = store_administration.registered_profile_database().await?;
@@ -181,15 +219,23 @@ pub(super) async fn resolved_project_server_key(
         // any permitted repair; this is only a mounted-runtime reuse path.
         return Ok(None);
     };
-    let graph_scope = tracedecay_runtime_core::branch::current_branch(canonical_project_path)
-        .or_else(|| {
-            tracedecay_runtime_core::worktree::detached_worktree_graph_scope(canonical_project_path)
-        });
-    let (graph_db_path, _, fallback_warning) = crate::project::TraceDecay::resolve_db_for_branch(
-        canonical_project_path,
-        &layout.data_root,
-        graph_scope.as_deref(),
-    );
+    let probe_path = canonical_project_path.to_path_buf();
+    let data_root = layout.data_root.clone();
+    let (graph_db_path, fallback_warning) =
+        bounded_repository_probe(canonical_project_path, move || {
+            let graph_scope = tracedecay_runtime_core::branch::current_branch(&probe_path)
+                .or_else(|| {
+                    tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
+                });
+            let (graph_db_path, _, fallback_warning) =
+                crate::project::TraceDecay::resolve_db_for_branch(
+                    &probe_path,
+                    &data_root,
+                    graph_scope.as_deref(),
+                );
+            (graph_db_path, fallback_warning)
+        })
+        .await?;
     if fallback_warning.is_some() {
         return Ok(None);
     }
