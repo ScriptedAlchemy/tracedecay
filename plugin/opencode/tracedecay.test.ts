@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test"
 
-import { dispatch, dispatchAfterAck } from "./tracedecay"
+import mcpModule from "./tracedecay-mcp"
+import hookModule, { dispatch, dispatchAfterAck, TraceDecayPlugin } from "./tracedecay"
+
+test("OpenCode discovers one v1 server entrypoint per installed module", () => {
+  expect(hookModule).toEqual({ id: "tracedecay-hooks", server: TraceDecayPlugin })
+  expect(mcpModule.id).toBe("tracedecay-mcp")
+  expect(typeof mcpModule.server).toBe("function")
+})
 
 test("dispatch lets the hook child finish instead of killing before durable spool", async () => {
   const startedAt = performance.now()

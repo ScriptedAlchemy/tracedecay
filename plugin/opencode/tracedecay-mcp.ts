@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 
 const TRACEDECAY_BIN = "__TRACEDECAY_BIN__"
 
@@ -12,4 +12,7 @@ export const TraceDecayMcpPlugin: Plugin = async () => ({
   },
 })
 
-export default TraceDecayMcpPlugin
+export default {
+  id: "tracedecay-mcp",
+  server: TraceDecayMcpPlugin,
+} satisfies PluginModule

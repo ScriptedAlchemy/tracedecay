@@ -1,4 +1,4 @@
-import type { Hooks, Plugin } from "@opencode-ai/plugin"
+import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin"
 
 const TRACEDECAY_BIN = "__TRACEDECAY_BIN__"
 const MAX_GUIDANCE_BYTES = 8 * 1024
@@ -99,4 +99,7 @@ export const TraceDecayPlugin: Plugin = async ({ client }) => {
   }
 }
 
-export default TraceDecayPlugin
+export default {
+  id: "tracedecay-hooks",
+  server: TraceDecayPlugin,
+} satisfies PluginModule
