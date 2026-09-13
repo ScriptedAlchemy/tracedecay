@@ -5,24 +5,21 @@
 //!
 //! `WorkGraphVersionEntryV1` pairs a graph with a runtime projection, and the
 //! domain validates that the attempts observed there are exactly the accepted
-//! attempts the graph declares. This authority observes none: the durable
-//! attempt rows live in `work_attempts_v1` under a `WorkAuthority`
-//! (project/repository/worktree/actor/policy), and the product journal is keyed
-//! by the registered profile owner. There is no recorded correspondence between
-//! the two, so joining them would invent a coverage measurement this authority
-//! cannot prove.
+//! attempts the graph declares. Durable attempt rows live in `work_attempts_v1`
+//! under a `WorkAuthority` (project/repository/worktree/actor/policy), while the
+//! product journal is keyed by the registered profile owner. Plain storage has
+//! no correspondence between them. Daemon routes bind their registered
+//! authority through [`AuthorizedWorkProductReadStorageV1`], which can hydrate
+//! exactly the accepted attempt identities declared by each graph version.
 //!
 //! So the coverage is reported, not guessed:
 //!
 //! * a graph that declares no accepted attempts gets `Complete` with zero
 //!   attempts — a true and complete empty reading, not an absence;
-//! * a graph that declares accepted attempts gets `Unavailable` — an explicit
-//!   "this authority did not observe the runtime", which is what the Work views
-//!   should draw as a named absence.
-//!
-//! When an executor authority that can prove the correspondence lands, it
-//! supplies the observed attempts here and the coverage becomes `Complete`
-//! without any other shape changing.
+//! * a graph that declares accepted attempts gets `Unavailable` without an
+//!   executor authority;
+//! * an authority-bound read loads those exact attempts and reports complete or
+//!   partial coverage without crossing into any other Work authority.
 //!
 //! ## The selection-coverage rule
 //!
@@ -50,13 +47,17 @@
 //! with `Complete { returned: 0 }` coverage — so that is what they answer.
 
 use tracedecay_contracts::{
-    MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, OpaqueCursor, WorkGraphReadModeV1,
-    WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkProductPortContextV1,
+    MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, OpaqueCursor, VerifiedWorkEvidenceRootV1,
+    VerifiedWorkGraphVersionV1, WorkAttemptReceiptReadErrorV1, WorkAttemptReceiptReadPortV1,
+    WorkAttemptReceiptV1, WorkAttemptStoragePort, WorkEvidenceRootReadErrorV1,
+    WorkEvidenceRootReadPortV1, WorkGraphReadModeV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1,
+    WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphTimelineV1, WorkGraphVersionEntryV1,
+    WorkProductPortContextV1,
 };
 use tracedecay_domain::{
-    ProjectionGenerationId, UtcMicros, WorkProductGraphV1, WorkProductProjectionBundleV1,
-    WorkProjectionSequenceV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1,
+    ProjectionGenerationId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAuthority,
+    WorkProductGraphV1, WorkProductProjectionBundleV1, WorkProjectionSequenceV1,
+    WorkRuntimeAttemptProjectionV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1,
     canonical_sha256,
 };
 
@@ -72,77 +73,140 @@ type PortError = WorkGraphReadPortErrorV1;
 const PROJECTION_GENERATION_DOMAIN: &str =
     "tracedecay.rusqlite-runtime.work-product-projection-generation.v1";
 
+#[derive(Clone)]
+pub struct AuthorizedWorkProductReadStorageV1 {
+    storage: WorkSqliteStorage,
+    authority: WorkAuthority,
+}
+
+impl AuthorizedWorkProductReadStorageV1 {
+    pub const fn new(storage: WorkSqliteStorage, authority: WorkAuthority) -> Self {
+        Self { storage, authority }
+    }
+}
+
 impl WorkGraphReadPortV1 for WorkSqliteStorage {
     fn read_graph(
         &self,
         context: &WorkProductPortContextV1,
         request: &WorkGraphReadRequestV1,
     ) -> Result<WorkGraphReadV1, PortError> {
-        let scope = context.authorized_scope();
-        // Events outside the selection fall outside it; they do not poison the
-        // ones inside. The read is answered over the covered prefix and carries
-        // the coverage that says what was left out, so a caller can never
-        // mistake a slice for the whole.
-        let covered = load_covered_journal(self.handle(), scope).ok_or(PortError::Unavailable)?;
-        let selection_coverage = covered.coverage;
+        read_graph(self, None, context, request)
+    }
+}
 
-        let entries = build_entries(&covered.journal, &covered.published, request.observed_at)?;
-        match &request.mode {
-            WorkGraphReadModeV1::Current => {
-                let snapshot = entries
-                    .into_iter()
-                    .next_back()
-                    .ok_or(PortError::NotFoundOrNotAuthorized)?;
-                Ok(WorkGraphReadV1::Current {
-                    authorized_scope: scope.clone(),
-                    selection_coverage,
-                    snapshot,
+impl WorkGraphReadPortV1 for AuthorizedWorkProductReadStorageV1 {
+    fn read_graph(
+        &self,
+        context: &WorkProductPortContextV1,
+        request: &WorkGraphReadRequestV1,
+    ) -> Result<WorkGraphReadV1, PortError> {
+        read_graph(&self.storage, Some(&self.authority), context, request)
+    }
+}
+
+// The bound runtime authority only licenses hydrating accepted attempt rows for
+// the graph read. Evidence roots are scoped by the port context and attempt
+// receipts by the authority the caller passes, so binding one here would either
+// be ignored or override the caller's — both routes answer from the same
+// storage.
+impl WorkEvidenceRootReadPortV1 for AuthorizedWorkProductReadStorageV1 {
+    fn read_evidence_root(
+        &self,
+        context: &WorkProductPortContextV1,
+        task_id: &TaskId,
+        requested: &VerifiedWorkGraphVersionV1,
+    ) -> Result<VerifiedWorkEvidenceRootV1, WorkEvidenceRootReadErrorV1> {
+        self.storage.read_evidence_root(context, task_id, requested)
+    }
+}
+
+impl WorkAttemptReceiptReadPortV1 for AuthorizedWorkProductReadStorageV1 {
+    fn attempt_receipt(
+        &self,
+        authority: &WorkAuthority,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<WorkAttemptReceiptV1, WorkAttemptReceiptReadErrorV1> {
+        self.storage.attempt_receipt(authority, identity)
+    }
+}
+
+fn read_graph(
+    storage: &WorkSqliteStorage,
+    authority: Option<&WorkAuthority>,
+    context: &WorkProductPortContextV1,
+    request: &WorkGraphReadRequestV1,
+) -> Result<WorkGraphReadV1, PortError> {
+    let scope = context.authorized_scope();
+    // Events outside the selection fall outside it; they do not poison the
+    // ones inside. The read is answered over the covered prefix and carries
+    // the coverage that says what was left out, so a caller can never
+    // mistake a slice for the whole.
+    let covered = load_covered_journal(storage.handle(), scope).ok_or(PortError::Unavailable)?;
+    let selection_coverage = covered.coverage;
+
+    let entries = build_entries(
+        storage,
+        authority,
+        &covered.journal,
+        &covered.published,
+        request.observed_at,
+    )?;
+    match &request.mode {
+        WorkGraphReadModeV1::Current => {
+            let snapshot = entries
+                .into_iter()
+                .next_back()
+                .ok_or(PortError::NotFoundOrNotAuthorized)?;
+            Ok(WorkGraphReadV1::Current {
+                authorized_scope: scope.clone(),
+                selection_coverage,
+                snapshot,
+            })
+        }
+        WorkGraphReadModeV1::AsOf { valid_at } => {
+            let snapshot = entries
+                .into_iter()
+                .rfind(|entry| entry.valid_at() <= *valid_at)
+                .ok_or(PortError::NotFoundOrNotAuthorized)?;
+            Ok(WorkGraphReadV1::AsOf {
+                authorized_scope: scope.clone(),
+                selection_coverage,
+                snapshot,
+            })
+        }
+        WorkGraphReadModeV1::Evolution {
+            from_valid_at,
+            through_valid_at,
+        } => {
+            let selected = entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.valid_at() >= *from_valid_at && entry.valid_at() <= *through_valid_at
                 })
-            }
-            WorkGraphReadModeV1::AsOf { valid_at } => {
-                let snapshot = entries
-                    .into_iter()
-                    .rfind(|entry| entry.valid_at() <= *valid_at)
-                    .ok_or(PortError::NotFoundOrNotAuthorized)?;
-                Ok(WorkGraphReadV1::AsOf {
-                    authorized_scope: scope.clone(),
-                    selection_coverage,
-                    snapshot,
+                .collect::<Vec<_>>();
+            Ok(WorkGraphReadV1::Evolution {
+                authorized_scope: scope.clone(),
+                selection_coverage,
+                timeline: page(selected, request.continuation.as_ref())?,
+            })
+        }
+        WorkGraphReadModeV1::Forensic {
+            from_observed_at,
+            through_observed_at,
+        } => {
+            let selected = entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.observed_at() >= *from_observed_at
+                        && entry.observed_at() <= *through_observed_at
                 })
-            }
-            WorkGraphReadModeV1::Evolution {
-                from_valid_at,
-                through_valid_at,
-            } => {
-                let selected = entries
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.valid_at() >= *from_valid_at && entry.valid_at() <= *through_valid_at
-                    })
-                    .collect::<Vec<_>>();
-                Ok(WorkGraphReadV1::Evolution {
-                    authorized_scope: scope.clone(),
-                    selection_coverage,
-                    timeline: page(selected, request.continuation.as_ref())?,
-                })
-            }
-            WorkGraphReadModeV1::Forensic {
-                from_observed_at,
-                through_observed_at,
-            } => {
-                let selected = entries
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.observed_at() >= *from_observed_at
-                            && entry.observed_at() <= *through_observed_at
-                    })
-                    .collect::<Vec<_>>();
-                Ok(WorkGraphReadV1::Forensic {
-                    authorized_scope: scope.clone(),
-                    selection_coverage,
-                    timeline: page(selected, request.continuation.as_ref())?,
-                })
-            }
+                .collect::<Vec<_>>();
+            Ok(WorkGraphReadV1::Forensic {
+                authorized_scope: scope.clone(),
+                selection_coverage,
+                timeline: page(selected, request.continuation.as_ref())?,
+            })
         }
     }
 }
@@ -150,6 +214,8 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
 /// Build one entry per published version, each carrying the graph folded to
 /// that version and every projection derived from that same graph.
 fn build_entries(
+    storage: &WorkSqliteStorage,
+    authority: Option<&WorkAuthority>,
     journal: &[WorkProductJournalEntryV1],
     published: &[WorkProductPublishedVersionV1],
     projected_at: UtcMicros,
@@ -173,7 +239,7 @@ fn build_entries(
                 return Err(PortError::Unavailable);
             }
             let verified = verified_version(version, &entry.event).ok_or(PortError::Unavailable)?;
-            let runtime = runtime_projection(&graph, version, projected_at)?;
+            let runtime = runtime_projection(storage, authority, &graph, version, projected_at)?;
             let projections =
                 WorkProductProjectionBundleV1::from_graph(&graph, &runtime, projected_at)
                     .map_err(|_| PortError::Unavailable)?;
@@ -196,23 +262,50 @@ fn build_entries(
 /// See the module documentation for why an unobserved runtime is reported as
 /// `Unavailable` instead of as zero attempts.
 fn runtime_projection(
+    storage: &WorkSqliteStorage,
+    authority: Option<&WorkAuthority>,
     graph: &WorkProductGraphV1,
     version: &WorkProductPublishedVersionV1,
     projected_at: UtcMicros,
 ) -> Result<WorkRuntimeProjectionV1, PortError> {
-    let declares_accepted_attempts = graph
+    let accepted = graph
         .items()
         .iter()
-        .any(|item| !item.accepted_attempts().is_empty());
-    let coverage = if declares_accepted_attempts {
+        .flat_map(|item| item.accepted_attempts().iter())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut attempts = Vec::new();
+    let mut unavailable = std::collections::BTreeSet::new();
+    if let Some(authority) = authority {
+        for identity in &accepted {
+            match storage.load(authority, identity) {
+                Ok(attempt) => attempts.push(WorkRuntimeAttemptProjectionV1 {
+                    identity: attempt.identity().clone(),
+                    state: attempt.state(),
+                }),
+                Err(_) => {
+                    unavailable.insert(identity.clone());
+                }
+            }
+        }
+    } else {
+        unavailable = accepted;
+    }
+    let coverage = if unavailable.is_empty() {
+        WorkRuntimeProjectionCoverageV1::Complete
+    } else if attempts.is_empty() {
         WorkRuntimeProjectionCoverageV1::Unavailable
     } else {
-        WorkRuntimeProjectionCoverageV1::Complete
+        WorkRuntimeProjectionCoverageV1::Partial {
+            unavailable_attempts: unavailable,
+        }
     };
     let generation_id = canonical_sha256(&(
         PROJECTION_GENERATION_DOMAIN,
         version.graph_version.get(),
         version.event_sequence.get(),
+        &attempts,
+        &coverage,
     ))
     .ok()
     .and_then(|digest| ProjectionGenerationId::new(digest.as_str()).ok())
@@ -222,7 +315,7 @@ fn runtime_projection(
         generation_id,
         WorkProjectionSequenceV1::new(version.event_sequence.get()),
         projected_at,
-        Vec::new(),
+        attempts,
         coverage,
     )
     .map_err(|_| PortError::Unavailable)
