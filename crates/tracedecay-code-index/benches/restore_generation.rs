@@ -33,7 +33,6 @@ use std::{
 };
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
 };
@@ -131,13 +130,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Every restore verified the same manifest's per-segment and aggregate
     // digests, so a divergent restore would already have been refused. This
     // pins the records that survived those checks to each other as well.
-    let (restored_files, expected) = &restores[0].0;
-    for (index, ((files, identity), _)) in restores.iter().enumerate() {
-        if files != restored_files || identity != expected {
-            return Err(format!("restore {index} returned different records").into());
+    let expected = &restores[0].0;
+    for (index, (coverage, _)) in restores.iter().enumerate() {
+        if coverage != expected {
+            return Err(format!("restore {index} recovered different records").into());
         }
     }
-    let restored_files = *restored_files;
+    let restored_files = expected.len();
     let mut completions = restores.iter().map(|(_, at)| *at).collect::<Vec<_>>();
     completions.sort_unstable();
     let (file_segment_bytes, evidence_bytes) = directory_bytes(&segments)?;
@@ -166,20 +165,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// A cheap witness that two restores produced the same records: the file count
-/// and a digest over every restored file's logical path in canonical order.
-fn coverage_identity(restored: &CodeIndexPublishedGenerationV1) -> (usize, String) {
+/// A witness that two restores recovered the same records: every restored
+/// file's logical path in canonical order.
+fn coverage_identity(restored: &CodeIndexPublishedGenerationV1) -> Vec<String> {
     let mut paths = restored
         .analysis_coverage()
         .map(|(path, _)| path.to_owned())
         .collect::<Vec<_>>();
     paths.sort_unstable();
-    let mut identity = Sha256::new();
-    for path in &paths {
-        identity.update(path.as_bytes());
-        identity.update([0]);
-    }
-    (paths.len(), format!("{:x}", identity.finalize()))
+    paths
 }
 
 fn read_segment(
