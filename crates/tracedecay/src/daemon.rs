@@ -254,7 +254,9 @@ pub use core_proxy::*;
 // Daemon process lifecycle and logging live in `tracedecay-daemon-service`;
 // the root's engine, bootstrap, and connection serving still read them by
 // these names until they move.
-pub(crate) use tracedecay_daemon_service::logging::{recent_watcher_events, unavailable_error};
+#[cfg(unix)]
+pub(crate) use tracedecay_daemon_service::logging::recent_watcher_events;
+pub(crate) use tracedecay_daemon_service::logging::unavailable_error;
 #[cfg(feature = "hotpath")]
 pub use tracedecay_daemon_service::shutdown::install_hotpath_shutdown_finalizer;
 pub(crate) use tracedecay_daemon_service::shutdown::{
