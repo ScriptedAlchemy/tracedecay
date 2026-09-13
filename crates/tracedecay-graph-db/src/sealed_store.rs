@@ -904,29 +904,28 @@ impl GraphDb {
     /// exists. Cancellation or a crash before the artifact directory is
     /// renamed into place leaves no container (the next attempt clears the
     /// build directory and rebuilds from the replay journal's manifest); a
-    /// crash after it leaves a complete, receipted artifact the next attempt
-    /// adopts by digest. Nothing about this build is recoverable *only* from
-    /// process memory. An artifact from an earlier seal of this exact
-    /// generation is adopted without a build.
+    /// crash after it leaves a complete, receipted artifact; the next pending
+    /// publication rebuilds that derived artifact from the durable replay
+    /// without retaining it beside the reopened store. Nothing about this
+    /// build is recoverable *only* from process memory.
     ///
-    /// `Ok(None)` means the sealed-store lane cannot serve this database
-    /// (kill-switch set, memory-backed, or no reopen configuration), so the
-    /// caller must stage and prove the generation the ordinary way.
+    /// [`DirectSealOutcome::Unavailable`] returns ownership when the sealed
+    /// lane cannot serve this database, so the caller can stage the same rows.
     #[hotpath::measure(label = "graph_db.sealed_store.seal_direct", impl_type = "GraphDb")]
     pub(crate) fn seal_generation_from_manifest(
         &self,
-        manifest: &GraphGenerationManifest,
+        manifest: Arc<GraphGenerationManifest>,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<Option<GraphCommit>, GraphDbError> {
+    ) -> Result<DirectSealOutcome, GraphDbError> {
         if sealed_store_disabled() {
-            return Ok(None);
+            return Ok(DirectSealOutcome::Unavailable(manifest));
         }
         let Some(reopen) = self.inner.reopen.as_ref() else {
-            return Ok(None);
+            return Ok(DirectSealOutcome::Unavailable(manifest));
         };
         let Some(database_path) = reopen.config.path.clone() else {
-            return Ok(None);
+            return Ok(DirectSealOutcome::Unavailable(manifest));
         };
         check()?;
         manifest.validate_checked(check)?;
@@ -986,7 +985,7 @@ impl GraphDb {
             .ok_or_else(|| GraphDbError::Corrupt {
                 message: "sealed generation is missing its projection commit".to_owned(),
             })?;
-        Ok(Some(commit))
+        Ok(DirectSealOutcome::Sealed(commit))
     }
 
     /// Opens an existing sealed store for `identity` without building one.
@@ -1235,7 +1234,12 @@ pub(crate) enum SealedRowSource<'a> {
     /// is one of its own entities, so no staging row is ever needed, written,
     /// or read. The journal and the code generation it names remain the
     /// recovery source for every failure boundary of the build.
-    Manifest(&'a GraphGenerationManifest),
+    Manifest(Arc<GraphGenerationManifest>),
+}
+
+pub(crate) enum DirectSealOutcome {
+    Sealed(GraphCommit),
+    Unavailable(Arc<GraphGenerationManifest>),
 }
 
 /// Builds (or adopts) the sealed store for `identity` and returns the
@@ -1257,13 +1261,17 @@ fn build_or_open_sealed_store(
     let physical_namespace = identity.physical_namespace()?;
     let root = sealed_store_root(database_path);
     let directory = sealed_generation_directory(&root, &physical_namespace);
-    // Idempotent replay: an artifact from an earlier seal of this exact
-    // generation is adopted if its receipt binds the same digest. Adoption
-    // never enumerates `source`'s rows, so it yields no staging proof.
-    match open_sealed_store(&directory, identity, expected) {
-        Ok(Some(store)) => return Ok((store, None)),
-        Ok(None) => {}
-        Err(_) => remove_sealed_directory(&directory),
+    // A staging handle is cheap, so an exact prior artifact can be adopted.
+    // A manifest is corpus-sized: opening and proving that artifact while the
+    // rows remain owned recreates the publication RSS peak. Rebuild that
+    // derived artifact from its durable replay instead; the owned manifest is
+    // released after encoding and before the new container is reopened.
+    if staging_sourced {
+        match open_sealed_store(&directory, identity, expected) {
+            Ok(Some(store)) => return Ok((store, None)),
+            Ok(None) => {}
+            Err(_) => remove_sealed_directory(&directory),
+        }
     }
     if directory.exists() {
         remove_sealed_directory(&directory);
@@ -1358,7 +1366,7 @@ fn build_sealed_container(
                 }
                 SealedRowSource::Manifest(manifest) => {
                     let counts = push_manifest_rows(
-                        manifest,
+                        &manifest,
                         identity,
                         &physical_namespace,
                         &mut sealed,
@@ -1824,7 +1832,7 @@ fn sealed_copy_proof(
 mod build_tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use rayon::ThreadPoolBuilder;
 
@@ -1832,6 +1840,7 @@ mod build_tests {
         SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
         sealed_generation_directory, sealed_store_root,
     };
+    use crate::runtime::{GraphEngineOpenSite, test_seams};
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
         GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion, GraphGenerationId,
@@ -2043,7 +2052,7 @@ mod build_tests {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("source.grafeo");
         let database = open_source(&database_path);
-        let manifest = manifest(2_000, 3_000);
+        let manifest = self::manifest(2_000, 3_000);
         let identity = manifest.identity();
         let expected = manifest.expected_recovered_digest(check).unwrap();
         database
@@ -2105,7 +2114,7 @@ mod build_tests {
         let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("source.grafeo");
-        let manifest = manifest(2_000, 3_000);
+        let manifest = self::manifest(2_000, 3_000);
         let identity = manifest.identity();
         let expected = manifest.expected_recovered_digest(check).unwrap();
         let root = sealed_store_root(&database_path);
@@ -2125,7 +2134,7 @@ mod build_tests {
             Ok(())
         };
         let interrupted = build_or_open_sealed_store(
-            SealedRowSource::Manifest(&manifest),
+            SealedRowSource::Manifest(Arc::new(manifest.clone())),
             &identity,
             &expected,
             &database_path,
@@ -2145,14 +2154,31 @@ mod build_tests {
         // directory and rebuilds from the manifest.
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join(SEALED_STORE_DATABASE_FILE), b"torn container").unwrap();
+        let direct_manifest = Arc::new(manifest);
+        let direct_manifest_weak = Arc::downgrade(&direct_manifest);
+        let reopen_observed = Arc::new(AtomicBool::new(false));
+        let hook_observed = Arc::clone(&reopen_observed);
+        let _seam = test_seams::install(move |seam| {
+            if seam == test_seams::Seam::EngineOpen(GraphEngineOpenSite::LazyFirstUse) {
+                assert!(
+                    direct_manifest_weak.upgrade().is_none(),
+                    "the transferred manifest must be released before sealed reopen verification"
+                );
+                hook_observed.store(true, Ordering::Release);
+            }
+        });
         let (direct, staging_proof) = build_or_open_sealed_store(
-            SealedRowSource::Manifest(&manifest),
+            SealedRowSource::Manifest(direct_manifest),
             &identity,
             &expected,
             &database_path,
             check,
         )
         .unwrap();
+        assert!(
+            reopen_observed.load(Ordering::Acquire),
+            "the direct build must exercise sealed reopen verification"
+        );
         assert!(
             staging_proof.is_none(),
             "a manifest-sourced build proves nothing about the staging database"
@@ -2168,6 +2194,7 @@ mod build_tests {
         std::fs::remove_dir_all(&directory).unwrap();
 
         // The same rows, staged and copied out of the staging database.
+        let manifest = self::manifest(2_000, 3_000);
         let database = open_source(&database_path);
         database
             .apply_generation_unverified_with_digest(Arc::new(manifest.clone()), &expected, check)
@@ -2196,7 +2223,7 @@ mod build_tests {
         let (parallel, _) = pool
             .install(|| {
                 build_or_open_sealed_store(
-                    SealedRowSource::Manifest(&manifest),
+                    SealedRowSource::Manifest(Arc::new(manifest)),
                     &identity,
                     &expected,
                     &database_path,

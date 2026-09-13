@@ -30,6 +30,7 @@ use crate::generation_runtime::{GenerationContentsDeletion, GenerationStageOutco
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
+use crate::sealed_store::DirectSealOutcome;
 use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationReplaySource, GraphProjectionIdentity,
@@ -1839,54 +1840,56 @@ impl GraphDbRegistry {
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
-                            if let Some(commit) = direct_seal(
+                            match direct_seal(
                                 &database,
-                                &manifest,
+                                manifest,
                                 sealed_digest,
                                 direct_seal_eligible,
                                 &check,
                             )? {
-                                drop(manifest);
-                                (commit, sealed_digest.clone())
-                            } else {
-                                let staged = database
-                                    .apply_generation_unverified_with_digest_observed(
-                                        manifest,
-                                        sealed_digest,
-                                        &check,
-                                    )?;
-                                match staged {
-                                    GenerationStageOutcome::Applied(commit) => {
-                                        // A repair that wrote missing native rows is
-                                        // a new seal: build and prove its derived
-                                        // artifact before seating it.
-                                        let (_, recovered) = database
-                                            .verify_generation_for_publication(
+                                DirectSealOutcome::Sealed(commit) => {
+                                    (commit, sealed_digest.clone())
+                                }
+                                DirectSealOutcome::Unavailable(manifest) => {
+                                    let staged = database
+                                        .apply_generation_unverified_with_digest_observed(
+                                            manifest,
+                                            sealed_digest,
+                                            &check,
+                                        )?;
+                                    match staged {
+                                        GenerationStageOutcome::Applied(commit) => {
+                                            // A repair that wrote missing native rows is
+                                            // a new seal: build and prove its derived
+                                            // artifact before seating it.
+                                            let (_, recovered) = database
+                                                .verify_generation_for_publication(
+                                                    &identity,
+                                                    sealed_digest,
+                                                    row_counts,
+                                                    true,
+                                                    &check,
+                                                )?;
+                                            (commit, recovered)
+                                        }
+                                        GenerationStageOutcome::Reseated(commit) => {
+                                            // An already-complete generation is an
+                                            // activation. Verify the staging authority
+                                            // and adopt an existing sealed artifact, but
+                                            // never construct a missing whole-generation
+                                            // copy before the rows can serve.
+                                            let recovered = database.verify_activated_generation(
                                                 &identity,
                                                 sealed_digest,
-                                                row_counts,
-                                                true,
                                                 &check,
                                             )?;
-                                        (commit, recovered)
-                                    }
-                                    GenerationStageOutcome::Reseated(commit) => {
-                                        // An already-complete generation is an
-                                        // activation. Verify the staging authority
-                                        // and adopt an existing sealed artifact, but
-                                        // never construct a missing whole-generation
-                                        // copy before the rows can serve.
-                                        let recovered = database.verify_activated_generation(
-                                            &identity,
-                                            sealed_digest,
-                                            &check,
-                                        )?;
-                                        database.open_sealed_generation_store_if_present(
-                                            &identity,
-                                            sealed_digest,
-                                            &check,
-                                        )?;
-                                        (commit, recovered)
+                                            database.open_sealed_generation_store_if_present(
+                                                &identity,
+                                                sealed_digest,
+                                                &check,
+                                            )?;
+                                            (commit, recovered)
+                                        }
                                     }
                                 }
                             }
@@ -1997,17 +2000,14 @@ impl GraphDbRegistry {
                 // faults are retained exactly like the staging proof's.
                 let direct = direct_seal(
                     &database,
-                    &manifest,
+                    manifest,
                     sealed_digest,
                     direct_seal_eligible,
                     &check,
                 );
                 match direct {
-                    Ok(Some(commit)) => {
-                        drop(manifest);
-                        Ok((commit, sealed_digest.clone()))
-                    }
-                    Ok(None) => {
+                    Ok(DirectSealOutcome::Sealed(commit)) => Ok((commit, sealed_digest.clone())),
+                    Ok(DirectSealOutcome::Unavailable(manifest)) => {
                         let staged = database.apply_generation_unverified_with_digest_observed(
                             manifest,
                             sealed_digest,
@@ -2701,13 +2701,13 @@ fn describe_verified_head(head: Option<&GraphVerifiedHeadV1>) -> String {
 /// lane cannot serve this database.
 fn direct_seal(
     database: &GraphDbLeaseV1,
-    manifest: &GraphGenerationManifest,
+    manifest: Arc<GraphGenerationManifest>,
     expected: &GraphRecoveredGenerationDigestV1,
     eligible: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Option<GraphCommit>, GraphDbError> {
+) -> Result<DirectSealOutcome, GraphDbError> {
     if !eligible {
-        return Ok(None);
+        return Ok(DirectSealOutcome::Unavailable(manifest));
     }
     database.seal_generation_from_manifest(manifest, expected, check)
 }
