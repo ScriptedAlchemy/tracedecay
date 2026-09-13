@@ -1880,7 +1880,7 @@ pub(super) const INDEXES: &[Index] = &[
     },
     Index {
         table: "observations",
-        name: Some("idx_observations_session_sequence"),
+        name: Some("idx_observations_valid_session_sequence"),
         unique: false,
         origin: "c",
         columns: &[INDEX_EXPRESSION_COLUMN, "sequence"],

@@ -1887,7 +1887,7 @@ mod tests {
                 "SELECT name FROM sqlite_master
                  WHERE type = 'index'
                    AND name IN (
-                       'idx_observations_session_sequence',
+                       'idx_observations_valid_session_sequence',
                        'idx_observations_identity_receipt',
                        'idx_projection_dispositions_observation_receipt'
                    )
@@ -1905,7 +1905,7 @@ mod tests {
             indexes,
             [
                 "idx_observations_identity_receipt",
-                "idx_observations_session_sequence",
+                "idx_observations_valid_session_sequence",
                 "idx_projection_dispositions_observation_receipt"
             ]
         );
@@ -1932,7 +1932,7 @@ mod tests {
         }
         assert!(
             plan.iter()
-                .any(|detail| detail.contains("idx_observations_session_sequence")),
+                .any(|detail| detail.contains("idx_observations_valid_session_sequence")),
             "lifecycle admission must seek by session instead of scanning observations: {plan:?}"
         );
     }

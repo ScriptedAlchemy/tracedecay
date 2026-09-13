@@ -694,7 +694,12 @@ async fn reconcile_projected_codex_goal_response(
         ));
     }
     drop(provenance_rows);
-    delete_projected_output(conn, current.provider.as_str(), response_message_id.as_str()).await?;
+    delete_projected_output(
+        conn,
+        current.provider.as_str(),
+        response_message_id.as_str(),
+    )
+    .await?;
     conn.execute(
         "DELETE FROM observation_projection_provenance
          WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",

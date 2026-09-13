@@ -329,7 +329,11 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
     // Partial on json_valid: a malformed observation row must never make the
     // index build (and with it the store's schema convergence) fail, and the
     // lifecycle lookup restricts itself to valid rows so the index applies.
-    "CREATE INDEX IF NOT EXISTS idx_observations_session_sequence
+    // The first cut of this index was not partial and refused any malformed
+    // observation_json row; stores that installed it under the old name drop
+    // it here (derived object, no data) before the partial replacement builds.
+    "DROP INDEX IF EXISTS idx_observations_session_sequence;
+     CREATE INDEX IF NOT EXISTS idx_observations_valid_session_sequence
      ON observations (
         json_extract(observation_json, '$.identity.source.session_id'),
         sequence
@@ -614,6 +618,51 @@ mod tests {
         );
     }
 
+    /// A store that installed the first, non-partial cut of the session index
+    /// under its old name must converge on reopen: the old index is a derived
+    /// object and is dropped, the partial replacement is built, and admission
+    /// no longer refuses the store as missing its required index.
+    #[tokio::test]
+    async fn non_partial_session_index_predecessor_is_replaced_on_reopen() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        drop(open_registered_schema(&path).await.unwrap());
+        let conn = TestConnection::open(&path);
+        conn.execute_batch(
+            "DROP INDEX idx_observations_valid_session_sequence;
+             CREATE INDEX idx_observations_session_sequence
+             ON observations (
+                json_extract(observation_json, '$.identity.source.session_id'),
+                sequence
+             );",
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        drop(open_registered_schema(&path).await.unwrap());
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT name, partial FROM pragma_index_list('observations')
+                 WHERE name LIKE 'idx_observations_%session_sequence'
+                 ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut indexes = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            indexes.push((row.get::<String>(0).unwrap(), row.get::<i64>(1).unwrap()));
+        }
+        assert_eq!(
+            indexes,
+            [("idx_observations_valid_session_sequence".to_owned(), 1)],
+            "reopen must drop the non-partial predecessor and keep only the partial index"
+        );
+    }
+
     #[tokio::test]
     async fn performance_indexes_install_outside_schema_transaction() {
         let temp = TempDir::new().unwrap();
@@ -627,7 +676,7 @@ mod tests {
              DROP INDEX idx_observation_workflow_facts_item;
              DROP INDEX idx_projection_rebuild_provenance_output;
              DROP INDEX idx_projection_rebuild_workflow_goal;
-             DROP INDEX idx_observations_session_sequence;
+             DROP INDEX idx_observations_valid_session_sequence;
              DROP INDEX idx_observations_identity_receipt;
              DROP INDEX idx_projection_dispositions_observation_receipt;",
         )
@@ -653,7 +702,7 @@ mod tests {
                     'idx_observation_workflow_facts_item',
                     'idx_projection_rebuild_provenance_output',
                     'idx_projection_rebuild_workflow_goal',
-                    'idx_observations_session_sequence',
+                    'idx_observations_valid_session_sequence',
                     'idx_observations_identity_receipt',
                     'idx_projection_dispositions_observation_receipt'
                  )",

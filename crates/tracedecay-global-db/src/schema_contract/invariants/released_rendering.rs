@@ -275,6 +275,7 @@ pub(super) fn admit_provenance_row(
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
+    use tracedecay_domain::derive_exact_observation_anchor_id;
     use tracedecay_domain::{
         ComponentVersion, DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
         ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
@@ -283,7 +284,6 @@ mod tests {
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
     };
-    use tracedecay_domain::derive_exact_observation_anchor_id;
     use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
@@ -797,8 +797,10 @@ mod tests {
                      {reason}"
                 );
                 assert!(
-                    reason.contains("privacy sanitizer quarantined an ambiguous structured \
-                                     document"),
+                    reason.contains(
+                        "privacy sanitizer quarantined an ambiguous structured \
+                                     document"
+                    ),
                     "the capture path must name the sanitizer's verdict: {reason}"
                 );
             }
@@ -811,7 +813,8 @@ mod tests {
         let snapshot = database.read_snapshot().await.unwrap();
         // What a fresh capture of this envelope leaves behind: no output, and
         // the observation's own receipt bound to the durable refusal.
-        let fresh_capture = projection_outcome(&snapshot, &observation, QUARANTINED_RECORD_ID).await;
+        let fresh_capture =
+            projection_outcome(&snapshot, &observation, QUARANTINED_RECORD_ID).await;
         drop(snapshot);
         assert_eq!(
             fresh_capture,
@@ -820,8 +823,15 @@ mod tests {
                 raw_rows: 0,
                 provenance_rows: 0,
                 disposition: Some((
-                    observation.receipt().receipt().receipt_id().as_str().to_owned(),
-                    ProjectionSkipReason::SanitizationRefused.as_str().to_owned(),
+                    observation
+                        .receipt()
+                        .receipt()
+                        .receipt_id()
+                        .as_str()
+                        .to_owned(),
+                    ProjectionSkipReason::SanitizationRefused
+                        .as_str()
+                        .to_owned(),
                 )),
             }
         );
