@@ -756,14 +756,38 @@ fn qualification_failure(
     canonical: Option<&[u8]>,
     expectations: &NativeQualificationExpectationsV1,
 ) -> SemanticQualificationFailureV1 {
+    let evidence_digest = canonical.map(canonical_sha256).or_else(|| {
+        qualification.map(|value| value.qualification_key.evaluator.raw_output_digest.clone())
+    });
+    superseded_decision_rule_failure(
+        &error,
+        qualification,
+        canonical,
+        &expectations.evaluated_profile_id,
+        evidence_digest.clone(),
+    )
+    .or_else(|| {
+        measured_evidence_refusal(&error, qualification, expectations, evidence_digest.clone())
+    })
+    .unwrap_or_else(|| {
+        absent_qualification_evidence(&error, qualification, expectations, evidence_digest)
+    })
+}
+
+/// Name a refusal that a genuine measurement produced: the evidence is
+/// readable and its identities are known, so the operator learns whether the
+/// workload moved on or the run itself did not pass.
+fn measured_evidence_refusal(
+    error: &PackagedNativeQualificationErrorV1,
+    qualification: Option<&PackagedNativeQualificationV1>,
+    expectations: &NativeQualificationExpectationsV1,
+    evidence_digest: Option<String>,
+) -> Option<SemanticQualificationFailureV1> {
     let observed_profile =
         qualification.map(|value| value.qualification_key.evaluated_profile_id.as_str());
     let observed_workload =
         qualification.map(|value| value.qualification_key.evaluator.workload_digest.as_str());
-    let evidence_digest = canonical.map(canonical_sha256).or_else(|| {
-        qualification.map(|value| value.qualification_key.evaluator.raw_output_digest.clone())
-    });
-    if error == PackagedNativeQualificationErrorV1::StaleWorkload
+    if *error == PackagedNativeQualificationErrorV1::StaleWorkload
         && qualification.is_some_and(|value| {
             value.portable_evidence.report.status == DirectEvaluationStatusV1::Pass
         })
@@ -772,26 +796,37 @@ fn qualification_failure(
         && observed_workload.is_some_and(|digest| digest != expectations.workload_digest)
         && let Some(evidence_digest) = evidence_digest.clone()
     {
-        return SemanticQualificationFailureV1::StaleWorkload {
+        return Some(SemanticQualificationFailureV1::StaleWorkload {
             profile_id: profile_id.to_owned(),
             packaged_workload_digest: packaged_workload_digest.to_owned(),
             current_workload_digest: expectations.workload_digest.clone(),
             evidence_digest,
             remedy: REQUALIFY_REMEDY.to_owned(),
-        };
+        });
     }
-    if error == PackagedNativeQualificationErrorV1::FailedQualification
+    if *error == PackagedNativeQualificationErrorV1::FailedQualification
         && let Some(profile_id) = observed_profile
         && let Some(workload_digest) = observed_workload
-        && let Some(evidence_digest) = evidence_digest.clone()
+        && let Some(evidence_digest) = evidence_digest
     {
-        return SemanticQualificationFailureV1::FailedQualification {
+        return Some(SemanticQualificationFailureV1::FailedQualification {
             profile_id: profile_id.to_owned(),
             workload_digest: workload_digest.to_owned(),
             evidence_digest,
             remedy: REQUALIFY_REMEDY.to_owned(),
-        };
+        });
     }
+    None
+}
+
+fn absent_qualification_evidence(
+    error: &PackagedNativeQualificationErrorV1,
+    qualification: Option<&PackagedNativeQualificationV1>,
+    expectations: &NativeQualificationExpectationsV1,
+    evidence_digest: Option<String>,
+) -> SemanticQualificationFailureV1 {
+    let observed_profile =
+        qualification.map(|value| value.qualification_key.evaluated_profile_id.as_str());
     SemanticQualificationFailureV1::NoQualificationEvidence {
         profile_id: expectations.evaluated_profile_id.clone(),
         current_workload_digest: expectations.workload_digest.clone(),
@@ -807,9 +842,62 @@ fn qualification_failure(
     }
 }
 
+/// Present a superseded schema or methodology as itself rather than as absent
+/// evidence: the bytes exist and were produced by a genuine run, they simply
+/// answer a question this build no longer asks. Falls through to the caller's
+/// generic refusal when the packaged version is not readable, because naming a
+/// version nobody wrote would be a fabrication.
+fn superseded_decision_rule_failure(
+    error: &PackagedNativeQualificationErrorV1,
+    qualification: Option<&PackagedNativeQualificationV1>,
+    canonical: Option<&[u8]>,
+    profile_id: &str,
+    evidence_digest: Option<String>,
+) -> Option<SemanticQualificationFailureV1> {
+    let probe = canonical.and_then(PackagedVersionProbeV1::read);
+    match error {
+        PackagedNativeQualificationErrorV1::UnsupportedSchema => {
+            let packaged_schema_version = qualification
+                .map(|value| value.schema_version)
+                .or_else(|| probe.as_ref().map(|probe| probe.schema_version))?;
+            Some(SemanticQualificationFailureV1::SupersededSchema {
+                profile_id: profile_id.to_owned(),
+                packaged_schema_version,
+                current_schema_version: PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION,
+                evidence_digest,
+                remedy: REQUALIFY_REMEDY.to_owned(),
+            })
+        }
+        PackagedNativeQualificationErrorV1::UnsupportedMethodology => {
+            let packaged_methodology_version = qualification
+                .map(|value| value.methodology_version)
+                .or_else(|| probe.as_ref().and_then(|probe| probe.methodology_version))?;
+            Some(SemanticQualificationFailureV1::SupersededMethodology {
+                profile_id: profile_id.to_owned(),
+                packaged_methodology_version,
+                current_methodology_version: QUALIFICATION_METHODOLOGY_VERSION,
+                evidence_digest,
+                remedy: REQUALIFY_REMEDY.to_owned(),
+            })
+        }
+        _ => None,
+    }
+}
+
 fn qualification_failure_without_expectations(
     error: PackagedNativeQualificationErrorV1,
 ) -> SemanticQualificationFailureV1 {
+    let canonical = embedded_qualification_bytes().ok();
+    let evidence_digest = canonical.map(canonical_sha256);
+    if let Some(failure) = superseded_decision_rule_failure(
+        &error,
+        None,
+        canonical,
+        SEMANTIC_PROFILE,
+        evidence_digest.clone(),
+    ) {
+        return failure;
+    }
     let current_workload_digest = match load_authoritative_default_workload_metadata() {
         Ok(workload) => {
             compute_workload_digest(&workload).unwrap_or_else(|_| "unavailable".to_owned())
@@ -819,7 +907,7 @@ fn qualification_failure_without_expectations(
     SemanticQualificationFailureV1::NoQualificationEvidence {
         profile_id: SEMANTIC_PROFILE.to_owned(),
         current_workload_digest,
-        evidence_digest: embedded_qualification_bytes().ok().map(canonical_sha256),
+        evidence_digest,
         detail: error.to_string(),
         remedy: INSTALL_EVIDENCE_REMEDY.to_owned(),
     }
@@ -848,10 +936,20 @@ pub fn validate_packaged_native_activation_report(
         })
 }
 
-/// The one field a packaged asset of any schema is guaranteed to carry.
+/// The envelope versions a packaged asset of any schema can be asked about,
+/// read without committing to the current asset shape. `methodology_version`
+/// is absent in schema 1, which is why it is optional here and not defaulted
+/// to a version that asset never claimed.
 #[derive(Deserialize)]
-struct PackagedSchemaVersionProbeV1 {
+struct PackagedVersionProbeV1 {
     schema_version: u32,
+    methodology_version: Option<u32>,
+}
+
+impl PackagedVersionProbeV1 {
+    fn read(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
 }
 
 fn load_embedded_qualification()
@@ -862,7 +960,7 @@ fn load_embedded_qualification()
     }
     // Evidence written under an earlier schema is structurally incompatible, not
     // damaged. Read the version first so the refusal names the real reason.
-    let schema_version = serde_json::from_slice::<PackagedSchemaVersionProbeV1>(canonical)
+    let schema_version = serde_json::from_slice::<PackagedVersionProbeV1>(canonical)
         .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?
         .schema_version;
     if schema_version != PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION {
@@ -1288,7 +1386,7 @@ mod tests {
         assert_eq!(bytes.len(), PACKAGED_NATIVE_QUALIFICATION_BYTES);
         assert_eq!(canonical_sha256(bytes), PACKAGED_NATIVE_QUALIFICATION_SHA256);
         assert_eq!(
-            serde_json::from_slice::<PackagedSchemaVersionProbeV1>(bytes)
+            PackagedVersionProbeV1::read(bytes)
                 .expect("packaged schema version")
                 .schema_version,
             1

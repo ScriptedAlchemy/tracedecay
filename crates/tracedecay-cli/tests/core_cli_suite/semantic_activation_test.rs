@@ -360,18 +360,21 @@ fn shipped_cli_refuses_stale_qualification_without_removing_installed_model() {
         initial_runtime["semantic_runtime"]["qualification"]["state"],
         "unqualified"
     );
-    assert_eq!(
-        initial_runtime["semantic_runtime"]["qualification"]["failure"]["reason"],
-        "stale_workload"
+    // The shipped PASS was measured before methodology 2 introduced the paired
+    // held-out effect, so the refusal an operator sees names the superseded
+    // schema and the version this build requires — not a digest drift.
+    let failure = &initial_runtime["semantic_runtime"]["qualification"]["failure"];
+    assert_eq!(failure["reason"], "superseded_schema");
+    let packaged_schema = failure["packaged_schema_version"]
+        .as_u64()
+        .expect("packaged schema version");
+    let current_schema = failure["current_schema_version"]
+        .as_u64()
+        .expect("current schema version");
+    assert!(
+        packaged_schema < current_schema,
+        "a superseded schema must be older than this build's: {initial_runtime}"
     );
-    let packaged_workload =
-        initial_runtime["semantic_runtime"]["qualification"]["failure"]["packaged_workload_digest"]
-            .as_str()
-            .expect("packaged workload digest");
-    let current_workload =
-        initial_runtime["semantic_runtime"]["qualification"]["failure"]["current_workload_digest"]
-            .as_str()
-            .expect("current workload digest");
 
     let project_arg = project.to_string_lossy();
     let activation = run_cli(
@@ -391,11 +394,11 @@ fn shipped_cli_refuses_stale_qualification_without_removing_installed_model() {
     assert!(!activation.status.success());
     let activation_error = String::from_utf8_lossy(&activation.stderr);
     assert!(
-        activation_error.contains("semantic_qualification_stale_workload")
-            && activation_error.contains(packaged_workload)
-            && activation_error.contains(current_workload)
+        activation_error.contains("semantic_qualification_superseded_schema")
+            && activation_error.contains(&format!("schema {packaged_schema}"))
+            && activation_error.contains(&format!("schema {current_schema}"))
             && activation_error.contains("qualify-native"),
-        "stale qualification denial must name type, identities, and remedy: {activation_error}"
+        "superseded qualification denial must name type, versions, and remedy: {activation_error}"
     );
 
     let after = tool(&binary, &home, &project, "runtime", r#"{"format":"json"}"#);
@@ -428,7 +431,8 @@ fn shipped_cli_refuses_stale_qualification_without_removing_installed_model() {
     assert_eq!(strict["semantic"]["reason"], "calibration_unavailable");
     assert_eq!(
         strict["semantic"]["qualification"]["failure"]["reason"],
-        "stale_workload"
+        "superseded_schema",
+        "strict abstention must carry the same superseded-evidence state: {strict}"
     );
 
     let fallback = tool(
