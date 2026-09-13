@@ -535,25 +535,6 @@ fn lcm_authority_unavailable() -> TranscriptCaptureOutcome {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cursor_capture_preserves_deferred_projection() {
-        let outcome = cursor_capture_outcome(
-            tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats {
-                messages_upserted: 3,
-                source_deferred: true,
-                ..Default::default()
-            },
-        );
-
-        assert_eq!(outcome.messages_upserted, 3);
-        assert!(outcome.source_deferred);
-    }
-}
-
 async fn capture_kiro_project(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
@@ -581,4 +562,23 @@ async fn capture_kiro_project(
         snapshot: Some(capture),
         ..TranscriptCaptureOutcome::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_capture_preserves_deferred_projection() {
+        let outcome = cursor_capture_outcome(
+            tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats {
+                messages_upserted: 3,
+                source_deferred: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(outcome.messages_upserted, 3);
+        assert!(outcome.source_deferred);
+    }
 }
