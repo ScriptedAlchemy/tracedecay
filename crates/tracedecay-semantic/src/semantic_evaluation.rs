@@ -723,6 +723,63 @@ fn semantic_execution_interruption_error(
         })
 }
 
+/// One encoder group with byte-identical model rows collapsed.
+///
+/// A group's padded sequence length is its longest encoding, and the longest
+/// row's first occurrence always survives, so every surviving row keeps the
+/// exact tokens — and therefore the exact vector — the full group would have
+/// produced. Only the tensor's batch dimension shrinks.
+struct CollapsedEncoderGroupV1<'chunk> {
+    /// The distinct rows, in first-occurrence order.
+    distinct: Vec<&'chunk CodeSearchChunkV1>,
+    /// Each original row's index into `distinct`.
+    rows: Vec<usize>,
+}
+
+impl CollapsedEncoderGroupV1<'_> {
+    /// Fan the distinct rows' vectors back out to the original group order.
+    fn expand(&self, distinct: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
+        if distinct.len() != self.distinct.len() {
+            return Err(
+                "semantic evaluator returned an unexpected distinct model row count".to_owned(),
+            );
+        }
+        self.rows
+            .iter()
+            .map(|row| {
+                distinct
+                    .get(*row)
+                    .cloned()
+                    .ok_or_else(|| "semantic evaluator lost a distinct model row".to_owned())
+            })
+            .collect()
+    }
+}
+
+fn collapse_identical_rows<'chunk>(
+    chunks: &[&'chunk CodeSearchChunkV1],
+    documents: &[String],
+) -> Result<CollapsedEncoderGroupV1<'chunk>, String> {
+    if chunks.len() != documents.len() {
+        return Err("semantic evaluator cache lost a composed model row".to_owned());
+    }
+    let mut first_occurrence = BTreeMap::<&str, usize>::new();
+    let mut distinct = Vec::with_capacity(chunks.len());
+    let mut rows = Vec::with_capacity(chunks.len());
+    for (chunk, document) in chunks.iter().zip(documents) {
+        let row = *first_occurrence
+            .entry(document.as_str())
+            .or_insert_with(|| {
+                distinct.push(*chunk);
+                distinct.len().saturating_sub(1)
+            });
+        rows.push(row);
+    }
+    hotpath::gauge!("semantic_evaluation_collapsed_model_rows")
+        .inc(u64::try_from(rows.len().saturating_sub(distinct.len())).unwrap_or(u64::MAX));
+    Ok(CollapsedEncoderGroupV1 { distinct, rows })
+}
+
 impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
     fn exact_key(
         &self,
@@ -875,9 +932,15 @@ where
                 .collect();
         }
 
-        let miss_groups = unique_misses
+        let collapsed = unique_misses
             .iter()
-            .map(|(_, position, _)| groups[*position])
+            .map(|(guard, position, _)| {
+                collapse_identical_rows(groups[*position], &guard.key().ordered_documents)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let miss_groups = collapsed
+            .iter()
+            .map(|group| group.distinct.as_slice())
             .collect::<Vec<_>>();
         let miss_encoded = self.inner.encode_batches(key, &miss_groups)?;
         if miss_encoded.len() != unique_misses.len() {
@@ -888,6 +951,11 @@ where
         if let Some(error) = self.cancellation_error() {
             return Err(error);
         }
+        let miss_encoded = miss_encoded
+            .into_iter()
+            .zip(&collapsed)
+            .map(|(distinct, group)| group.expand(distinct))
+            .collect::<Result<Vec<_>, String>>()?;
         for ((guard, _, _), vectors) in unique_misses.iter().zip(&miss_encoded) {
             if vectors.len() != guard.key().group_len {
                 return Err(

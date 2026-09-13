@@ -265,6 +265,19 @@ fn documents() -> Arc<EmbeddingDocumentComposerV1> {
     ))
 }
 
+/// The trailing label byte of a `chunk` fixture's id, as a vector dimension.
+fn chunk_label(chunk: &CodeSearchChunkV1) -> f32 {
+    f32::from(
+        chunk
+            .id
+            .as_str()
+            .as_bytes()
+            .last()
+            .copied()
+            .expect("chunk fixture id"),
+    )
+}
+
 fn chunk(label: char, text: &str) -> CodeSearchChunkV1 {
     let generation = CodeGenerationId::new("evaluation-cache.generation".to_owned())
         .expect("generation fixture");
@@ -892,6 +905,104 @@ fn failures_are_not_cached() {
     assert_eq!(cached.inner.attempted_group_invocations, 2);
     assert_eq!(cached.inner.group_invocations, 0);
     assert_eq!(cache.entry_count_for_tests(), 0);
+}
+
+/// A duplicated corpus composes the same document many times over. Each
+/// tensor must carry every distinct document exactly once, and the vectors
+/// must still come back per original row.
+#[test]
+fn identical_documents_reach_the_model_once_per_tensor() {
+    struct RecordingEncoderV1 {
+        inner: CountingEncoderV1,
+        submitted: Vec<Vec<CodeSearchChunkId>>,
+    }
+
+    impl crate::projector::CanonicalChunkTokenLengthsV1 for RecordingEncoderV1 {
+        fn document_token_lengths(
+            &mut self,
+            key: &EmbeddingProjectionKeyV1,
+            chunks: &[&CodeSearchChunkV1],
+        ) -> Result<Vec<usize>, String> {
+            self.inner.document_token_lengths(key, chunks)
+        }
+    }
+
+    impl CanonicalChunkVectorEncoderV1 for RecordingEncoderV1 {
+        fn encode(
+            &mut self,
+            key: &EmbeddingProjectionKeyV1,
+            chunk: &CodeSearchChunkV1,
+        ) -> Result<Vec<f32>, String> {
+            self.inner.encode(key, chunk)
+        }
+
+        fn encode_batches(
+            &mut self,
+            _key: &EmbeddingProjectionKeyV1,
+            groups: &[&[&CodeSearchChunkV1]],
+        ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+            self.submitted.extend(
+                groups
+                    .iter()
+                    .map(|group| group.iter().map(|chunk| chunk.id.clone()).collect()),
+            );
+            // One dimension per row, carrying the row's own chunk label, so a
+            // mis-ordered fan-out is visible in the output rather than hidden
+            // behind identical fixture vectors.
+            Ok(groups
+                .iter()
+                .map(|group| group.iter().map(|chunk| vec![chunk_label(chunk)]).collect())
+                .collect())
+        }
+    }
+
+    let projection = projection();
+    let embedding_key = projection.embedding_key().clone();
+    // Three labels share one text; the fourth is distinct. Under sanitized-text
+    // composition the first three compose to the same document.
+    let duplicated = ['a', 'b', 'c'].map(|label| chunk(label, "duplicated body"));
+    let distinct = chunk('d', "distinct body");
+    let group = [
+        &duplicated[0],
+        &duplicated[1],
+        &distinct,
+        &duplicated[2],
+        &duplicated[0],
+    ];
+    let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+    let authority = crate::session_pool::test_support::authority();
+    let mut cached = CachedSemanticEvaluationChunkEncoderV1::new(
+        RecordingEncoderV1 {
+            inner: CountingEncoderV1::healthy(),
+            submitted: Vec::new(),
+        },
+        &authority,
+        &cache,
+        SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        cancellation(),
+        documents(),
+    );
+
+    let encoded = cached
+        .encode_batches(&embedding_key, &[group.as_slice()])
+        .expect("collapsed projection");
+
+    assert_eq!(
+        cached.inner.submitted,
+        vec![vec![duplicated[0].id.clone(), distinct.id.clone()]],
+        "only the first occurrence of each distinct document may reach the model"
+    );
+    let labels = encoded
+        .iter()
+        .map(|vectors| vectors.iter().map(|vector| vector[0]).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let kept = chunk_label(&duplicated[0]);
+    let lone = chunk_label(&distinct);
+    assert_eq!(
+        labels,
+        vec![vec![kept, kept, lone, kept, kept]],
+        "identical documents share the surviving row's vector, in group order"
+    );
 }
 
 #[test]
