@@ -40,29 +40,27 @@ fn repository_discovery_can_be_cancelled_while_the_blocking_pool_is_busy() {
         started_rx.recv().expect("blocking task started");
 
         let cancellation = CancellationToken::new();
-        let discovery_path = repository.clone();
-        let discovery_cancellation = cancellation.clone();
-        let discovery = tokio::spawn(async move {
-            discover_repository_identity(
-                &discovery_path,
-                MonotonicDeadline::at(Instant::now() + Duration::from_secs(2)),
-                &discovery_cancellation,
-            )
-            .await
-        });
-        let mut resolution_started = false;
-        for _ in 0..100 {
-            resolution_started =
-                tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(&repository)
-                    .is_some();
-            if resolution_started {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(resolution_started, "repository discovery did not start");
+        let discovery = discover_repository_identity(
+            &repository,
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(2)),
+            &cancellation,
+        );
+        tokio::pin!(discovery);
+        std::future::poll_fn(|context| {
+            assert!(
+                std::future::Future::poll(discovery.as_mut(), context).is_pending(),
+                "repository discovery must wait while the blocking pool is busy"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(&repository)
+                .is_some(),
+            "repository discovery did not queue its authority resolution"
+        );
         cancellation.cancel();
-        let outcome = discovery.await.expect("repository discovery joined");
+        let outcome = discovery.await;
 
         release_tx.send(()).expect("release blocking task");
         blocker.await.expect("blocking task joined");
