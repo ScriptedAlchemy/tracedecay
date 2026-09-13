@@ -86,7 +86,7 @@ fn product_task(task_id: TaskId) -> (WorkInitiativeV1, WorkPlanV1, WorkMilestone
     (initiative, plan, milestone, item)
 }
 
-fn provider_route() -> WorkProviderRouteV1 {
+pub(super) fn provider_route() -> WorkProviderRouteV1 {
     WorkProviderRouteV1::new(
         id::<ProviderId>("provider.work.codex-cli"),
         id::<WorkProviderRouteId>("route.work.evidence-codex.v1"),
@@ -94,7 +94,7 @@ fn provider_route() -> WorkProviderRouteV1 {
     .expect("provider route")
 }
 
-fn configured_work_proposal_routing(
+pub(super) fn configured_work_proposal_routing(
     project: &std::path::Path,
     scope: ResolvedScope,
     grant: &CapabilityGrantSnapshot,
