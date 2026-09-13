@@ -805,9 +805,9 @@ async fn validate_message_projection_row(
         return Ok(false);
     };
     // A released rendering's stored rows *are* the rendering the provenance
-    // pairs them with — admitted above, and rewritten to this binary's
-    // rendering by the write step that owns the transaction. Comparing them
-    // against this binary's fields here would refuse exactly that.
+    // pairs them with, and the write step that owns the transaction rewrites
+    // them; comparing them against this binary's fields would refuse exactly
+    // that.
     if admit_provenance_row(
         owner_provenance,
         &owner_projection,
@@ -815,26 +815,36 @@ async fn validate_message_projection_row(
         resolved.released,
     )? == StoredProvenanceRendering::Current
     {
-        let owner_session = owner_projection.session();
-        let owner_message = owner_projection.message();
-        crate::observation_projection::verify_projection_rows_from_records(
-            conn,
-            &owner_projection,
-            resolved
-                .projection_rows
-                .session(&owner_session.provider, &owner_session.session_id),
-            resolved
-                .projection_rows
-                .message(&owner_message.provider, &owner_message.message_id),
-        )
-        .await
-        .map_err(|error| {
-            authority_violation(format!(
-                "projection output rows disagree with deterministic output: {error}"
-            ))
-        })?;
+        verify_owner_output_rows(conn, resolved, &owner_projection).await?;
     }
     Ok(true)
+}
+
+/// Compares one output's stored session and message rows against the owner
+/// projection this binary derives, using the page's batched rows.
+async fn verify_owner_output_rows(
+    conn: &impl QueryExecutor,
+    resolved: &ResolvedOutputAuthority<'_>,
+    owner: &SessionMessageProjection,
+) -> tracedecay_domain::errors::Result<()> {
+    let session = owner.session();
+    let message = owner.message();
+    crate::observation_projection::verify_projection_rows_from_records(
+        conn,
+        owner,
+        resolved
+            .projection_rows
+            .session(&session.provider, &session.session_id),
+        resolved
+            .projection_rows
+            .message(&message.provider, &message.message_id),
+    )
+    .await
+    .map_err(|error| {
+        authority_violation(format!(
+            "projection output rows disagree with deterministic output: {error}"
+        ))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
