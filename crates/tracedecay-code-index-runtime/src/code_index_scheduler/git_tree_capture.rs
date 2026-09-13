@@ -5,12 +5,32 @@ use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "hotpath")]
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use gix::bstr::ByteSlice;
+use tracedecay_application::code_index::open_production_code_index_owner_v1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_contracts::now_micros;
+use tracedecay_domain::{
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+};
+use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
 
-use super::*;
+use super::{
+    CapturedCandidateV1, CapturedSnapshotV1, CodeIndexSchedulerErrorV1,
+    CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1, DaemonProjectionSinkV1,
+    LatestCompleteCodeIndexV1, branch_generations, cancelled_code_index_reconcile,
+    file_occurrence_id, id, identity, omitted_file_occurrence_id, privacy, projection_key,
+    snapshot_content_identity,
+};
+use crate::code_index::chunks::content_digest;
+use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
+use crate::code_index::production::{
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexGenerationScopeV1,
+    CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexRepositoryParseIdentityV1,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactGitTreeSourceV1 {
@@ -954,9 +974,9 @@ mod tests {
     use super::{
         CodeIndexSchedulerErrorV1, CodeIndexSearchUnavailableReasonV1,
         CodeIndexWorktreeSchedulerV1, ExactGitTreeSourceV1, NativeCandidateGenerationIdentityV1,
-        NativeCandidateGenerationSourcesV1, SharedCodeIndexBytePoolV1, branch_generations,
-        classify_capture_failure,
+        NativeCandidateGenerationSourcesV1, branch_generations, classify_capture_failure,
     };
+    use crate::code_index_scheduler::SharedCodeIndexBytePoolV1;
 
     #[cfg(feature = "hotpath")]
     use super::{CAPTURE_PROGRESS_UPDATE_PERIOD, CaptureProgressV1};
