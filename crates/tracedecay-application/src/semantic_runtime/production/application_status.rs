@@ -511,6 +511,12 @@ mod tests {
         assert_eq!(status.validate(), Ok(()));
         assert!(status.configuration.is_none());
         assert!(matches!(
+            status.qualification,
+            tracedecay_contracts::SemanticQualificationStateV1::Unqualified {
+                failure: tracedecay_contracts::SemanticQualificationFailureV1::StaleWorkload { .. }
+            }
+        ));
+        assert!(matches!(
             status.state,
             SemanticRuntimeStateV1::Unavailable {
                 reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
