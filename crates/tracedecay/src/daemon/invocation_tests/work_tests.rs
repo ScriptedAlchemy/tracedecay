@@ -130,7 +130,11 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
         ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).expect("configuration digest");
     let service = DaemonInvocationService::default();
     let (proposal_routing, configuration_digest) =
-        empty_work_proposal_routing(scope.clone(), &grant);
+        super::work_evidence_journey_tests::configured_work_proposal_routing(
+            project.path(),
+            scope.clone(),
+            &grant,
+        );
     let policy_digest = mount_test_work_observability(
         &service,
         project.path(),
@@ -300,10 +304,10 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
         .decision
         .route_plan
         .as_ref()
-        .expect("an empty pinned route set remains an explained decision");
-    assert!(route_plan.ranked.is_empty());
+        .expect("the configured route remains in the explained decision");
+    assert!(!route_plan.ranked.is_empty());
     assert!(
-        generated
+        !generated
             .decision
             .ordered_reason_codes
             .contains(&WorkProposalReasonV1::NoEligibleRoutes)
@@ -319,7 +323,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             .configuration_revision
             .as_ref()
             .map(tracedecay_domain::ConfigurationRevisionId::as_str),
-        Some("configuration.revision.work-empty-routing")
+        Some("configuration.revision.work-evidence-routing")
     );
 
     let proposal = WorkProposalV1::new(
@@ -330,8 +334,13 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
         WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "explicit fixture work")
             .expect("proposal sizing"),
         Vec::new(),
-        WorkRouteDecisionV1::abstain("test route has no provider selection")
-            .expect("proposal route"),
+        WorkRouteDecisionV1::selected(
+            super::work_evidence_journey_tests::provider_route(),
+            Vec::new(),
+            BTreeSet::new(),
+            "no fallback in the core lifecycle".to_owned(),
+        )
+        .expect("proposal route"),
         "Admit the explicitly declared Work task".to_owned(),
         proposal_digest,
         configuration_digest.clone(),
