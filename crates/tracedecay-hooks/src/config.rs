@@ -487,36 +487,43 @@ mod tests {
         );
     }
 
+    /// Linked worktrees share their project's `data_root`, and each project
+    /// runtime publishes with `revision = now`, so the worktree opened later
+    /// always carries the higher revision. A publication authority keyed only
+    /// by host would let that later worktree replace the earlier one's binding
+    /// in place, and every hook in the earlier worktree would then read — and
+    /// stamp its envelopes with — a foreign worktree identity.
     #[test]
-    fn linked_worktree_publication_preserves_root_worktree_binding() {
-        let directory = TestDir::new();
-        let root_worktree_id = [3; 16];
-        let linked_worktree_id = [7; 16];
-        let root_path =
-            hook_configuration_path(&directory.path, root_worktree_id, HookHostV1::ClaudeCode);
-        let linked_path =
-            hook_configuration_path(&directory.path, linked_worktree_id, HookHostV1::ClaudeCode);
-        let root_snapshot = snapshot(10, 100);
-        let mut linked_snapshot = snapshot(11, 100);
-        linked_snapshot.binding.worktree_id = linked_worktree_id;
+    fn a_later_worktree_publication_does_not_replace_an_earlier_worktree_binding() {
+        let data_root = TestDir::new();
+        let host = HookHostV1::ClaudeCode;
+        let earlier = snapshot(10, 100);
+        let mut later = snapshot(11, 100);
+        later.binding.worktree_id = [7; 16];
+        assert_ne!(earlier.binding.worktree_id, later.binding.worktree_id);
+        assert!(earlier.revision < later.revision);
 
-        HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&root_path))
-            .publish(root_snapshot.clone())
-            .unwrap();
-        HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&linked_path))
-            .publish(linked_snapshot.clone())
-            .unwrap();
+        for snapshot in [earlier.clone(), later.clone()] {
+            let path =
+                hook_configuration_path(&data_root.path, snapshot.binding.worktree_id, host);
+            assert_eq!(
+                HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(path))
+                    .publish(snapshot)
+                    .unwrap(),
+                HookConfigurationPublicationOutcomeV1::Published
+            );
+        }
 
-        assert_ne!(root_path, linked_path);
-        assert_eq!(
-            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(root_path))
-                .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
-            HookConfigurationReadOutcomeV1::Bound(root_snapshot)
-        );
-        assert_eq!(
-            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(linked_path))
-                .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
-            HookConfigurationReadOutcomeV1::Bound(linked_snapshot)
-        );
+        for expected in [earlier, later] {
+            let path =
+                hook_configuration_path(&data_root.path, expected.binding.worktree_id, host);
+            assert_eq!(
+                HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(path))
+                    .load_current(host, UtcMicros(2)),
+                HookConfigurationReadOutcomeV1::Bound(expected.clone()),
+                "worktree {:?} must keep its own live binding",
+                expected.binding.worktree_id
+            );
+        }
     }
 }

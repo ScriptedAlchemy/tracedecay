@@ -1095,6 +1095,13 @@ fn daemon_request_context(
             "capability.application.feedback.affected-tests",
             "use-case.application.feedback.affected-tests",
         ),
+        // The cycle reads its own committed publications back through the
+        // `feedback_list` route: the Context Scout producer tail assembles
+        // candidates from the latest committed publication in this scope.
+        (
+            tracedecay_contracts::feedback::FEEDBACK_LIST_CAPABILITY_ID_V1,
+            tracedecay_contracts::feedback::FEEDBACK_LIST_USE_CASE_ID_V1,
+        ),
         (
             tracedecay_contracts::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
             tracedecay_contracts::feedback::GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
@@ -1173,6 +1180,7 @@ fn authorized_daemon_request_context(
         "capability.application.feedback.diagnostics",
         "capability.application.feedback.impact",
         "capability.application.feedback.affected-tests",
+        tracedecay_contracts::feedback::FEEDBACK_LIST_CAPABILITY_ID_V1,
         tracedecay_contracts::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
         tracedecay_contracts::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
         tracedecay_contracts::feedback::PROXIMITY_CAPABILITY_ID_V1,
@@ -1344,6 +1352,7 @@ mod tests {
             "capability.application.feedback.diagnostics",
             "capability.application.feedback.impact",
             "capability.application.feedback.affected-tests",
+            tracedecay_contracts::feedback::FEEDBACK_LIST_CAPABILITY_ID_V1,
             tracedecay_contracts::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
             tracedecay_contracts::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
             tracedecay_contracts::feedback::PROXIMITY_CAPABILITY_ID_V1,
@@ -1575,6 +1584,45 @@ mod tests {
             .is_err(),
             "a derived request grant must not add capability.diagnostics.current"
         );
+    }
+
+    /// The Context Scout producer tail reads the publication the cycle just
+    /// committed back out of the durable store, and that read is gated on the
+    /// `feedback_list` surface operation. The cycle's own derived grant is the
+    /// only context that read ever runs under, so a grant without
+    /// `capability.application.feedback.list` silently yields no publication,
+    /// no candidates, and no mounted Scout claim authority.
+    #[tokio::test]
+    async fn cycle_grant_can_read_back_its_own_committed_publication() {
+        let scope = scope();
+        let configuration_digest = digest("configuration");
+        let configuration_revision =
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision");
+        let (authorization, _) = authorization(
+            &scope,
+            &configuration_revision,
+            &configuration_digest,
+            1_000_000,
+        );
+        let observed_at = UtcMicros(1);
+        let access = authorization.authorize(observed_at).await.expect("access");
+        let expires_at = access.grant_expires_at;
+        let context = authorized_daemon_request_context(
+            &scope,
+            &ActorId::new("actor.cycle-production").expect("actor"),
+            access,
+            observed_at,
+        )
+        .expect("request context");
+        let list = tracedecay_contracts::feedback::feedback_surface_operation("feedback_list")
+            .expect("catalog")
+            .expect("feedback_list is a catalogued surface operation");
+
+        assert!(
+            context.allows(list.capability_id(), list.use_case_id()),
+            "the cycle grant must authorize the read route its Scout tail consumes"
+        );
+        assert!(observed_at < expires_at);
     }
 
     #[test]
