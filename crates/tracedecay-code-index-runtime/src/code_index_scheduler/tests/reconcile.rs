@@ -26,8 +26,6 @@ use tracedecay_domain::{
     RetrieverKind, SanitizerRevision, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1,
     UtcMicros, VectorWatermark, WorktreeId,
 };
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use tracedecay_graph_db::NeverCancelled;
 use tracedecay_query::retrieval::{
     rerank::{AdmittedNativeRerankExecutorV1, BoundedRerankRuntimeV1},
     semantic::apply_bounded_rerank_outcome,
