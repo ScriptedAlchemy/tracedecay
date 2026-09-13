@@ -12,7 +12,8 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     BranchStackRevisionV1, ManifestDigest, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
-    NativeIntegrationTerminalOutcomeV1, StackSignalKindV1, UtcMicros,
+    NativeIntegrationTerminalOutcomeV1, NativeIntegrationUnavailabilityV1, StackSignalKindV1,
+    UtcMicros,
 };
 
 /// Produces the one truthful transition represented by a sealed preflight.
@@ -29,6 +30,13 @@ pub fn signal_from_preflight(
         NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_) => {
             StackSignalKindV1::DependencyReady
         }
+        // The native adapter emits this exact partial state only after Git has
+        // established mechanical eligibility and the destination ref is the
+        // mounted checkout. Applying there is unsafe, but the dependency-ready
+        // transition remains real and is precisely what should wake that host.
+        NativeIntegrationPreviewDispositionV1::Partial {
+            reason: NativeIntegrationUnavailabilityV1::DestinationOccupied,
+        } => StackSignalKindV1::DependencyReady,
         NativeIntegrationPreviewDispositionV1::NativeConflict { .. } => {
             StackSignalKindV1::ActualConflict
         }
@@ -430,6 +438,15 @@ mod tests {
         assert_eq!(first, replay);
         assert_eq!(first.kind, StackSignalKindV1::DependencyReady);
         assert_eq!(first.state_digest, eligible.preview_digest);
+
+        let (_, occupied) = preview(NativeIntegrationPreviewDispositionV1::Partial {
+            reason: NativeIntegrationUnavailabilityV1::DestinationOccupied,
+        });
+        let occupied_signal = signal_from_preflight(&scope, &occupied)
+            .expect("occupied destination result")
+            .expect("occupied destination dependency-ready signal");
+        assert_eq!(occupied_signal.kind, StackSignalKindV1::DependencyReady);
+        assert_eq!(occupied_signal.state_digest, occupied.preview_digest);
 
         let (_, conflict) = preview(NativeIntegrationPreviewDispositionV1::NativeConflict {
             conflict_digest: digest('8'),
