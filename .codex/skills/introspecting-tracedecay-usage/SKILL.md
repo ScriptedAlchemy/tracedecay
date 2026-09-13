@@ -1,75 +1,48 @@
 ---
 name: introspecting-tracedecay-usage
-description: "TraceDecay Dev: Use when turning TraceDecay's own analytics, session history, automation runs, managed skills, memory facts, diagnostics, or code-health signals into repo improvements, evals, or bundled skill updates."
+description: "Audit TraceDecay adoption and usage evidence to identify concrete repository or skill improvements."
 ---
 
-# TraceDecay Dev: Introspecting TraceDecay Usage
+# Introspecting TraceDecay Usage
 
-Use this skill for TraceDecay self-improvement driven by real agent behavior,
-not guesswork. Keep the pass evidence-first: logs and summaries identify the
-failure mode, then code, tests, or bundled skills encode the fix.
+Bound the project set, time window, and question. Use evidence to identify a
+failure before changing code or guidance. A focused question needs only the
+relevant evidence; a requested broad audit can combine the lanes below.
 
-## Required Audit Lanes
+## Choose evidence
 
-1. **Adoption and telemetry:** Use `tracedecay:diagnosing-analytics`. Run
-   `tracedecay analytics diagnostics` (add `--all` when the question is
-   cross-project). Compare hook/tool volume with TraceDecay tool usage.
-2. **Past-session behavior:** Use `tracedecay:managing-session-context`.
-   Start with `tracedecay_message_search`; use `tracedecay_lcm_status` before
-   deeper LCM work, then `tracedecay_lcm_grep` or replay only as needed.
-3. **Managed skills and automation:** Use
-   `tracedecay:inspecting-managed-skills`. Start with
-   `tracedecay_skill_list`; view skills or run artifacts only when the list
-   points to a specific stale, patched, failed, or unused item.
-4. **Durable memory:** Use `tracedecay:project-memory`. Search with
-   `tracedecay_fact_store` before re-deriving project decisions. For curation,
-   run read-only inventory and dry-runs first; never remove facts without
-   explicit approval.
-5. **Code-health and implementation target:** Use `tracedecay:code-health`.
-   Let weak dimensions and hotspots decide whether the fix is code, tests,
-   docs, evals, or skill guidance.
+- **Adoption:** `tracedecay analytics diagnostics`; add `--all` only for a
+  cross-project question. Use `tracedecay:diagnosing-analytics` for interpretation.
+- **Session behavior:** start with `tracedecay_message_search`; use
+  `tracedecay:managing-session-context` for deeper LCM retrieval or replay.
+- **Managed skills and automation:** start with `tracedecay_skill_list`; open
+  the exact skill or run implicated by the evidence. Use
+  `tracedecay:inspecting-managed-skills` for managed state and the repo-local
+  `inspecting-automation-cycles` skill for run outcomes.
+- **Prior decisions and memory:** use `tracedecay:project-memory` when recall or
+  curation is relevant. A usage audit does not itself require adding facts or
+  running curation. Requested curation settles automatically after validation;
+  inspect its receipts rather than introducing a manual approval gate.
+- **Code structure:** use `tracedecay:code-health` when evidence points to an
+  implementation hotspot, rather than running a whole-repo audit by default.
 
-## Interpretation Rules
+Use supported CLI, MCP, and dashboard analytics. The legacy
+`scripts/project-analytics.sh` reads profile databases directly; do not use it
+as a fallback. Report unavailable metrics as unavailable, not zero.
 
-- High hook volume with low TraceDecay tool usage is an adoption gap. Improve
-  trigger text, tool hints, or eval coverage before blaming users.
-- Managed skills with many patches and zero successful uses are validation
-  failures. Inspect their evidence and either tighten the managed-skill loop
-  or add a bundled operator skill that prevents the repeated mistake.
-- LCM depth and compression ratios are health signals, not direct quality
-  scores. Use raw/session recall to confirm what agents actually missed.
-- Memory curation candidates are proposals, not permission. Prefer merge or
-  update when provenance matters; deletion needs fresh user approval.
-- Analytics fields can be global. `project_id: null` means the run was global,
-  not broken.
+## Interpret and improve
 
-## Improvement Loop
+High hook volume, low tool usage, or zero skill invocations are candidate
+signals. Confirm a missed useful opportunity in task evidence before calling
+one an adoption failure. LCM compression and depth are health signals, not
+quality scores. `project_id: null` can identify global analytics.
 
-1. Capture counts and examples from every required audit lane.
-2. Group evidence into one failure class: discovery, fallback, diagnostics
-   interpretation, automation validation, memory curation, or code structure.
-3. Choose the smallest durable fix:
-   - bundled skill update when agents know the feature but skip the workflow;
-   - eval/test when the workflow should be enforced;
-   - code change when the data is unavailable, misleading, or too hard to
-     interpret;
-   - managed-skill action when the issue lives only in the profile store.
-4. Verify with the narrowest relevant command, then run the matching skill
-   contract or code test.
+Group related examples, locate their shared cause, and choose the smallest
+fix that addresses it: trigger text for misrouting, an exposed diagnostic for
+missing evidence, or an implementation change for faulty behavior. An audit
+request calls for findings; apply fixes when the user has requested improvement.
+Do not turn one anecdote into a universal rule.
 
-## Helper script
-
-Run [scripts/project-analytics.sh](scripts/project-analytics.sh) as the fast
-first pass over Lane 1 (adoption) and Lane 4 (durable memory). It prints what
-`tracedecay analytics diagnostics` does not: a per-tool `mcp_tool_call`
-breakdown with error counts, and fact-store *adoption* — how many times facts
-were retrieved/accessed ("seen") versus rated helpful/unhelpful, the
-seen:feedback ratio, and the transport-agnostic feedback ledger. It prefers the
-CLI/tools and drops to SQL only for those gaps, resolving store paths from
-`tracedecay tool storage_status`. Add `--all` for a cross-project breakdown.
-
-## Deliverable
-
-Report the exact commands/tools used, headline counts, cited sessions or run
-ids when available, the selected failure class, the improvement made, and the
-verification result. Include any `tracedecay_metrics:` savings line.
+Verify changed behavior with the narrowest relevant check. Report supporting
+sessions or run ids, the finding, any changes and verification, and limitations.
+Include tool-reported `tracedecay_metrics:` savings only when available.

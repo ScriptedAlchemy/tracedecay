@@ -1,0 +1,1021 @@
+//! Single read-only Git repository authority.
+//!
+//! Repository topology, refs, HEAD, object format, operation state, status,
+//! and bounded history are read through `gix`.
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+
+use gix::bstr::ByteSlice as _;
+use tracedecay_domain::git::{
+    GitChangeKindV1, GitDegradationV1, GitFileModeV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
+    GitOperationStateV1, GitStatusEntryV1, GitTrackedStatusV1,
+};
+
+mod history;
+mod native_integration;
+pub use history::{
+    GitHistoryBudget, GitHistoryOptions, GitHistoryTermination, GitRepositoryHistory,
+};
+pub use native_integration::{
+    GitNativeApplyOutcome, GitNativeCandidateTreeV1, GitNativeCandidateTreeVisitError,
+    GitNativeIntegrationMode, GitNativePreflight, GitNativePreflightCaptureError,
+    GitNativePreflightDisposition, GitNativeUnsupportedReason,
+};
+
+/// A typed failure from the in-process Git repository authority.
+#[derive(Debug, thiserror::Error)]
+pub enum GitRepositoryError {
+    #[error("not a Git repository: {path}")]
+    NotARepository { path: String },
+    #[error("Git repository at {path} is unreadable: {detail}")]
+    UnreadableRepository { path: String, detail: String },
+    #[error("Git HEAD is unreadable: {detail}")]
+    UnreadableHead { detail: String },
+    #[error("Git repository {operation} failed: {detail}")]
+    Operation {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error(transparent)]
+    Domain(#[from] tracedecay_domain::research::DomainError),
+}
+
+/// One resolved reference and its direct object target, if it has one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitReference {
+    pub name: String,
+    pub target: Option<GitOidV1>,
+    pub symbolic_target: Option<String>,
+}
+
+/// Repository status without application-specific repository identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitRepositoryStatus {
+    pub head: GitHeadStateV1,
+    pub operation: GitOperationStateV1,
+    pub entries: Vec<GitStatusEntryV1>,
+    pub degradations: BTreeSet<GitDegradationV1>,
+}
+
+/// One thread-safe `gix` repository authority.
+#[derive(Debug)]
+pub struct GitRepositoryAuthority {
+    repository: gix::ThreadSafeRepository,
+    worktree_root: Option<PathBuf>,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+}
+
+/// The repository paths one discovery resolves, before any ref or object is
+/// read: the upward walk for `.git`, the repository open, and the canonical
+/// form of each directory it names.
+///
+/// Separated from [`GitRepositoryAuthority`] because topology is the only part
+/// of a discovery that is stable for a checkout. HEAD, refs, and status are
+/// live reads and are answered from a freshly discovered authority every time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitRepositoryTopologyV1 {
+    pub worktree_root: Option<PathBuf>,
+    pub git_dir: PathBuf,
+    pub common_dir: PathBuf,
+}
+
+/// One retained topology resolution and the lock that makes it single-flight.
+#[derive(Default)]
+struct CheckoutTopologySlot {
+    resolved: Mutex<Option<Arc<GitRepositoryTopologyV1>>>,
+}
+
+/// Retained checkout-root topologies.
+///
+/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map is cleared
+/// rather than evicted by age, because every entry is a pure memo that costs
+/// one discovery to rebuild.
+static CHECKOUT_TOPOLOGY: LazyLock<Mutex<HashMap<PathBuf, Arc<CheckoutTopologySlot>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A daemon serves few project roots; this bound exists so a long-lived
+/// process that probes many paths cannot grow the memo without limit.
+const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
+
+/// Repository topology for `path`, resolved once per checkout root.
+///
+/// Live defect this exists for: one daemon connection asked the same
+/// repository for its common directory, worktree root, and linked-worktree
+/// shape a dozen times, and each question ran a complete `gix` discovery —
+/// an upward walk to the filesystem root plus a repository open. On a slow
+/// volume that is seconds per question, paid again by every concurrent
+/// client, and it ran inline on the tokio workers that also poll the daemon's
+/// accept loop.
+///
+/// Only a path that **is** its own worktree root is retained. For such a path
+/// the upward walk can never terminate anywhere else while `<root>/.git`
+/// exists, so probing that entry is a complete revalidation: no repository can
+/// appear between the path and the resolution. Every other path — a
+/// subdirectory, a bare repository, an unresolvable directory — is discovered
+/// live, so a repository created below it is observed immediately.
+pub fn repository_topology(path: &Path) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
+    let slot = checkout_topology_slot(path);
+    let mut resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(topology) = resolved.as_ref()
+        && checkout_topology_is_live(topology)
+    {
+        return Ok(Arc::clone(topology));
+    }
+    *resolved = None;
+    #[cfg(any(test, feature = "test-helpers"))]
+    observe_topology_resolution(path);
+    let topology = Arc::new(
+        hotpath::measure_block!(
+            "runtime_core.git.topology.resolve",
+            GitRepositoryAuthority::discover_uncached(path)
+        )?
+        .into_topology(),
+    );
+    match topology.worktree_root.as_deref() {
+        Some(root) if path.canonicalize().is_ok_and(|canonical| canonical == root) => {
+            *resolved = Some(Arc::clone(&topology));
+        }
+        // Discovered from a subdirectory, a bare repository's control dir, or
+        // any other path the walk did not start at. The answer is not
+        // retainable *for this path* — a repository can appear between it and
+        // the root — but it is the complete, revalidatable answer for the root
+        // it names, so the next question about that root is already paid for.
+        Some(root) => publish_checkout_root_topology(root, &topology),
+        None => {}
+    }
+    Ok(topology)
+}
+
+/// Retain a topology under the worktree root it resolved, not the path it was
+/// discovered from.
+///
+/// Safe to call while holding another path's slot: the root's own resolution
+/// takes the retain arm above and never reaches for a second slot, so no
+/// thread holds these two locks in the opposite order.
+fn publish_checkout_root_topology(root: &Path, topology: &Arc<GitRepositoryTopologyV1>) {
+    let slot = checkout_topology_slot(root);
+    let mut resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
+    *resolved = Some(Arc::clone(topology));
+}
+
+/// A live retained topology for `path`, without resolving one.
+///
+/// Never creates a slot: a peek that inserted would let unresolvable paths
+/// evict the memo this exists to preserve.
+fn retained_checkout_topology(path: &Path) -> Option<Arc<GitRepositoryTopologyV1>> {
+    let slot = Arc::clone(
+        CHECKOUT_TOPOLOGY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)?,
+    );
+    let resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
+    let topology = resolved.as_ref()?;
+    checkout_topology_is_live(topology).then(|| Arc::clone(topology))
+}
+
+fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
+    let mut slots = CHECKOUT_TOPOLOGY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(slot) = slots.get(path) {
+        return Arc::clone(slot);
+    }
+    if slots.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES {
+        slots.clear();
+    }
+    let slot = Arc::new(CheckoutTopologySlot::default());
+    slots.insert(path.to_path_buf(), Arc::clone(&slot));
+    slot
+}
+
+/// Whether a retained checkout-root topology still describes the filesystem.
+///
+/// `<root>/.git` is the entry the upward walk stopped at and the git directory
+/// is where the repository's own state lives; a checkout that was deleted,
+/// re-initialized elsewhere, or detached from its common directory fails one
+/// of the two probes and is resolved again.
+fn checkout_topology_is_live(topology: &GitRepositoryTopologyV1) -> bool {
+    topology
+        .worktree_root
+        .as_ref()
+        .is_some_and(|root| root.join(".git").try_exists().unwrap_or(false))
+        && topology.git_dir.try_exists().unwrap_or(false)
+}
+
+/// Counts live `gix` discoveries and injects discovery latency, per root.
+///
+/// Repository discovery is the blocking filesystem cost the daemon's route
+/// resolution is bounded against, so tests need both to observe how many
+/// discoveries a journey really runs and to make one slow on demand.
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Default)]
+struct RepositoryDiscoveryObservation {
+    discoveries: u64,
+    topology_resolutions: u64,
+    delay: Option<std::time::Duration>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+static REPOSITORY_DISCOVERY_OBSERVATIONS: LazyLock<
+    Mutex<HashMap<PathBuf, RepositoryDiscoveryObservation>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn repository_discovery_observations()
+-> std::sync::MutexGuard<'static, HashMap<PathBuf, RepositoryDiscoveryObservation>> {
+    REPOSITORY_DISCOVERY_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observed_discovery_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observe_repository_discovery(path: &Path) {
+    let delay = {
+        let mut observations = repository_discovery_observations();
+        if observations.is_empty() {
+            return;
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let mut delay = None;
+        for (root, observation) in observations.iter_mut() {
+            if !canonical.starts_with(root) {
+                continue;
+            }
+            observation.discoveries = observation.discoveries.saturating_add(1);
+            delay = delay.or(observation.delay);
+        }
+        delay
+    };
+    // Sleeping under the observation lock would serialize every other root's
+    // discovery behind this one and hide the concurrency the tests assert.
+    if let Some(delay) = delay {
+        std::thread::sleep(delay);
+    }
+}
+
+/// Begin counting live discoveries under `root`, and forget any topology
+/// already retained for it, so a fixture's counts start from a cold authority.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn observe_repository_discovery_for_test(root: &Path) {
+    forget_retained_checkout_topology_for_test(root);
+    repository_discovery_observations().insert(
+        observed_discovery_root(root),
+        RepositoryDiscoveryObservation::default(),
+    );
+}
+
+/// Make every live discovery walk under `root` take `delay`, modelling a
+/// repository on a slow volume. A repository opened from a retained topology
+/// pays no walk and so is not delayed — which is exactly the convergence the
+/// deferral tests assert. Implies [`observe_repository_discovery_for_test`].
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn delay_repository_discovery_for_test(root: &Path, delay: std::time::Duration) {
+    forget_retained_checkout_topology_for_test(root);
+    repository_discovery_observations().insert(
+        observed_discovery_root(root),
+        RepositoryDiscoveryObservation {
+            delay: Some(delay),
+            ..RepositoryDiscoveryObservation::default()
+        },
+    );
+}
+
+/// Live `gix` discoveries observed under `root` since observation began.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn repository_discovery_count_for_test(root: &Path) -> u64 {
+    repository_discovery_observations()
+        .get(&observed_discovery_root(root))
+        .map_or(0, |observation| observation.discoveries)
+}
+
+/// Topology resolutions under `root` — the discoveries the retained authority
+/// could not answer — since observation began.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn repository_topology_resolution_count_for_test(root: &Path) -> u64 {
+    repository_discovery_observations()
+        .get(&observed_discovery_root(root))
+        .map_or(0, |observation| observation.topology_resolutions)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observe_topology_resolution(path: &Path) {
+    let mut observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return;
+    }
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    for (root, observation) in observations.iter_mut() {
+        if canonical.starts_with(root) {
+            observation.topology_resolutions = observation.topology_resolutions.saturating_add(1);
+        }
+    }
+}
+
+/// Stop observing `root` and drop its retained topology.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_repository_discovery_for_test(root: &Path) {
+    repository_discovery_observations().remove(&observed_discovery_root(root));
+    forget_retained_checkout_topology_for_test(root);
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn forget_retained_checkout_topology_for_test(root: &Path) {
+    let canonical = observed_discovery_root(root);
+    CHECKOUT_TOPOLOGY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|path, _| !path.starts_with(&canonical) && !canonical.starts_with(path));
+}
+
+impl GitRepositoryAuthority {
+    /// Open the repository `path` belongs to.
+    ///
+    /// A retained topology answers the *where* half of a discovery — the
+    /// upward walk for `.git` and the canonical form of each directory it
+    /// names — so this opens the repository directly at its own Git directory
+    /// instead of walking the volume again. Live reads (HEAD, refs, status)
+    /// still come from a freshly opened repository.
+    ///
+    /// Live defect this exists for: the topology memo only short-circuited
+    /// `repository_topology`. Every HEAD read — one per route resolution, from
+    /// `current_branch` — still ran a complete `gix::discover`, so on a slow
+    /// volume a deferred route never converged: the memo was warm and the next
+    /// request paid the whole walk again anyway.
+    pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
+        if let Some(topology) = retained_checkout_topology(path)
+            && let Some(authority) = Self::open_retained(&topology)
+        {
+            return Ok(authority);
+        }
+        Self::discover_uncached(path)
+    }
+
+    /// Open a repository whose topology is already known, or `None` when the
+    /// open fails and the full walk has to decide.
+    fn open_retained(topology: &GitRepositoryTopologyV1) -> Option<Self> {
+        let repository = hotpath::measure_block!(
+            "runtime_core.git.repository_open_retained",
+            gix::open_opts(&topology.git_dir, repository_open_options())
+        )
+        .ok()?;
+        Some(Self {
+            repository: repository.into_sync(),
+            worktree_root: topology.worktree_root.clone(),
+            git_dir: topology.git_dir.clone(),
+            common_dir: topology.common_dir.clone(),
+        })
+    }
+
+    #[hotpath::measure(label = "runtime_core.git.repository_discover")]
+    fn discover_uncached(path: &Path) -> Result<Self, GitRepositoryError> {
+        #[cfg(any(test, feature = "test-helpers"))]
+        observe_repository_discovery(path);
+        let repository = hotpath::measure_block!(
+            "runtime_core.git.repository_discover.walk",
+            gix::discover_opts(
+                path,
+                gix::discover::upwards::Options::default(),
+                repository_open_options(),
+            )
+        )
+        .map_err(|error| match error {
+            gix::discover::Error::Discover(gix::discover::upwards::Error::NoGitRepository {
+                ..
+            }) => GitRepositoryError::NotARepository {
+                path: path.display().to_string(),
+            },
+            error => GitRepositoryError::UnreadableRepository {
+                path: path.display().to_string(),
+                detail: error.to_string(),
+            },
+        })?;
+        let (worktree_root, git_dir, common_dir) = hotpath::measure_block!(
+            "runtime_core.git.repository_discover.canonicalize",
+            (
+                repository
+                    .workdir()
+                    .map(|path| canonical(path, "worktree root"))
+                    .transpose(),
+                canonical(repository.git_dir(), "Git directory"),
+                canonical(repository.common_dir(), "Git common directory"),
+            )
+        );
+        let worktree_root = worktree_root.map_err(|error| repository_error(path, error))?;
+        let git_dir = git_dir.map_err(|error| repository_error(path, error))?;
+        let common_dir = common_dir.map_err(|error| repository_error(path, error))?;
+        Ok(Self {
+            repository: repository.into_sync(),
+            worktree_root,
+            git_dir,
+            common_dir,
+        })
+    }
+
+    /// Exact per-worktree checkout root, absent for bare repositories.
+    pub fn worktree_root(&self) -> Option<&Path> {
+        self.worktree_root.as_deref()
+    }
+
+    /// The stable paths this discovery resolved, without the open repository.
+    fn into_topology(self) -> GitRepositoryTopologyV1 {
+        GitRepositoryTopologyV1 {
+            worktree_root: self.worktree_root,
+            git_dir: self.git_dir,
+            common_dir: self.common_dir,
+        }
+    }
+
+    /// Exact per-worktree Git directory.
+    pub fn git_dir(&self) -> &Path {
+        &self.git_dir
+    }
+
+    /// Shared repository common directory.
+    pub fn common_dir(&self) -> &Path {
+        &self.common_dir
+    }
+
+    /// Repository object format from parsed Git configuration.
+    pub fn object_format(&self) -> Result<GitObjectFormatV1, GitRepositoryError> {
+        match self.repository.to_thread_local().object_hash() {
+            gix::hash::Kind::Sha1 => Ok(GitObjectFormatV1::Sha1),
+            gix::hash::Kind::Sha256 => Ok(GitObjectFormatV1::Sha256),
+            format => Err(GitRepositoryError::Operation {
+                operation: "object format",
+                detail: format!("unsupported object format {format}"),
+            }),
+        }
+    }
+
+    /// Exact HEAD state for this repository or linked worktree.
+    #[hotpath::measure(label = "runtime_core.git.head")]
+    pub fn head(&self) -> Result<GitHeadStateV1, GitRepositoryError> {
+        let repository = self.repository.to_thread_local();
+        head_from_gix(&repository)
+    }
+
+    /// Whether any current main or linked worktree has the reference checked out.
+    ///
+    /// Reading the complete repository worktree inventory lets mutation
+    /// callers fail closed when a linked checkout was not part of their
+    /// authorized routing roots or appeared after preflight.
+    pub fn reference_is_checked_out(&self, reference: &str) -> Result<bool, GitRepositoryError> {
+        let repository = self.repository.to_thread_local();
+        let main = repository
+            .main_repo()
+            .map_err(|error| operation("open main worktree", error))?;
+        if main.workdir().is_some() && head_matches_reference(head_from_gix(&main)?, reference) {
+            return Ok(true);
+        }
+        for proxy in repository
+            .worktrees()
+            .map_err(|error| operation("list worktrees", error))?
+        {
+            let linked = proxy
+                .into_repo()
+                .map_err(|error| operation("open linked worktree", error))?;
+            if head_matches_reference(head_from_gix(&linked)?, reference) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// All ordinary repository refs in stable name order.
+    #[hotpath::measure(label = "runtime_core.git.references")]
+    pub fn references(&self) -> Result<Vec<GitReference>, GitRepositoryError> {
+        let repository = self.repository.to_thread_local();
+        let platform = repository
+            .references()
+            .map_err(|error| operation("references", error))?;
+        let iter = platform
+            .all()
+            .map_err(|error| operation("references", error))?;
+        let mut references = Vec::new();
+        for reference in iter {
+            let reference = reference.map_err(|error| operation("references", error))?;
+            let target = reference.target();
+            references.push(GitReference {
+                name: reference.name().as_bstr().to_string(),
+                target: target
+                    .try_id()
+                    .map(|target| GitOidV1::new(target.to_string()))
+                    .transpose()?,
+                symbolic_target: target.try_name().map(|name| name.as_bstr().to_string()),
+            });
+        }
+        references.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(references)
+    }
+
+    /// Parsed in-progress operation state.
+    ///
+    /// `gix::state::InProgress` has no sequencer variant. An interrupted
+    /// `cherry-pick`/`revert` sequence whose `CHERRY_PICK_HEAD`/`REVERT_HEAD`
+    /// is already gone still leaves `.git/sequencer` behind, and `gix` reports
+    /// no in-progress state at all for it. Reading the directory marker keeps
+    /// [`GitOperationStateV1::Sequencer`] reachable through the status path
+    /// instead of collapsing an in-progress sequence to `None`.
+    pub fn operation_state(&self) -> GitOperationStateV1 {
+        use gix::state::InProgress;
+
+        match self.repository.to_thread_local().state() {
+            None if self.git_dir.join("sequencer").is_dir() => GitOperationStateV1::Sequencer,
+            None => GitOperationStateV1::None,
+            Some(InProgress::Merge) => GitOperationStateV1::Merge,
+            Some(
+                InProgress::ApplyMailbox
+                | InProgress::ApplyMailboxRebase
+                | InProgress::Rebase
+                | InProgress::RebaseInteractive,
+            ) => GitOperationStateV1::Rebase,
+            Some(InProgress::CherryPick | InProgress::CherryPickSequence) => {
+                GitOperationStateV1::CherryPick
+            }
+            Some(InProgress::Revert | InProgress::RevertSequence) => GitOperationStateV1::Revert,
+            Some(InProgress::Bisect) => GitOperationStateV1::Bisect,
+        }
+    }
+
+    /// Live staged, unstaged, untracked, ignored, conflict, and submodule
+    /// status directly from the current index and working tree.
+    #[hotpath::measure(label = "runtime_core.git.status")]
+    pub fn status(&self) -> Result<GitRepositoryStatus, GitRepositoryError> {
+        use gix::diff::index::ChangeRef;
+        use gix::dir::entry::Status as DirectoryStatus;
+        use gix::status::Item;
+        use gix::status::index_worktree::Item as IndexWorktreeItem;
+        use gix::status::plumbing::index_as_worktree::{Change as WorktreeChange, EntryStatus};
+
+        let repository = self.repository.to_thread_local();
+        let mut platform = repository
+            .status(gix::progress::Discard)
+            .map_err(|error| operation("status", error))?
+            .untracked_files(gix::status::UntrackedFiles::Files)
+            .index_worktree_rewrites(None);
+        platform.dirwalk_options_mut(|options| {
+            options.set_emit_ignored(Some(gix::dir::walk::EmissionMode::Matching));
+        });
+        let status = platform
+            .into_iter(Vec::<gix::bstr::BString>::new())
+            .map_err(|error| operation("status", error))?;
+
+        let mut tracked = HashMap::<String, TrackedStatusBuilder>::new();
+        let mut loose = HashMap::<String, GitStatusEntryV1>::new();
+        for item in status {
+            match item.map_err(|error| operation("status", error))? {
+                Item::TreeIndex(change) => match change {
+                    ChangeRef::Addition {
+                        location,
+                        entry_mode,
+                        ..
+                    } => {
+                        let path = path_text(location.as_ref(), "status")?;
+                        tracked
+                            .entry(path.clone())
+                            .or_insert_with(|| TrackedStatusBuilder::new(path))
+                            .set_index(GitChangeKindV1::Added, None, Some(mode(entry_mode)?), None);
+                    }
+                    ChangeRef::Deletion {
+                        location,
+                        entry_mode,
+                        ..
+                    } => {
+                        let path = path_text(location.as_ref(), "status")?;
+                        tracked
+                            .entry(path.clone())
+                            .or_insert_with(|| TrackedStatusBuilder::new(path))
+                            .set_index(
+                                GitChangeKindV1::Deleted,
+                                Some(mode(entry_mode)?),
+                                None,
+                                None,
+                            );
+                    }
+                    ChangeRef::Modification {
+                        location,
+                        previous_entry_mode,
+                        entry_mode,
+                        ..
+                    } => {
+                        let path = path_text(location.as_ref(), "status")?;
+                        tracked
+                            .entry(path.clone())
+                            .or_insert_with(|| TrackedStatusBuilder::new(path))
+                            .set_index(
+                                GitChangeKindV1::Modified,
+                                Some(mode(previous_entry_mode)?),
+                                Some(mode(entry_mode)?),
+                                None,
+                            );
+                    }
+                    ChangeRef::Rewrite {
+                        source_location,
+                        source_entry_mode,
+                        location,
+                        entry_mode,
+                        copy,
+                        ..
+                    } => {
+                        let path = path_text(location.as_ref(), "status")?;
+                        let source = path_text(source_location.as_ref(), "status")?;
+                        tracked
+                            .entry(path.clone())
+                            .or_insert_with(|| TrackedStatusBuilder::new(path))
+                            .set_index(
+                                if copy {
+                                    GitChangeKindV1::Copied
+                                } else {
+                                    GitChangeKindV1::Renamed
+                                },
+                                Some(mode(source_entry_mode)?),
+                                Some(mode(entry_mode)?),
+                                Some(source),
+                            );
+                    }
+                },
+                Item::IndexWorktree(worktree) => match worktree {
+                    IndexWorktreeItem::Modification {
+                        entry,
+                        rela_path,
+                        status,
+                        ..
+                    } => {
+                        let path = path_text(rela_path.as_ref(), "status")?;
+                        match status {
+                            EntryStatus::NeedsUpdate(_) => {}
+                            // Porcelain reports `git add --intent-to-add` as a
+                            // tracked entry with a worktree-side addition
+                            // (` A`), never as `??` untracked.
+                            EntryStatus::IntentToAdd => {
+                                let builder = tracked
+                                    .entry(path.clone())
+                                    .or_insert_with(|| TrackedStatusBuilder::new(path));
+                                builder.worktree = GitChangeKindV1::Added;
+                                builder.index_mode = Some(mode(entry.mode)?);
+                                builder.worktree_mode =
+                                    worktree_mode(self.worktree_root.as_deref(), &builder.path)?;
+                            }
+                            EntryStatus::Conflict { entries, .. } => {
+                                let builder = tracked
+                                    .entry(path.clone())
+                                    .or_insert_with(|| TrackedStatusBuilder::new(path));
+                                builder.index = GitChangeKindV1::Unmerged;
+                                builder.worktree = GitChangeKindV1::Unmerged;
+                                builder.index_mode = entries
+                                    .iter()
+                                    .flatten()
+                                    .next()
+                                    .map(|entry| mode(entry.mode))
+                                    .transpose()?;
+                                builder.worktree_mode =
+                                    worktree_mode(self.worktree_root.as_deref(), &builder.path)?;
+                            }
+                            EntryStatus::Change(change) => {
+                                let builder = tracked
+                                    .entry(path.clone())
+                                    .or_insert_with(|| TrackedStatusBuilder::new(path));
+                                if builder.index_mode.is_none() {
+                                    builder.index_mode = Some(mode(entry.mode)?);
+                                }
+                                if builder.head_mode.is_none() {
+                                    builder.head_mode = Some(mode(entry.mode)?);
+                                }
+                                builder.submodule |= entry.mode.is_submodule();
+                                match change {
+                                    WorktreeChange::Removed => {
+                                        builder.worktree = GitChangeKindV1::Deleted;
+                                        builder.worktree_mode = None;
+                                    }
+                                    WorktreeChange::Type { worktree_mode } => {
+                                        builder.worktree = GitChangeKindV1::TypeChanged;
+                                        builder.worktree_mode = Some(mode(worktree_mode)?);
+                                    }
+                                    WorktreeChange::Modification { .. } => {
+                                        builder.worktree = GitChangeKindV1::Modified;
+                                        builder.worktree_mode = worktree_mode(
+                                            self.worktree_root.as_deref(),
+                                            &builder.path,
+                                        )?;
+                                    }
+                                    WorktreeChange::SubmoduleModification(_) => {
+                                        builder.worktree = GitChangeKindV1::Modified;
+                                        builder.worktree_mode = Some(mode(entry.mode)?);
+                                        builder.submodule = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    IndexWorktreeItem::DirectoryContents { entry, .. } => {
+                        let path = path_text(entry.rela_path.as_ref(), "status")?;
+                        match entry.status {
+                            DirectoryStatus::Ignored(_) => {
+                                loose.insert(path.clone(), GitStatusEntryV1::Ignored { path });
+                            }
+                            DirectoryStatus::Untracked => {
+                                loose.insert(path.clone(), GitStatusEntryV1::Untracked { path });
+                            }
+                            DirectoryStatus::Pruned | DirectoryStatus::Tracked => {}
+                        }
+                    }
+                    IndexWorktreeItem::Rewrite { .. } => {}
+                },
+            }
+        }
+
+        for path in tracked.keys() {
+            loose.remove(path);
+        }
+        let mut entries = tracked
+            .into_values()
+            .map(TrackedStatusBuilder::finish)
+            .map(GitStatusEntryV1::Tracked)
+            .collect::<Vec<_>>();
+        entries.extend(loose.into_values());
+        entries.sort_by(|left, right| left.path().cmp(right.path()));
+
+        let head = self.head()?;
+        let op_state = self.operation_state();
+        let mut degradations = self.degradations(&repository, &head, op_state);
+        if entries
+            .iter()
+            .any(|entry| matches!(entry, GitStatusEntryV1::Tracked(value) if value.is_conflicted()))
+        {
+            degradations.insert(GitDegradationV1::ConflictedState);
+        }
+        if entries
+            .iter()
+            .any(|entry| matches!(entry, GitStatusEntryV1::Tracked(value) if value.submodule))
+        {
+            degradations.insert(GitDegradationV1::SubmoduleState);
+        }
+        if has_ignored_collision(&entries) {
+            degradations.insert(GitDegradationV1::IgnoredCollision);
+        }
+        Ok(GitRepositoryStatus {
+            head,
+            operation: op_state,
+            entries,
+            degradations,
+        })
+    }
+
+    fn degradations(
+        &self,
+        repository: &gix::Repository,
+        head: &GitHeadStateV1,
+        operation: GitOperationStateV1,
+    ) -> BTreeSet<GitDegradationV1> {
+        let mut degradations = BTreeSet::new();
+        match head {
+            GitHeadStateV1::Detached { .. } => {
+                degradations.insert(GitDegradationV1::DetachedHead);
+            }
+            GitHeadStateV1::Unborn { .. } => {
+                degradations.insert(GitDegradationV1::UnbornBranch);
+            }
+            GitHeadStateV1::Attached { .. } => {}
+        }
+        if operation != GitOperationStateV1::None {
+            degradations.insert(GitDegradationV1::InProgressOperation);
+        }
+        if repository
+            .config_snapshot()
+            .boolean("core.sparseCheckout")
+            .unwrap_or(false)
+        {
+            degradations.insert(GitDegradationV1::SparseCheckout);
+        }
+        if std::fs::read_dir(&self.git_dir).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("sharedindex.")
+            })
+        }) {
+            degradations.insert(GitDegradationV1::SplitIndex);
+        }
+        if self
+            .worktree_root
+            .as_ref()
+            .is_some_and(|root| root.join(".gitmodules").is_file())
+        {
+            degradations.insert(GitDegradationV1::SubmoduleState);
+        }
+        degradations
+    }
+}
+
+fn head_matches_reference(head: GitHeadStateV1, reference: &str) -> bool {
+    let GitHeadStateV1::Attached { branch, .. } = head else {
+        return false;
+    };
+    branch == reference
+        || reference
+            .strip_prefix("refs/heads/")
+            .is_some_and(|short| branch == short)
+}
+
+#[derive(Debug)]
+struct TrackedStatusBuilder {
+    path: String,
+    original_path: Option<String>,
+    index: GitChangeKindV1,
+    worktree: GitChangeKindV1,
+    head_mode: Option<GitFileModeV1>,
+    index_mode: Option<GitFileModeV1>,
+    worktree_mode: Option<GitFileModeV1>,
+    submodule: bool,
+}
+
+impl TrackedStatusBuilder {
+    fn new(path: String) -> Self {
+        Self {
+            path,
+            original_path: None,
+            index: GitChangeKindV1::Unmodified,
+            worktree: GitChangeKindV1::Unmodified,
+            head_mode: None,
+            index_mode: None,
+            worktree_mode: None,
+            submodule: false,
+        }
+    }
+
+    fn set_index(
+        &mut self,
+        change: GitChangeKindV1,
+        head_mode: Option<GitFileModeV1>,
+        index_mode: Option<GitFileModeV1>,
+        original_path: Option<String>,
+    ) {
+        self.index = change;
+        self.head_mode = head_mode;
+        self.worktree_mode.clone_from(&index_mode);
+        self.index_mode = index_mode;
+        self.original_path = original_path;
+        self.submodule = self
+            .index_mode
+            .as_ref()
+            .or(self.head_mode.as_ref())
+            .is_some_and(GitFileModeV1::is_submodule);
+    }
+
+    fn finish(self) -> GitTrackedStatusV1 {
+        GitTrackedStatusV1 {
+            path: self.path,
+            original_path: self.original_path,
+            index: self.index,
+            worktree: self.worktree,
+            head_mode: self.head_mode,
+            index_mode: self.index_mode,
+            worktree_mode: self.worktree_mode,
+            submodule: self.submodule,
+        }
+    }
+}
+
+/// Preserve the repository's normal configuration and attribute semantics
+/// while rejecting `GIT_*` redirection from the daemon environment.
+fn repository_open_options() -> gix::open::Options {
+    let mut permissions = gix::open::Permissions::secure();
+    permissions.env.git_prefix = gix::sec::Permission::Deny;
+    permissions.env.objects = gix::sec::Permission::Deny;
+    permissions.config.env = false;
+    gix::open::Options::default().permissions(permissions)
+}
+
+fn head_from_gix(repository: &gix::Repository) -> Result<GitHeadStateV1, GitRepositoryError> {
+    let head = repository
+        .head()
+        .map_err(|error| GitRepositoryError::UnreadableHead {
+            detail: error.to_string(),
+        })?;
+    let branch = head
+        .referent_name()
+        .and_then(|name| name.as_bstr().to_str().ok())
+        .and_then(|name| name.strip_prefix("refs/heads/"))
+        .map(str::to_owned);
+    match (head.id(), branch) {
+        (Some(commit), Some(branch)) => Ok(GitHeadStateV1::Attached {
+            branch,
+            commit: GitOidV1::new(commit.to_string())?,
+        }),
+        (Some(commit), None) => Ok(GitHeadStateV1::Detached {
+            commit: GitOidV1::new(commit.to_string())?,
+        }),
+        (None, Some(branch)) => Ok(GitHeadStateV1::Unborn { branch }),
+        (None, None) => Err(GitRepositoryError::UnreadableHead {
+            detail: "HEAD has neither a commit nor a branch".to_owned(),
+        }),
+    }
+}
+
+fn repository_error(path: &Path, error: impl std::fmt::Display) -> GitRepositoryError {
+    GitRepositoryError::UnreadableRepository {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    }
+}
+
+fn path_text(
+    path: &gix::bstr::BStr,
+    operation_name: &'static str,
+) -> Result<String, GitRepositoryError> {
+    path.to_str()
+        .map(str::to_owned)
+        .map_err(|error| GitRepositoryError::Operation {
+            operation: operation_name,
+            detail: error.to_string(),
+        })
+}
+
+fn mode(mode: gix::index::entry::Mode) -> Result<GitFileModeV1, GitRepositoryError> {
+    GitFileModeV1::new(format!("{:06o}", mode.bits())).map_err(Into::into)
+}
+
+fn worktree_mode(
+    root: Option<&Path>,
+    path: &str,
+) -> Result<Option<GitFileModeV1>, GitRepositoryError> {
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let metadata = match std::fs::symlink_metadata(root.join(path)) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(operation("status worktree mode", error)),
+    };
+    let value = if metadata.file_type().is_symlink() {
+        GitFileModeV1::SYMLINK
+    } else if metadata.is_dir() {
+        GitFileModeV1::GITLINK
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o111 != 0 {
+                GitFileModeV1::EXECUTABLE
+            } else {
+                GitFileModeV1::REGULAR
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            GitFileModeV1::REGULAR
+        }
+    };
+    GitFileModeV1::new(value).map(Some).map_err(Into::into)
+}
+
+fn has_ignored_collision(entries: &[GitStatusEntryV1]) -> bool {
+    let ignored = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            GitStatusEntryV1::Ignored { path } => Some(path.trim_end_matches('/')),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    entries.iter().any(|entry| {
+        let path = match entry {
+            GitStatusEntryV1::Ignored { .. } => return false,
+            _ => entry.path(),
+        };
+        ignored.iter().any(|ignored_path| {
+            parent_dir(ignored_path) == parent_dir(path)
+                || path.starts_with(&format!("{ignored_path}/"))
+                || (!parent_dir(path).is_empty()
+                    && ignored_path.starts_with(&format!("{}/", parent_dir(path))))
+        })
+    })
+}
+
+fn parent_dir(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    trimmed.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+fn canonical(path: &Path, operation_name: &'static str) -> Result<PathBuf, GitRepositoryError> {
+    path.canonicalize()
+        .map_err(|error| operation(operation_name, error))
+}
+
+fn operation(operation: &'static str, error: impl std::fmt::Display) -> GitRepositoryError {
+    GitRepositoryError::Operation {
+        operation,
+        detail: error.to_string(),
+    }
+}

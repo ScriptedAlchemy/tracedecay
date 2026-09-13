@@ -1,21 +1,14 @@
 //! Audit-tier fixture surface.
 //!
 //! This module intentionally plants a few ship-risk markers so the
-//! audit/safety-scan, dead-code, and unused-import scenarios have something
+//! audit/safety-scan and dead-code scenarios have something
 //! concrete and unambiguous to find. It is deliberately kept OUT of the order
 //! flow (`orders`/`pricing`/`inventory`/`discount`) so the exploration,
 //! call-tracing, and impact scenarios' ground truth is unaffected.
 //!
 //! Planted markers:
-//!   * an unused `use` import (for unused-imports / clean-dead-code),
 //!   * a `TODO` marker (for TODO/audit scans),
 //!   * a needless `unsafe` block (for audit-safety / panic-and-risk scans).
-
-// Planted unused import: `BTreeMap` is referenced nowhere in the crate, so the
-// unused-imports scan flags it. (A type that other modules DO use, like
-// HashMap, would share one import node and read as "used", so pick a unique
-// one.)
-use std::collections::BTreeMap;
 
 /// Reinterpret a total (in cents) as a `usize` through a raw-pointer read.
 ///

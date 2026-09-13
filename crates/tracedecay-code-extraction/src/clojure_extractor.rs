@@ -1,73 +1,24 @@
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+use crate::common::{ExtractionState, local_node_id};
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 pub struct ClojureExtractor;
 
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
-    }
-
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl ClojureExtractor {
-    pub fn extract_clojure(file_path: &str, source: &str) -> ExtractionResult {
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
-
-        let tree = match Self::parse_source(source) {
-            Ok(t) => t,
-            Err(msg) => {
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -77,7 +28,7 @@ impl ClojureExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -91,6 +42,7 @@ impl ClojureExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -98,22 +50,17 @@ impl ClojureExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
-        Self::build_result(state, start)
-    }
 
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("clojure")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Clojure grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -158,7 +105,13 @@ impl ClojureExtractor {
         };
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -182,6 +135,7 @@ impl ClojureExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -214,7 +168,7 @@ impl ClojureExtractor {
         };
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let sig = Self::first_line(state, node);
 
         let graph_node = Node {
@@ -239,6 +193,7 @@ impl ClojureExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -253,7 +208,6 @@ impl ClojureExtractor {
             });
         }
 
-        // Collect call sites from the body.
         Self::extract_calls(state, node, &id, 2);
     }
 
@@ -264,7 +218,13 @@ impl ClojureExtractor {
         };
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            &name,
+            node,
+        );
         let sig = Self::first_line(state, node);
 
         let graph_node = Node {
@@ -289,6 +249,7 @@ impl ClojureExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -310,7 +271,13 @@ impl ClojureExtractor {
         };
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
         let sig = Self::first_line(state, node);
 
         let graph_node = Node {
@@ -335,6 +302,7 @@ impl ClojureExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -353,7 +321,13 @@ impl ClojureExtractor {
     fn visit_require(state: &mut ExtractionState, node: TsNode<'_>) {
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, "require", start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Use,
+            "require",
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -377,6 +351,7 @@ impl ClojureExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -398,7 +373,7 @@ impl ClojureExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "sym_lit" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -417,7 +392,7 @@ impl ClojureExtractor {
                 let child = cursor.node();
                 if child.kind() == "sym_lit" {
                     if count == n {
-                        return Some(state.node_text(child));
+                        return Some(state.node_text(child).to_string());
                     }
                     count += 1;
                 }
@@ -517,7 +492,16 @@ impl crate::LanguageExtractor for ClojureExtractor {
         "Clojure"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_clojure(file_path, source)
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

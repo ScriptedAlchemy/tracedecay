@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "baseline": "partitioned-codec-baseline.json",
+  "prior": "partitioned-codec-optimized.json",
+  "profile": "bench",
+  "features": [
+    "hotpath",
+    "hotpath-alloc"
+  ],
+  "note": "Streaming codec (#811). The fixture columns below are byte-identical to partitioned-codec-baseline.json, which is the 2,600-file byte-identity evidence for the format-preserving rewrite.",
+  "fixture": {
+    "corpus": "benchmark_data/index-bench/corpus",
+    "replicas": 10,
+    "files": 2600,
+    "source_bytes": 9284370,
+    "manifest_bytes": 5177470,
+    "segments": 2601,
+    "segment_bytes": 281183513,
+    "segment_bytes_per_file": 108147.505
+  },
+  "measured_iterations": 5,
+  "exclusive_allocations": {
+    "encode": {
+      "total_bytes": "5.1 GB",
+      "total_count": 3270260
+    },
+    "decode_and_open": {
+      "total_bytes": "7.0 GB",
+      "total_count": 55770020
+    }
+  },
+  "bytes_lane": {
+    "vm_hwm_bytes": 1984229376,
+    "encode_p50_ns": 5422994807,
+    "encode_p95_ns": 5640862384,
+    "decode_and_open_p50_ns": 10442455557,
+    "decode_and_open_p95_ns": 11443002514
+  },
+  "count_lane": {
+    "vm_hwm_bytes": 1985306624,
+    "encode_p50_ns": 4694421202,
+    "encode_p95_ns": 4821093545,
+    "decode_and_open_p50_ns": 8665776348,
+    "decode_and_open_p95_ns": 8968579437
+  }
+}

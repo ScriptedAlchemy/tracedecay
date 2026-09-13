@@ -1,0 +1,50 @@
+{
+  "mcp": {
+    "tracedecay": {
+      "type": "local",
+      "command": ["__TRACEDECAY_BIN__", "serve"]
+    }
+  },
+  "lsp": {
+    "tracedecay": {
+      "command": [
+        "__TRACEDECAY_BIN__",
+        "lsp",
+        "bridge",
+        "--stdio"
+      ],
+      "extensions": [
+        ".rs",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".py",
+        ".go",
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".hh",
+        ".hpp",
+        ".hxx",
+        ".m",
+        ".mm",
+        ".zig",
+        ".lua",
+        ".php"
+      ],
+      "env": {
+        "TRACEDECAY_LSP_BROKER_UPSTREAM": "0"
+      },
+      "initialization": {
+        "tracedecay": {
+          "brokerUpstream": false,
+          "duplicateAnalyzerAvoidance": true,
+          "competingAnalyzerPolicy": "preflight-and-refuse-ambiguous"
+        }
+      }
+    }
+  }
+}

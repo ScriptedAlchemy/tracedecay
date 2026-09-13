@@ -1,0 +1,2471 @@
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::common;
+use crate::common::{
+    canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
+};
+use serde_json::{Value, json};
+use tempfile::TempDir;
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
+};
+use tracedecay_domain::UtcMicros;
+use tracedecay_hooks::{
+    HOOK_CONFIGURATION_SCHEMA_VERSION, HookCapabilityV1, HookConfigurationFileWriterV1,
+    HookConfigurationPublisherV1, HookConfigurationSnapshotV1, HookEventFamily, HookEventSupportV1,
+    HookEventV2, HookHostV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolV1,
+    hook_configuration_path,
+};
+use tracedecay_runtime_core::storage::{
+    default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
+};
+use tracedecay_tool_catalog::SchemaId;
+
+/// Bound for waits that depend on spawning and running the real `tracedecay`
+/// CLI as a child process: connecting to the fake daemon socket and forwarding
+/// the observed request back to the test thread. Under nextest's
+/// process-per-test parallelism the fork/exec + init of that child can be
+/// scheduled slowly on a loaded runner, so a 2s bound false-fires. This is a
+/// generous ceiling that still fails fast on a genuine hang (the CLI normally
+/// connects in well under a second).
+const CLI_ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Bound for local, in-process readiness signals (a spawned thread binding a
+/// socket and sending on an mpsc channel). These do not spawn external
+/// processes, but the thread can still be scheduled slowly under load.
+const LOCAL_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Outer kill ceiling for CLI children under hang-regression tests. Product
+/// deadlines (for example `TRACEDECAY_STATUS_DEADLINE_MS`) must expire first.
+const CLI_CHILD_KILL_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// Spawn a CLI child with stdin closed and drain stdout/stderr on dedicated
+/// threads so a large or stalled response cannot deadlock the pipe buffers.
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Output {
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout {
+            out.read_to_end(&mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr {
+            err.read_to_end(&mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
+        }
+        buf
+    });
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
+        {
+            let stdout = stdout_handle.join().expect("stdout reader");
+            let stderr = stderr_handle.join().expect("stderr reader");
+            return Output {
+                status,
+                stdout,
+                stderr,
+            };
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child
+                .wait()
+                .unwrap_or_else(|e| panic!("failed to wait for timed out child: {e}"));
+            let stdout = stdout_handle.join().unwrap_or_default();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            panic!(
+                "tracedecay hung after {:?}\nstdout:\n{}\nstderr:\n{}",
+                started.elapsed(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+enum FakeDaemonResponse {
+    Complete { text: String },
+    HoldOpen,
+}
+
+/// The self-identifying version of the compiled CLI under test, as its
+/// `--version` flag reports it. The fake daemon echoes this so the readiness
+/// probe sees a daemon that matches the client instead of a version skew.
+fn cli_build_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+            .arg("--version")
+            .output()
+            .expect("the built tracedecay binary should run");
+        assert!(output.status.success(), "`tracedecay --version` failed");
+        let printed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        printed
+            .strip_prefix("tracedecay ")
+            .unwrap_or_else(|| panic!("unexpected `--version` output: {printed:?}"))
+            .to_string()
+    })
+}
+
+fn spawn_scripted_daemon(
+    socket_path: PathBuf,
+    expected_tool_name: &'static str,
+    response: FakeDaemonResponse,
+) -> mpsc::Receiver<Value> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (request_tx, request_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+
+        // The CLI may open preliminary connections before the scripted tool
+        // call (for example the startup readiness probe's `initialize`
+        // roundtrip), so the fake daemon serves accepted connections in a
+        // loop until the expected `tools/call` arrives.
+        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+        loop {
+            let (stream, _) = common::poll_until(
+                deadline,
+                Duration::from_millis(10),
+                || match listener.accept() {
+                    Ok(accepted) => Some(accepted),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                    Err(e) => panic!("accept fake daemon client: {e}"),
+                },
+                || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
+            );
+            stream
+                .set_nonblocking(false)
+                .expect("set accepted stream blocking");
+            stream
+                .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
+                .expect("write timeout");
+            let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+
+            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            // Skip preamble lines (auth preface, handshake) until the first
+            // JSON-RPC frame carrying a `method`; a connection that closes
+            // without one is ignored.
+            let request = loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break None,
+                    Ok(_) => {}
+                }
+                let value: Value =
+                    serde_json::from_str(line.trim()).expect("fake daemon preamble JSON");
+                if value.get("method").is_some() {
+                    break Some(value);
+                }
+            };
+            let Some(request) = request else {
+                continue;
+            };
+
+            if request["method"] == "initialize" {
+                // Answer the readiness probe with this build's identity so
+                // the CLI proceeds to the scripted tool call.
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"].clone(),
+                    "result": {
+                        "serverInfo": {
+                            "name": "tracedecay",
+                            "version": cli_build_version(),
+                        }
+                    }
+                });
+                let mut writer = stream;
+                writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+                    .expect("write fake daemon initialize response");
+                continue;
+            }
+
+            assert_eq!(request["method"], "tools/call");
+            assert_eq!(request["params"]["name"], expected_tool_name);
+            request_tx
+                .send(request.clone())
+                .expect("send observed JSON-RPC request");
+
+            match response {
+                FakeDaemonResponse::Complete { text } => {
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"].clone(),
+                        "result": {
+                            "content": [{
+                                "type": "text",
+                                "text": text
+                            }]
+                        }
+                    });
+                    let mut writer = stream;
+                    writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+                        .expect("write fake daemon response");
+                }
+                FakeDaemonResponse::HoldOpen => {
+                    // Keep the accepted socket open without writing a matching response.
+                    std::thread::sleep(CLI_CHILD_KILL_TIMEOUT + Duration::from_secs(2));
+                }
+            }
+            break;
+        }
+    });
+
+    ready_rx
+        .recv_timeout(LOCAL_READY_TIMEOUT)
+        .expect("fake daemon should become ready");
+    request_rx
+}
+
+fn minimal_status_payload() -> String {
+    serde_json::to_string(&json!({
+        "node_count": 1,
+        "edge_count": 0,
+        "file_count": 1,
+        "nodes_by_kind": {},
+        "edges_by_kind": {},
+        "db_size_bytes": 128,
+        "last_updated": 1,
+        "total_source_bytes": 32,
+        "files_by_language": { "Rust": 1 },
+        "last_sync_at": 1,
+        "last_full_sync_at": 1,
+        "last_sync_duration_ms": 1,
+        "serving_branch": "master",
+    }))
+    .expect("status payload")
+}
+
+fn init_project_with_cli(home: &Path, project: &Path) {
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+
+    crate::common::initialize_tracedecay_cli_project(home, project);
+}
+
+/// [`init_project_with_cli`] over a committed repository.
+///
+/// The daemon's project-scoped retained authorities (LCM, sessions) and its
+/// code index are all git-backed: a project that is not a committed repository
+/// opens with those authorities unmounted, and `init` reports that code
+/// indexing is unavailable rather than requesting reconciliation. Journeys
+/// whose subject is one of those authorities need the repository, or they only
+/// ever observe the degraded open.
+fn init_committed_git_project_with_cli(home: &Path, project: &Path) {
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    git(project, &["init", "-b", "main"]);
+    git(project, &["add", "."]);
+    git(
+        project,
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.local",
+            "commit",
+            "-m",
+            "seed committed project fixture",
+        ],
+    );
+
+    crate::common::initialize_tracedecay_cli_project(home, project);
+}
+
+fn git(project: &Path, args: &[&str]) {
+    let git = crate::common::git_program();
+    // Retry a transient spawn ENOENT under heavy parallel load.
+    let mut last_err: Option<std::io::Error> = None;
+    let mut output = None;
+    for attempt in 0..5 {
+        match std::process::Command::new(&git)
+            .args(args)
+            .current_dir(project)
+            .output()
+        {
+            Ok(out) => {
+                output = Some(out);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt < 4 => {
+                last_err = Some(e);
+                std::thread::sleep(Duration::from_millis(20 * (attempt + 1)));
+            }
+            Err(e) => panic!("git {args:?} should run (program {git:?}): {e}"),
+        }
+    }
+    let output =
+        output.unwrap_or_else(|| panic!("git {args:?} should run after retries: {last_err:?}"));
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
+    let home = TempDir::new().unwrap();
+    let repository = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let primary = repository.path().join("primary");
+    let linked = repository.path().join("linked");
+    std::fs::create_dir_all(primary.join("src")).unwrap();
+    git(&primary, &["init", "-b", "main"]);
+    std::fs::write(
+        primary.join("src/lib.rs"),
+        "pub fn daemon_first_init_fixture() {}\n",
+    )
+    .unwrap();
+    git(&primary, &["add", "."]);
+    git(
+        &primary,
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.local",
+            "commit",
+            "-m",
+            "seed linked worktree fixture",
+        ],
+    );
+    let linked_arg = linked.to_string_lossy().into_owned();
+    git(
+        &primary,
+        &["worktree", "add", "-b", "linked-init", &linked_arg],
+    );
+    let linked = canonical_existing_path(&linked);
+
+    // Match the production dogfood journey exactly: the profile is empty,
+    // daemon authority starts first, then the public CLI initializes the
+    // checkout through that already-running daemon.
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let initialized = run_command_with_timeout(
+        {
+            let mut command = tracedecay_command_with_home(&home_path);
+            command.arg("init").current_dir(&linked);
+            command
+        },
+        CLI_ROUNDTRIP_TIMEOUT,
+    );
+    assert!(
+        initialized.status.success(),
+        "daemon-first init from a linked worktree must enroll the authenticated profile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let init_stderr = String::from_utf8_lossy(&initialized.stderr);
+    assert!(
+        init_stderr.contains("daemon code-index reconciliation requested"),
+        "successful init must request the daemon-owned scheduler: {init_stderr}"
+    );
+
+    let linked_arg = linked.to_string_lossy().into_owned();
+    let status = run_command_with_timeout(
+        {
+            let mut command = tracedecay_command_with_home(&home_path);
+            command
+                .args(["tool", "--project", &linked_arg, "status", "--json"])
+                .current_dir(&linked);
+            command
+        },
+        CLI_ROUNDTRIP_TIMEOUT,
+    );
+    assert!(
+        status.status.success(),
+        "the initialized linked worktree must remain enrolled for a normal daemon call\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
+    let project_arg = project.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "status",
+            "--json",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("tracedecay tool status should run");
+    assert!(
+        output.status.success(),
+        "status should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("tool result json");
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("status result text");
+    let payload: Value = serde_json::from_str(text).expect("status payload json");
+    payload["server"]["tool_calls"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("missing server.tool_calls in {payload}"))
+}
+
+fn configuration_tool_success(
+    home: &Path,
+    project: &Path,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
+    let project_arg = project.to_string_lossy().to_string();
+    let arguments = serde_json::to_string(&arguments).expect("configuration arguments");
+    let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+    loop {
+        let mut command = tracedecay_command_with_home(home);
+        command.current_dir(project).args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            tool_name,
+            "--args",
+            arguments.as_str(),
+            "--json",
+        ]);
+        let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+        let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{tool_name} returned invalid JSON: {error}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        if payload.get("outcome").is_some() {
+            assert!(
+                output.status.success(),
+                "{tool_name} returned an outcome with a failing status\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return payload;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{tool_name} never became available\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_daemon_socket(socket_path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    common::poll_until(
+        deadline,
+        Duration::from_millis(25),
+        || UnixStream::connect(socket_path).is_ok().then_some(()),
+        || {
+            format!(
+                "timed out waiting for daemon socket at {}",
+                socket_path.display()
+            )
+        },
+    );
+}
+
+fn spawn_sentinel_daemon(
+    socket_path: PathBuf,
+    expected_tool_name: &'static str,
+    expect_project_path: bool,
+    expect_allow_init: bool,
+    sentinel: &'static str,
+) -> mpsc::Receiver<Value> {
+    spawn_sentinel_daemon_with_notification(
+        socket_path,
+        expected_tool_name,
+        expect_project_path,
+        expect_allow_init,
+        sentinel,
+        false,
+    )
+}
+
+fn spawn_sentinel_daemon_with_notification(
+    socket_path: PathBuf,
+    expected_tool_name: &'static str,
+    expect_project_path: bool,
+    expect_allow_init: bool,
+    sentinel: &'static str,
+    emit_notification: bool,
+) -> mpsc::Receiver<Value> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (request_tx, request_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+
+        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+        let (stream, _) = common::poll_until(
+            deadline,
+            Duration::from_millis(10),
+            || match listener.accept() {
+                Ok(accepted) => Some(accepted),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                Err(e) => panic!("accept fake daemon client: {e}"),
+            },
+            || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
+        );
+        stream
+            .set_nonblocking(false)
+            .expect("set accepted stream blocking");
+        stream
+            .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
+            .expect("write timeout");
+
+        let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+        let mut handshake = String::new();
+        reader
+            .read_line(&mut handshake)
+            .expect("read daemon handshake");
+        let handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
+        assert_eq!(handshake["project_path"].is_string(), expect_project_path);
+        assert_eq!(
+            handshake
+                .get("allow_init")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            expect_allow_init
+        );
+
+        let mut request = String::new();
+        reader
+            .read_line(&mut request)
+            .expect("read JSON-RPC request");
+        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
+        assert_eq!(request["method"], "tools/call");
+        assert_eq!(request["params"]["name"], expected_tool_name);
+        request_tx
+            .send(request.clone())
+            .expect("send observed JSON-RPC request");
+
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request["id"].clone(),
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": sentinel
+                }]
+            }
+        });
+        let mut writer = stream;
+        if emit_notification {
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": {
+                    "level": "warning",
+                    "data": "daemon notice before response"
+                }
+            });
+            writeln!(writer, "{}", serde_json::to_string(&notification).unwrap())
+                .expect("write fake daemon notification");
+        }
+        writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+            .expect("write fake daemon response");
+    });
+
+    ready_rx
+        .recv_timeout(LOCAL_READY_TIMEOUT)
+        .expect("fake daemon should become ready");
+    request_rx
+}
+
+/// Enroll a project for the native hook capture contract: an enrollment
+/// marker binds the project root to a profile shard, and a daemon-issued
+/// hook configuration binding is published under that shard's data root so
+/// `run_native_capture` resolves `Bound` instead of `Unbound`.
+fn enroll_native_capture_project(
+    home: &Path,
+    project: &Path,
+    project_id: &str,
+    host: HookHostV1,
+    families: &[HookEventFamily],
+) -> PathBuf {
+    pin_fixture_repository_identity(project, project_id).unwrap();
+    // An enrolled project always belongs to an installed profile: the prompt
+    // callbacks stay quiet without a profile identity, so the fixture installs
+    // it through the canonical authority before the project store exists.
+    let profile_root = home.join(".tracedecay");
+    tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("install fixture profile identity");
+    let data_root = profile_root.join("projects").join(project_id);
+    std::fs::create_dir_all(&data_root).unwrap();
+    let now = capture_test_now();
+    HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(hook_configuration_path(
+        &data_root, [3; 16], host,
+    )))
+    .publish(HookConfigurationSnapshotV1 {
+        schema_version: HOOK_CONFIGURATION_SCHEMA_VERSION,
+        revision: 1,
+        published_at: UtcMicros(now.0 - 1_000_000),
+        expires_at: UtcMicros(now.0 + 600_000_000),
+        binding: HookScopeBindingV1 {
+            host,
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: 4,
+            binding_token: [5; 32],
+            capabilities: families
+                .iter()
+                .map(|family| HookCapabilityV1 {
+                    family: *family,
+                    support: HookEventSupportV1::Native,
+                })
+                .collect(),
+        },
+    })
+    .unwrap();
+    data_root
+}
+
+fn capture_test_now() -> UtcMicros {
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    UtcMicros(i64::try_from(elapsed.as_micros()).unwrap())
+}
+
+fn run_native_capture_hook(
+    home: &Path,
+    project: &Path,
+    command_arg: &str,
+    event: &Value,
+) -> Output {
+    let event = event.to_string();
+    tracedecay_command_with_home(home)
+        .current_dir(project)
+        .arg(command_arg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin should be piped")
+                .write_all(event.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook command should run")
+}
+
+fn native_capture_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
+    data_root.join("hook-v2-spool").join(host.hook_key())
+}
+
+/// Assert the transport-only response contract shared by every native
+/// capture outcome: `{}` on stdout, nothing on stderr, and the exit code the
+/// `NativeHookCaptureOutcomeV1` mapping assigns to the outcome.
+fn assert_capture_transport_response(label: &str, output: &Output, expected_exit: i32) {
+    assert_eq!(
+        output.status.code(),
+        Some(expected_exit),
+        "{label}: unexpected exit\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"{}\n", "{label}: {output:?}");
+    // A landed capture is silent on stderr; a refused one must name its
+    // refusal there rather than exit 1 with nothing to act on.
+    if expected_exit == 0 {
+        assert!(output.stderr.is_empty(), "{label}: {output:?}");
+    } else {
+        assert!(
+            output.stderr.starts_with(b"tracedecay hook: "),
+            "{label}: refusal must be named on stderr: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn cursor_after_file_edit_hook_captures_bound_spool_record() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = HookHostV1::CursorDesktop;
+    let data_root = enroll_native_capture_project(
+        &home_path,
+        &project_path,
+        "proj_cursor_after_file_edit_capture",
+        host,
+        &[HookEventFamily::SavedEdit],
+    );
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    let edited = project_path.join("src/lib.rs");
+    std::fs::write(&edited, "pub fn answer() -> u32 { 43 }\n").unwrap();
+
+    // A payload without Cursor's documented identity fields (edits,
+    // conversation/generation/session identity) is typed Rejected: exit 1,
+    // transport-only `{}` response, and no spool artifact.
+    let rejected = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-after-file-edit",
+        &json!({
+            "hook_event_name": "afterFileEdit",
+            "file_path": edited,
+            "workspace_roots": [project_path],
+        }),
+    );
+    assert_capture_transport_response("afterFileEdit rejected", &rejected, 1);
+    assert!(
+        !native_capture_spool_root(&data_root, host).exists(),
+        "rejected payload must not leave a spool artifact"
+    );
+
+    // The authentic Cursor afterFileEdit shape (mirroring the checked-in
+    // host fixture) is Captured into the bounded replay spool.
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-after-file-edit",
+        &json!({
+            "conversation_id": "conv-1",
+            "generation_id": "gen-1",
+            "model": "test-model",
+            "file_path": edited,
+            "edits": [{
+                "old_string": "pub fn answer() -> u32 { 42 }",
+                "new_string": "pub fn answer() -> u32 { 43 }",
+            }],
+            "session_id": "session-1",
+            "hook_event_name": "afterFileEdit",
+            "cursor_version": "1.7.0",
+            "workspace_roots": [project_path],
+            "user_email": "dev@example.com",
+            "transcript_path": home_path.join("transcripts/session-1.jsonl"),
+        }),
+    );
+    assert_capture_transport_response("afterFileEdit captured", &output, 0);
+
+    let (mut spool, report) = HookSpoolV1::open(
+        native_capture_spool_root(&data_root, host),
+        HookSpoolConfigV1::stock(host),
+        capture_test_now(),
+    )
+    .expect("open captured spool");
+    assert_eq!(report.pending_records, 1, "captured record must be spooled");
+    let batches = spool
+        .claim_replay_batches(capture_test_now(), 1)
+        .expect("claim spooled batch");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].records.len(), 1);
+    assert_eq!(batches[0].records[0].envelope.producer, host);
+    assert!(
+        matches!(
+            batches[0].records[0].envelope.event,
+            HookEventV2::SavedEdit { .. }
+        ),
+        "afterFileEdit must capture a SavedEdit envelope: {:?}",
+        batches[0].records[0].envelope.event
+    );
+}
+
+#[test]
+fn cursor_after_shell_hook_is_typed_unsupported_without_spool_record() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = HookHostV1::CursorDesktop;
+    // Bind every family Cursor natively supports so the absence of a spool
+    // record is attributable to the unsupported event, not a missing binding.
+    let data_root = enroll_native_capture_project(
+        &home_path,
+        &project_path,
+        "proj_cursor_after_shell_capture",
+        host,
+        &[HookEventFamily::SessionBoundary, HookEventFamily::SavedEdit],
+    );
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-after-shell",
+        &json!({
+            "hook_event_name": "afterShellExecution",
+            "command": "git pull --rebase",
+            "cwd": project_path,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    // Shell events have no native capture family for Cursor (ToolLifecycle
+    // is typed Unavailable), so the outcome is Unsupported: fail-open exit 0
+    // and no spool artifact — command text can never enter the spool.
+    assert_capture_transport_response("afterShellExecution unsupported", &output, 0);
+    assert!(
+        !native_capture_spool_root(&data_root, host).exists(),
+        "unsupported shell event must not leave a spool artifact"
+    );
+}
+
+#[test]
+fn cursor_after_shell_missing_daemon_exits_promptly_without_children() {
+    const SAMPLE_COUNT: usize = 10;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+    let missing_socket = socket_dir.path().join("missing.sock");
+    let event = json!({
+        "hook_event_name": "afterShellExecution",
+        "command": "git status",
+        "cwd": project_path,
+        "workspace_roots": [project_path],
+    })
+    .to_string();
+    let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+
+    for _ in 0..SAMPLE_COUNT {
+        let started = Instant::now();
+        let output = tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+            .arg("hook-cursor-after-shell")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .as_mut()
+                    .expect("stdin should be piped")
+                    .write_all(event.as_bytes())?;
+                #[cfg(target_os = "linux")]
+                {
+                    let children =
+                        std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", child.id()))
+                            .unwrap_or_default();
+                    assert!(
+                        children.trim().is_empty(),
+                        "after-shell hook spawned unexpected children: {children}"
+                    );
+                }
+                child.wait_with_output()
+            })
+            .expect("missing-daemon hook command should run");
+        samples.push(started.elapsed());
+        assert!(
+            output.status.success(),
+            "missing-daemon hook must fail open\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    samples.sort_unstable();
+    let min = samples[0];
+    let median = samples[SAMPLE_COUNT / 2];
+    let max = samples[SAMPLE_COUNT - 1];
+    eprintln!(
+        "cursor missing-daemon after-shell samples={SAMPLE_COUNT} min_us={} median_us={} max_us={}",
+        min.as_micros(),
+        median.as_micros(),
+        max.as_micros()
+    );
+    assert!(
+        max < Duration::from_secs(2),
+        "missing-daemon hook exceeded its bounded fail-fast ceiling: {max:?}"
+    );
+}
+
+#[test]
+fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = HookHostV1::Kiro;
+    let data_root = enroll_native_capture_project(
+        &home_path,
+        &project_path,
+        "proj_kiro_capture",
+        host,
+        &[HookEventFamily::PromptBoundary],
+    );
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    std::fs::write(
+        project_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 44 }\n",
+    )
+    .unwrap();
+
+    // Kiro's only native capture family is PromptBoundary; postToolUse is
+    // typed Unsupported (fail-open exit 0) and never enters the spool.
+    let post_tool_use = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-kiro-post-tool-use",
+        &json!({
+            "hook_event_name": "postToolUse",
+            "cwd": project_path,
+            "tool_name": "fs_write",
+            "tool_input": {
+                "path": "src/lib.rs"
+            },
+        }),
+    );
+    assert_capture_transport_response("Kiro postToolUse unsupported", &post_tool_use, 0);
+    assert!(
+        !native_capture_spool_root(&data_root, host).exists(),
+        "unsupported Kiro postToolUse must not leave a spool artifact"
+    );
+
+    let prompt_submit = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-kiro-prompt-submit",
+        &json!({
+            "hook_event_name": "userPromptSubmit",
+            "session_id": "session-1",
+            "cwd": project_path,
+            "prompt": "redacted prompt text",
+        }),
+    );
+    // PromptBoundary now live-dispatches (counter reset). Without a daemon the
+    // hook still fail-opens at exit 0 / `{}`. The diagnostic goes to tracing,
+    // which the hook entry point keeps silent by default: Kiro reads stderr
+    // as its block-reason channel and Codex treats unexpected stderr as a
+    // hook failure, so a daemon-unavailable note must not appear there.
+    assert_eq!(
+        prompt_submit.status.code(),
+        Some(0),
+        "Kiro userPromptSubmit captured: unexpected exit\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&prompt_submit.stdout),
+        String::from_utf8_lossy(&prompt_submit.stderr)
+    );
+    assert_eq!(prompt_submit.stdout, b"{}\n", "{prompt_submit:?}");
+    let prompt_stderr = String::from_utf8_lossy(&prompt_submit.stderr);
+    assert!(
+        prompt_stderr.is_empty(),
+        "live PromptBoundary dispatch must keep the daemon-unavailable diagnostic off the host stderr: {prompt_submit:?}"
+    );
+
+    let (mut spool, report) = HookSpoolV1::open(
+        native_capture_spool_root(&data_root, host),
+        HookSpoolConfigV1::stock(host),
+        capture_test_now(),
+    )
+    .expect("open captured spool");
+    assert_eq!(report.pending_records, 1, "prompt boundary must be spooled");
+    let batches = spool
+        .claim_replay_batches(capture_test_now(), 1)
+        .expect("claim spooled batch");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].records.len(), 1);
+    assert_eq!(batches[0].records[0].envelope.producer, host);
+    assert!(
+        matches!(
+            batches[0].records[0].envelope.event,
+            HookEventV2::PromptBoundary
+        ),
+        "userPromptSubmit must capture a PromptBoundary envelope: {:?}",
+        batches[0].records[0].envelope.event
+    );
+}
+
+#[test]
+fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = common::daemon_socket_path(&home_path);
+    common::stop_managed_daemon(&home_path);
+    let mut daemon = spawn_tracedecay_daemon(&home_path);
+
+    let mut client = UnixStream::connect(&socket_path).expect("client should connect to daemon");
+    let mut reader = BufReader::new(client.try_clone().expect("clone daemon client stream"));
+    let authority: Value = serde_json::from_slice(
+        &std::fs::read(home_path.join(".tracedecay/daemon-authority.json"))
+            .expect("read daemon authority"),
+    )
+    .expect("parse daemon authority");
+    let auth_token = authority["auth_token"]
+        .as_str()
+        .expect("daemon authority auth token");
+    writeln!(
+        client,
+        "{}",
+        json!({
+            "protocol": "tracedecay-daemon-v1",
+            "auth_token": auth_token
+        })
+    )
+    .expect("write daemon auth preface");
+    let handshake = json!({
+        "project_path": project_path,
+        "scope_prefix": null,
+        "timings": false,
+        "allow_init": false,
+        "client_identity": {
+            "profile_root": home_path.join(".tracedecay"),
+            "global_db_path": home_path.join(".tracedecay/global.db")
+        }
+    });
+    writeln!(client, "{handshake}").expect("write daemon handshake");
+    writeln!(
+        client,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        })
+    )
+    .expect("write initialize request");
+    let mut response = String::new();
+    reader
+        .read_line(&mut response)
+        .expect("read initialize response");
+    assert!(
+        response.contains("\"id\":1"),
+        "daemon should answer initialize before SIGTERM, got: {response}"
+    );
+
+    let pid = daemon.id().to_string();
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", pid.as_str()])
+        .status()
+        .expect("send SIGTERM to daemon");
+    assert!(status.success(), "kill -TERM should succeed");
+
+    assert!(
+        daemon
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("daemon status should be readable")
+            .is_some(),
+        "daemon should exit on SIGTERM even with a connected project client"
+    );
+}
+
+#[test]
+fn daemon_socket_is_owner_only() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let socket_path = common::daemon_socket_path(&home_path);
+    let _ = std::fs::remove_file(&socket_path);
+    let mut daemon = common::DaemonProcess::new(
+        tracedecay_command_with_home(&home_path)
+            .arg("daemon")
+            .arg("run")
+            .arg("--socket")
+            .arg(&socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("tracedecay daemon should start"),
+    );
+
+    wait_for_daemon_socket(&socket_path);
+    let mode = std::fs::metadata(&socket_path)
+        .expect("socket metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "daemon socket should be owner-only");
+
+    let pid = daemon.id().to_string();
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", pid.as_str()])
+        .status()
+        .expect("send SIGTERM to daemon");
+    assert!(status.success(), "kill -TERM should succeed");
+
+    assert!(
+        daemon
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("daemon status should be readable")
+            .is_some(),
+        "daemon should exit after socket permission test"
+    );
+}
+
+#[test]
+fn tool_cli_skips_daemon_notifications_until_matching_response() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let sentinel = "daemon response after notification";
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed_request = spawn_sentinel_daemon_with_notification(
+        socket_path.clone(),
+        "tracedecay_status",
+        true,
+        false,
+        sentinel,
+        true,
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        output.status.success(),
+        "tool CLI should skip daemon notifications before the response\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(sentinel),
+        "tool CLI should print daemon response after notification, got:\n{stdout}"
+    );
+    observed_request
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
+        .expect("fake daemon should receive tools/call request");
+}
+
+#[test]
+fn fact_store_cli_accepts_exact_route_and_rejects_broad_router() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+
+    let broad = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .args(["tool", "fact_store", "--help"])
+        .output()
+        .expect("broad fact-store lookup should return");
+    assert!(!broad.status.success(), "broad fact-store route must fail");
+    assert!(
+        String::from_utf8_lossy(&broad.stderr).contains("unknown tool: 'fact_store'"),
+        "broad lookup must fail as unknown:\n{}",
+        String::from_utf8_lossy(&broad.stderr)
+    );
+
+    let sentinel = "first-touch daemon response";
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed_request = spawn_sentinel_daemon(
+        socket_path.clone(),
+        "tracedecay_fact_store_add",
+        true,
+        true,
+        sentinel,
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "fact_store_add",
+            "--json",
+            "--args",
+            r#"{"content":"first touch via daemon","category":"decision"}"#,
+        ])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        output.status.success(),
+        "first-touch store tool CLI should accept daemon response\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(sentinel),
+        "tool CLI should print daemon response, got:\n{stdout}"
+    );
+    let request = observed_request
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
+        .expect("fake daemon should receive first-touch tools/call request");
+    assert_eq!(request["params"]["name"], "tracedecay_fact_store_add");
+    assert_eq!(
+        request["params"]["arguments"]["content"],
+        "first touch via daemon"
+    );
+    assert!(
+        request["params"]["arguments"].get("action").is_none(),
+        "exact route payload must not carry the deleted broad action selector"
+    );
+}
+
+#[test]
+fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+    let daemon = spawn_tracedecay_daemon(&home_path);
+
+    let initial = configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_get",
+        json!({ "key": "diagnostics.prewarm.v1" }),
+    );
+    let project_id = initial["scope"]["project_id"]
+        .as_str()
+        .expect("configuration scope project id")
+        .to_owned();
+    let initial_revision = initial["outcome"]["value"]["payload"]["revision_id"]
+        .as_str()
+        .expect("configuration get revision")
+        .to_owned();
+    let initial_value = initial["outcome"]["value"]["payload"]["effective_value"]["value"]
+        .as_bool()
+        .expect("initial diagnostics prewarm value");
+    let next_value = !initial_value;
+    let mutation = json!({
+        "layer": {
+            "kind": "project",
+            "project_id": project_id,
+        },
+        "key": "diagnostics.prewarm.v1",
+        "value": {
+            "kind": "boolean",
+            "value": next_value,
+        },
+        "expected_revision": initial_revision,
+        "idempotency_key": "configuration.idempotency.cli-restart-survival",
+    });
+
+    configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_set",
+        mutation.clone(),
+    );
+    let advanced = configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_observed_state",
+        json!({}),
+    );
+    let advanced_revision = advanced["outcome"]["value"]["payload"][0]["desired_revision_id"]
+        .as_str()
+        .expect("advanced configuration revision")
+        .to_owned();
+    assert_ne!(advanced_revision, initial_revision);
+
+    drop(daemon);
+    let _restarted_daemon = spawn_tracedecay_daemon(&home_path);
+    let reloaded = configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_get",
+        json!({ "key": "diagnostics.prewarm.v1" }),
+    );
+    assert_eq!(
+        reloaded["outcome"]["value"]["payload"]["effective_value"]["value"], next_value,
+        "the CLI mutation must survive a daemon restart and affect the resolved setting"
+    );
+    assert_eq!(
+        reloaded["outcome"]["value"]["payload"]["revision_id"], advanced_revision,
+        "configuration get must return the revision accepted by the next mutation CAS"
+    );
+
+    let stale_mutation = json!({
+        "layer": {
+            "kind": "project",
+            "project_id": project_id,
+        },
+        "key": "diagnostics.prewarm.v1",
+        "value": {
+            "kind": "boolean",
+            "value": initial_value,
+        },
+        "expected_revision": initial_revision,
+        // A distinct key from the accepted write above: sharing one key would
+        // make this a replay of that effect, so the revision-CAS conflict this
+        // case asserts could never be observed.
+        "idempotency_key": "configuration.idempotency.cli-stale-revision-cas",
+    });
+    let project_arg = project_path.to_string_lossy().to_string();
+    let stale_arguments = serde_json::to_string(&stale_mutation).unwrap();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command.current_dir(&project_path).args([
+        "tool",
+        "--project",
+        project_arg.as_str(),
+        "configuration_set",
+        "--args",
+        stale_arguments.as_str(),
+        "--json",
+    ]);
+    let stale = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+    assert!(
+        !stale.status.success(),
+        "a stale configuration write must fail the shell gate\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&stale.stdout),
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    let stale_payload: Value =
+        serde_json::from_slice(&stale.stdout).expect("stale write problem JSON");
+    assert_eq!(stale_payload["problem"]["kind"], "conflict");
+    assert_eq!(stale_payload["problem"]["code"], "configuration.conflict");
+}
+
+#[test]
+fn daemon_reuses_project_engine_across_tool_clients() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let second_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+
+    // `init` is brokered through the daemon now (`tracedecay_status` then
+    // `tracedecay_admin_sync`), so the fixture has already spent tool calls on
+    // this engine and the first status here is no longer call number one. What
+    // this test is about survives that: the counter is the engine's, so the
+    // first call sees itself and a second client sees exactly one more.
+    assert!(
+        first_tool_calls >= 1,
+        "first status call should see itself counted, got {first_tool_calls}"
+    );
+    assert_eq!(
+        second_tool_calls,
+        first_tool_calls + 1,
+        "second status call should reuse the daemon engine and see exactly one more tool call"
+    );
+}
+
+#[test]
+fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    // Doctor's SemanticIndex family reports an unmounted code index as an
+    // issue, and `doctor` exits nonzero on any issue. The index is git-backed,
+    // so a non-repository fixture would fail this journey on the fixture's own
+    // shape rather than on anything doctor did to the live database.
+    init_committed_git_project_with_cli(&home_path, &project_path);
+
+    let data_root = profile_sharded_data_root(
+        &home_path.join(".tracedecay"),
+        &default_profile_project_id(&project_path),
+    );
+    let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+    common::create_runtime().block_on(async {
+        let (db, _) = crate::common::open_test_database(&db_path)
+            .await
+            .expect("open graph database");
+        db.execute_write_batch(
+            "seed doctor daemon reclaimable pages fixture",
+            "CREATE TABLE doctor_daemon_probe (payload BLOB);\
+                 WITH RECURSIVE count(x) AS (\
+                     VALUES(1) UNION ALL SELECT x + 1 FROM count WHERE x < 128\
+                 )\
+                 INSERT INTO doctor_daemon_probe SELECT zeroblob(8192) FROM count;\
+                 DELETE FROM doctor_daemon_probe;",
+        )
+        .await
+        .expect("seed reclaimable pages");
+        db.checkpoint().await.expect("checkpoint fixture");
+    });
+
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    let output = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    assert!(
+        output.status.success(),
+        "doctor failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Compacting database") && !stderr.contains("VACUUM"),
+        "doctor must stay read-only while daemon owns the database:\n{stderr}"
+    );
+
+    let second_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
+    assert!(
+        second_tool_calls > first_tool_calls,
+        "daemon project engine must remain usable after doctor"
+    );
+}
+
+#[test]
+fn daemon_project_handshake_uses_client_profile_identity() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_home_path = canonical_existing_path(client_home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&client_home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&client_home_path)
+        .current_dir(&project_path)
+        .env(
+            "TRACEDECAY_DAEMON_SOCKET",
+            common::daemon_socket_path(&daemon_home_path),
+        )
+        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .output()
+        .expect("tracedecay tool status should run");
+
+    assert!(
+        output.status.success(),
+        "daemon should open the client's profile-sharded project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn daemon_first_touch_uses_registered_runtime_without_rewriting_legacy_config() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_home_path = canonical_existing_path(client_home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&client_home_path, &project_path);
+
+    let project_id = default_profile_project_id(&project_path);
+    let config_path = client_home_path
+        .join(".tracedecay/projects")
+        .join(project_id)
+        .join("config.json");
+    std::fs::write(&config_path, b"{not json").unwrap();
+
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&client_home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "fact_store_add",
+            "--json",
+            "--args",
+            r#"{"content":"do not hide config errors","category":"decision"}"#,
+        ])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        output.status.success(),
+        "daemon dispatch must use the registered configuration revision instead of re-entering \
+         legacy first-touch migration\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Status: `success`") && stdout.contains("fact_store_add"),
+        "registered runtime should execute the requested tool\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(config_path).unwrap(),
+        "{not json",
+        "bad config should remain unchanged after rejected first-touch init"
+    );
+}
+
+#[test]
+fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_home_path = canonical_existing_path(client_home.path());
+    let project_path = canonical_existing_path(project.path());
+
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    std::fs::write(
+        project_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    pin_fixture_repository_identity(&project_path, "proj_daemon_registry").unwrap();
+
+    crate::common::initialize_tracedecay_cli_project(&client_home_path, &project_path);
+    // Repository identity lives in the git common dir now, so the fixture no
+    // longer plants a repo-local marker directory. "No marker" is exactly the
+    // shape this test needs, so an already-absent directory is the modeled
+    // state rather than a setup failure.
+    crate::cli_non_interactive_test::remove_repo_local_marker_dir_if_present(&project_path);
+
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&client_home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "active_project"])
+        .output()
+        .expect("tracedecay tool active_project should run");
+
+    assert!(
+        output.status.success(),
+        "daemon should open registry-backed profile store without a checkout marker\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("proj_daemon_registry"),
+        "active_project should report the registered profile store id\nstdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn daemon_project_handshake_uses_registered_remote_store_after_rename() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_home = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_home_path = canonical_existing_path(client_home.path());
+    let original_path = workspace.path().join("repo-before-rename");
+    let renamed_path = workspace.path().join("repo-after-rename");
+
+    std::fs::create_dir_all(&original_path).unwrap();
+    git(&original_path, &["init"]);
+    git(
+        &original_path,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:ScriptedAlchemy/tracedecay.git",
+        ],
+    );
+    init_project_with_cli(&client_home_path, &original_path);
+    let original_project_id = default_profile_project_id(&canonical_existing_path(&original_path));
+    std::fs::rename(&original_path, &renamed_path).unwrap();
+    let renamed_path = canonical_existing_path(&renamed_path);
+
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let project_arg = renamed_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&client_home_path)
+        .current_dir(&renamed_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "active_project"])
+        .output()
+        .expect("tracedecay tool active_project should run");
+
+    assert!(
+        output.status.success(),
+        "daemon should open renamed checkout through the registered git remote store\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        client_home_path
+            .join(".tracedecay/projects")
+            .join(&original_project_id)
+            .join("tracedecay.db")
+            .exists(),
+        "original profile shard should remain the selected initialized store"
+    );
+    assert!(
+        !client_home_path
+            .join(".tracedecay/projects")
+            .join(default_profile_project_id(&renamed_path))
+            .join("tracedecay.db")
+            .exists(),
+        "daemon must not create a second path-hash profile shard for the renamed checkout"
+    );
+}
+
+#[test]
+fn daemon_project_cache_is_scoped_by_client_identity() {
+    let daemon_home = TempDir::new().unwrap();
+    let client_a_home = TempDir::new().unwrap();
+    let client_b_home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let daemon_home_path = canonical_existing_path(daemon_home.path());
+    let client_a_home_path = canonical_existing_path(client_a_home.path());
+    let client_b_home_path = canonical_existing_path(client_b_home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&client_a_home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
+
+    // Both clients use one daemon socket; only handshake identity should
+    // distinguish project cache entries.
+    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    assert_ne!(socket_path, common::daemon_socket_path(&client_a_home_path));
+    assert_ne!(socket_path, common::daemon_socket_path(&client_b_home_path));
+    let project_arg = project_path.to_string_lossy().to_string();
+    let client_a_output = tracedecay_command_with_home(&client_a_home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .output()
+        .expect("client A tool status should run");
+    assert!(
+        client_a_output.status.success(),
+        "client A should open its initialized project through the shared daemon\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&client_a_output.stdout),
+        String::from_utf8_lossy(&client_a_output.stderr)
+    );
+
+    let client_b_output = tracedecay_command_with_home(&client_b_home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .output()
+        .expect("client B tool status should run");
+    assert!(
+        !client_b_output.status.success(),
+        "client B should not reuse client A's cached project server\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&client_b_output.stdout),
+        String::from_utf8_lossy(&client_b_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&client_b_output.stderr);
+    let expected_project_path = project_path.to_string_lossy();
+    let stderr_lower = stderr.to_lowercase();
+    assert!(
+        stderr.contains("daemon tool call failed")
+            && stderr_lower.contains("no tracedecay index found")
+            && stderr.contains(expected_project_path.as_ref()),
+        "expected client B to fail because its profile has not initialized the project, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let missing_socket = socket_dir.path().join("missing.sock");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
+        "expected explicit daemon-unavailable error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn status_json_requests_compact_daemon_payload_noninteractively() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed = spawn_scripted_daemon(
+        socket_path.clone(),
+        "tracedecay_status",
+        FakeDaemonResponse::Complete {
+            text: minimal_status_payload(),
+        },
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .env("TERM", "dumb")
+        // Positional path avoids a preliminary registry admin_cli round-trip
+        // through --project-path / --project-id resolution.
+        .args(["status", "--json", project_arg.as_str()]);
+    let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+
+    assert!(
+        output.status.success(),
+        "status --json should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "noninteractive status --json must not emit ANSI, got:\n{stdout}"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("one JSON status object");
+    assert_eq!(payload["node_count"], 1);
+    assert_ne!(payload.get("truncated"), Some(&json!(true)));
+
+    let request = observed
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
+        .expect("fake daemon should receive tools/call request");
+    assert_eq!(request["params"]["name"], "tracedecay_status");
+    let args = &request["params"]["arguments"];
+    assert_eq!(args["format"], "json");
+    assert_eq!(args["include_branch_diagnostics"], false);
+    assert_eq!(args["include_storage_health"], false);
+    assert_eq!(args["include_session_ingest"], false);
+    assert_eq!(args["include_staleness"], false);
+}
+
+#[test]
+fn status_command_times_out_when_daemon_never_replies() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let _observed = spawn_scripted_daemon(
+        socket_path.clone(),
+        "tracedecay_status",
+        FakeDaemonResponse::HoldOpen,
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .env("TRACEDECAY_STATUS_DEADLINE_MS", "2000")
+        .args(["status", "--json", project_arg.as_str()]);
+    let started = Instant::now();
+    let output = run_command_with_timeout(command, CLI_CHILD_KILL_TIMEOUT);
+    let elapsed = started.elapsed();
+
+    assert!(
+        !output.status.success(),
+        "stalled daemon must not succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "status should fail under the absolute deadline, took {elapsed:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    assert!(
+        stderr.contains("timed out") || stderr.contains("deadline"),
+        "expected deadline diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The `tools/call` requests a [`spawn_scripted_result_sequence_daemon`]
+/// observed. Dropping it stops the daemon thread.
+struct ScriptedResultSequenceDaemon {
+    requests: mpsc::Receiver<Value>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for ScriptedResultSequenceDaemon {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// A fake daemon that answers every `tools/call` for `expected_tool_name` with
+/// the next scripted `result`, repeating the last one once the script is
+/// exhausted, so a test can hand the CLI a typed retryable state for as many
+/// attempts as it makes and then either the answer or nothing else.
+fn spawn_scripted_result_sequence_daemon(
+    socket_path: PathBuf,
+    expected_tool_name: &'static str,
+    results: Vec<Value>,
+) -> ScriptedResultSequenceDaemon {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (request_tx, request_rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let daemon_stop = Arc::clone(&stop);
+
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+        let mut results = results.into_iter();
+        let mut current = results.next().expect("at least one scripted result");
+
+        while !daemon_stop.load(Ordering::Acquire) {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(e) => panic!("accept fake daemon client: {e}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("set accepted stream blocking");
+            stream
+                .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
+                .expect("write timeout");
+            let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            let request = loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break None,
+                    Ok(_) => {}
+                }
+                let value: Value =
+                    serde_json::from_str(line.trim()).expect("fake daemon preamble JSON");
+                if value.get("method").is_some() {
+                    break Some(value);
+                }
+            };
+            let Some(request) = request else {
+                continue;
+            };
+            let result = if request["method"] == "initialize" {
+                json!({
+                    "serverInfo": {
+                        "name": "tracedecay",
+                        "version": cli_build_version(),
+                    }
+                })
+            } else {
+                assert_eq!(request["method"], "tools/call");
+                assert_eq!(request["params"]["name"], expected_tool_name);
+                if request_tx.send(request.clone()).is_err() {
+                    break;
+                }
+                let served = current.clone();
+                if let Some(next) = results.next() {
+                    current = next;
+                }
+                served
+            };
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request["id"].clone(),
+                "result": result,
+            });
+            let mut writer = stream;
+            writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+                .expect("write fake daemon response");
+        }
+    });
+
+    ready_rx
+        .recv_timeout(LOCAL_READY_TIMEOUT)
+        .expect("fake daemon should become ready");
+    ScriptedResultSequenceDaemon {
+        requests: request_rx,
+        stop,
+    }
+}
+
+/// The MCP tool result the daemon renders for a project route whose retained
+/// owner is still mounting behind the core publication: `isError` with the
+/// typed pre-admission problem and its after-delay retry directive.
+fn mounting_owner_tool_result(retry_after_millis: u64) -> Value {
+    let envelope = ApplicationProblemEnvelope::new(
+        ResultContractRef::new(
+            SchemaId::new("schema.retained.fact_store_add.result").expect("schema id"),
+            1,
+        )
+        .expect("result contract"),
+        RequestId::new("request.cli.tool.mounting-owner").expect("request id"),
+        ApplicationProblem::unavailable(
+            SafeDiagnostic::new(
+                "application.surface.unavailable",
+                "The project runtime for this operation is still mounting",
+            )
+            .expect("diagnostic"),
+        ),
+    )
+    .expect("mounting owner envelope")
+    .with_retry_after_millis(Some(retry_after_millis))
+    .expect("retry delay");
+    json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::to_string(&envelope).expect("envelope JSON"),
+        }],
+        "isError": true,
+        "problem": serde_json::to_value(envelope.problem.as_ref()).expect("problem record"),
+    })
+}
+
+fn fact_store_add_args() -> String {
+    json!({
+        "category": "project",
+        "content": "the fact store answers once its owner has mounted",
+        "format": "json",
+        "source_label": "retry-directive-journey",
+        "trust": 0.3,
+    })
+    .to_string()
+}
+
+fn fact_store_add_command(
+    home: &Path,
+    project: &Path,
+    socket: &Path,
+    deadline_ms: &str,
+) -> Command {
+    let project_arg = project.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(home);
+    command
+        .current_dir(project)
+        .env("TRACEDECAY_DAEMON_SOCKET", socket)
+        .env("TRACEDECAY_TOOL_DEADLINE_MS", deadline_ms)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "tracedecay_fact_store_add",
+            "--json",
+            "--args",
+            &fact_store_add_args(),
+        ]);
+    command
+}
+
+/// A one-shot `tracedecay tool` call holds a deadline, so a typed
+/// `retry: after_delay` unavailable from an owner still mounting is progress
+/// to wait through on the delay the directive names, not the answer.
+#[test]
+fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    const RETRY_AFTER_MILLIS: u64 = 100;
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let daemon = spawn_scripted_result_sequence_daemon(
+        socket_path.clone(),
+        "tracedecay_fact_store_add",
+        vec![
+            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
+            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": json!({"outcome": {"outcome": "effect", "marker": "mounted-answer"}}).to_string(),
+                }]
+            }),
+        ],
+    );
+    let started = Instant::now();
+    let output = run_command_with_timeout(
+        fact_store_add_command(&home_path, &project_path, &socket_path, "10000"),
+        CLI_ROUNDTRIP_TIMEOUT,
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "the tool must return the owner's answer once it mounts\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("mounted-answer"),
+        "stdout must carry the mounted owner's answer, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("application.surface.unavailable"),
+        "a ridden-out mounting state must not reach the caller, got:\n{stdout}"
+    );
+    let attempts = std::iter::from_fn(|| daemon.requests.try_recv().ok()).count();
+    assert_eq!(
+        attempts, 3,
+        "the CLI must re-send the same request until the owner answers"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(2 * RETRY_AFTER_MILLIS),
+        "each retry must wait the delay the directive names, took {elapsed:?}"
+    );
+}
+
+/// The retry directive is honoured only inside the caller's budget: once the
+/// deadline cannot hold another delay, the daemon's typed state is the answer
+/// and the process fails typed instead of retrying past its budget.
+#[test]
+fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let daemon = spawn_scripted_result_sequence_daemon(
+        socket_path.clone(),
+        "tracedecay_fact_store_add",
+        vec![mounting_owner_tool_result(250)],
+    );
+    let started = Instant::now();
+    let output = run_command_with_timeout(
+        fact_store_add_command(&home_path, &project_path, &socket_path, "1500"),
+        CLI_CHILD_KILL_TIMEOUT,
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        !output.status.success(),
+        "an owner that never mounts within the deadline must fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let printed: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!("the typed daemon result must be printed as JSON ({error}):\n{stdout}")
+    });
+    assert_eq!(printed["isError"], true);
+    assert_eq!(
+        printed["problem"]["code"], "application.surface.unavailable",
+        "the daemon's typed state must be surfaced once the deadline is exhausted"
+    );
+    assert_eq!(printed["problem"]["retry"], "after_delay");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reported an application failure"),
+        "the process must fail typed, got:\n{stderr}"
+    );
+    let attempts = std::iter::from_fn(|| daemon.requests.try_recv().ok()).count();
+    assert!(
+        attempts >= 2,
+        "the CLI must retry within its deadline before surfacing the state, made {attempts} attempt(s)"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(1000) && elapsed < Duration::from_secs(10),
+        "retries must stop at the deadline, not before or long after it, took {elapsed:?}"
+    );
+}
+
+fn spawn_handshake_capturing_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (handshake_tx, handshake_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+
+        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+        let (stream, _) = common::poll_until(
+            deadline,
+            Duration::from_millis(10),
+            || match listener.accept() {
+                Ok(accepted) => Some(accepted),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                Err(e) => panic!("accept fake daemon client: {e}"),
+            },
+            || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
+        );
+        stream
+            .set_nonblocking(false)
+            .expect("set accepted stream blocking");
+        let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+
+        let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+        let mut handshake = String::new();
+        reader
+            .read_line(&mut handshake)
+            .expect("read daemon handshake");
+        let handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
+        handshake_tx
+            .send(handshake)
+            .expect("send observed handshake");
+
+        let mut request = String::new();
+        reader
+            .read_line(&mut request)
+            .expect("read JSON-RPC request");
+        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request["id"].clone(),
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "{\"status\":\"ok\"}"
+                }]
+            }
+        });
+        let mut writer = stream;
+        writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+            .expect("write fake daemon response");
+    });
+
+    ready_rx
+        .recv_timeout(LOCAL_READY_TIMEOUT)
+        .expect("fake daemon should become ready");
+    handshake_rx
+}
+
+#[test]
+fn user_scoped_transcript_ingest_handshakes_projectless_from_filesystem_root_cwd() {
+    let home = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed_handshake = spawn_handshake_capturing_daemon(socket_path.clone());
+    let args = json!({
+        "action": "ingest_transcript",
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "storage_scope": "user",
+        "messages": [
+            {"role": "user", "content": "hello", "id": "m1"},
+            {"role": "assistant", "content": "hi there", "id": "m2"}
+        ],
+    })
+    .to_string();
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(std::path::Path::new("/"))
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args([
+            "tool",
+            "tracedecay_hook_runtime",
+            "--json",
+            "--args",
+            args.as_str(),
+        ])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert!(
+        output.status.success(),
+        "user-scoped LCM from cwd=/ must reach the daemon projectless\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let handshake = observed_handshake
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
+        .expect("fake daemon should observe handshake");
+    assert!(
+        handshake.get("project_path").is_none()
+            || handshake.get("project_path") == Some(&Value::Null),
+        "Hermes user scope must not invent project=/; handshake was {handshake}"
+    );
+}
+
+#[test]
+fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
+    // A user-scoped read-only preflight from cwd=/ must not detach the
+    // independently mounted project-scoped LCM read authority.
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    // The project-scoped LCM read authority this test must keep attached only
+    // mounts for a committed repository; without one it is never mounted and
+    // `lcm_grep` answers `application.retained.authority-unavailable` whether
+    // or not the user-scoped preflight detached anything.
+    init_committed_git_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let socket = common::daemon_socket_path(&home_path);
+
+    let user_args = json!({
+        "action": "ingest_transcript",
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "user_scope": true,
+        "messages": [
+            {
+                "role": "user",
+                "content": "hello",
+                "id": "tracedecay_sync_1_user",
+                "timestamp": 1.0,
+                "associated_project_roots": [project_arg],
+            },
+            {
+                "role": "assistant",
+                "content": "hi there",
+                "id": "tracedecay_sync_1_assistant",
+                "timestamp": 1.0,
+                "associated_project_roots": [project_arg],
+            }
+        ],
+    })
+    .to_string();
+    let user_output = tracedecay_command_with_home(&home_path)
+        .current_dir(std::path::Path::new("/"))
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+        .args([
+            "tool",
+            "tracedecay_hook_runtime",
+            "--json",
+            "--args",
+            user_args.as_str(),
+        ])
+        .output()
+        .expect("user-scoped transcript ingest should run");
+    assert!(
+        user_output.status.success(),
+        "user-scoped Hermes transcript ingest must succeed projectless\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&user_output.stdout),
+        String::from_utf8_lossy(&user_output.stderr)
+    );
+
+    let project_args = json!({
+        "action": "ingest_transcript",
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "messages": [
+            {
+                "role": "user",
+                "content": "hello",
+                "id": "tracedecay_sync_1_user",
+                "timestamp": 1.0,
+                "associated_project_roots": [project_arg],
+            },
+            {
+                "role": "assistant",
+                "content": "hi there",
+                "id": "tracedecay_sync_1_assistant",
+                "timestamp": 1.0,
+                "associated_project_roots": [project_arg],
+            }
+        ],
+    })
+    .to_string();
+    let project_output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "tracedecay_hook_runtime",
+            "--json",
+            "--args",
+            project_args.as_str(),
+        ])
+        .output()
+        .expect("project-scoped transcript ingest should run");
+    assert!(
+        project_output.status.success(),
+        "project-scoped Hermes transcript ingest must succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&project_output.stdout),
+        String::from_utf8_lossy(&project_output.stderr)
+    );
+
+    let grep_args = json!({
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "query": "hello",
+        "scope": "all",
+    })
+    .to_string();
+    let grep_output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "tracedecay_lcm_grep",
+            "--json",
+            "--args",
+            grep_args.as_str(),
+        ])
+        .output()
+        .expect("project-scoped lcm_grep should run");
+    assert!(
+        grep_output.status.success(),
+        "lcm_grep after sync_turn must succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&grep_output.stdout),
+        String::from_utf8_lossy(&grep_output.stderr)
+    );
+    let grep: Value = serde_json::from_slice(&grep_output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "lcm_grep should return JSON ({error}): {}",
+            String::from_utf8_lossy(&grep_output.stdout)
+        )
+    });
+    let payload = grep
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .unwrap_or(grep);
+    assert!(
+        payload.get("error").is_none(),
+        "Hermes regression: grep must remain available after preflight, got {payload}"
+    );
+    assert_ne!(
+        payload.get("status").and_then(Value::as_str),
+        Some("unavailable"),
+        "stock Hermes regression: temporal store must stay attached, got {payload}"
+    );
+}
+
+#[tokio::test]
+async fn daemon_upgrades_retained_receipts_and_reopens_without_reset() {
+    let home = TempDir::new().unwrap();
+    let db_path = home.path().join(".tracedecay/global.db");
+    common::write_empty_global_db_schema(&db_path).await;
+    {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch("DROP TABLE session_relation_receipts;")
+            .unwrap();
+        db.execute_batch(include_str!(
+            "../../../tracedecay-global-db/tests/fixtures/session-relation-receipts-before-recovery.sql"
+        )).unwrap();
+        db.execute_batch(
+            "INSERT INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES ('retained-upgrade', 1, 'building', '{}', 100);
+             INSERT INTO session_relation_receipts (
+                session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+                state, graph_watermark, created_at, applied_at
+             ) VALUES ('retained-upgrade', 1, 'project_sessions', 'project-a',
+                       'watermark-1', 'applied', 'watermark-1', 101, 102);
+             INSERT INTO session_relation_effect_journal (
+                session_id, generation, projection_json, created_at
+             ) VALUES ('retained-upgrade', 1, '{\"effects\":1}', 102);",
+        )
+        .unwrap();
+        let version: i64 = db.query_row(
+            "SELECT version FROM session_temporal_schema_migrations WHERE name = 'session-temporal'",
+            [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(version, 4);
+    }
+    for _ in 0..2 {
+        let daemon = spawn_tracedecay_daemon(home.path());
+        let db = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let retained: (String, String, i64, i64, Option<String>, i64, i64) = db
+            .query_row(
+                "SELECT state, recovery_state, created_at, applied_at, recovery_failure_code,
+                    recovery_failure_count, recovery_next_attempt_at
+             FROM session_relation_receipts WHERE session_id = 'retained-upgrade'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            retained,
+            ("applied".into(), "pending".into(), 101, 102, None, 0, 0)
+        );
+        let journal: String = db
+            .query_row(
+                "SELECT projection_json FROM session_relation_effect_journal
+             WHERE session_id = 'retained-upgrade'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(journal, r#"{"effects":1}"#);
+        drop(db);
+        drop(daemon);
+    }
+}

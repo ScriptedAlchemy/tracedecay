@@ -1,0 +1,19 @@
+{
+  "role": "assistant",
+  "message": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Running a shell command to list files."
+      },
+      {
+        "type": "tool_use",
+        "id": "call_1",
+        "name": "Shell",
+        "input": {
+          "command": "echo hi"
+        }
+      }
+    ]
+  }
+}

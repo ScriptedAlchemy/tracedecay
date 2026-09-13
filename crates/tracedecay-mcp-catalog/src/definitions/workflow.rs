@@ -1,0 +1,99 @@
+//! MCP discovery projected from the canonical Workflow executable registry.
+//!
+//! The executable owns Workflow's operation set, request schemas, effects, and
+//! availability. MCP contributes only its transport prefix and presentation —
+//! the same division the Work family holds, so the two closed families cannot
+//! drift into two different discovery stories.
+
+use serde_json::json;
+use tracedecay_api::WorkflowOperation;
+use tracedecay_tool_catalog::{CatalogValidationError, OperationId};
+
+use crate::ToolDefinition;
+
+type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
+
+/// Build every discoverable Workflow tool from the mounted executable bindings.
+///
+/// Discovery fails loudly if the registry is incomplete rather than silently
+/// omitting a callable operation: a Workflow operation that no adapter
+/// publishes is invisible to every agent, which is exactly how all sixteen of
+/// them stayed off MCP while CLI and HTTP carried them.
+pub(super) fn workflow_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
+    let registry = tracedecay_contracts::workflow_executable_binding_registry()
+        .map_err(crate::McpCatalogError::CatalogValidation)?;
+    if registry.iter().count() != WorkflowOperation::ALL.len() {
+        return Err(invalid_workflow_discovery(
+            "MCP Workflow executable registry",
+            "must expose exactly every canonical Workflow operation",
+        ));
+    }
+    WorkflowOperation::ALL
+        .into_iter()
+        .map(|operation| {
+            let operation_id =
+                OperationId::new(operation.operation_id_str().to_owned()).map_err(|_| {
+                    invalid_workflow_discovery(
+                        "MCP Workflow operation identity",
+                        "must name one canonical Workflow operation",
+                    )
+                })?;
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .ok_or_else(|| {
+                    invalid_workflow_discovery(
+                        "MCP Workflow executable binding",
+                        "canonical Workflow operation is not executable",
+                    )
+                })?;
+            Ok(ToolDefinition {
+                name: format!("tracedecay_workflow_{}", operation.operation_key()),
+                description: format!(
+                    "Invoke the Workflow {} operation.",
+                    operation.operation_key()
+                ),
+                input_schema: binding.request_schema().body().clone(),
+                annotations: Some(json!({
+                    "readOnlyHint": binding.effect().is_read_only(),
+                    "title": format!("Workflow {}", operation.operation_key()),
+                })),
+                meta: None,
+            })
+        })
+        .collect()
+}
+
+fn invalid_workflow_discovery(field: &'static str, reason: &'static str) -> crate::McpCatalogError {
+    CatalogValidationError::InvalidValue { field, reason }.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workflow_definitions;
+
+    #[test]
+    fn activation_help_names_catalog_and_revision_preconditions() {
+        let definitions = workflow_definitions().expect("workflow definitions");
+        let activate = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_workflow_activate_definition")
+            .expect("workflow activation definition");
+        let revision_help = activate.input_schema["properties"]["expected_revision"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(revision_help.contains("candidate disposition revision"));
+        assert!(revision_help.contains('1'));
+
+        let register = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_workflow_register_definition")
+            .expect("workflow registration definition");
+        let catalog_help = register.input_schema["$defs"]["WorkflowDefinition"]["properties"]
+            ["pinned_catalog_digest"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(catalog_help.contains("live Work executable catalog digest"));
+        assert!(catalog_help.to_ascii_lowercase().contains("validation"));
+    }
+}

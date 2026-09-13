@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "provider": "cursor",
+  "cases": [
+    {
+      "state": "supported", "admission_provider": "cursor",
+      "request": {"hook_event_name": "sessionStart", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"]},
+      "admission": {"status": "supported", "retryable": false},
+      "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{\"TRACEDECAY_PROJECT_ROOT\":\"<PROJECT_ROOT>\"}}", "stderr": ""}
+    },
+    {
+      "state": "degraded", "admission_provider": "cursor",
+      "request": {"hook_event_name": "sessionStart", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"]},
+      "admission": {"status": "degraded", "retryable": false, "reason_code": "spool_record_too_large"},
+      "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{\"TRACEDECAY_PROJECT_ROOT\":\"<PROJECT_ROOT>\"}}", "stderr": ""}
+    },
+    {
+      "state": "unavailable", "admission_provider": "cursor",
+      "request": {"hook_event_name": "sessionStart", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"]},
+      "admission": {"status": "unavailable", "retryable": false, "reason_code": "project_authority_unbound"},
+      "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{\"TRACEDECAY_PROJECT_ROOT\":\"<PROJECT_ROOT>\"}}", "stderr": ""}
+    },
+    {
+      "state": "unknown", "admission_provider": "cursor-future",
+      "request": {"hook_event_name": "sessionStart", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"]},
+      "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
+      "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{\"TRACEDECAY_PROJECT_ROOT\":\"<PROJECT_ROOT>\"}}", "stderr": ""}
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "routing_clarification_required",
+  "category": "routing",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Please change the behavior. I have not specified which behavior or the desired result yet.",
+  "ground_truth": [
+    "which",
+    "behavior"
+  ],
+  "max_tool_calls": 0,
+  "allowed_skills": [],
+  "max_tracedecay_calls": 0
+}

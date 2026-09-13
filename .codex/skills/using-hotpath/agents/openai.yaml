@@ -1,0 +1,4 @@
+interface:
+  display_name: "Using Hotpath"
+  short_description: "Profile TraceDecay with Hotpath 0.24 correctly"
+  default_prompt: "Use $using-hotpath to profile this TraceDecay performance issue, select truthful feature-gated instrumentation, and prove the root-cause fix against an OS baseline."

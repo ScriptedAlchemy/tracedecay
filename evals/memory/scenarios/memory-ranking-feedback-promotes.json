@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "id": "memory-ranking-feedback-promotes",
+  "title": "helpful/unhelpful feedback reorders real search results",
+  "description": "Proves the full feedback loop end-to-end: rating one fact `helpful` and an equally-relevant rival `unhelpful` moves their trust scores and, through the trust-weighted combined_score, flips their order in the exact fact search tool. This is the payoff the feedback instruction (surfaced in tracedecay_context and the digest) is meant to produce.",
+  "contract": "stable",
+  "contract_notes": "Deterministic, no LLM. Two facts share every query-matching token and seed at trust 0.7. The harness resolves each feedback target from the FactId returned by its exact setup write, then verifies trust and ranking through the same retained surface.",
+  "setup": {
+    "facts": [
+      {
+        "content": "Checkout service validates coupons against the promo ledger tango",
+        "category": "project",
+        "source_label": "praised",
+        "trust": 0.7
+      },
+      {
+        "content": "Checkout service validates coupons against the promo ledger foxtrot",
+        "category": "project",
+        "source_label": "panned",
+        "trust": 0.7
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "tool",
+        "tool": "tracedecay_fact_feedback",
+        "args": { "fact_id": "$fact:praised", "action": "helpful" }
+      },
+      {
+        "kind": "tool",
+        "tool": "tracedecay_fact_feedback",
+        "args": { "fact_id": "$fact:panned", "action": "unhelpful" }
+      }
+    ],
+    "violation": null
+  },
+  "assertions": [
+    {
+      "kind": "fact-count",
+      "name": "feedback_ranking_fixture_loaded",
+      "op": "eq",
+      "value": 2
+    },
+    {
+      "kind": "source-trust",
+      "name": "helpful_raised_praised_trust",
+      "source": "praised",
+      "op": "gt",
+      "value": 0.7
+    },
+    {
+      "kind": "source-trust",
+      "name": "unhelpful_lowered_panned_trust",
+      "source": "panned",
+      "op": "lt",
+      "value": 0.65
+    },
+    {
+      "kind": "search-rank",
+      "name": "praised_fact_outranks_panned_after_feedback",
+      "query": "checkout coupons promo ledger",
+      "top_fact_source": "praised",
+      "min_rank_gap": 1,
+      "limit": 5
+    }
+  ]
+}

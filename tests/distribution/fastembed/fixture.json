@@ -1,0 +1,45 @@
+{
+  "schema": "tracedecay.distribution.fastembed-fixture.v1",
+  "model": "JinaEmbeddingsV2BaseCode",
+  "source": {
+    "upstream": "https://huggingface.co/jinaai/jina-embeddings-v2-base-code",
+    "revision": "516f4baf13dec4ddddda8631e019b5737c8bc250",
+    "license": "Apache-2.0",
+    "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+    "provenance": "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/tree/516f4baf13dec4ddddda8631e019b5737c8bc250"
+  },
+  "expected_dimensions": 768,
+  "max_length": 8192,
+  "members": {
+    "model": {
+      "path": "model.onnx",
+      "upstream_path": "onnx/model.onnx",
+      "length": 641517466,
+      "sha256": "63363fc178428b74620c6f3780cbc7191883fa5c7f84c0945c45eb5c4256733b"
+    },
+    "tokenizer": {
+      "path": "tokenizer.json",
+      "upstream_path": "tokenizer.json",
+      "length": 2561316,
+      "sha256": "b01c78a902aa4facb2f47f95449f48e2f7bbfea5d2472ee2f6ce92323c6f86e5"
+    },
+    "config": {
+      "path": "config.json",
+      "upstream_path": "config.json",
+      "length": 1216,
+      "sha256": "e426aa684c7f9a95c5f020aa855faf93a24f065f5fad0c9e17b124670cabdea6"
+    },
+    "special_tokens_map": {
+      "path": "special_tokens_map.json",
+      "upstream_path": "special_tokens_map.json",
+      "length": 280,
+      "sha256": "06e405a36dfe4b9604f484f6a1e619af1a7f7d09e34a8555eb0b77b66318067f"
+    },
+    "tokenizer_config": {
+      "path": "tokenizer_config.json",
+      "upstream_path": "tokenizer_config.json",
+      "length": 493,
+      "sha256": "f477aeb15ff9f78d3c1ddf2361d2b0b8b20cf55220f839f29a37f3a18efddd89"
+    }
+  }
+}

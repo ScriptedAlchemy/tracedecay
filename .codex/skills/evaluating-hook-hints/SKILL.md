@@ -1,32 +1,36 @@
 ---
 name: evaluating-hook-hints
-description: "TraceDecay Dev: Use when auditing, testing, debugging, or improving TraceDecay hook hint behavior, especially Codex/Claude/Cursor hint injection, verbosity, repetition, dedupe, token efficiency, real transcript examples, synthetic scenarios, or `src/hooks/tool_hints*` changes."
+description: "Evaluate TraceDecay hook hint relevance, repetition, and host-visible output when auditing or changing hint behavior."
 ---
 
-# TraceDecay Dev: Evaluating Hook Hints
+# Evaluating Hook Hints
 
-Use this skill for TraceDecay repo development only. These are repo-local dev instructions (`.claude/skills` / `.codex/skills`), not plugin-distributed skills.
+Inspect the hint classifier, dedupe state, affected host adapters, and relevant
+transcript evidence before changing behavior. Current sources live under
+`crates/tracedecay-agent-hosts/src/hooks/`; locate the current modules rather
+than relying on historical root `src/hooks/` paths.
 
-## Workflow
+For transcript regressions, render the selected session with
+`scripts/render-codex-hook-inputs.py /path/to/rollout.jsonl --all --limit 5`.
+Choose the user's relevant sessions; do not scan a fixed operator home by default.
 
-1. Start with TraceDecay context for `src/hooks/tool_hints.rs`, `src/hooks/tool_hints/classifiers.rs`, `src/hooks/tool_hints/evals.rs`, host adapters in `src/hooks/{codex,claude,cursor}.rs`, and recent transcript evidence.
-2. Render model-visible hook input when judging verbosity:
-   `scripts/render-codex-hook-inputs.py --glob '/home/zack/.codex/sessions/**/*.jsonl' --all --limit 5 --max-chars 800`.
-3. Run deterministic evals before behavior edits:
-   `cargo test --lib hooks::tool_hints::evals -- --nocapture`.
-4. Score hints on four axes: relevance, silence when no hint is needed, compactness, and rotation/dedupe after the model has seen a category.
-5. Prefer tightening classifiers, budgets, or dedupe over adding broad static instructions. Use bundled skills and tool discovery as the durable guidance layer.
-6. After edits, run focused host tests for the touched adapter:
-   `cargo test --lib hooks::tool_hints:: hooks::codex::tests::` for Codex prompt hints, or the matching Claude/Cursor hook tests.
+Judge relevance, appropriate silence, compactness, and dedupe after a category
+has already been shown. Prefer tightening the responsible classifier or dedupe
+behavior over broad static instructions. Normal prompts should not acquire
+noisy hook-completion wrappers; no hint is a valid outcome.
 
-## Acceptance Rules
+For behavior changes, use real and synthetic cases that exercise the changed
+failure and neighboring cases that should remain silent. Read
+[hint-eval-signals.md](references/hint-eval-signals.md) to choose classifier
+evals versus adapter tests. A review-only pass does not require running builds.
 
-- Hints should be contextual and short; avoid generic TraceDecay availability boilerplate.
-- Real-world transcript cases and synthetic cases should both be represented in `src/hooks/tool_hints/evals.rs`.
-- A normal user prompt should not be wrapped into a noisy `UserPromptSubmit hook (completed)` model-visible user message.
-- No hint is a valid outcome when the request does not need TraceDecay guidance.
-- Repeated native behavior should get at most one initial hint plus one later escalation per category, bounded by the session budget.
+Run relevant existing evals in the owning package:
+`cargo test -p tracedecay-agent-hosts --lib hooks::tool_hints::evals -- --nocapture`.
+For an adapter change, run its focused tests separately; Cargo accepts one name
+filter per invocation. Confirm non-zero test counts. Audit all supported hosts
+when shared hook behavior changes; test affected behavior without repeating
+identical substrate cases across every host.
 
-## References
-
-Read `references/hint-eval-signals.md` when deciding whether a scenario belongs in evals or in an adapter-specific integration test.
+Preserve contextual hint budgets and the current bounded repetition policy;
+do not weaken limits to hide excessive hints. Report observed behavior,
+changes or findings, and the relevant verification.

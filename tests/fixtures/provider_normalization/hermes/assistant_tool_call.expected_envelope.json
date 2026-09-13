@@ -1,0 +1,38 @@
+{
+  "description": "Canonical envelope expected after parsing the native Hermes SQLite message row.",
+  "version": 1,
+  "provider": "hermes",
+  "native_record_kind": "message",
+  "relations": {
+    "session_id": "session-redacted",
+    "agent_id_present": true,
+    "absent": [
+      "thread_id",
+      "turn_id",
+      "parent_agent_id",
+      "parent_message_id"
+    ]
+  },
+  "evidence": {
+    "ordering_domain": "sqlite_row_id",
+    "range": {
+      "start": 0,
+      "end": 7
+    },
+    "native_timestamp": 1780629310,
+    "native_sequence": 7
+  },
+  "fact_kinds": [
+    "tool_invocation",
+    "reasoning",
+    "provider_usage"
+  ],
+  "encoded_must_contain": [
+    "terminal",
+    "cargo test billing"
+  ],
+  "encoded_must_not_contain": [
+    "routing",
+    "provenance"
+  ]
+}

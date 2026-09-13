@@ -26,6 +26,7 @@
         "SubagentStart": { "$ref": "#/$defs/matcherGroupArray" },
         "SubagentStop": { "$ref": "#/$defs/matcherGroupArray" },
         "PreCompact": { "$ref": "#/$defs/matcherGroupArray" },
+        "PostCompact": { "$ref": "#/$defs/matcherGroupArray" },
         "SessionStart": { "$ref": "#/$defs/matcherGroupArray" },
         "SessionEnd": { "$ref": "#/$defs/matcherGroupArray" }
       }

@@ -1,0 +1,142 @@
+use serde::{Deserialize, Serialize};
+use tracedecay_contracts::{
+    AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
+    ApplicationOutcome, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
+    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1, StartWorkAttemptCommand,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+    WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
+    WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
+    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
+    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
+    WorkProposalComparisonV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
+};
+use tracedecay_domain::{
+    WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
+    WorkRunControlV1,
+};
+
+// `StartAttempt` is matched and constructed across several call sites
+// (work_cli, service::invocation::work); boxing it would ripple through all
+// of them for a request/response contract type, not a hot allocation path.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "request", rename_all = "snake_case")]
+pub enum WorkApplicationInvocationV1 {
+    GenerateProposal(GenerateProposalRequest),
+    Create(CreateWorkTaskRequestV1),
+    ReviewProposal(ReviewWorkProposalRequestV1),
+    AcceptProposal(AcceptWorkProposalRequestV1),
+    AdmitExecution(AdmitWorkExecutionRequestV1),
+    StartAttempt(StartWorkAttemptCommand),
+    Synthesize(AdmitWorkSynthesisCommand),
+    AttemptStatus(WorkAttemptStatusRequestV1),
+    CancelAttempt(CancelWorkAttemptCommand),
+    ResumeAttempts(ResumeWorkAttemptsCommand),
+    RetryAttempt(RetryWorkAttemptCommandV1),
+    ListAttempts(WorkAttemptListRequestV1),
+    ExecutionHistory(WorkAttemptListRequestV1),
+    HydrateArtifacts(WorkArtifactHydrationRequestV1),
+    RetrieveEvidence(WorkEvidenceRetrieveRequestV1),
+    Views(WorkGraphReadRequestV1),
+    Experience(WorkExperienceRequestV1),
+    CompareProposal(WorkProposalComparisonRequestV1),
+    PrepareGraphMutation(PrepareWorkProductMutationRequestV1),
+    MutateGraph(WorkProductMutationRequestV1),
+    Topology(WorkTopologyViewRequestV1),
+    TopologyMetrics(ExecutionTopologyMetricsRequestV1),
+    PrepareDuplicateAdjudication(PrepareWorkDuplicateAdjudicationRequestV1),
+    AdjudicateDuplicate(WorkDuplicateAdjudicationCommandV1),
+    AdjudicateLeak(AdjudicateWorkLeakCommandV1),
+    PauseRun(PauseWorkRunCommand),
+    ResumeRun(ResumeWorkRunCommand),
+    RunControl(WorkRunControlRequestV1),
+    PlacementPreflight(WorkPlacementPreflightRequestV1),
+    AdmitPlacement(AdmitWorkPlacementCommand),
+    PlacementStatus(WorkPlacementStatusRequestV1),
+    ReleasePlacement(ReleaseWorkPlacementCommand),
+}
+
+impl WorkApplicationInvocationV1 {
+    #[hotpath::skip]
+    pub const fn operation_key(&self) -> &'static str {
+        match self {
+            Self::GenerateProposal(_) => "generate_proposal",
+            Self::Create(_) => "create",
+            Self::ReviewProposal(_) => "review_proposal",
+            Self::AcceptProposal(_) => "accept_proposal",
+            Self::AdmitExecution(_) => "admit_execution",
+            Self::StartAttempt(_) => "start_attempt",
+            Self::Synthesize(_) => "synthesize",
+            Self::AttemptStatus(_) => "attempt_status",
+            Self::CancelAttempt(_) => "cancel_attempt",
+            Self::ResumeAttempts(_) => "resume_attempts",
+            Self::RetryAttempt(_) => "retry_attempt",
+            Self::ListAttempts(_) => "list_attempts",
+            Self::ExecutionHistory(_) => "execution_history",
+            Self::HydrateArtifacts(_) => "hydrate_artifacts",
+            Self::RetrieveEvidence(_) => "retrieve_evidence",
+            Self::Views(_) => "views",
+            Self::Experience(_) => "experience",
+            Self::CompareProposal(_) => "compare_proposal",
+            Self::PrepareGraphMutation(_) => "prepare_graph_mutation",
+            Self::MutateGraph(_) => "mutate_graph",
+            Self::Topology(_) => "topology",
+            Self::TopologyMetrics(_) => "topology_metrics",
+            Self::PrepareDuplicateAdjudication(_) => "prepare_duplicate_adjudication",
+            Self::AdjudicateDuplicate(_) => "adjudicate_duplicate",
+            Self::AdjudicateLeak(_) => "adjudicate_leak",
+            Self::PauseRun(_) => "pause_run",
+            Self::ResumeRun(_) => "resume_run",
+            Self::RunControl(_) => "run_control",
+            Self::PlacementPreflight(_) => "placement_preflight",
+            Self::AdmitPlacement(_) => "admit_placement",
+            Self::PlacementStatus(_) => "placement_status",
+            Self::ReleasePlacement(_) => "release_placement",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
+pub enum WorkApplicationOutcomeV1 {
+    GenerateProposal(ApplicationOutcome<GeneratedWorkProposal>),
+    Create(ApplicationOutcome<WorkProductMutationReceiptV1>),
+    ReviewProposal(ApplicationOutcome<WorkProductMutationReceiptV1>),
+    AcceptProposal(ApplicationOutcome<WorkProductMutationReceiptV1>),
+    AdmitExecution(ApplicationOutcome<AdmittedWorkExecutionV1>),
+    StartAttempt(ApplicationOutcome<WorkAttemptV1>),
+    Synthesize(ApplicationOutcome<WorkSynthesisAttemptV1>),
+    AttemptStatus(ApplicationOutcome<WorkAttemptV1>),
+    CancelAttempt(ApplicationOutcome<WorkAttemptV1>),
+    ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
+    RetryAttempt(Box<ApplicationOutcome<tracedecay_contracts::WorkRetryAttemptOutcomeV1>>),
+    ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
+    ExecutionHistory(ApplicationOutcome<WorkExecutionHistoryV1>),
+    HydrateArtifacts(ApplicationOutcome<WorkArtifactHydrationV1>),
+    RetrieveEvidence(ApplicationOutcome<WorkEvidenceRetrievalV1>),
+    Views(ApplicationOutcome<WorkGraphReadV1>),
+    Experience(ApplicationOutcome<WorkExperienceV1>),
+    CompareProposal(ApplicationOutcome<WorkProposalComparisonV1>),
+    PrepareGraphMutation(ApplicationOutcome<WorkProductMutationRequestV1>),
+    MutateGraph(ApplicationOutcome<WorkProductMutationReceiptV1>),
+    Topology(ApplicationOutcome<ExecutionTopologyViewV1>),
+    TopologyMetrics(ApplicationOutcome<ExecutionTopologyMetricsV1>),
+    PrepareDuplicateAdjudication(ApplicationOutcome<WorkDuplicateAdjudicationCommandV1>),
+    AdjudicateDuplicate(ApplicationOutcome<WorkDuplicateAdjudicationAppendOutcomeV1>),
+    AdjudicateLeak(ApplicationOutcome<WorkLeakAdjudicationOutcomeV1>),
+    PauseRun(ApplicationOutcome<WorkRunControlV1>),
+    ResumeRun(ApplicationOutcome<WorkRunControlV1>),
+    RunControl(ApplicationOutcome<WorkRunControlReadingV1>),
+    PlacementPreflight(ApplicationOutcome<WorkPlacementPreflightV1>),
+    AdmitPlacement(ApplicationOutcome<WorkPlacementV1>),
+    PlacementStatus(ApplicationOutcome<WorkPlacementReadingV1>),
+    ReleasePlacement(ApplicationOutcome<WorkPlacementV1>),
+}

@@ -1,8 +1,8 @@
 {
   "files": {
-    "SKILL.md": "sha256:ce428b37c4067c28a8bfa803e31e5647f023aa6996be5997e065b6e9d75c1ebb"
+    "SKILL.md": "sha256:72250a902f26620d2bb6c5aea1a1ae198aba382f061ae365d58cea71416d3d78"
   },
   "managed_by": "tracedecay-automation",
-  "package_hash": "sha256:070f5045d0af6f415c30166b75ecc0b3f4b2c9aaf61a23eaf8bb42a6900a390e",
+  "package_hash": "sha256:62c256a24e756b8b9270ed092477e24daa7d80aa721328de3d7749b8c232aa9d",
   "skill_id": "automation-run-review"
 }

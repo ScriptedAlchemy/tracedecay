@@ -1,14 +1,19 @@
 ---
 name: tracedecay-curate-memory
-description: Curate, update, delete, or inspect TraceDecay memory facts and dashboard curation from an explicit slash workflow.
+description: Curate or inspect TraceDecay memory facts and agent-managed curation runs.
 ---
 
 # /tracedecay-curate-memory
 
 Use `tracedecay:project-memory`.
 
-- **Args:** interpret `$ARGUMENTS` as the fact, entity, query, or curation action to review; if absent, ask what memory scope to curate before mutating anything.
-- Start read-only with `tracedecay_fact_store` search/list/probe/reason/contradict or `tracedecay_memory_status`; open `tracedecay_dashboard` only when the user wants visual curation.
-- Follow the hard-delete guardrail: confirm fact ids and reasons before `remove` unless the user already gave an exact deletion instruction.
+Interpret `$ARGUMENTS` as a fact, query, curation scope, or existing run. Resolve
+the registered project before mutation. Inspect an existing run without launching
+another; open the dashboard only when the user wants visual curation.
 
-Output: memory facts inspected or changed, confirmations requested, and the final verification search/list result.
+Broad curation uses `fact_store_curate` and the `project-memory` curation
+reference. Direct operations require an exact fact-administration request.
+Prefer supersession for corrections. Exact deletion instructions are sufficient;
+resolve ambiguous targets before permanent removal. Inspect returned terminal
+state and advertised artifacts, report committed effects before any retry, and
+verify final facts with canonical reads.

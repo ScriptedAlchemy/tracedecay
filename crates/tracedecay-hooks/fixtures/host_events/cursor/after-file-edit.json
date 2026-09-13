@@ -1,0 +1,20 @@
+{
+  "conversation_id": "<CONVERSATION_ID>",
+  "generation_id": "<GENERATION_ID>",
+  "model": "<MODEL>",
+  "file_path": "<WORKSPACE_ROOT>/probe.txt",
+  "edits": [
+    {
+      "old_string": "<REDACTED_OLD_TEXT>",
+      "new_string": "<REDACTED_NEW_TEXT>"
+    }
+  ],
+  "session_id": "<SESSION_ID>",
+  "hook_event_name": "afterFileEdit",
+  "cursor_version": "<CURSOR_VERSION>",
+  "workspace_roots": [
+    "<WORKSPACE_ROOT>"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": "<CURSOR_DATA_ROOT>/projects/<PROJECT>/agent-transcripts/<SESSION_ID>.jsonl"
+}

@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "memory-ranking-retrieval-reinforcement",
+  "title": "A frequently-retrieved fact outranks an equal-trust, never-retrieved rival",
+  "description": "Proves retrieval-frequency reinforcement end-to-end through the exact fact search tool: two facts with identical trust and equivalent query relevance are distinguished only after the hot fact is recalled through that same tool.",
+  "contract": "stable",
+  "contract_notes": "Deterministic, no LLM. Both facts share every query-matching token and are seeded at trust 0.6. The hot fact is recalled through the exact search route before the ranking assertion, so no test-only store mutation supplies usage state.",
+  "setup": {
+    "facts": [
+      {
+        "content": "Release pipeline caching uses sccache to speed Rust compilation zulu",
+        "category": "project",
+        "source_label": "hot",
+        "trust": 0.6,
+        "preload_query": "zulu",
+        "preload_searches": 12
+      },
+      {
+        "content": "Release pipeline caching uses sccache to speed Rust compilation yankee",
+        "category": "project",
+        "source_label": "cold",
+        "trust": 0.6
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [],
+    "violation": null
+  },
+  "assertions": [
+    {
+      "kind": "fact-count",
+      "name": "reinforcement_fixture_loaded",
+      "op": "eq",
+      "value": 2
+    },
+    {
+      "kind": "search-rank",
+      "name": "high_retrieval_fact_ranks_first",
+      "query": "release pipeline caching sccache rust",
+      "top_fact_source": "hot",
+      "min_rank_gap": 1,
+      "limit": 5
+    }
+  ]
+}

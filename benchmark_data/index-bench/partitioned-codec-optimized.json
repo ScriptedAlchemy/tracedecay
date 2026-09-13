@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "baseline": "partitioned-codec-baseline.json",
+  "profile": "bench",
+  "features": [
+    "hotpath",
+    "hotpath-alloc"
+  ],
+  "fixture": {
+    "corpus": "benchmark_data/index-bench/corpus",
+    "replicas": 10,
+    "files": 2600,
+    "source_bytes": 9284370,
+    "manifest_bytes": 5177470,
+    "segments": 2601,
+    "segment_bytes": 281183513,
+    "segment_bytes_per_file": 108147.505
+  },
+  "measured_iterations": 5,
+  "exclusive_allocations": {
+    "encode": {
+      "total_bytes": "12.1 GB",
+      "total_count": 77676560
+    },
+    "decode_and_open": {
+      "total_bytes": "16.0 GB",
+      "total_count": 141453235
+    }
+  },
+  "bytes_lane": {
+    "vm_hwm_bytes": 2248114176,
+    "encode_p50_ns": 4287891050,
+    "encode_p95_ns": 5347704363,
+    "decode_and_open_p50_ns": 9674887424,
+    "decode_and_open_p95_ns": 10723903850
+  },
+  "count_lane": {
+    "vm_hwm_bytes": 2228457472,
+    "encode_p50_ns": 5478250838,
+    "encode_p95_ns": 5673715042,
+    "decode_and_open_p50_ns": 12300089561,
+    "decode_and_open_p95_ns": 12628402554
+  }
+}

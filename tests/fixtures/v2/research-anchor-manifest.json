@@ -1,0 +1,1493 @@
+{
+  "envelope": {
+    "manifest": {
+      "agent_contributions": [
+        {
+          "confidence": 0.94,
+          "contributor": {
+            "actor_id": "actor-synthetic-child-001",
+            "version": null
+          },
+          "evidence_class": "derived_exact",
+          "manifest_entries": [
+            "research-anchor-child-001"
+          ],
+          "outputs": [
+            {
+              "id": "document-synthetic-child-output-001",
+              "kind": "document"
+            }
+          ],
+          "role": "researched",
+          "session_id": "session-synthetic-child-001"
+        },
+        {
+          "confidence": 0.4,
+          "contributor": {
+            "actor_id": "actor-synthetic-unknown-001",
+            "version": null
+          },
+          "evidence_class": "inferred",
+          "manifest_entries": [
+            "research-anchor-copied-coordination-001"
+          ],
+          "outputs": [
+            {
+              "id": "document-synthetic-coordination-001",
+              "kind": "document"
+            }
+          ],
+          "role": "researched",
+          "session_id": "session-synthetic-child-unknown-001"
+        }
+      ],
+      "anchors": [
+        {
+          "confidence": 1.0,
+          "coverage": {
+            "freshness": {
+              "shard-synthetic-a": {
+                "outbox_sequence": 42,
+                "shard_id": "shard-synthetic-a"
+              }
+            },
+            "incompatible": [],
+            "locked": [],
+            "redacted": [],
+            "searched": [
+              "shard-synthetic-a"
+            ],
+            "skipped": [],
+            "stale": [],
+            "truncated": [],
+            "unavailable": [],
+            "unknown_coverage": false
+          },
+          "entry_id": "research-anchor-message-001",
+          "evidence_class": "observed",
+          "expected_subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic exact message metadata."
+          },
+          "occurred_window": {
+            "end": 1767323045000001,
+            "start": 1767323045000000
+          },
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Resolve the exact synthetic message by canonical metadata."
+          },
+          "related_activity": null,
+          "retrieval_anchors": [
+            "retrieval-anchor-message-001"
+          ],
+          "retrieval_recipe_id": "retrieval-recipe-message-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 42
+            }
+          },
+          "source_observation_ids": [
+            "observation-message-001"
+          ],
+          "subject": {
+            "kind": "activity",
+            "subject": {
+              "agent_instance_id": "agent-synthetic-parent-001",
+              "goal_id": "goal-synthetic-parent-001",
+              "host": "host-synthetic-001",
+              "message_id": "message-synthetic-exact-001",
+              "orchestration_agent_label": null,
+              "orchestration_observation_id": null,
+              "parent_session_id": null,
+              "parent_tool_use_id": null,
+              "provider": "provider-synthetic",
+              "session_id": "session-synthetic-parent-001",
+              "source_store_id": "source-store-synthetic-001",
+              "thread_id": "thread-synthetic-parent-001",
+              "turn_id": "turn-synthetic-parent-001"
+            }
+          }
+        },
+        {
+          "confidence": 0.94,
+          "coverage": {
+            "freshness": {
+              "shard-synthetic-a": {
+                "outbox_sequence": 43,
+                "shard_id": "shard-synthetic-a"
+              }
+            },
+            "incompatible": [],
+            "locked": [],
+            "redacted": [],
+            "searched": [
+              "shard-synthetic-a"
+            ],
+            "skipped": [],
+            "stale": [],
+            "truncated": [],
+            "unavailable": [],
+            "unknown_coverage": false
+          },
+          "entry_id": "research-anchor-child-001",
+          "evidence_class": "derived_exact",
+          "expected_subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic child agent with declared parent linkage."
+          },
+          "occurred_window": {
+            "end": 1767323105000000,
+            "start": 1767323055000000
+          },
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Resolve a synthetic child agent through declared parent and tool metadata."
+          },
+          "related_activity": null,
+          "retrieval_anchors": [
+            "retrieval-anchor-child-001"
+          ],
+          "retrieval_recipe_id": "retrieval-recipe-child-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 43
+            }
+          },
+          "source_observation_ids": [
+            "observation-child-001"
+          ],
+          "subject": {
+            "kind": "activity",
+            "subject": {
+              "agent_instance_id": "agent-synthetic-child-001",
+              "goal_id": "goal-synthetic-child-001",
+              "host": "host-synthetic-001",
+              "message_id": "message-synthetic-child-001",
+              "orchestration_agent_label": "synthetic-child-task",
+              "orchestration_observation_id": "orchestration-observation-synthetic-child-001",
+              "parent_session_id": "session-synthetic-parent-001",
+              "parent_tool_use_id": "tool-use-synthetic-parent-001",
+              "provider": "provider-synthetic",
+              "session_id": "session-synthetic-child-001",
+              "source_store_id": "source-store-synthetic-001",
+              "thread_id": "thread-synthetic-child-001",
+              "turn_id": "turn-synthetic-child-001"
+            }
+          }
+        },
+        {
+          "confidence": 0.4,
+          "coverage": {
+            "freshness": {
+              "shard-synthetic-a": {
+                "outbox_sequence": 44,
+                "shard_id": "shard-synthetic-a"
+              }
+            },
+            "incompatible": [],
+            "locked": [],
+            "redacted": [],
+            "searched": [
+              "shard-synthetic-a"
+            ],
+            "skipped": [],
+            "stale": [],
+            "truncated": [],
+            "unavailable": [],
+            "unknown_coverage": false
+          },
+          "entry_id": "research-anchor-copied-coordination-001",
+          "evidence_class": "inferred",
+          "expected_subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic copied coordination event without direct authorship."
+          },
+          "occurred_window": {
+            "end": 1767323165000001,
+            "start": 1767323165000000
+          },
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Retain copied coordination as discovery-only evidence, not ownership."
+          },
+          "related_activity": null,
+          "retrieval_anchors": [
+            "retrieval-anchor-copied-coordination-001"
+          ],
+          "retrieval_recipe_id": "retrieval-recipe-copied-coordination-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 44
+            }
+          },
+          "source_observation_ids": [
+            "observation-copied-coordination-001"
+          ],
+          "subject": {
+            "kind": "activity",
+            "subject": {
+              "agent_instance_id": "agent-synthetic-child-unknown-001",
+              "goal_id": null,
+              "host": "host-synthetic-001",
+              "message_id": "message-synthetic-copied-coordination-001",
+              "orchestration_agent_label": null,
+              "orchestration_observation_id": "orchestration-observation-synthetic-copied-001",
+              "parent_session_id": "session-synthetic-parent-001",
+              "parent_tool_use_id": null,
+              "provider": "provider-synthetic",
+              "session_id": "session-synthetic-child-unknown-001",
+              "source_store_id": "source-store-synthetic-001",
+              "thread_id": "thread-synthetic-child-unknown-001",
+              "turn_id": "turn-synthetic-child-unknown-001"
+            }
+          }
+        },
+        {
+          "confidence": 0.91,
+          "coverage": {
+            "freshness": {
+              "shard-synthetic-a": {
+                "outbox_sequence": 45,
+                "shard_id": "shard-synthetic-a"
+              }
+            },
+            "incompatible": [],
+            "locked": [],
+            "redacted": [],
+            "searched": [
+              "shard-synthetic-a"
+            ],
+            "skipped": [],
+            "stale": [],
+            "truncated": [],
+            "unavailable": [],
+            "unknown_coverage": false
+          },
+          "entry_id": "research-anchor-workflow-001",
+          "evidence_class": "derived_exact",
+          "expected_subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic workflow run metadata."
+          },
+          "occurred_window": null,
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Retain a synthetic workflow run as its own canonical retrieval anchor."
+          },
+          "related_activity": {
+            "agent_instance_id": "agent-synthetic-child-001",
+            "goal_id": null,
+            "host": "host-synthetic-001",
+            "message_id": null,
+            "orchestration_agent_label": "synthetic-workflow-task",
+            "orchestration_observation_id": "orchestration-observation-synthetic-workflow-001",
+            "parent_session_id": "session-synthetic-parent-001",
+            "parent_tool_use_id": "tool-use-synthetic-parent-001",
+            "provider": "provider-synthetic",
+            "session_id": "session-synthetic-child-001",
+            "source_store_id": "source-store-synthetic-001",
+            "thread_id": "thread-synthetic-child-001",
+            "turn_id": null
+          },
+          "retrieval_anchors": [
+            "retrieval-anchor-workflow-001"
+          ],
+          "retrieval_recipe_id": "retrieval-recipe-workflow-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 45
+            }
+          },
+          "source_observation_ids": [
+            "observation-workflow-001"
+          ],
+          "subject": {
+            "kind": "delivery",
+            "subject": {
+              "delivery_entity": {
+                "id": "workflow-run-synthetic-001",
+                "kind": "workflow"
+              },
+              "repository_id": "repository-synthetic-001"
+            }
+          }
+        },
+        {
+          "confidence": 0.9,
+          "coverage": {
+            "freshness": {
+              "shard-synthetic-a": {
+                "outbox_sequence": 46,
+                "shard_id": "shard-synthetic-a"
+              }
+            },
+            "incompatible": [],
+            "locked": [],
+            "redacted": [],
+            "searched": [
+              "shard-synthetic-a"
+            ],
+            "skipped": [],
+            "stale": [],
+            "truncated": [],
+            "unavailable": [],
+            "unknown_coverage": false
+          },
+          "entry_id": "research-anchor-branch-session-001",
+          "evidence_class": "derived_exact",
+          "expected_subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic branch-active session correlation."
+          },
+          "occurred_window": null,
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Keep a synthetic branch-active session distinct from a Git commit anchor."
+          },
+          "related_activity": {
+            "agent_instance_id": "agent-synthetic-child-001",
+            "goal_id": null,
+            "host": "host-synthetic-001",
+            "message_id": null,
+            "orchestration_agent_label": null,
+            "orchestration_observation_id": null,
+            "parent_session_id": null,
+            "parent_tool_use_id": null,
+            "provider": "provider-synthetic",
+            "session_id": "session-synthetic-branch-active-001",
+            "source_store_id": "source-store-synthetic-001",
+            "thread_id": null,
+            "turn_id": null
+          },
+          "retrieval_anchors": [
+            "retrieval-anchor-branch-session-001"
+          ],
+          "retrieval_recipe_id": "retrieval-recipe-branch-session-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 46
+            }
+          },
+          "source_observation_ids": [
+            "observation-branch-session-001"
+          ],
+          "subject": {
+            "kind": "git",
+            "subject": {
+              "commit_id": null,
+              "project_id": "project-synthetic-001",
+              "ref_id": "ref-synthetic-branch-001",
+              "repository_id": "repository-synthetic-001",
+              "worktree_id": "worktree-synthetic-001"
+            }
+          }
+        },
+        {
+          "confidence": 1.0,
+          "coverage": {
+            "freshness": {
+              "shard-synthetic-a": {
+                "outbox_sequence": 47,
+                "shard_id": "shard-synthetic-a"
+              }
+            },
+            "incompatible": [],
+            "locked": [],
+            "redacted": [],
+            "searched": [
+              "shard-synthetic-a"
+            ],
+            "skipped": [],
+            "stale": [],
+            "truncated": [],
+            "unavailable": [],
+            "unknown_coverage": false
+          },
+          "entry_id": "research-anchor-produced-commit-001",
+          "evidence_class": "observed",
+          "expected_subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic produced commit relation."
+          },
+          "occurred_window": null,
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Keep a synthetic produced commit relation explicit."
+          },
+          "related_activity": {
+            "agent_instance_id": "agent-synthetic-child-001",
+            "goal_id": null,
+            "host": "host-synthetic-001",
+            "message_id": null,
+            "orchestration_agent_label": null,
+            "orchestration_observation_id": "orchestration-observation-synthetic-produced-001",
+            "parent_session_id": "session-synthetic-parent-001",
+            "parent_tool_use_id": "tool-use-synthetic-parent-001",
+            "provider": "provider-synthetic",
+            "session_id": "session-synthetic-child-001",
+            "source_store_id": "source-store-synthetic-001",
+            "thread_id": null,
+            "turn_id": null
+          },
+          "retrieval_anchors": [
+            "retrieval-anchor-produced-commit-001"
+          ],
+          "retrieval_recipe_id": "retrieval-recipe-produced-commit-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 47
+            }
+          },
+          "source_observation_ids": [
+            "observation-produced-commit-001"
+          ],
+          "subject": {
+            "kind": "git",
+            "subject": {
+              "commit_id": "commit-synthetic-produced-001",
+              "project_id": "project-synthetic-001",
+              "ref_id": "ref-synthetic-branch-001",
+              "repository_id": "repository-synthetic-001",
+              "worktree_id": "worktree-synthetic-001"
+            }
+          }
+        },
+        {
+          "confidence": 0.88,
+          "coverage": {
+            "freshness": {
+              "shard-synthetic-a": {
+                "outbox_sequence": 48,
+                "shard_id": "shard-synthetic-a"
+              }
+            },
+            "incompatible": [],
+            "locked": [],
+            "redacted": [],
+            "searched": [
+              "shard-synthetic-a"
+            ],
+            "skipped": [],
+            "stale": [],
+            "truncated": [],
+            "unavailable": [],
+            "unknown_coverage": false
+          },
+          "entry_id": "research-anchor-observed-commit-001",
+          "evidence_class": "derived_exact",
+          "expected_subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic observed commit relation."
+          },
+          "occurred_window": null,
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Keep a synthetic observed commit distinct from production evidence."
+          },
+          "related_activity": {
+            "agent_instance_id": "agent-synthetic-observer-001",
+            "goal_id": null,
+            "host": "host-synthetic-001",
+            "message_id": null,
+            "orchestration_agent_label": null,
+            "orchestration_observation_id": "orchestration-observation-synthetic-observed-001",
+            "parent_session_id": null,
+            "parent_tool_use_id": null,
+            "provider": "provider-synthetic",
+            "session_id": "session-synthetic-observer-001",
+            "source_store_id": "source-store-synthetic-001",
+            "thread_id": null,
+            "turn_id": null
+          },
+          "retrieval_anchors": [
+            "retrieval-anchor-observed-commit-001"
+          ],
+          "retrieval_recipe_id": "retrieval-recipe-observed-commit-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 48
+            }
+          },
+          "source_observation_ids": [
+            "observation-observed-commit-001"
+          ],
+          "subject": {
+            "kind": "git",
+            "subject": {
+              "commit_id": "commit-synthetic-observed-001",
+              "project_id": "project-synthetic-001",
+              "ref_id": "ref-synthetic-branch-001",
+              "repository_id": "repository-synthetic-001",
+              "worktree_id": "worktree-synthetic-001"
+            }
+          }
+        }
+      ],
+      "base_commit": "commit-synthetic-base-001",
+      "catalog_snapshot": {
+        "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+        "generation": "catalog-synthetic-001"
+      },
+      "created_at": 1767323045000000,
+      "created_by": {
+        "actor_id": "actor-synthetic-parent-001",
+        "version": null
+      },
+      "digest": "sha256:434a2e25fc976db1dc72bb6c73a55317b1749cd0901480864cbc93188d615c10",
+      "git_snapshot": {
+        "captured_at": 1767323045000000,
+        "dirty": false,
+        "head_commit": "commit-synthetic-head-001",
+        "merge_base": "commit-synthetic-merge-base-001",
+        "refs": [
+          [
+            "ref-synthetic-branch-001",
+            "commit-synthetic-head-001"
+          ]
+        ],
+        "repository": "repository-synthetic-001"
+      },
+      "manifest_id": "research-manifest-synthetic-001",
+      "parent_plan": {
+        "id": "plan-synthetic-001",
+        "kind": "plan"
+      },
+      "plan_commit": "commit-synthetic-plan-001",
+      "private_corpus": null,
+      "redaction_report": {
+        "receipts": [
+          "sanitization-receipt-synthetic-001"
+        ],
+        "redacted": 1,
+        "rejected": 0,
+        "sanitizer_version": "synthetic-sanitizer-1.0.0",
+        "scanned": 9
+      },
+      "repository": "repository-synthetic-001",
+      "retrieval_recipes": [
+        {
+          "anchors": [
+            "retrieval-anchor-message-001"
+          ],
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Resolve synthetic exact message metadata."
+          },
+          "recipe_id": "retrieval-recipe-message-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 42
+            }
+          },
+          "use_case": "use-case-synthetic-message-001"
+        },
+        {
+          "anchors": [
+            "retrieval-anchor-child-001"
+          ],
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Resolve synthetic child linkage metadata."
+          },
+          "recipe_id": "retrieval-recipe-child-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 43
+            }
+          },
+          "use_case": "use-case-synthetic-child-001"
+        },
+        {
+          "anchors": [
+            "retrieval-anchor-copied-coordination-001"
+          ],
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Recover synthetic coordination metadata without authorship."
+          },
+          "recipe_id": "retrieval-recipe-copied-coordination-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 44
+            }
+          },
+          "use_case": "use-case-synthetic-attribution-gap-001"
+        },
+        {
+          "anchors": [
+            "retrieval-anchor-workflow-001"
+          ],
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Resolve synthetic workflow metadata."
+          },
+          "recipe_id": "retrieval-recipe-workflow-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 45
+            }
+          },
+          "use_case": "use-case-synthetic-workflow-001"
+        },
+        {
+          "anchors": [
+            "retrieval-anchor-branch-session-001"
+          ],
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Resolve synthetic branch session metadata."
+          },
+          "recipe_id": "retrieval-recipe-branch-session-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 46
+            }
+          },
+          "use_case": "use-case-synthetic-branch-session-001"
+        },
+        {
+          "anchors": [
+            "retrieval-anchor-produced-commit-001"
+          ],
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Resolve synthetic produced commit metadata."
+          },
+          "recipe_id": "retrieval-recipe-produced-commit-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 47
+            }
+          },
+          "use_case": "use-case-synthetic-produced-commit-001"
+        },
+        {
+          "anchors": [
+            "retrieval-anchor-observed-commit-001"
+          ],
+          "purpose": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Resolve synthetic observed commit metadata."
+          },
+          "recipe_id": "retrieval-recipe-observed-commit-001",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 48
+            }
+          },
+          "use_case": "use-case-synthetic-observed-commit-001"
+        }
+      ],
+      "schema_version": "research-bundle/v1",
+      "store_watermarks": {
+        "components": {
+          "shard-synthetic-a": 48
+        }
+      },
+      "supersedes": "research-manifest-synthetic-000",
+      "unresolved_attribution": [
+        {
+          "candidate_sessions": [
+            "session-synthetic-child-unknown-001"
+          ],
+          "reason": "missing_parent_tool_use",
+          "repair_recipe": "retrieval-recipe-copied-coordination-001",
+          "subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic child attribution remains unresolved."
+          }
+        },
+        {
+          "candidate_sessions": [
+            "session-synthetic-child-unknown-001"
+          ],
+          "reason": "copied_coordination_text",
+          "repair_recipe": "retrieval-recipe-copied-coordination-001",
+          "subject": {
+            "receipt": {
+              "receipt_id": "sanitization-receipt-synthetic-001",
+              "sanitizer_version": "synthetic-sanitizer-1.0.0"
+            },
+            "value": "Synthetic copied coordination cannot prove authorship."
+          }
+        }
+      ]
+    },
+    "retrieval_catalog": {
+      "records": {
+        "retrieval-anchor-branch-session-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-branch-session-001",
+          "canonical_request_digest": "sha256:a54b849958d54b2b2fda697eb7a238adefb99de2916fff97581f102329dacdf6",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:7c67dcc5a00e11280449ba8140a07efe2825eb800199a1fbcc1d470ff290605c",
+          "durability": "durable_evidence",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:32524450f8613b2bf93454dd4fc09d21bfa80af6a403303e3ec25c26c3e621cc",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "document-synthetic-retrieval-005",
+              "kind": "document"
+            }
+          ],
+          "payload_access": "eligible",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-retrieval-005"
+          ],
+          "resolved_scope_id": "scope-synthetic-retrieval-005",
+          "retention_class": "retention-synthetic-durable",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 46
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-branch-session-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "document-synthetic-retrieval-005",
+              "kind": "document"
+            }
+          },
+          "target_kind": "document",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-child-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-child-001",
+          "canonical_request_digest": "sha256:9ba087e4292a86c1fe358193515da719e266239f72c5d58835651c7d100eb6f5",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:0ed4b01bea29136dff5075f95b5ae7273291785b0ed65a1a8534e041fcde924b",
+          "durability": "durable_evidence",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:ebfce7152077cbf76e956a2ecc3391aa0035ac9c3409762082cfb6b47593c64a",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "document-synthetic-retrieval-002",
+              "kind": "document"
+            }
+          ],
+          "payload_access": "eligible",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-retrieval-002"
+          ],
+          "resolved_scope_id": "scope-synthetic-retrieval-002",
+          "retention_class": "retention-synthetic-durable",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 43
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-child-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "document-synthetic-retrieval-002",
+              "kind": "document"
+            }
+          },
+          "target_kind": "document",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-copied-coordination-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-copied-coordination-001",
+          "canonical_request_digest": "sha256:6d2b30f3f00a9172a289d87034ef2403faad18e9b7833c8378a1bbc4fbae4b89",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:33c61167ea76fd779fc9bcaafcf8fcae524c86e3743271e72ca4d7075e96cdd7",
+          "durability": "durable_evidence",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:1c8dcbaeadd18037611573bb84adfd0fe95a390feb7b076a89d320019a871b6a",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "document-synthetic-retrieval-003",
+              "kind": "document"
+            }
+          ],
+          "payload_access": "eligible",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-retrieval-003"
+          ],
+          "resolved_scope_id": "scope-synthetic-retrieval-003",
+          "retention_class": "retention-synthetic-durable",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 44
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-copied-coordination-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "document-synthetic-retrieval-003",
+              "kind": "document"
+            }
+          },
+          "target_kind": "document",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-message-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-message-001",
+          "canonical_request_digest": "sha256:d4a5827385716df498936a331ba03b7d99332fb28295488cb9f9ba73e2f15ea3",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:f469d9e40899b5d8bbe896c8362c3afd97640f7a395f15a79a19cecab98336c4",
+          "durability": "durable_evidence",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:601223c61549afc0e0c4aca964dbc820de8c78c6dab3167d675a0dd0e95de5b5",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "document-synthetic-retrieval-001",
+              "kind": "document"
+            }
+          ],
+          "payload_access": "eligible",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-retrieval-001"
+          ],
+          "resolved_scope_id": "scope-synthetic-retrieval-001",
+          "retention_class": "retention-synthetic-durable",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 42
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-message-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "document-synthetic-retrieval-001",
+              "kind": "document"
+            }
+          },
+          "target_kind": "document",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-observed-commit-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-observed-commit-001",
+          "canonical_request_digest": "sha256:6e2f663eafaa7deecc5a19ae6afa01b60ca0177c6ccb394b9c0ec9db20e4e29a",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:59331da088f184e425cf977bb701d6356cd079ea0da8395ff5d17d506d8058e6",
+          "durability": "durable_evidence",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:423314258e865f94ee15a2d17ec5e63d77bcc5df6f07e82a93c0ed8b0e0fdbd5",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "document-synthetic-retrieval-007",
+              "kind": "document"
+            }
+          ],
+          "payload_access": "eligible",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-retrieval-007"
+          ],
+          "resolved_scope_id": "scope-synthetic-retrieval-007",
+          "retention_class": "retention-synthetic-durable",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 48
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-observed-commit-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "document-synthetic-retrieval-007",
+              "kind": "document"
+            }
+          },
+          "target_kind": "document",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-produced-commit-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-produced-commit-001",
+          "canonical_request_digest": "sha256:ca4a87d2064b11ce784b1abddb32afb12f0906eece1a1b7269813199b31e8f01",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:45f46b7bb873c159eb8771184829285b7475e9cfc8f272f913eac0337327f97a",
+          "durability": "durable_evidence",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:439c4b755842e61acaf7ee6da102f6ae9b91a97afc1bd2db17dbe61d64f5ca9d",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "document-synthetic-retrieval-006",
+              "kind": "document"
+            }
+          ],
+          "payload_access": "eligible",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-retrieval-006"
+          ],
+          "resolved_scope_id": "scope-synthetic-retrieval-006",
+          "retention_class": "retention-synthetic-durable",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 47
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-produced-commit-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "document-synthetic-retrieval-006",
+              "kind": "document"
+            }
+          },
+          "target_kind": "document",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-deleted-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-deleted-001",
+          "canonical_request_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "durability": "archived",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "message-synthetic-deleted-001",
+              "kind": "message"
+            }
+          ],
+          "payload_access": "unavailable",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-deleted-001"
+          ],
+          "resolved_scope_id": "scope-synthetic-deleted-001",
+          "retention_class": "retention-synthetic-deleted",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 51
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-deleted-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "message-synthetic-deleted-001",
+              "kind": "message"
+            }
+          },
+          "target_kind": "message",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-redacted-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-redacted-001",
+          "canonical_request_digest": "sha256:e3be3858c3750db9b482758446d2f3d0e3a4b8538c8f86096d439a1307834759",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:0570b0b2c27edf5870e1b61422e9d63a46bd6f5dd36933543bb04809a957f502",
+          "durability": "durable_evidence",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:361569480b8cb49210b83e62759d7f41b801f1867ede6a19790b3d560a58a617",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "document-synthetic-retrieval-008",
+              "kind": "document"
+            }
+          ],
+          "payload_access": "redacted",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-retrieval-008"
+          ],
+          "resolved_scope_id": "scope-synthetic-retrieval-008",
+          "retention_class": "retention-synthetic-durable",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 49
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "document-synthetic-retrieval-008",
+              "kind": "document"
+            }
+          },
+          "target_kind": "document",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-response-handle-expired-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-response-handle-expired-001",
+          "canonical_request_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "durability": {
+            "retention_bound": {
+              "expires_at": 1767323224000000
+            }
+          },
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "response-handle-synthetic-expired-001",
+              "kind": "response_handle"
+            }
+          ],
+          "payload_access": "retention_expired",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-response-handle-expired-001"
+          ],
+          "resolved_scope_id": "scope-synthetic-response-handle-expired-001",
+          "retention_class": "retention-synthetic-response-handle",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 50
+            }
+          },
+          "source_identity_class": "external_delivery",
+          "source_observations": [
+            "observation-response-handle-expired-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "response-handle-synthetic-expired-001",
+              "kind": "response_handle"
+            }
+          },
+          "target_kind": "response_handle",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
+        "retrieval-anchor-workflow-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-workflow-001",
+          "canonical_request_digest": "sha256:d0685d0dc271bd8aad9f66e74d45155c8aacfdb56991c7e6ebf5cf18eb41c72b",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:8555a67ea113432f9f5fa9577a0818296367f3347f9ab6b0f0b8ab096c0b221a",
+          "durability": "durable_evidence",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:0f4d7c484799b1ddf2dd4e839fdb77d9f60edeff96706b24606273ca1cea0b79",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "document-synthetic-retrieval-004",
+              "kind": "document"
+            }
+          ],
+          "payload_access": "eligible",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-retrieval-004"
+          ],
+          "resolved_scope_id": "scope-synthetic-retrieval-004",
+          "retention_class": "retention-synthetic-durable",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 45
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-workflow-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "document-synthetic-retrieval-004",
+              "kind": "document"
+            }
+          },
+          "target_kind": "document",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        }
+      },
+      "snapshot": {
+        "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+        "generation": "catalog-synthetic-001"
+      }
+    }
+  },
+  "tombstones": [
+    {
+      "coverage": {
+        "freshness": {
+          "shard-synthetic-a": {
+            "outbox_sequence": 51,
+            "shard_id": "shard-synthetic-a"
+          }
+        },
+        "incompatible": [],
+        "locked": [],
+        "redacted": [],
+        "searched": [],
+        "skipped": [],
+        "stale": [],
+        "truncated": [],
+        "unavailable": [
+          "shard-synthetic-a"
+        ],
+        "unknown_coverage": false
+      },
+      "entry_id": "research-anchor-deleted-001",
+      "evidence_class": "observed",
+      "occurred_at": 1767323225000000,
+      "reason": "deleted",
+      "receipt": {
+        "receipt_id": "audit-receipt-synthetic-deleted-001"
+      },
+      "retrieval_anchors": [
+        "retrieval-anchor-deleted-001"
+      ],
+      "snapshot": {
+        "components": {
+          "shard-synthetic-a": 51
+        }
+      },
+      "subject": {
+        "kind": "activity",
+        "subject": {
+          "agent_instance_id": null,
+          "goal_id": null,
+          "host": "host-synthetic-001",
+          "message_id": "message-synthetic-deleted-001",
+          "orchestration_agent_label": null,
+          "orchestration_observation_id": null,
+          "parent_session_id": null,
+          "parent_tool_use_id": null,
+          "provider": "provider-synthetic",
+          "session_id": "session-synthetic-deleted-001",
+          "source_store_id": "source-store-synthetic-001",
+          "thread_id": null,
+          "turn_id": null
+        }
+      }
+    },
+    {
+      "coverage": {
+        "freshness": {
+          "shard-synthetic-a": {
+            "outbox_sequence": 49,
+            "shard_id": "shard-synthetic-a"
+          }
+        },
+        "incompatible": [],
+        "locked": [],
+        "redacted": [
+          "shard-synthetic-a"
+        ],
+        "searched": [],
+        "skipped": [],
+        "stale": [],
+        "truncated": [],
+        "unavailable": [],
+        "unknown_coverage": false
+      },
+      "entry_id": "research-anchor-redacted-001",
+      "evidence_class": "observed",
+      "occurred_at": 1767323225000000,
+      "reason": "redacted",
+      "receipt": {
+        "receipt_id": "audit-receipt-synthetic-redacted-001"
+      },
+      "retrieval_anchors": [
+        "retrieval-anchor-redacted-001"
+      ],
+      "snapshot": {
+        "components": {
+          "shard-synthetic-a": 49
+        }
+      },
+      "subject": {
+        "kind": "activity",
+        "subject": {
+          "agent_instance_id": null,
+          "goal_id": null,
+          "host": "host-synthetic-001",
+          "message_id": "message-synthetic-redacted-001",
+          "orchestration_agent_label": null,
+          "orchestration_observation_id": null,
+          "parent_session_id": null,
+          "parent_tool_use_id": null,
+          "provider": "provider-synthetic",
+          "session_id": "session-synthetic-redacted-001",
+          "source_store_id": "source-store-synthetic-001",
+          "thread_id": null,
+          "turn_id": null
+        }
+      }
+    },
+    {
+      "coverage": {
+        "freshness": {
+          "shard-synthetic-a": {
+            "outbox_sequence": 50,
+            "shard_id": "shard-synthetic-a"
+          }
+        },
+        "incompatible": [],
+        "locked": [],
+        "redacted": [],
+        "searched": [],
+        "skipped": [],
+        "stale": [],
+        "truncated": [],
+        "unavailable": [
+          "shard-synthetic-a"
+        ],
+        "unknown_coverage": false
+      },
+      "entry_id": "research-anchor-response-handle-expired-001",
+      "evidence_class": "observed",
+      "occurred_at": 1767323225000000,
+      "reason": "expired",
+      "receipt": {
+        "receipt_id": "audit-receipt-synthetic-response-handle-expired-001"
+      },
+      "retrieval_anchors": [
+        "retrieval-anchor-response-handle-expired-001"
+      ],
+      "snapshot": {
+        "components": {
+          "shard-synthetic-a": 50
+        }
+      },
+      "subject": {
+        "kind": "delivery",
+        "subject": {
+          "delivery_entity": {
+            "id": "response-handle-synthetic-expired-001",
+            "kind": "response_handle"
+          },
+          "repository_id": "repository-synthetic-001"
+        }
+      }
+    }
+  ],
+  "sanitization_receipts": [
+    {
+      "receipt": {
+        "receipt_id": "sanitization-receipt-synthetic-001",
+        "sanitizer_version": "synthetic-sanitizer-1.0.0"
+      },
+      "value_sha256": [
+        "06fcf82b01ef0b44b89b1db3298685dee1d9ed098a5a50ee54177e98f04b21cb",
+        "0cbe600e3b43b7ea275676f0d1a395bbd13486a08951bc662bac2e5caa4620a8",
+        "169e7550437e89e9824ce2767ccaef8139e1d00cade449176141145253b10346",
+        "24a1646610d46876acc0d36aeac6bc97a8e01e7d58fe0b8e2c16c3be96eda5b6",
+        "32b139576ed8a5a7f4f4e98cba4840e0c0d3e88b44ca26136b980a9b919e38fc",
+        "50c4d69830aece5f80e905db3f8c07083af15908b188bcb7b15392cf47f93071",
+        "55303d64ee92a76196cffa5dd7123c10aa461e3cf385b2fc19b3d2277edba0b8",
+        "5f2f26e4d256cb49a9ac0c4ed43595fde9b5dc3ce26e9348190105f53e55c04e",
+        "6fdc919bd4c42c475a99aa47e634604102a35dd465ef243215d6240034039aaa",
+        "7b669232e88b3d62866a64c6212f9d70fee72cba2ba5a03d7849744147869264",
+        "a28f2215b863e0a2742e1f69cc9aee4733b8c1879d437d863ca66c04f8a70962",
+        "b2a1c7e4ed9e668a7384ff95c4960a50a6e855b171fadd90afb7d0e7f3a0565b",
+        "b8a9c2ee7c1671b25988b3f50974ddb0db0049f37e51ac76871e239b3a124e50",
+        "b9a59fec91771edf93a12eae16af6e10669bc85f048159b01fd6c8fb7cd1c28a",
+        "be906696285434062b39795758d700a29cd244dbfa0f42bfb01770ad21d90b81",
+        "d6eda130bbfb1c481f421bc18e2278b1676518731ea36ddc0faaa8c0548933b0",
+        "d900bad07614ec0d1ed296ff3091e95a905a0fa0ad2584d31eaf41b0f7aa0523",
+        "dee6460f0bcdc3b012bd1844e15e9407c3ffa42a366c4d4a139711aaebc45444",
+        "e309c0790bc58271a567e015042fe624122b15e017b369f72573f17d480af493",
+        "e782b56e9ea2488534fb130978fcff30a12c07edf957013ba3d0d3cbe2ca8dae",
+        "ee21b026777b6d0547f0b0e804a0ed054211dc5e5d66fb5517be8d68de1a0813",
+        "fb3ec776fecba21a85a04003d5b1f8c56c96d36c1d00ec96e09bfd5fb2517265",
+        "ff0477a34d907935439985b7415d7d69b3e8ea232fa201f218dced1520f4e842"
+      ]
+    }
+  ]
+}

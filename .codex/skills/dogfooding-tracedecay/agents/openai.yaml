@@ -1,4 +1,0 @@
-interface:
-  display_name: "Dogfood TraceDecay"
-  short_description: "Install and verify local TraceDecay builds"
-  default_prompt: "Use $dogfooding-tracedecay to install this checkout globally and verify the live runtime."

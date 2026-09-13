@@ -176,7 +176,7 @@ INCIDENT_WORKLOADS = (
         "indexing-coalescence",
         (
             CrateLane.CODE_INDEX,
-            CrateLane.APPLICATION,
+            CrateLane.CONTRACTS,
             CrateLane.INTEGRATED,
         ),
         Surface.CLI,
@@ -197,7 +197,7 @@ INCIDENT_WORKLOADS = (
         "maintenance-contention",
         (
             CrateLane.QUERY,
-            CrateLane.APPLICATION,
+            CrateLane.CONTRACTS,
             CrateLane.INTEGRATED,
         ),
         Surface.CLI,
@@ -215,7 +215,7 @@ INCIDENT_WORKLOADS = (
     IncidentWorkload(
         "diagnostic-dedup-batch-rate",
         "diagnostic-generation",
-        (CrateLane.APPLICATION, CrateLane.API, CrateLane.INTEGRATED),
+        (CrateLane.CONTRACTS, CrateLane.API, CrateLane.INTEGRATED),
         Surface.CLI,
         RuntimeState.REPEAT,
         TimeoutPhase.TOOL_CALL,
@@ -231,7 +231,7 @@ INCIDENT_WORKLOADS = (
         "daemon-resource-stability",
         (
             CrateLane.RUSQLITE_RUNTIME,
-            CrateLane.APPLICATION,
+            CrateLane.CONTRACTS,
             CrateLane.INTEGRATED,
         ),
         Surface.CLI,
@@ -254,7 +254,7 @@ INCIDENT_WORKLOADS = (
     IncidentWorkload(
         "renderer-consumer-event-count",
         "event-rendering",
-        (CrateLane.API, CrateLane.APPLICATION, CrateLane.INTEGRATED),
+        (CrateLane.API, CrateLane.CONTRACTS, CrateLane.INTEGRATED),
         Surface.HOST,
         RuntimeState.REPEAT,
         TimeoutPhase.HOST_ACTIVATION,

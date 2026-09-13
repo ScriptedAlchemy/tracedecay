@@ -1,0 +1,41 @@
+[package]
+name = "tracedecay-daemon-control"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "OS service lifecycle, readiness probing, and daemon control for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[dependencies]
+dirs = "6"
+hex = "0.4"
+hotpath.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracing = "0.1"
+
+# COM Task Scheduler bindings for the per-user Windows daemon task
+# (`service/windows_task.rs`). `Win32_System_Ole` is not imported by name but
+# is required by the `windows` crate's VARIANT/TaskScheduler machinery.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Variant",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }

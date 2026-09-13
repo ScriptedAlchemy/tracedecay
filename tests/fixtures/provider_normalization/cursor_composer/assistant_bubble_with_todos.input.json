@@ -1,0 +1,16 @@
+{
+  "type": 2,
+  "text": "Working the checklist.",
+  "todos": [
+    {
+      "id": "t1",
+      "content": "First todo",
+      "status": "completed"
+    },
+    {
+      "id": "t2",
+      "content": "Second todo",
+      "status": "pending"
+    }
+  ]
+}

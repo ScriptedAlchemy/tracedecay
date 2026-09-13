@@ -1,0 +1,345 @@
+@import 'tailwindcss';
+@import './fonts.css';
+@import './tokens.css';
+
+/* Non-inline @theme: semantic tokens reference the runtime CSS variables so
+ * data-theme / data-contrast switching works without a rebuild. Components
+ * use these utilities only (lint-enforced); raw palette classes are banned.
+ */
+@theme {
+  --color-surface-0: var(--raw-surface-0);
+  --color-surface-1: var(--raw-surface-1);
+  --color-surface-2: var(--raw-surface-2);
+  --color-surface-3: var(--raw-surface-3);
+  --color-text-primary: var(--raw-text-primary);
+  --color-text-secondary: var(--raw-text-secondary);
+  --color-text-muted: var(--raw-text-muted);
+  --color-edge-subtle: var(--raw-edge-subtle);
+  --color-edge-strong: var(--raw-edge-strong);
+  --color-accent: var(--raw-accent);
+  --color-accent-emphasis: var(--raw-accent-emphasis);
+  --color-alert: var(--raw-alert);
+  --color-alert-emphasis: var(--raw-alert-emphasis);
+
+  --color-state-loading: var(--raw-state-loading);
+  --color-state-ready: var(--raw-state-ready);
+  --color-state-complete-zero: var(--raw-state-complete-zero);
+  --color-state-partial: var(--raw-state-partial);
+  --color-state-stale: var(--raw-state-stale);
+  --color-state-locked: var(--raw-state-locked);
+  --color-state-denied: var(--raw-state-denied);
+  --color-state-unauthorized: var(--raw-state-unauthorized);
+  --color-state-redacted: var(--raw-state-redacted);
+  --color-state-conflicting: var(--raw-state-conflicting);
+  --color-state-offline: var(--raw-state-offline);
+  --color-state-unknown: var(--raw-state-unknown);
+  --color-state-cancelled: var(--raw-state-cancelled);
+  --color-state-timed-out: var(--raw-state-timed-out);
+  --color-state-error: var(--raw-state-error);
+  --color-state-unsupported-schema: var(--raw-state-unsupported-schema);
+
+  --color-sev-info: var(--raw-sev-info);
+  --color-sev-low: var(--raw-sev-low);
+  --color-sev-medium: var(--raw-sev-medium);
+  --color-sev-high: var(--raw-sev-high);
+  --color-sev-critical: var(--raw-sev-critical);
+
+  --color-grid: var(--raw-grid);
+  --color-grid-minor: var(--raw-grid-minor);
+  --color-well: var(--raw-well);
+  --color-raised: var(--raw-raised);
+
+  /* Three faces, three jobs (see fonts.css for the vendored files and
+   * licenses). The old stack was Inter for everything with an unstyled system
+   * fallback for mono, which is the default voice of every technical dashboard
+   * ever shipped and left the display tier and the mono tier undesigned.
+   *
+   * Inter was kept behind Plex for a while to cover the scripts the vendored
+   * Latin subsets do not, but it earned its place in the bundle rather than on
+   * the screen: all seven of its faces measured `unloaded` at runtime, because
+   * a `@font-face` is only fetched when a glyph in its unicode-range is
+   * actually needed and Plex answered every one. What it did do was keep a
+   * fourth typeface in a three-face system and sit between the designed face
+   * and the system fallback, where it could quietly cover a gap in Plex instead
+   * of letting that gap show. Non-Latin now resolves to `system-ui`, which
+   * carries Cyrillic, Greek and Vietnamese on every platform this ships to and
+   * costs nothing to deliver. */
+  --font-sans: 'IBM Plex Sans Variable', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
+  /* The engraved tier. Only ever reached through this token — never a
+   * hard-coded family in a component. */
+  --font-display: 'Chakra Petch', 'IBM Plex Sans Variable', system-ui, sans-serif;
+
+  /* Instrument type scale. `3xs` is the annotation size — used only for
+   * letterspaced uppercase legends and units, never for prose.
+   *
+   * The scale runs 10 → 60px on purpose. The old ceiling was 26px, which meant
+   * a surface's headline quantity was set barely larger than its own row text
+   * and the eye had nowhere to land first. The top three steps are the display
+   * tier: they are for the ONE number a surface exists to report. */
+  --text-3xs: 10px;
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 19px;
+  --text-xl: 26px;
+  --text-2xl: 34px;
+  --text-3xl: 44px;
+  --text-4xl: 60px;
+
+  --radius-standard: var(--radius-standard);
+  --radius-chip: var(--radius-chip);
+}
+
+@layer base {
+  html {
+    background: var(--raw-surface-0);
+    color: var(--raw-text-primary);
+    font-family: var(--font-sans);
+    font-size: 14px;
+  }
+  /* Every numeral in the instrument is measured: tabular figures everywhere,
+   * so a column of readouts aligns on the decimal without per-site classes. */
+  body {
+    font-variant-numeric: tabular-nums;
+  }
+  /* The named-region tier. Workspace pages set their own size and weight on
+   * these; the face is the one thing the design system owns centrally, so a
+   * page never has to know which family the display tier is. Sentence-case
+   * headings stay at normal width — the expansion is specific to the uppercase
+   * letterspaced tiers, and `.td-title` (a class) outranks this for the
+   * headings that are both. */
+  h1,
+  h2 {
+    font-family: var(--font-display);
+  }
+  [data-cell='numeric'],
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+  :focus-visible {
+    outline: 2px solid var(--raw-accent);
+    outline-offset: 1px;
+  }
+}
+
+@layer components {
+  /* The engraved legend: every panel, region and column header in the app
+   * wears this — small, letterspaced, uppercase, quiet.
+   *
+   * This is where the display face earns its keep. At 10px uppercase almost
+   * nothing of a face's personality survives except weight and STROKE GEOMETRY,
+   * and Chakra Petch's chamfered terminals are exactly the detail that does
+   * survive: under heavy tracking the legends read as machine-engraved stamps,
+   * the register a round grotesque cannot reach. `font-stretch` stays declared
+   * so a future variable face with a width axis picks the tuned width up
+   * without touching every call site; Chakra Petch ships one width and
+   * ignores it. */
+  .td-legend {
+    font-family: var(--font-display);
+    font-stretch: var(--display-width);
+    font-size: var(--text-3xs);
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    font-weight: 500;
+    /* Legends carry digits (nav channel numbers, `SAVED 7D` vs `SAVED 30D`),
+     * so they hold the same tabular figures as the readouts they label. */
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    color: var(--raw-text-muted);
+    white-space: nowrap;
+  }
+  /* A measured value: monospaced, tabular, ink-coloured. */
+  .td-value {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    color: var(--raw-text-primary);
+  }
+  /* The unit that sits beside a value — small, quiet, never bold. */
+  .td-unit {
+    font-size: var(--text-3xs);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--raw-text-muted);
+  }
+  /* Hairline fill rule: the horizontal line that runs from a legend to the
+   * edge of its region, the single most repeated mark in this design. */
+  .td-rule {
+    flex: 1 1 0%;
+    height: 1px;
+    min-width: 8px;
+    background: var(--raw-edge-subtle);
+  }
+
+  /* The display numeral. A monospaced face set large keeps its default wide
+   * sidebearings and goes limp — at 34px and above the figures need to be
+   * pulled together and given a little more weight, or the headline number
+   * reads as a terminal echo instead of a gauge. The tight tracking here plus
+   * the 0.16em tracking on `.td-legend` is the whole typographic idea: the two
+   * extremes of the scale are also the two extremes of fit, so a readout has
+   * an unmistakable top and bottom even in a monochrome screenshot. */
+  .td-display {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    font-weight: 500;
+    letter-spacing: -0.035em;
+    line-height: 0.92;
+    color: var(--raw-text-primary);
+  }
+
+  /* The title tier: what names a region a reader is meant to navigate by, as
+   * opposed to `.td-legend`, which annotates a cell. Sized and weighted to sit
+   * clearly above the legend without shouting. */
+  .td-title {
+    font-family: var(--font-display);
+    font-stretch: var(--display-width);
+    font-size: var(--text-2xs);
+    line-height: 1;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    color: var(--raw-text-secondary);
+  }
+
+  /* ---- the compact control ----
+   * How a deliberately small bezel reaches the 44px touch minimum without
+   * being redrawn at 44px.
+   *
+   * Several controls here are compact by design — a 24px `Refresh` in a panel
+   * header, a 17px scheduler chip, a 20px order toggle — because this console
+   * is a dense instrument and a row of 44px slabs is a different product. The
+   * minimum is about what a finger can land on, not about how large the chrome
+   * looks, so the two are separated: the ELEMENT becomes a transparent 44x44
+   * hit area and an inner span goes on drawing the bezel at exactly the size
+   * it was designed. Nothing on screen changes; the target it reports is now
+   * the target a pointer actually gets.
+   *
+   * Deliberately NOT a pseudo-element on the small box. The gate measures the
+   * element's own border box, and an `::after` that merely overlaps a larger
+   * area would report 24px while claiming 44 — a hit area the harness cannot
+   * see is indistinguishable from one that does not exist. */
+  .td-hit {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--touch-target-min);
+    min-width: var(--touch-target-min);
+  }
+
+  /* ---- the checkbox ----
+   * `.td-hit` for a control that cannot hold an inner span. A native checkbox
+   * paints at 13x13 and does not grow with padding — the box is UA-drawn, so
+   * padding pushes the LABEL away and leaves the target exactly as small as it
+   * was. The element therefore becomes the 44x44 target itself and draws its
+   * bezel in `::before` at the size it was designed, which is the same
+   * separation `.td-hit` makes with a wrapper span, expressed in CSS because
+   * an `<input>` has no children to draw with.
+   *
+   * The mark is a rotated BORDER, never a background or a box-shadow. Forced
+   * colors forces `background-color` to `Canvas` and `box-shadow` to `none`,
+   * so a checkmark drawn either way disappears into its own box in exactly the
+   * mode a reader is relying on it most. `border-color` is forced to
+   * `CanvasText`, so a bordered tick survives the forced palette — and it
+   * survives it without `forced-color-adjust`, which no element in this app
+   * sets and the gate's forced-colors probe measures. */
+  .td-check {
+    appearance: none;
+    display: grid;
+    place-content: center;
+    flex: none;
+    width: var(--touch-target-min);
+    height: var(--touch-target-min);
+    margin: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+  .td-check::before {
+    content: '';
+    grid-area: 1 / 1;
+    width: 16px;
+    height: 16px;
+    border: 1px solid var(--raw-edge-strong);
+    border-radius: var(--radius-chip);
+    background: var(--raw-surface-0);
+  }
+  .td-check:hover::before {
+    border-color: var(--raw-accent);
+  }
+  .td-check:checked::before {
+    border-color: var(--raw-accent);
+    background: var(--raw-accent);
+  }
+  .td-check::after {
+    content: '';
+    grid-area: 1 / 1;
+    place-self: center;
+    width: 5px;
+    height: 9px;
+    margin-top: -1px;
+    border: solid var(--raw-surface-0);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+    opacity: 0;
+  }
+  .td-check:checked::after {
+    opacity: 1;
+  }
+  .td-check:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  /* ---- elevation planes (see tokens.css) ---- */
+  /* Recessed: milled out of the face. Things you look into. */
+  .td-well {
+    background: var(--raw-well);
+    box-shadow: var(--shadow-well);
+  }
+  /* Proud of the face: things you read off. */
+  .td-raised {
+    background: var(--raw-raised);
+    box-shadow: var(--shadow-raised);
+  }
+
+  /* ---- the magnitude rail ----
+   * A quantity printed as text has no size; the same quantity given a length
+   * can be compared across a column without reading a single digit. Every list
+   * of numbers in this console wears one of these under or beside its value,
+   * which is what turns thirty identical rows into a distribution.
+   *
+   * The fill is SEGMENTED — 5px cells on a 7px pitch — because a continuous
+   * pill is paint and a row of cells is an instrument register: the same
+   * length now also reads as a count of lit segments, and a wall of meters
+   * stops looking like a bar chart smeared across the page. The mask keeps
+   * the segmentation on whatever hue a call site's `tone` sets. Hairline
+   * (1px) meters are below the cell size and drop the mask via the
+   * height-conditional below — a 1px rule diced into 5px dashes reads as a
+   * dotted border, not a measurement. */
+  .td-meter {
+    position: relative;
+    overflow: hidden;
+    background: var(--raw-surface-3);
+  }
+  .td-meter-fill {
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    background: var(--raw-accent);
+    mask-image: repeating-linear-gradient(
+      to right,
+      black 0 5px,
+      transparent 5px 7px
+    );
+  }
+  .h-px > .td-meter-fill {
+    mask-image: none;
+  }
+}

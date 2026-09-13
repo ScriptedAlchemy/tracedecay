@@ -1,0 +1,15 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/workspace/.claude/transcripts/session.jsonl",
+  "cwd": "/workspace/project",
+  "prompt_id": "toolu_000000000000000000000000",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "<REDACTED>"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Created capture.txt.",
+  "background_tasks": [],
+  "session_crons": []
+}

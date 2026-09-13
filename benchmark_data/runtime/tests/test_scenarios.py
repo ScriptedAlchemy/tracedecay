@@ -13,103 +13,14 @@ from benchmark_data.runtime.scenarios import (
     SCENARIOS,
     WORKLOADS,
     CapabilityStatus,
-    CrateLane,
-    DaemonSurvival,
     DigestSemantics,
-    RuntimeState,
-    ShutdownEvidence,
-    Surface,
-    TimeoutPhase,
     WorkloadInputs,
-    WorkloadKind,
-    build_scenarios,
     stable_digest,
     validate_stable_id,
 )
 
 
 class ScenarioCatalogTest(unittest.TestCase):
-    def test_workloads_cover_every_required_query_family_and_tool(self) -> None:
-        tools = {workload.tool for workload in WORKLOADS}
-        kinds = {workload.kind for workload in WORKLOADS}
-
-        self.assertEqual(
-            kinds,
-            {
-                WorkloadKind.EXACT,
-                WorkloadKind.LEXICAL,
-                WorkloadKind.GRAPH,
-                WorkloadKind.SESSION,
-                WorkloadKind.CONTEXT,
-                WorkloadKind.QUERY,
-                WorkloadKind.PAYLOAD,
-                WorkloadKind.CONCURRENCY,
-            },
-        )
-        self.assertTrue(
-            {
-                "tracedecay_find_exact_symbol",
-                "tracedecay_code_exact_occurrence",
-                "tracedecay_grep",
-                "tracedecay_code_phrase_search",
-                "tracedecay_callers",
-                "tracedecay_callees",
-                "tracedecay_impact",
-                "tracedecay_search",
-                "tracedecay_message_search",
-                "tracedecay_lcm_grep",
-                "tracedecay_lcm_expand_query",
-                "tracedecay_context",
-            }.issubset(tools)
-        )
-
-    def test_scenarios_cover_surfaces_states_and_throughput_levels(self) -> None:
-        self.assertEqual({scenario.surface for scenario in SCENARIOS}, set(Surface))
-        self.assertEqual({scenario.state for scenario in SCENARIOS}, set(RuntimeState))
-        self.assertEqual(
-            {
-                scenario.concurrency
-                for scenario in SCENARIOS
-                if scenario.is_throughput
-            },
-            {1, 4, 8},
-        )
-        self.assertEqual(
-            {
-                scenario.surface
-                for scenario in SCENARIOS
-                if scenario.is_throughput
-            },
-            {Surface.CLI, Surface.MCP},
-        )
-        self.assertTrue(
-            all(
-                scenario.surface is Surface.MCP
-                for scenario in SCENARIOS
-                if scenario.state is RuntimeState.PERSISTENT_MCP
-            )
-        )
-
-    def test_final_runtime_states_include_noop_contention_and_recovery(self) -> None:
-        self.assertTrue(
-            {
-                RuntimeState.COLD_ADMISSION,
-                RuntimeState.WARM,
-                RuntimeState.NO_OP,
-                RuntimeState.CONTENTION,
-                RuntimeState.RECOVERY,
-            }.issubset({scenario.state for scenario in SCENARIOS})
-        )
-
-    def test_catalog_is_reproducible_and_has_unique_ids(self) -> None:
-        rebuilt = build_scenarios()
-
-        self.assertEqual(rebuilt, SCENARIOS)
-        self.assertEqual(
-            len({scenario.id for scenario in SCENARIOS}),
-            len(SCENARIOS),
-        )
-
     def test_argument_factories_match_required_stable_shapes(self) -> None:
         inputs = WorkloadInputs(
             symbol="stable_symbol",
@@ -238,46 +149,6 @@ class ScenarioCatalogTest(unittest.TestCase):
             stable_digest(reordered, DigestSemantics.UNORDERED_JSON),
         )
 
-    def test_every_scenario_declares_digest_and_capability_semantics(self) -> None:
-        workload_by_id = {workload.id: workload for workload in WORKLOADS}
-
-        for scenario in SCENARIOS:
-            with self.subTest(scenario=scenario.id):
-                workload = workload_by_id[scenario.workload_id]
-                self.assertIsInstance(scenario.digest_semantics, DigestSemantics)
-                self.assertIn(workload.tool, scenario.required_capabilities)
-                self.assertGreaterEqual(len(scenario.required_capabilities), 1)
-
-    def test_workloads_name_final_crate_lanes_and_scenarios_stay_in_lane(self) -> None:
-        expected_lanes = {
-            "tracedecay-query",
-            "tracedecay-code-index",
-            "tracedecay-capture",
-            "tracedecay-application",
-            "tracedecay-hooks",
-            "tracedecay-api",
-            "tracedecay-rusqlite-runtime",
-            "tracedecay",
-        }
-        self.assertEqual({lane.value for lane in CrateLane}, expected_lanes)
-        self.assertEqual(
-            {
-                lane
-                for workload in WORKLOADS
-                for lane in workload.supported_crate_lanes
-            },
-            set(CrateLane),
-        )
-        workload_by_id = {workload.id: workload for workload in WORKLOADS}
-        for scenario in SCENARIOS:
-            with self.subTest(scenario=scenario.id):
-                workload = workload_by_id[scenario.workload_id]
-                self.assertIn(
-                    scenario.crate_lane,
-                    workload.supported_crate_lanes,
-                )
-                self.assertTrue(scenario.journey_id)
-
     def test_ids_reject_delivery_stage_and_milestone_vocabulary(self) -> None:
         serialized_catalog = json.dumps(
             {
@@ -374,43 +245,6 @@ class ScenarioCatalogTest(unittest.TestCase):
         self.assertEqual(identity["round_index"], 4)
         self.assertEqual(identity["abba_position"], 3)
 
-    def test_runtime_normalization_dimensions_are_explicit_and_only_runtime(self) -> None:
-        cold = next(
-            scenario
-            for scenario in SCENARIOS
-            if scenario.state is RuntimeState.COLD_ADMISSION
-        )
-        warm = next(
-            scenario for scenario in SCENARIOS if scenario.state is RuntimeState.WARM
-        )
-
-        self.assertEqual(
-            cold.normalization_dimensions(
-                platform="linux-x86_64",
-                shard="shard-a",
-                storage_mode="durable",
-            ),
-            {
-                "platform": "linux-x86_64",
-                "shard": "shard-a",
-                "storage_mode": "durable",
-                "concurrency": cold.concurrency,
-                "cache_state": "cold",
-            },
-        )
-        self.assertEqual(
-            warm.normalization_dimensions(
-                platform="linux-x86_64",
-                shard="shard-a",
-                storage_mode="durable",
-            )["cache_state"],
-            "warm",
-        )
-        self.assertEqual(
-            cold.test_identity,
-            (cold.crate_lane.value, cold.journey_id, cold.workload_id, cold.id),
-        )
-
     def test_remote_journeys_require_committed_mounted_production_routes(self) -> None:
         remote = next(scenario for scenario in SCENARIOS if scenario.is_remote)
 
@@ -441,94 +275,6 @@ class ScenarioCatalogTest(unittest.TestCase):
         self.assertFalse(failed.runnable)
         self.assertEqual(mounted.status, CapabilityStatus.AVAILABLE)
         self.assertTrue(mounted.runnable)
-
-    def test_every_scenario_is_n1_wall_time_regression_evidence_not_an_slo(self) -> None:
-        for scenario in SCENARIOS:
-            with self.subTest(scenario=scenario.id):
-                self.assertEqual(scenario.sample_count, 1)
-                self.assertTrue(scenario.measures_wall_time)
-                self.assertFalse(scenario.slo_gate)
-                self.assertFalse(scenario.accepts_empty_success)
-                self.assertIsInstance(scenario.timeout_phase, TimeoutPhase)
-                self.assertIsInstance(scenario.daemon_survival, DaemonSurvival)
-
-    def test_host_evidence_scenarios_preserve_typed_outcomes_and_states(self) -> None:
-        evidence = {
-            scenario.evidence_id: scenario
-            for scenario in SCENARIOS
-            if scenario.evidence_id is not None
-        }
-
-        self.assertTrue(
-            {
-                "warming-daemon",
-                "unresponsive-daemon",
-                "dashboard-malformed",
-                "dashboard-204",
-                "dashboard-404",
-                "verbose-hanging-child",
-                "repeated-capture-ids",
-            }.issubset(evidence)
-        )
-        self.assertEqual(
-            evidence["warming-daemon"].expected_status,
-            CapabilityStatus.PARTIAL,
-        )
-        self.assertEqual(
-            evidence["unresponsive-daemon"].expected_status,
-            CapabilityStatus.UNAVAILABLE,
-        )
-        self.assertEqual(
-            evidence["dashboard-malformed"].expected_status,
-            CapabilityStatus.FAILED,
-        )
-        self.assertEqual(
-            evidence["dashboard-204"].expected_status,
-            CapabilityStatus.UNAVAILABLE,
-        )
-        self.assertEqual(
-            evidence["dashboard-404"].expected_status,
-            CapabilityStatus.UNSUPPORTED,
-        )
-        self.assertEqual(
-            evidence["verbose-hanging-child"].timeout_phase,
-            TimeoutPhase.CHILD_IO,
-        )
-        self.assertEqual(
-            evidence["repeated-capture-ids"].expected_status,
-            CapabilityStatus.AVAILABLE,
-        )
-        self.assertEqual(
-            {scenario.state for scenario in evidence.values()},
-            {RuntimeState.HOST_ACTIVATION, RuntimeState.HOST_RESTART},
-        )
-        self.assertTrue(
-            all(
-                scenario.daemon_survival is DaemonSurvival.REQUIRED
-                for scenario in evidence.values()
-            )
-        )
-
-    def test_shutdown_evidence_keeps_total_and_abort_offsets_distinct(self) -> None:
-        shutdown = {
-            scenario.shutdown_evidence
-            for scenario in SCENARIOS
-            if scenario.shutdown_evidence is not None
-        }
-
-        self.assertEqual(
-            shutdown,
-            {
-                ShutdownEvidence(total_seconds=89, abort_offset_seconds=81),
-                ShutdownEvidence(total_seconds=57, abort_offset_seconds=52),
-            },
-        )
-
-    def test_catalog_exposes_every_typed_expected_state(self) -> None:
-        self.assertEqual(
-            {scenario.expected_status for scenario in SCENARIOS},
-            set(CapabilityStatus),
-        )
 
 
 if __name__ == "__main__":

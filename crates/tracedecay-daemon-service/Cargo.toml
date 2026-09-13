@@ -1,0 +1,95 @@
+[package]
+name = "tracedecay-daemon-service"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Daemon invocation dispatch, project runtimes, and payload handlers for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Cross-crate fixture surface for composition-root invocation tests:
+# `DaemonInvocationService::invoke`, publication gates, and test constructors.
+# Production code is never gated by this feature.
+test-helpers = []
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath", "hotpath/axum-0-8"]
+
+[dependencies]
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["util"] }
+tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
+tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
+axum = "0.8"
+getrandom = "0.2"
+hex = "0.4"
+hotpath.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-source-edit = { path = "../tracedecay-source-edit", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+url = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+fs2 = "0.4"
+tempfile = "3"
+tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+# The moved lifecycle/doctor tests open projects through the registered test
+# runtime and pin the profile data directory.
+tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37", features = ["test-helpers"] }

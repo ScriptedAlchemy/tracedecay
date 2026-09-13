@@ -47,11 +47,26 @@ trap 'rm -rf "$tmp_dir"' EXIT
 curl -fsSL "${asset_root}/${asset}" -o "${tmp_dir}/${asset}"
 curl -fsSL "${asset_root}/SHA256SUMS" -o "${tmp_dir}/SHA256SUMS"
 
-expected=$(
-  awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' \
-    "${tmp_dir}/SHA256SUMS"
-)
-[[ -n $expected ]] || fail "SHA256SUMS has no entry for ${asset}"
+if ! expected=$(
+  awk -v asset="$asset" '
+    $2 == asset || $2 == "*" asset {
+      matches += 1
+      digest = $1
+      fields = NF
+    }
+    END {
+      if (matches != 1 || fields != 2) {
+        exit 1
+      }
+      print digest
+    }
+  ' "${tmp_dir}/SHA256SUMS"
+); then
+  fail "SHA256SUMS must contain exactly one entry for ${asset}"
+fi
+[[ $expected =~ ^[[:xdigit:]]{64}$ ]] ||
+  fail "SHA256SUMS has an invalid digest for ${asset}"
+expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
 
 if command -v sha256sum >/dev/null 2>&1; then
   actual=$(sha256sum "${tmp_dir}/${asset}" | awk '{print $1}')
@@ -67,6 +82,19 @@ tar -xzf "${tmp_dir}/${asset}" -C "$tmp_dir"
 
 mkdir -p "$install_dir"
 install -m 0755 "${tmp_dir}/tracedecay" "${install_dir}/tracedecay"
+# Linux archives ship the $ORIGIN-linked ONNX companion beside the binary.
+# Copy it (and any soname symlink) into the install directory so the
+# advertised installer works without a system ONNX Runtime.
+shopt -s nullglob
+for companion in "${tmp_dir}"/libonnxruntime.so*; do
+  dest="${install_dir}/$(basename "$companion")"
+  if [[ -L $companion ]]; then
+    ln -sfn "$(readlink "$companion")" "$dest"
+  else
+    install -m 0644 "$companion" "$dest"
+  fi
+done
+shopt -u nullglob
 printf 'Installed tracedecay %s to %s\n' "${tag#v}" "${install_dir}/tracedecay"
 
 case ":${PATH}:" in

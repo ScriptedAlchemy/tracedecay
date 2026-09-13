@@ -1,91 +1,51 @@
 /// Tree-sitter based Bash source code extractor.
 ///
 /// Parses Bash/shell source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::time::Instant;
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::docstring_from_hash_comments;
+use crate::common::{ExtractionState, docstring_from_hash_comments, local_node_id};
 use crate::complexity::{BASH_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Bash source files using tree-sitter.
 pub struct BashExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl BashExtractor {
-    /// Extract code graph nodes and edges from a Bash source file.
-    ///
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Bash source code to parse.
-    pub fn extract_bash(file_path: &str, source: &str) -> ExtractionResult {
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        if matches!(
+            scope,
+            crate::parsed_extraction::ParsedExtractionScope::ChangedRegions(_)
+        ) {
+            // Bash reextracts the whole file on incremental edits because its script module
+            // spans and parents the whole document.
+            let full = Self::extract_tree(
+                file_path,
+                source,
+                tree,
+                crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+            );
+            return crate::parsed_extraction::ParsedExtraction::reset(
+                full.result,
+                crate::parsed_extraction::ParsedExtractionResetReason::ChangedRootIdentity,
+                source.len(),
+            );
+        }
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        let root = tree.root_node();
 
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -94,7 +54,7 @@ impl BashExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -108,49 +68,64 @@ impl BashExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         let file_node_id = file_node.id.clone();
+        let script_name = Path::new(file_path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or(file_path);
+        let script_node = Node {
+            id: local_node_id(
+                file_path,
+                source.as_bytes(),
+                &NodeKind::Module,
+                script_name,
+                root,
+            ),
+            kind: NodeKind::Module,
+            name: script_name.to_owned(),
+            qualified_name: format!("{file_path}::{script_name}"),
+            start_line: root.start_position().row as u32,
+            attrs_start_line: root.start_position().row as u32,
+            end_line: root.end_position().row as u32,
+            start_column: root.start_position().column as u32,
+            end_column: root.end_position().column as u32,
+            parent_id: Some(file_node_id.clone()),
+            ..file_node.clone()
+        };
+        let script_node_id = script_node.id.clone();
         state.nodes.push(file_node);
-        state.node_stack.push((file_path.to_string(), file_node_id));
+        state.nodes.push(script_node);
+        state.edges.push(Edge {
+            source: file_node_id.clone(),
+            target: script_node_id.clone(),
+            kind: EdgeKind::Contains,
+            line: Some(0),
+        });
+        state
+            .node_stack
+            .push((script_name.to_owned(), script_node_id.clone()));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+            if child.kind() != "function_definition" {
+                Self::extract_call_sites(&mut state, child, &script_node_id);
+            }
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("bash")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Bash grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
-    }
-
-    /// Visit all children of a node.
-    fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                Self::visit_node(state, child);
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_definition" => Self::visit_function(state, node),
@@ -164,9 +139,10 @@ impl BashExtractor {
     ///
     /// Bash functions are always top-level (no classes), so they get `NodeKind::Function`.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let kind = NodeKind::Function;
         let visibility = Visibility::Pub;
@@ -176,9 +152,9 @@ impl BashExtractor {
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &BASH_COMPLEXITY, &state.source);
+        let qualified_name = format!("{}::{name}", state.file_path);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let metrics = count_complexity(node, &BASH_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -202,12 +178,12 @@ impl BashExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
-            parent_id: None,
+            parent_id: state.parent_node_id().map(str::to_owned),
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -217,7 +193,6 @@ impl BashExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -233,52 +208,52 @@ impl BashExtractor {
         }
 
         // Find the variable_assignment child to get the name.
-        if let Some(assignment) = find_direct_child_by_kind(node, "variable_assignment") {
-            if let Some(name_node) = assignment.child_by_field_name("name") {
-                let name = state.node_text(name_node);
-                let start_line = node.start_position().row as u32;
-                let end_line = node.end_position().row as u32;
-                let start_column = node.start_position().column as u32;
-                let end_column = node.end_position().column as u32;
-                let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        if let Some(assignment) = find_direct_child_by_kind(node, "variable_assignment")
+            && let Some(name_node) = assignment.child_by_field_name("name")
+        {
+            let name = state.node_text(name_node);
+            let start_line = node.start_position().row as u32;
+            let end_line = node.end_position().row as u32;
+            let start_column = node.start_position().column as u32;
+            let end_column = node.end_position().column as u32;
+            let qualified_name = format!("{}::{name}", state.file_path);
+            let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
-                let graph_node = Node {
-                    id: id.clone(),
-                    kind: NodeKind::Const,
-                    name,
-                    qualified_name,
-                    file_path: state.file_path.clone(),
-                    start_line,
-                    attrs_start_line: start_line,
-                    end_line,
-                    start_column,
-                    end_column,
-                    signature: Some(text.trim().to_string()),
-                    docstring: None,
-                    visibility: Visibility::Pub,
-                    is_async: false,
-                    branches: 0,
-                    loops: 0,
-                    returns: 0,
-                    max_nesting: 0,
-                    unsafe_blocks: 0,
-                    unchecked_calls: 0,
-                    assertions: 0,
-                    updated_at: state.timestamp,
-                    parent_id: None,
-                };
-                state.nodes.push(graph_node);
+            let graph_node = Node {
+                id: id.clone(),
+                kind: NodeKind::Const,
+                name: name.to_string(),
+                qualified_name,
+                file_path: state.file_path.clone(),
+                start_line,
+                attrs_start_line: start_line,
+                end_line,
+                start_column,
+                end_column,
+                signature: Some(text.trim().to_string()),
+                docstring: None,
+                visibility: Visibility::Pub,
+                is_async: false,
+                branches: 0,
+                loops: 0,
+                returns: 0,
+                max_nesting: 0,
+                unsafe_blocks: 0,
+                unchecked_calls: 0,
+                assertions: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
+                updated_at: state.timestamp,
+                parent_id: None,
+            };
+            state.nodes.push(graph_node);
 
-                // Contains edge from parent.
-                if let Some(parent_id) = state.parent_node_id() {
-                    state.edges.push(Edge {
-                        source: parent_id.to_string(),
-                        target: id,
-                        kind: EdgeKind::Contains,
-                        line: Some(start_line),
-                    });
-                }
+            if let Some(parent_id) = state.parent_node_id() {
+                state.edges.push(Edge {
+                    source: parent_id.to_string(),
+                    target: id,
+                    kind: EdgeKind::Contains,
+                    line: Some(start_line),
+                });
             }
         }
     }
@@ -299,8 +274,8 @@ impl BashExtractor {
                 let end_line = node.end_position().row as u32;
                 let start_column = node.start_position().column as u32;
                 let end_column = node.end_position().column as u32;
-                let qualified_name = format!("{}::{}", state.qualified_prefix(), arg);
-                let id = generate_node_id(&state.file_path, &NodeKind::Use, &arg, start_line);
+                let qualified_name = format!("{}::{arg}", state.file_path);
+                let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &arg, node);
                 let text = state.node_text(node);
 
                 let graph_node = Node {
@@ -325,12 +300,12 @@ impl BashExtractor {
                     unsafe_blocks: 0,
                     unchecked_calls: 0,
                     assertions: 0,
+                    complexity_analysis: ComplexityAnalysisV1::Complete,
                     updated_at: state.timestamp,
                     parent_id: None,
                 };
                 state.nodes.push(graph_node);
 
-                // Contains edge from parent.
                 if let Some(parent_id) = state.parent_node_id() {
                     state.edges.push(Edge {
                         source: parent_id.to_string(),
@@ -342,10 +317,6 @@ impl BashExtractor {
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the function signature (first line of the definition).
     fn extract_function_signature(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
@@ -363,37 +334,32 @@ impl BashExtractor {
     /// Bash uses comment lines (# ...) as documentation. We look for `comment`
     /// sibling nodes that immediately precede the given definition node.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_hash_comments(&state.source, node)
+        docstring_from_hash_comments(state.source, node)
     }
 
     /// Recursively find command nodes inside a given node and create unresolved Calls references.
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
+        if node.kind() == "command"
+            && let Some(name_node) = node.child_by_field_name("name")
+        {
+            let callee_name = state.node_text(name_node);
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: fn_node_id.to_string(),
+                reference_name: callee_name.to_string(),
+                reference_kind: EdgeKind::Calls,
+                line: node.start_position().row as u32,
+                column: node.start_position().column as u32,
+                file_path: state.file_path.clone(),
+            });
+        }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
                 match child.kind() {
-                    "command" => {
-                        // Extract the command name.
-                        if let Some(name_node) = child.child_by_field_name("name") {
-                            let callee_name = state.node_text(name_node);
-                            state.unresolved_refs.push(UnresolvedRef {
-                                from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
-                                reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
-                                file_path: state.file_path.clone(),
-                            });
-                        }
-                        // Recurse into command for nested command substitutions.
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
                     // Skip nested function definitions.
                     "function_definition" => {}
-                    _ => {
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
+                    _ => Self::extract_call_sites(state, child, fn_node_id),
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -411,7 +377,7 @@ impl BashExtractor {
             loop {
                 let child = cursor.node();
                 if cursor.field_name() == Some("argument") {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -442,7 +408,16 @@ impl crate::LanguageExtractor for BashExtractor {
         "Bash"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_bash(file_path, source)
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

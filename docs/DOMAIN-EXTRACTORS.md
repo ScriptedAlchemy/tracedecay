@@ -1,5 +1,12 @@
 # Domain Symbol Extractors
 
+> **Status: design, not implemented.** No code reads
+> `.tracedecay/domain-symbols.toml` or `~/.tracedecay/domain-packs/`, and there
+> is no `tracedecay domain` subcommand. Writing a rules file today is a no-op —
+> nothing parses it and no domain nodes appear in the graph — but it is no
+> longer a silent one: `tracedecay doctor` warns when the file is present and
+> points back here. Everything below describes the intended design.
+
 Configurable, project-local rules that promote string literals and structural patterns into first-class graph nodes. Motivated by [issue #48](https://github.com/ScriptedAlchemy/tracedecay/issues/48).
 
 ---

@@ -1,244 +1,155 @@
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+//! Graph node, edge, and extraction contracts shared across the workspace.
+//!
+//! Traversal, search, and context-assembly shapes that only the root façade
+//! consumes live in `tracedecay::types` instead, so edits to them do not
+//! invalidate every crate that depends on this one.
+
 use std::collections::{HashMap, HashSet};
 
-/// `serde` `skip_serializing_if` predicate: skip a `bool` field when it is
-/// `false`. Keeps default-off flags (e.g. `dry_run`) out of tool output unless
-/// they are actually set.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_false(value: &bool) -> bool {
-    !*value
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Declares a graph vocabulary enum and its persistence spelling in one place.
+///
+/// Each `Variant => "wire"` line is the sole authority for that variant: it
+/// emits the enum variant, the `ALL` slot, the `as_str` arm, and the
+/// `from_str` arm, so a spelling cannot drift between them. `as_str` stays a
+/// direct exhaustive `match` — a new variant fails to compile until it is
+/// declared here, and the node-ID hot path never scans the table. Extra
+/// `| "alias"` spellings widen `from_str` only; `ALL` and `as_str` record what
+/// is written. Serde representations come from the derives passed through on
+/// the enum and are independent of these spellings.
+macro_rules! wire_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident => $wire:literal $(| $alias:literal)*
+            ),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis enum $name {
+            $( $(#[$variant_meta])* $variant, )+
+        }
+
+        #[allow(clippy::should_implement_trait)]
+        impl $name {
+            /// Every variant paired with the spelling [`Self::as_str`] emits and
+            /// [`Self::from_str`] accepts, in declaration order. Inbound-only
+            /// aliases are not listed: `ALL` records what is written.
+            pub const ALL: [($name, &'static str); wire_enum!(@count $($variant)+)] =
+                [$((Self::$variant, $wire),)+];
+
+            pub const fn as_str(&self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+
+            pub fn from_str(s: &str) -> Option<Self> {
+                match s {
+                    $($wire $(| $alias)* => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+    (@count $($variant:ident)+) => {
+        <[()]>::len(&[$(wire_enum!(@unit $variant)),+])
+    };
+    (@unit $variant:ident) => {
+        ()
+    };
 }
 
-/// Kinds of nodes in the code graph.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum NodeKind {
-    File,
-    Module,
-    Struct,
-    Enum,
-    EnumVariant,
-    Trait,
-    Function,
-    Method,
-    Impl,
-    Const,
-    Static,
-    TypeAlias,
-    Field,
-    Macro,
-    Use,
-    // Java-specific
-    Class,
-    Interface,
-    Constructor,
-    Annotation,
-    AnnotationUsage,
-    Package,
-    InnerClass,
-    InitBlock,
-    AbstractMethod,
-    // Go-specific
-    InterfaceType,
-    StructMethod,
-    GoPackage,
-    StructTag,
-    // Scala-specific
-    ScalaObject,
-    CaseClass,
-    ScalaPackage,
-    ValField,
-    VarField,
-    // Shared
-    GenericParam,
-    // TypeScript/JavaScript-specific
-    ArrowFunction,
-    Decorator,
-    Export,
-    Namespace,
-    // C/C++-specific
-    Union,
-    Typedef,
-    Include,
-    PreprocessorDef,
-    Template,
-    // Kotlin-specific
-    DataClass,
-    SealedClass,
-    CompanionObject,
-    KotlinObject,
-    KotlinPackage,
-    Property,
-    // Dart-specific
-    Mixin,
-    Extension,
-    Library,
-    // C#-specific
-    Delegate,
-    Event,
-    Record,
-    CSharpProperty,
-    // Pascal-specific
-    Procedure,
-    PascalUnit,
-    PascalProgram,
-    PascalRecord,
-    // Protobuf-specific
-    #[cfg(feature = "lang-protobuf")]
-    ProtoMessage,
-    #[cfg(feature = "lang-protobuf")]
-    ProtoService,
-    #[cfg(feature = "lang-protobuf")]
-    ProtoRpc,
+wire_enum! {
+    /// The persistence spelling is a contract, not a display detail: node IDs
+    /// are `"{wire}:{hash}"` (see [`generate_node_id`]), so a renamed spelling
+    /// invalidates every stored ID for that kind.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum NodeKind {
+        File => "file",
+        Module => "module",
+        Struct => "struct",
+        Enum => "enum",
+        EnumVariant => "enum_variant",
+        Trait => "trait",
+        Function => "function",
+        Method => "method",
+        Impl => "impl",
+        Const => "const",
+        Static => "static",
+        TypeAlias => "type_alias",
+        Field => "field",
+        Macro => "macro",
+        Use => "use",
+        // Java-specific
+        Class => "class",
+        Interface => "interface",
+        Constructor => "constructor",
+        Annotation => "annotation",
+        AnnotationUsage => "annotation_usage",
+        Package => "package",
+        InnerClass => "inner_class",
+        InitBlock => "init_block",
+        AbstractMethod => "abstract_method",
+        // Go-specific
+        InterfaceType => "interface_type",
+        StructMethod => "struct_method",
+        GoPackage => "go_package",
+        StructTag => "struct_tag",
+        // Scala-specific
+        ScalaObject => "object",
+        CaseClass => "case_class",
+        ScalaPackage => "scala_package",
+        ValField => "val",
+        VarField => "var",
+        // Shared
+        GenericParam => "generic_param",
+        // TypeScript/JavaScript-specific
+        ArrowFunction => "arrow_function",
+        Decorator => "decorator",
+        Export => "export",
+        Namespace => "namespace",
+        // C/C++-specific
+        Union => "union",
+        Typedef => "typedef",
+        Include => "include",
+        PreprocessorDef => "preprocessor_def",
+        Template => "template",
+        // Kotlin-specific
+        DataClass => "data_class",
+        SealedClass => "sealed_class",
+        CompanionObject => "companion_object",
+        KotlinObject => "kotlin_object",
+        KotlinPackage => "kotlin_package",
+        Property => "property",
+        // Dart-specific
+        Mixin => "mixin",
+        Extension => "extension",
+        Library => "library",
+        // C#-specific
+        Delegate => "delegate",
+        Event => "event",
+        Record => "record",
+        CSharpProperty => "csharp_property",
+        // Pascal-specific
+        Procedure => "procedure",
+        PascalUnit => "pascal_unit",
+        PascalProgram => "pascal_program",
+        PascalRecord => "pascal_record",
+        // Protobuf-specific. These are unconditional domain vocabulary; parser
+        // availability remains a root-crate feature concern.
+        ProtoMessage => "proto_message",
+        ProtoService => "proto_service",
+        ProtoRpc => "proto_rpc",
+    }
 }
 
-#[allow(clippy::should_implement_trait)]
 impl NodeKind {
-    /// Returns the string representation of this node kind.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            NodeKind::File => "file",
-            NodeKind::Module => "module",
-            NodeKind::Struct => "struct",
-            NodeKind::Enum => "enum",
-            NodeKind::EnumVariant => "enum_variant",
-            NodeKind::Trait => "trait",
-            NodeKind::Function => "function",
-            NodeKind::Method => "method",
-            NodeKind::Impl => "impl",
-            NodeKind::Const => "const",
-            NodeKind::Static => "static",
-            NodeKind::TypeAlias => "type_alias",
-            NodeKind::Field => "field",
-            NodeKind::Macro => "macro",
-            NodeKind::Use => "use",
-            NodeKind::Class => "class",
-            NodeKind::Interface => "interface",
-            NodeKind::Constructor => "constructor",
-            NodeKind::Annotation => "annotation",
-            NodeKind::AnnotationUsage => "annotation_usage",
-            NodeKind::Package => "package",
-            NodeKind::InnerClass => "inner_class",
-            NodeKind::InitBlock => "init_block",
-            NodeKind::AbstractMethod => "abstract_method",
-            NodeKind::InterfaceType => "interface_type",
-            NodeKind::StructMethod => "struct_method",
-            NodeKind::GoPackage => "go_package",
-            NodeKind::StructTag => "struct_tag",
-            NodeKind::ScalaObject => "object",
-            NodeKind::CaseClass => "case_class",
-            NodeKind::ScalaPackage => "scala_package",
-            NodeKind::ValField => "val",
-            NodeKind::VarField => "var",
-            NodeKind::GenericParam => "generic_param",
-            NodeKind::ArrowFunction => "arrow_function",
-            NodeKind::Decorator => "decorator",
-            NodeKind::Export => "export",
-            NodeKind::Namespace => "namespace",
-            NodeKind::Union => "union",
-            NodeKind::Typedef => "typedef",
-            NodeKind::Include => "include",
-            NodeKind::PreprocessorDef => "preprocessor_def",
-            NodeKind::Template => "template",
-            NodeKind::DataClass => "data_class",
-            NodeKind::SealedClass => "sealed_class",
-            NodeKind::CompanionObject => "companion_object",
-            NodeKind::KotlinObject => "kotlin_object",
-            NodeKind::KotlinPackage => "kotlin_package",
-            NodeKind::Property => "property",
-            NodeKind::Mixin => "mixin",
-            NodeKind::Extension => "extension",
-            NodeKind::Library => "library",
-            NodeKind::Delegate => "delegate",
-            NodeKind::Event => "event",
-            NodeKind::Record => "record",
-            NodeKind::CSharpProperty => "csharp_property",
-            NodeKind::Procedure => "procedure",
-            NodeKind::PascalUnit => "pascal_unit",
-            NodeKind::PascalProgram => "pascal_program",
-            NodeKind::PascalRecord => "pascal_record",
-            #[cfg(feature = "lang-protobuf")]
-            NodeKind::ProtoMessage => "proto_message",
-            #[cfg(feature = "lang-protobuf")]
-            NodeKind::ProtoService => "proto_service",
-            #[cfg(feature = "lang-protobuf")]
-            NodeKind::ProtoRpc => "proto_rpc",
-        }
-    }
-
-    /// Parses a string into a `NodeKind`, returning `None` for unrecognized values.
-    pub fn from_str(s: &str) -> Option<NodeKind> {
-        match s {
-            "file" => Some(NodeKind::File),
-            "module" => Some(NodeKind::Module),
-            "struct" => Some(NodeKind::Struct),
-            "enum" => Some(NodeKind::Enum),
-            "enum_variant" => Some(NodeKind::EnumVariant),
-            "trait" => Some(NodeKind::Trait),
-            "function" => Some(NodeKind::Function),
-            "method" => Some(NodeKind::Method),
-            "impl" => Some(NodeKind::Impl),
-            "const" => Some(NodeKind::Const),
-            "static" => Some(NodeKind::Static),
-            "type_alias" => Some(NodeKind::TypeAlias),
-            "field" => Some(NodeKind::Field),
-            "macro" => Some(NodeKind::Macro),
-            "use" => Some(NodeKind::Use),
-            "class" => Some(NodeKind::Class),
-            "interface" => Some(NodeKind::Interface),
-            "constructor" => Some(NodeKind::Constructor),
-            "annotation" => Some(NodeKind::Annotation),
-            "annotation_usage" => Some(NodeKind::AnnotationUsage),
-            "package" => Some(NodeKind::Package),
-            "inner_class" => Some(NodeKind::InnerClass),
-            "init_block" => Some(NodeKind::InitBlock),
-            "abstract_method" => Some(NodeKind::AbstractMethod),
-            "interface_type" => Some(NodeKind::InterfaceType),
-            "struct_method" => Some(NodeKind::StructMethod),
-            "go_package" => Some(NodeKind::GoPackage),
-            "struct_tag" => Some(NodeKind::StructTag),
-            "object" => Some(NodeKind::ScalaObject),
-            "case_class" => Some(NodeKind::CaseClass),
-            "scala_package" => Some(NodeKind::ScalaPackage),
-            "val" => Some(NodeKind::ValField),
-            "var" => Some(NodeKind::VarField),
-            "generic_param" => Some(NodeKind::GenericParam),
-            "arrow_function" => Some(NodeKind::ArrowFunction),
-            "decorator" => Some(NodeKind::Decorator),
-            "export" => Some(NodeKind::Export),
-            "namespace" => Some(NodeKind::Namespace),
-            "union" => Some(NodeKind::Union),
-            "typedef" => Some(NodeKind::Typedef),
-            "include" => Some(NodeKind::Include),
-            "preprocessor_def" => Some(NodeKind::PreprocessorDef),
-            "template" => Some(NodeKind::Template),
-            "data_class" => Some(NodeKind::DataClass),
-            "sealed_class" => Some(NodeKind::SealedClass),
-            "companion_object" => Some(NodeKind::CompanionObject),
-            "kotlin_object" => Some(NodeKind::KotlinObject),
-            "kotlin_package" => Some(NodeKind::KotlinPackage),
-            "property" => Some(NodeKind::Property),
-            "mixin" => Some(NodeKind::Mixin),
-            "extension" => Some(NodeKind::Extension),
-            "library" => Some(NodeKind::Library),
-            "delegate" => Some(NodeKind::Delegate),
-            "event" => Some(NodeKind::Event),
-            "record" => Some(NodeKind::Record),
-            "csharp_property" => Some(NodeKind::CSharpProperty),
-            "procedure" => Some(NodeKind::Procedure),
-            "pascal_unit" => Some(NodeKind::PascalUnit),
-            "pascal_program" => Some(NodeKind::PascalProgram),
-            "pascal_record" => Some(NodeKind::PascalRecord),
-            #[cfg(feature = "lang-protobuf")]
-            "proto_message" => Some(NodeKind::ProtoMessage),
-            #[cfg(feature = "lang-protobuf")]
-            "proto_service" => Some(NodeKind::ProtoService),
-            #[cfg(feature = "lang-protobuf")]
-            "proto_rpc" => Some(NodeKind::ProtoRpc),
-            _ => None,
-        }
-    }
-
     /// Returns `true` if this node kind represents a callable definition that
     /// should participate in test-coverage / attribution accounting.
     ///
@@ -255,90 +166,34 @@ impl NodeKind {
     }
 }
 
-/// Kinds of edges in the code graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EdgeKind {
-    Contains,
-    Calls,
-    Uses,
-    Implements,
-    TypeOf,
-    Returns,
-    DerivesMacro,
-    Extends,
-    Annotates,
-    Receives,
-}
-
-#[allow(clippy::should_implement_trait)]
-impl EdgeKind {
-    /// Returns the string representation of this edge kind.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EdgeKind::Contains => "contains",
-            EdgeKind::Calls => "calls",
-            EdgeKind::Uses => "uses",
-            EdgeKind::Implements => "implements",
-            EdgeKind::TypeOf => "type_of",
-            EdgeKind::Returns => "returns",
-            EdgeKind::DerivesMacro => "derives_macro",
-            EdgeKind::Extends => "extends",
-            EdgeKind::Annotates => "annotates",
-            EdgeKind::Receives => "receives",
-        }
-    }
-
-    /// Parses a string into an `EdgeKind`, returning `None` for unrecognized values.
-    pub fn from_str(s: &str) -> Option<EdgeKind> {
-        match s {
-            "contains" => Some(EdgeKind::Contains),
-            "calls" => Some(EdgeKind::Calls),
-            "uses" => Some(EdgeKind::Uses),
-            "implements" => Some(EdgeKind::Implements),
-            "type_of" => Some(EdgeKind::TypeOf),
-            "returns" => Some(EdgeKind::Returns),
-            "derives_macro" => Some(EdgeKind::DerivesMacro),
-            "extends" => Some(EdgeKind::Extends),
-            "annotates" => Some(EdgeKind::Annotates),
-            "receives" => Some(EdgeKind::Receives),
-            _ => None,
-        }
+wire_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum EdgeKind {
+        Contains => "contains",
+        Calls => "calls",
+        Uses => "uses",
+        Implements => "implements",
+        TypeOf => "type_of",
+        Returns => "returns",
+        DerivesMacro => "derives_macro",
+        Extends => "extends",
+        Annotates => "annotates",
+        Receives => "receives",
     }
 }
 
-/// Visibility of a code item.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Visibility {
-    Pub,
-    PubCrate,
-    PubSuper,
-    #[default]
-    Private,
-}
-
-impl Visibility {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pub => "public",
-            Self::PubCrate => "pub_crate",
-            Self::PubSuper => "pub_super",
-            Self::Private => "private",
-        }
-    }
-
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "public" | "pub" => Some(Self::Pub),
-            "pub_crate" => Some(Self::PubCrate),
-            "pub_super" => Some(Self::PubSuper),
-            "private" => Some(Self::Private),
-            _ => None,
-        }
+wire_enum! {
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum Visibility {
+        // `"pub"` is accepted inbound only; `"public"` is what is written.
+        Pub => "public" | "pub",
+        PubCrate => "pub_crate",
+        PubSuper => "pub_super",
+        #[default]
+        Private => "private",
     }
 }
 
-/// A node in the code graph representing a code entity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
@@ -373,6 +228,10 @@ pub struct Node {
     pub unchecked_calls: u32,
     /// Number of assertion calls (e.g. `assert!`, `assertEquals`, `expect`).
     pub assertions: u32,
+    /// Whether the bounded complexity walk covered the whole body. Omitted on
+    /// the wire when complete, so rows without it carry exact counters.
+    #[serde(default, skip_serializing_if = "ComplexityAnalysisV1::is_complete")]
+    pub complexity_analysis: ComplexityAnalysisV1,
     pub updated_at: u64,
     /// `id` of the enclosing scope (module, impl, class, …). `None` for
     /// top-level nodes whose parent is the file itself. Populated from
@@ -381,7 +240,28 @@ pub struct Node {
     pub parent_id: Option<String>,
 }
 
-/// An edge in the code graph representing a relationship between nodes.
+/// Whether the bounded complexity walk over a symbol's body ran to the end.
+///
+/// The extractor stops walking a body once its traversal budget is spent. The
+/// counters accumulated by then are lower bounds over the visited prefix, not
+/// facts about the whole body, so every surface that prints, ranks, or
+/// aggregates complexity must render this state instead of treating those
+/// counters as exact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComplexityAnalysisV1 {
+    #[default]
+    Complete,
+    /// The walk stopped when the traversal budget ran out.
+    TraversalBudgetExhausted,
+}
+
+impl ComplexityAnalysisV1 {
+    pub const fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
     pub source: String,
@@ -390,18 +270,6 @@ pub struct Edge {
     pub line: Option<u32>,
 }
 
-/// Record tracking an indexed file.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FileRecord {
-    pub path: String,
-    pub content_hash: String,
-    pub size: u64,
-    pub modified_at: i64,
-    pub indexed_at: i64,
-    pub node_count: u32,
-}
-
-/// An unresolved reference found during parsing, to be resolved later.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnresolvedRef {
     pub from_node_id: String,
@@ -412,7 +280,6 @@ pub struct UnresolvedRef {
     pub file_path: String,
 }
 
-/// Result of extracting code entities from a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
     pub nodes: Vec<Node>,
@@ -429,7 +296,7 @@ impl ExtractionResult {
     /// insert time but keep its edges, we get FK constraint violations.
     pub fn sanitize(&mut self) {
         let before = self.nodes.len();
-        let bad_ids: std::collections::HashSet<String> = self
+        let bad_ids: HashSet<String> = self
             .nodes
             .iter()
             .filter(|n| n.name.is_empty())
@@ -452,63 +319,47 @@ impl ExtractionResult {
                 .push(format!("stripped {removed} node(s) with empty names"));
         }
     }
-}
 
-/// A subgraph containing a subset of nodes and edges.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Subgraph {
-    pub nodes: Vec<Node>,
-    pub edges: Vec<Edge>,
-    pub roots: Vec<String>,
-}
-
-/// A search result pairing a node with a relevance score.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchResult {
-    pub node: Node,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndexCoverageHint {
-    pub message: String,
-    pub skipped_dirs: Vec<String>,
-    pub suggested_command: String,
-}
-
-/// Direction for graph traversal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TraversalDirection {
-    Outgoing,
-    Incoming,
-    Both,
-}
-
-/// Options controlling graph traversal behavior.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraversalOptions {
-    pub max_depth: u32,
-    pub edge_kinds: Option<Vec<EdgeKind>>,
-    pub node_kinds: Option<Vec<NodeKind>>,
-    pub direction: TraversalDirection,
-    pub limit: u32,
-    pub include_start: bool,
-}
-
-impl Default for TraversalOptions {
-    fn default() -> Self {
-        TraversalOptions {
-            max_depth: 3,
-            edge_kinds: None,
-            node_kinds: None,
-            direction: TraversalDirection::Outgoing,
-            limit: 100,
-            include_start: true,
-        }
+    /// Deterministic canonical row order shared by full-document and
+    /// incremental extraction, so identical content serializes byte-identically
+    /// regardless of traversal path: file rows first, then source position with
+    /// enclosing (larger) spans before their children, with the content-hash id
+    /// as the final total-order tiebreaker.
+    pub fn canonicalize_order(&mut self) {
+        self.nodes.sort_by(|left, right| {
+            let left_is_file = left.kind == NodeKind::File;
+            let right_is_file = right.kind == NodeKind::File;
+            right_is_file
+                .cmp(&left_is_file)
+                .then_with(|| left.start_line.cmp(&right.start_line))
+                .then_with(|| left.start_column.cmp(&right.start_column))
+                .then_with(|| right.end_line.cmp(&left.end_line))
+                .then_with(|| right.end_column.cmp(&left.end_column))
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.edges.sort_by(|left, right| {
+            left.line
+                .cmp(&right.line)
+                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+        });
+        self.unresolved_refs.sort_by(|left, right| {
+            left.line
+                .cmp(&right.line)
+                .then_with(|| left.column.cmp(&right.column))
+                .then_with(|| left.from_node_id.cmp(&right.from_node_id))
+                .then_with(|| left.reference_name.cmp(&right.reference_name))
+                .then_with(|| {
+                    left.reference_kind
+                        .as_str()
+                        .cmp(right.reference_kind.as_str())
+                })
+        });
     }
 }
 
-/// Statistics about the code graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphStats {
     pub node_count: u64,
@@ -530,270 +381,193 @@ pub struct GraphStats {
     pub last_sync_duration_ms: u64,
 }
 
-/// Options for building an LLM context from the graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildContextOptions {
-    pub max_nodes: usize,
-    pub max_code_blocks: usize,
-    pub max_code_block_size: usize,
-    pub include_code: bool,
-    pub format: OutputFormat,
-    pub search_limit: usize,
-    pub traversal_depth: usize,
-    pub min_score: f64,
-    /// Additional keywords to search for beyond those extracted from the query.
-    /// Enables agent-driven synonym expansion (e.g. `"authentication"` → `["login", "session"]`).
-    pub extra_keywords: Vec<String>,
-    /// Node IDs to exclude from results (for session deduplication across calls).
-    pub exclude_node_ids: HashSet<String>,
-    /// When true, merge code blocks from the same file whose line ranges are
-    /// adjacent or overlapping into a single block.
-    pub merge_adjacent: bool,
-    /// Maximum symbols from a single file in context results. Prevents one
-    /// large file from dominating the output. `None` means no cap (defaults
-    /// to `max_nodes`).
-    pub max_per_file: Option<usize>,
-    /// When set, only nodes whose `file_path` starts with this prefix are
-    /// considered as entry points. Graph expansion may still traverse outside
-    /// the prefix (traversals are unscoped).
-    pub path_prefix: Option<String>,
-}
-
-impl Default for BuildContextOptions {
-    fn default() -> Self {
-        BuildContextOptions {
-            max_nodes: 20,
-            max_code_blocks: 5,
-            max_code_block_size: 1500,
-            include_code: true,
-            format: OutputFormat::Markdown,
-            search_limit: 3,
-            traversal_depth: 1,
-            min_score: 0.0,
-            extra_keywords: Vec::new(),
-            exclude_node_ids: HashSet::new(),
-            merge_adjacent: false,
-            max_per_file: None,
-            path_prefix: None,
-        }
-    }
-}
-
-/// Output format for CLI results.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OutputFormat {
-    Markdown,
-    Json,
-}
-
-/// Context assembled for a task, combining graph data with code blocks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskContext {
-    pub query: String,
-    pub summary: String,
-    pub subgraph: Subgraph,
-    pub entry_points: Vec<Node>,
-    pub code_blocks: Vec<CodeBlock>,
-    pub related_files: Vec<String>,
-    /// IDs of all returned nodes (pass to next call's `exclude_node_ids` for dedup).
-    pub seen_node_ids: Vec<String>,
-}
-
-/// A block of source code extracted from a file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodeBlock {
-    pub content: String,
-    pub file_path: String,
-    pub start_line: u32,
-    pub end_line: u32,
-    pub node_id: Option<String>,
-}
-
 /// Generates a deterministic node ID from file path, kind, name, and line number.
 ///
 /// The ID format is `"kind:32hexchars"` where the hex portion is the first 32
 /// characters of the SHA-256 hash of the input components.
+/// Extracted names may be empty for anonymous source constructs; file, kind,
+/// and line keep those identities deterministic and distinct.
 pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32) -> String {
-    debug_assert!(
-        !name.is_empty(),
-        "generate_node_id called with empty name for {file_path}:{line}"
-    );
-    let input = format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line);
+    hash_node_id(
+        kind,
+        &format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line),
+    )
+}
+
+/// Generates the node ID for a construct that shares its line with preceding
+/// source text, so the start column also participates.
+///
+/// Extraction mints [`generate_node_id`] for constructs that begin their line
+/// (only blanks precede them) and this form otherwise. Two constructs of the
+/// same kind and name on one line — `impl A { fn run() {} } impl B { fn run()
+/// {} }` — therefore never share an ID, while indentation and one-construct
+/// lines leave the line-keyed ID unchanged.
+pub fn generate_node_id_at(
+    file_path: &str,
+    kind: &NodeKind,
+    name: &str,
+    line: u32,
+    column: u32,
+) -> String {
+    hash_node_id(
+        kind,
+        &format!(
+            "{}:{}:{}:{}:{}",
+            file_path,
+            kind.as_str(),
+            name,
+            line,
+            column
+        ),
+    )
+}
+
+fn hash_node_id(kind: &NodeKind, input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
-    let hex_str = hex::encode(hash);
+    let hex_str = crate::canonical_text::encode_lowercase_hex(&hash);
     format!("{}:{}", kind.as_str(), &hex_str[..32])
 }
 
-/// Result of resolving references in the graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResolutionResult {
-    pub resolved: Vec<ResolvedRef>,
-    pub unresolved: Vec<UnresolvedRef>,
-    pub total: usize,
-    pub resolved_count: usize,
+#[cfg(test)]
+mod complexity_analysis_wire_tests {
+    use super::{ComplexityAnalysisV1, Node, NodeKind, Visibility};
+
+    fn node(complexity_analysis: ComplexityAnalysisV1) -> Node {
+        Node {
+            id: "function:0".to_owned(),
+            kind: NodeKind::Function,
+            name: "f".to_owned(),
+            qualified_name: "lib.rs::f".to_owned(),
+            file_path: "lib.rs".to_owned(),
+            start_line: 0,
+            attrs_start_line: 0,
+            end_line: 0,
+            start_column: 0,
+            end_column: 0,
+            signature: None,
+            docstring: None,
+            visibility: Visibility::Private,
+            is_async: false,
+            branches: 2,
+            loops: 0,
+            returns: 0,
+            max_nesting: 1,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis,
+            updated_at: 0,
+            parent_id: None,
+        }
+    }
+
+    #[test]
+    fn complete_rows_omit_the_state_and_incomplete_rows_carry_it() {
+        let complete = serde_json::to_value(node(ComplexityAnalysisV1::Complete)).expect("row");
+        assert!(complete.get("complexity_analysis").is_none());
+
+        let incomplete = serde_json::to_value(node(ComplexityAnalysisV1::TraversalBudgetExhausted))
+            .expect("row");
+        assert_eq!(
+            incomplete["complexity_analysis"],
+            serde_json::json!("traversal_budget_exhausted")
+        );
+
+        let restored: Node = serde_json::from_value(complete).expect("row without the state");
+        assert_eq!(restored.complexity_analysis, ComplexityAnalysisV1::Complete);
+        let restored: Node = serde_json::from_value(incomplete).expect("row with the state");
+        assert_eq!(
+            restored.complexity_analysis,
+            ComplexityAnalysisV1::TraversalBudgetExhausted
+        );
+    }
 }
 
-/// A reference that has been resolved to a target node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResolvedRef {
-    pub original: UnresolvedRef,
-    pub target_node_id: String,
-    pub confidence: f64,
-    pub resolved_by: String,
+#[cfg(test)]
+mod same_line_node_id_tests {
+    use super::{NodeKind, generate_node_id, generate_node_id_at};
+
+    #[test]
+    fn column_keyed_ids_are_deterministic_and_distinct_from_line_keyed_ids() {
+        let line_keyed = generate_node_id("src/lib.rs", &NodeKind::Method, "run", 3);
+        let first = generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 60);
+        let second = generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 94);
+
+        assert_eq!(
+            first,
+            generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 60)
+        );
+        assert_ne!(first, second, "same-line constructs must stay distinct");
+        assert_ne!(first, line_keyed);
+        assert_ne!(second, line_keyed);
+        assert!(first.starts_with("method:"), "unexpected id shape: {first}");
+    }
 }
 
-/// Result of a single string replacement edit.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct EditResult {
-    pub success: bool,
-    pub file_path: String,
-    pub matched_str: String,
-    pub new_str: String,
-    /// For `replace_symbol`: the exact source span that was replaced, including
-    /// any leading doc-comment / attribute block that belongs to the item. Lets
-    /// callers see precisely what was swapped out (and recover its docs/attrs if
-    /// the replacement dropped them). `None` for plain string replacements.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaced_span: Option<String>,
-    /// True when this was a dry run: validation, spans, and the resulting
-    /// content were all computed, but nothing was written to disk.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub dry_run: bool,
-    /// Bounded preview diff of the would-be change. Populated only on a
-    /// successful dry run; `None` for real edits and for failures.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
-    pub message: String,
+#[cfg(test)]
+mod empty_name_node_id_tests {
+    use super::{NodeKind, generate_node_id};
+
+    #[test]
+    fn empty_name_yields_a_deterministic_id_in_every_profile() {
+        let first = generate_node_id(
+            "integration/fs-routes-test.ts",
+            &NodeKind::Function,
+            "",
+            286,
+        );
+        let second = generate_node_id(
+            "integration/fs-routes-test.ts",
+            &NodeKind::Function,
+            "",
+            286,
+        );
+
+        assert_eq!(first, second, "empty-name ids must be deterministic");
+        assert!(
+            first.starts_with("function:"),
+            "unexpected id shape: {first}"
+        );
+    }
+
+    #[test]
+    fn empty_name_ids_stay_distinct_per_file_kind_and_line() {
+        let base = generate_node_id("a.ts", &NodeKind::Function, "", 286);
+
+        assert_ne!(base, generate_node_id("b.ts", &NodeKind::Function, "", 286));
+        assert_ne!(base, generate_node_id("a.ts", &NodeKind::Class, "", 286));
+        assert_ne!(base, generate_node_id("a.ts", &NodeKind::Function, "", 287));
+    }
 }
 
-/// Result of a multi-string replacement edit.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MultiEditResult {
-    pub success: bool,
-    pub file_path: String,
-    pub applied_count: usize,
-    /// True when this was a dry run: replacements were validated and the
-    /// resulting content computed, but nothing was written to disk.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub dry_run: bool,
-    /// Bounded preview diff of the would-be change. Populated only on a
-    /// successful dry run; `None` for real edits and for failures.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
-    pub message: String,
-}
+#[cfg(test)]
+mod wire_spelling_tests {
+    use super::{EdgeKind, NodeKind, Visibility, generate_node_id};
 
-/// Result of an insert-at operation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct InsertResult {
-    pub success: bool,
-    pub file_path: String,
-    pub anchor_line: u32,
-    pub content: String,
-    pub before: bool,
-    /// True when this was a dry run: the insertion point was resolved and the
-    /// resulting content computed, but nothing was written to disk.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub dry_run: bool,
-    /// Bounded preview diff of the would-be change. Populated only on a
-    /// successful dry run; `None` for real edits and for failures.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
-    pub message: String,
-}
+    /// Spellings that do not follow from the variant name, the inbound-only
+    /// `"pub"` alias, and refusal of unknown spellings.
+    #[test]
+    fn representative_spellings_alias_and_refusal() {
+        assert_eq!(NodeKind::ScalaObject.as_str(), "object");
+        assert_eq!(NodeKind::ValField.as_str(), "val");
+        assert_eq!(NodeKind::VarField.as_str(), "var");
+        assert_eq!(NodeKind::EnumVariant.as_str(), "enum_variant");
+        assert_eq!(EdgeKind::TypeOf.as_str(), "type_of");
+        assert_eq!(Visibility::Pub.as_str(), "public");
+        assert!(
+            generate_node_id("Main.scala", &NodeKind::ScalaObject, "Main", 1)
+                .starts_with("object:")
+        );
 
-/// Result of an ast-grep rewrite operation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AstGrepResult {
-    pub success: bool,
-    pub file_path: String,
-    pub pattern: String,
-    pub rewrite: String,
-    /// True when this was a dry run: the rewrite was resolved (via the built-in
-    /// literal fallback or an ast-grep preview run) but nothing was written.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub dry_run: bool,
-    /// Bounded preview of the would-be change. Populated only on a successful
-    /// dry run; `None` for real edits and for failures.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
-    pub message: String,
-}
+        assert_eq!(Visibility::from_str("pub"), Some(Visibility::Pub));
+        assert!(Visibility::ALL.iter().all(|(_, wire)| *wire != "pub"));
+        assert_eq!(Visibility::default(), Visibility::Private);
 
-/// One evidence-based, actionable finding produced by the `move_symbol` impact
-/// engine. Each hint points at a concrete file/line and carries a suggestion
-/// the caller (or a follow-up refactor) can act on. Hints are derived from graph
-/// edges (callers/callees) and parse-level facts (identifiers, `use` lines,
-/// module declarations) — never speculative noise.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MoveHint {
-    /// Taxonomy tag: `caller_reference`, `dependency_broken`, `import_needed`,
-    /// `visibility_required`, `collision`, `module_missing`, `cycle_risk`,
-    /// `orphaned_import`, or `cfg_context`.
-    pub kind: String,
-    /// File the finding concerns (the caller's file, the destination, or the
-    /// source), project-relative.
-    pub file: String,
-    /// 1-based line the finding concerns, when a specific site is known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line: Option<u32>,
-    /// Human-readable description of what the move breaks or affects.
-    pub detail: String,
-    /// The exact change to make (e.g. a `use` line to add, a path to rewrite, a
-    /// visibility to escalate). `None` when no single mechanical fix applies.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suggestion: Option<String>,
-}
-
-/// Result of a `move_symbol` operation: the moved span, a dry-run diff of the
-/// source + destination files, and — the centerpiece — the impact report of
-/// everything the move breaks or that needs attention.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MoveResult {
-    pub success: bool,
-    /// The resolved symbol that was (or would be) moved, `name (kind)`.
-    pub symbol: String,
-    pub source_file: String,
-    pub dest_file: String,
-    /// The exact source span that was moved, including its leading
-    /// doc-comment / attribute block. `None` on failure.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub moved_span: Option<String>,
-    /// True when this was a dry run: spans, the destination shape, and the
-    /// impact report were all computed, but nothing was written to disk.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub dry_run: bool,
-    /// Combined preview diff of the source (removal) and destination (insertion)
-    /// files. Populated on a successful dry run; `None` for real moves.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
-    /// `use` lines auto-inserted at the destination because the moved body's
-    /// dependency on them was unambiguous. Reported so the caller sees exactly
-    /// what the move added.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub applied_imports: Vec<String>,
-    /// The impact report — every actionable finding. Empty on a truly clean
-    /// move.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub impact: Vec<MoveHint>,
-    pub message: String,
-}
-
-/// A single parsed turn from a Claude Code session transcript,
-/// ready for DB insertion into the `turns` table.
-pub struct CostTurn {
-    pub message_id: String,
-    pub project_hash: String,
-    pub session_id: String,
-    pub model: String,
-    pub timestamp: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cost_usd: f64,
-    pub category: String,
-    pub tool_names: String,
+        assert!(NodeKind::from_str("unknown_kind").is_none());
+        assert!(NodeKind::from_str("").is_none());
+        assert!(EdgeKind::from_str("unknown_edge").is_none());
+        assert!(Visibility::from_str("unknown").is_none());
+    }
 }

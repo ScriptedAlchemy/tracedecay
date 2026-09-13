@@ -128,7 +128,6 @@
           "projection": "evidence"
         },
         "node_id": "node.application-parity",
-        "resolve_trait_dispatch": true,
         "scope": {
           "path_prefix": "src"
         }
@@ -155,26 +154,6 @@
       },
       "request_schema": "schema.application.code-query.declaration.request",
       "result_schema": "schema.application.code-query.declaration.result"
-    },
-    "code_definition": {
-      "bindings": {
-        "cli": "binding.cli.code_definition.v1",
-        "http": "binding.http.code_definition.v1",
-        "mcp": "binding.mcp.code_definition.v1"
-      },
-      "request": {
-        "meta": {
-          "order": "source_position",
-          "projection": "evidence"
-        },
-        "node_id": "symbol.application-parity",
-        "scope": {
-          "generation": "generation.application-parity",
-          "path_prefix": "src"
-        }
-      },
-      "request_schema": "schema.application.code-query.definition.request",
-      "result_schema": "schema.application.code-query.definition.result"
     },
     "code_exact_occurrence": {
       "bindings": {
@@ -434,19 +413,16 @@
     "source_body",
     "source_outline",
     "module_api",
-    "file_metadata",
     "health_read",
     "health_delta",
     "storage_status",
     "diagnostics_read",
     "observatory_read",
     "configuration_list",
-    "configuration_explain",
     "configuration_get",
     "configuration_set",
     "configuration_unset",
     "configuration_batch",
-    "configuration_write_credential",
     "configuration_observed_state",
     "configuration_protected_preview",
     "configuration_protected_apply",

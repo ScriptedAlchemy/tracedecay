@@ -68,3 +68,60 @@ TEST_CHECKSUMS="$tmpdir/SHA256SUMS" \
   "$INSTALLER"
 
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ ! -e "$tmpdir/install/libonnxruntime.so.1" ]]
+
+# Linux release archives also contain the $ORIGIN-linked ONNX companion.
+# The installer must place it beside the binary, not leave it in the
+# extracted temp directory that the EXIT trap deletes.
+printf 'onnx-runtime\n' >"$tmpdir/archive/libonnxruntime.so.1"
+ln -sfn libonnxruntime.so.1 "$tmpdir/archive/libonnxruntime.so"
+tar -czf "$tmpdir/tracedecay-v9.8.7-x86_64-linux.tar.gz" \
+  -C "$tmpdir/archive" tracedecay libonnxruntime.so.1 libonnxruntime.so
+(
+  cd "$tmpdir"
+  sha256sum tracedecay-v9.8.7-x86_64-linux.tar.gz >SHA256SUMS
+)
+PATH="$tmpdir/bin:$PATH" \
+TRACEDECAY_INSTALL_DIR="$tmpdir/install-with-runtime" \
+TEST_ARCHIVE="$tmpdir/tracedecay-v9.8.7-x86_64-linux.tar.gz" \
+TEST_CHECKSUMS="$tmpdir/SHA256SUMS" \
+  "$INSTALLER"
+[[ "$("$tmpdir/install-with-runtime/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ "$(cat "$tmpdir/install-with-runtime/libonnxruntime.so.1")" == "onnx-runtime" ]]
+[[ "$(readlink "$tmpdir/install-with-runtime/libonnxruntime.so")" == "libonnxruntime.so.1" ]]
+
+expect_installer_failure() {
+  local checksums=$1
+  local expected_message=$2
+  local output="$tmpdir/installer-failure.log"
+  if PATH="$tmpdir/bin:$PATH" \
+    TRACEDECAY_INSTALL_DIR="$tmpdir/install" \
+    TEST_ARCHIVE="$tmpdir/tracedecay-v9.8.7-x86_64-linux.tar.gz" \
+    TEST_CHECKSUMS="$checksums" \
+      "$INSTALLER" >"$output" 2>&1
+  then
+    echo "installer unexpectedly accepted invalid release inputs" >&2
+    exit 1
+  fi
+  grep -Fq "$expected_message" "$output"
+}
+
+printf '%064d  tracedecay-v9.8.7-x86_64-linux.tar.gz\n' 0 \
+  >"$tmpdir/mismatched-SHA256SUMS"
+expect_installer_failure \
+  "$tmpdir/mismatched-SHA256SUMS" \
+  "checksum mismatch for tracedecay-v9.8.7-x86_64-linux.tar.gz"
+
+{
+  cat "$tmpdir/SHA256SUMS"
+  cat "$tmpdir/SHA256SUMS"
+} >"$tmpdir/duplicate-SHA256SUMS"
+expect_installer_failure \
+  "$tmpdir/duplicate-SHA256SUMS" \
+  "SHA256SUMS must contain exactly one entry for tracedecay-v9.8.7-x86_64-linux.tar.gz"
+
+printf 'not-a-digest  tracedecay-v9.8.7-x86_64-linux.tar.gz\n' \
+  >"$tmpdir/invalid-SHA256SUMS"
+expect_installer_failure \
+  "$tmpdir/invalid-SHA256SUMS" \
+  "SHA256SUMS has an invalid digest for tracedecay-v9.8.7-x86_64-linux.tar.gz"

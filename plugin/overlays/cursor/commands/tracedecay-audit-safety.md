@@ -1,13 +1,12 @@
 ---
 name: tracedecay-audit-safety
-description: Audit the repo or a directory for ship-blocking risk, panic sites, risk markers, dead code, and untested high-risk symbols.
+description: Audit a repository or directory for concrete ship-blocking code risks.
 ---
 
 # /tracedecay-audit-safety
 
 Use `tracedecay:reviewing-changes`.
 
-- **Scope:** the whole repo, or the directory named in `$ARGUMENTS` if one was given.
-- Read-only: report findings, don't fix them here.
-
-Output: findings grouped Critical / Warning / Note with file + enclosing symbol, and a prioritized follow-up list.
+Audit the whole repository, or `$ARGUMENTS` when it names a directory. This is
+read-only. Confirm a concrete failure mode before reporting prioritized findings
+with their file, enclosing symbol, evidence, and practical follow-up.

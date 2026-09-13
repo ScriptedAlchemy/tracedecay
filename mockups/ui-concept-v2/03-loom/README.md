@@ -17,6 +17,7 @@ The canonical product sequence is indexed in [`final/README.md`](final/README.md
 5. [Selected event evidence](final/05-selected-event-evidence.md)
 6. [Feedback continuation](final/06-feedback-continuation.md)
 7. [Evidence gaps](final/07-evidence-gaps.md)
+8. [Work proximity](final/08-work-proximity.md)
 
 These final states replace the v7 vertical host-weave overview as implementation reference. All final plates remain explicitly `CONCEPT / SYNTHETIC DATA` until bound to authenticated production evidence.
 

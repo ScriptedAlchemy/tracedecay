@@ -7,7 +7,7 @@ evidence_class: concept_synthetic
 
 ## User job
 
-After provider read authority is configured, find every ingested pull request across all projects, identify unresolved or weakly evidenced work, and recognize PRs that jointly produce one umbrella outcome.
+After provider read authority is configured, find every ingested pull request across registered TraceDecay projects, identify unresolved or weakly evidenced work, and recognize PRs that jointly produce one umbrella outcome.
 
 ## Product behavior
 
@@ -21,6 +21,11 @@ After provider read authority is configured, find every ingested pull request ac
 
 The plate is synthetic. Production correlation must label exact, inferred, ambiguous, stale, missing, and unavailable links separately. Provider controls are read-only unless a real authorized write path exists.
 
+Provider discovery does not define the inbox population. A PR is admitted only
+when its repository belongs to the TraceDecay registry and its tracked head is
+joined to indexed evidence. Provider-only or broad-account audit results remain
+outside Delivery until that admission evidence exists.
+
 ## Access gates
 
 - Keyboard navigation reaches filters, the PR list, umbrella groups, the inspector, and the local-first fallback without requiring graph interaction.
@@ -31,6 +36,6 @@ The plate is synthetic. Production correlation must label exact, inferred, ambig
 ## Production authorities
 
 - The project registry and shipping repository field own the local-first fallback and repository selection.
-- The independently typed pull-request projection owns provider publication, authorization, freshness, pagination, and served-empty state; it requires `github_read_authority` when GitHub data is not published locally.
+- The independently typed pull-request projection owns provider publication, authorization, freshness, pagination, and served-empty state; it requires `github_read_authority` when GitHub data is not published locally and cannot bypass registry/index admission.
 - Review and CI projections provide unresolved review counts and check evidence independently of PR-list readiness.
 - Umbrella edges are based only on shared Work tasks, session-Git correlation, shared agents, or cross-repository handoff tokens, with each edge labeled `exact`, `inferred`, or `ambiguous`.

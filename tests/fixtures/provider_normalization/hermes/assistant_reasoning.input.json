@@ -1,0 +1,9 @@
+{
+  "row_id": 7,
+  "session_id": "session-redacted",
+  "role": "assistant",
+  "content": "",
+  "reasoning": "thinking about the billing fix",
+  "timestamp": 1780629410.0,
+  "session_model": "gpt-5.5"
+}

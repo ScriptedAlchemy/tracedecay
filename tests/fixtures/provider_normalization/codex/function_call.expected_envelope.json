@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "provider": "codex",
+  "native_record_kind": "response_item",
+  "stable_record_id": "$STABLE_RECORD_ID",
+  "relations": {
+    "session_id": "codex-golden-session",
+    "thread_id": "codex-golden-session",
+    "message_id": "$STABLE_RECORD_ID"
+  },
+  "facts": [
+    {
+      "kind": "tool_invocation",
+      "invocation_id": "call-redacted",
+      "name": "shell",
+      "arguments": null
+    }
+  ],
+  "evidence": {
+    "ordering_domain": "file_bytes",
+    "range": {
+      "start": 40,
+      "end": 80
+    },
+    "native_timestamp": 1783500569
+  }
+}

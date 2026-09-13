@@ -1,0 +1,319 @@
+use super::{
+    Arc, CheckpointBlockers, CheckpointOutcome, CheckpointRequest, DATABASE_HEALTH_GATE, Database,
+    DatabaseAuthorityRole, DatabaseHealth, DatabaseStorageTelemetryHandle, Result, TraceDecayError,
+    database_checkpoint_probe, database_health,
+};
+
+impl Database {
+    pub fn close(self) {
+        drop(self);
+    }
+
+    /// Applies the canonical retained runtime's bounded WAL checkpoint policy.
+    #[hotpath::skip]
+    pub async fn checkpoint(&self) -> Result<()> {
+        self.require_active_write_scope("checkpoint")?;
+        let _writer = self.writer().await;
+        self.checkpoint_unguarded().await
+    }
+
+    #[hotpath::skip]
+    pub async fn release_connection_memory(&self) -> Result<()> {
+        // Both connections derive from the same registry runtime handle and
+        // share one reader pool, so releasing through either covers every
+        // reader; the writable handle also reaches the writer actor.
+        let handle = if self.is_writable() {
+            self.inner
+                .write_conn
+                .as_ref()
+                .ok_or_else(|| TraceDecayError::Database {
+                    message: "writable database handle is missing its writer connection".to_owned(),
+                    operation: "release SQLite database memory".to_owned(),
+                })?
+        } else {
+            &self.inner.conn
+        };
+        match handle.release_connection_memory().await {
+            Ok(_) => Ok(()),
+            Err(error) => Err(TraceDecayError::Database {
+                message: format!("failed to release SQLite connection cache: {error}"),
+                operation: "release SQLite database memory".to_owned(),
+            }),
+        }
+    }
+
+    /// Forces a complete WAL truncation through the retained writer actor.
+    #[hotpath::skip]
+    pub async fn truncate_wal_for_offline_maintenance(&self) -> Result<()> {
+        const OPERATION: &str = "truncate WAL for offline maintenance";
+        self.require_active_write_scope(OPERATION)?;
+        let authority = self.write_authority()?;
+        if authority.role() != DatabaseAuthorityRole::Maintenance {
+            return Err(TraceDecayError::Database {
+                message: "WAL truncation requires exclusive maintenance authority".to_owned(),
+                operation: OPERATION.to_owned(),
+            });
+        }
+        let _writer = self.writer().await;
+        let connection = self.open_writer_connection_unguarded(OPERATION).await?;
+        let mut rows = connection
+            .checkpoint_wal_truncate()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to truncate WAL through the writer actor: {error}"),
+                operation: OPERATION.to_owned(),
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read WAL truncation result: {error}"),
+                operation: OPERATION.to_owned(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "WAL truncation returned no result".to_owned(),
+                operation: OPERATION.to_owned(),
+            })?;
+        let busy = row
+            .get::<i64>(0)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid WAL truncation busy result: {error}"),
+                operation: OPERATION.to_owned(),
+            })?;
+        let log_frames = row
+            .get::<i64>(1)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid WAL truncation frame result: {error}"),
+                operation: OPERATION.to_owned(),
+            })?;
+        let checkpointed_frames = row
+            .get::<i64>(2)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid WAL truncation checkpoint result: {error}"),
+                operation: OPERATION.to_owned(),
+            })?;
+        if busy != 0 || log_frames != 0 || checkpointed_frames != 0 {
+            return Err(TraceDecayError::Database {
+                message: format!(
+                    "WAL truncation incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+                ),
+                operation: OPERATION.to_owned(),
+            });
+        }
+        if rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to finish WAL truncation result: {error}"),
+                operation: OPERATION.to_owned(),
+            })?
+            .is_some()
+        {
+            return Err(TraceDecayError::Database {
+                message: "WAL truncation returned multiple results".to_owned(),
+                operation: OPERATION.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    #[hotpath::skip]
+    pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
+        let authority = self.write_authority()?;
+        let request = CheckpointRequest::new(
+            CheckpointBlockers::default(),
+            Arc::new(database_checkpoint_probe()?),
+        );
+        let outcome = self
+            .client
+            .runtime()
+            .run_checkpoint(request, authority)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("registered checkpoint failed: {error:?}"),
+                operation: "checkpoint".to_owned(),
+            })?;
+        match outcome {
+            CheckpointOutcome::BelowSoft { .. } | CheckpointOutcome::Complete { .. } => Ok(()),
+            CheckpointOutcome::Pending { .. } => Err(TraceDecayError::Database {
+                message: "registered checkpoint remains pending".to_owned(),
+                operation: "checkpoint".to_owned(),
+            }),
+            CheckpointOutcome::Interrupted { reason, .. } => Err(TraceDecayError::Database {
+                message: format!("registered checkpoint was interrupted: {reason:?}"),
+                operation: "checkpoint".to_owned(),
+            }),
+        }
+    }
+
+    #[hotpath::skip]
+    pub async fn size(&self) -> Result<u64> {
+        let mut rows = self
+            .inner
+            .conn
+            .query(
+                "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+                (),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to get database size: {error}"),
+                operation: "size".to_owned(),
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read database size row: {error}"),
+                operation: "size".to_owned(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "no result from page size query".to_owned(),
+                operation: "size".to_owned(),
+            })?;
+        let size = row
+            .get::<i64>(0)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read size value: {error}"),
+                operation: "size".to_owned(),
+            })?;
+        Ok(size as u64)
+    }
+
+    #[hotpath::skip]
+    pub async fn quick_check(&self) -> Result<bool> {
+        Ok(self.quick_check_report().await?.is_none())
+    }
+
+    #[hotpath::skip]
+    pub async fn quick_check_report(&self) -> Result<Option<String>> {
+        Ok(match self.health_on_fresh_reader("quick_check").await? {
+            DatabaseHealth::Healthy => None,
+            DatabaseHealth::Corrupt(problem) => Some(problem),
+        })
+    }
+
+    #[hotpath::skip]
+    async fn health_on_fresh_reader(&self, operation: &str) -> Result<DatabaseHealth> {
+        let queued_at = std::time::Instant::now();
+        let _health_guard = DATABASE_HEALTH_GATE
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let wait_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::debug!(
+            event = "database_health_check",
+            phase = "start",
+            operation,
+            wait_ms,
+            "database health check started"
+        );
+        let started_at = std::time::Instant::now();
+        let snapshot = self
+            .inner
+            .conn
+            .health_read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to begin database health snapshot: {error}"),
+                operation: operation.to_owned(),
+            })?;
+        let result = database_health(&snapshot, operation).await;
+        let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::debug!(
+            event = "database_health_check",
+            phase = "complete",
+            operation,
+            elapsed_ms,
+            healthy = matches!(&result, Ok(DatabaseHealth::Healthy)),
+            "database health check finished"
+        );
+        result
+    }
+
+    pub fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
+        let handle = self
+            .client
+            .runtime()
+            .telemetry_read_handle()
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to attach SQLite-store telemetry reader: {error:?}"),
+                operation: "attach SQLite-store telemetry reader".to_owned(),
+            })?;
+        Ok(DatabaseStorageTelemetryHandle {
+            handle,
+            _client_guard: self.client_guard(),
+        })
+    }
+
+    #[hotpath::skip]
+    pub async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
+        // The registry sampler blocks on reserved-health reader acquisition
+        // and a worker rendezvous (each bounded below); run it on the blocking
+        // pool so a busy store cannot capture an async executor thread.
+        let runtime = self.client.runtime().clone();
+        tokio::task::spawn_blocking(move || {
+            runtime.storage_page_counts(std::time::Duration::from_secs(5))
+        })
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("store-size sampling task failed: {error}"),
+            operation: "sample SQLite-store pages".to_owned(),
+        })?
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to sample SQLite-store pages: {error:?}"),
+            operation: "sample SQLite-store pages".to_owned(),
+        })
+    }
+
+    /// Runs bounded incremental vacuum through the canonical writer lane.
+    #[hotpath::skip]
+    pub async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
+        let authority = self.write_authority()?;
+        self.client
+            .runtime()
+            .run_bounded_incremental_compaction(pages, authority)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to compact SQLite store: {error:?}"),
+                operation: "run bounded SQLite-store compaction".to_owned(),
+            })
+    }
+
+    /// Produces an online snapshot through this database's canonical writer
+    /// runtime. Read-only clients cannot request a snapshot because the
+    /// writer samples the retained write authority throughout publication.
+    #[hotpath::skip]
+    pub async fn snapshot_to(&self, destination: &std::path::Path) -> Result<()> {
+        let authority = self.write_authority()?;
+        self.client
+            .runtime()
+            .snapshot_to(destination.to_path_buf(), authority)
+            .await
+            .map(|_| ())
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to snapshot SQLite store: {error:?}"),
+                operation: "snapshot SQLite store".to_owned(),
+            })
+    }
+
+    /// Produces an interruption-aware online snapshot through this database's
+    /// canonical writer runtime. The caller supplies only request control;
+    /// this guarded facade retains and revalidates the exact write authority.
+    #[hotpath::skip]
+    pub async fn snapshot_to_interruptible(
+        &self,
+        destination: &std::path::Path,
+        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
+    ) -> Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt> {
+        let authority = self.write_authority()?;
+        self.client
+            .runtime()
+            .snapshot_to_interruptible(destination.to_path_buf(), probe, authority)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to snapshot SQLite store: {error:?}"),
+                operation: "snapshot SQLite store".to_owned(),
+            })
+    }
+}

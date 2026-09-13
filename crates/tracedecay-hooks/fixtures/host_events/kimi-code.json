@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "provider": "kimi_code",
+  "sources": [
+    {
+      "kind": "live_native_hook_capture",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/kimi/README.md",
+      "kimi_code_version": "0.26.0",
+      "captured_on": "2026-07-21"
+    },
+    {
+      "kind": "official_documentation",
+      "url": "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html",
+      "sections": ["Event Data Format", "Event Reference"],
+      "retrieved_at": "2026-07-21"
+    }
+  ],
+  "events": [
+    {
+      "identity": "post_tool_use_edit",
+      "family": "tool_lifecycle",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json",
+      "request": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "<SESSION_ID>",
+        "cwd": "<PROJECT_ROOT>",
+        "tool_name": "Edit",
+        "tool_input": {
+          "path": "<SAVED_PATH>",
+          "old_string": "<REDACTED_OLD_TEXT>",
+          "new_string": "<REDACTED_NEW_TEXT>"
+        },
+        "tool_call_id": "<TOOL_CALL_ID>",
+        "tool_output": "<REDACTED_RESULT>"
+      }
+    },
+    {
+      "identity": "stop",
+      "family": "session_boundary",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json",
+      "request": {
+        "hook_event_name": "Stop",
+        "session_id": "<SESSION_ID>",
+        "cwd": "<PROJECT_ROOT>",
+        "stop_hook_active": false
+      }
+    }
+  ]
+}

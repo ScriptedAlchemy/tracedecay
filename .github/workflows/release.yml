@@ -6,81 +6,252 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing release tag to rebuild and publish, for example v0.0.17"
+        description: "Existing stable release tag to recover"
         required: true
         type: string
 
-# Skip beta/prerelease tags — handled by release-beta.yml
-
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build ${{ matrix.name }}
-    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: aarch64-macos
-            runner: macos-14
-            target: aarch64-apple-darwin
-            bottle_tag: arm64_sonoma
-            archive: tar.gz
-          - name: x86_64-linux
-            runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            bottle_tag: x86_64_linux
-            archive: tar.gz
-          - name: aarch64-linux
-            runner: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            archive: tar.gz
-          - name: x86_64-windows
-            runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
-
+  validate-release:
+    name: Resolve release source
+    if: >-
+      github.repository == 'ScriptedAlchemy/tracedecay' &&
+      (
+        (github.event_name == 'release' && !github.event.release.prerelease) ||
+        github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      source_epoch: ${{ steps.release.outputs.source_epoch }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      matrix: ${{ steps.release.outputs.matrix }}
+      build_required: ${{ steps.release.outputs.build_required }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - name: Validate manual stable recovery
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json isDraft,isPrerelease --jq '[.isPrerelease, .isDraft] | @tsv')" = $'false\tfalse'
+
+      - name: Resolve release identity
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          source_epoch="$(git show -s --format=%ct "$source_sha")"
+          version="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "tracedecay") | .version')"
+          test -n "$version"
+          test "$version" != "null"
+          [[ "$version" != *-* ]]
+          tag="v${version}"
+          test "$RELEASE_TAG" = "$tag"
+          test "$GITHUB_REF" = "refs/tags/${tag}"
+          test "$GITHUB_SHA" = "$source_sha"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+            tag_sha="$(git rev-list -n 1 "$tag")"
+            if [[ "$tag_sha" != "$source_sha" ]]; then
+              echo "::error::${tag} targets ${tag_sha}, not release source ${source_sha}"
+              exit 1
+            fi
+          fi
+          {
+            echo "source_sha=${source_sha}"
+            echo "source_epoch=${source_epoch}"
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "prerelease=false"
+          } >> "$GITHUB_OUTPUT"
+          gh api "repos/${{ github.repository }}/releases/tags/${tag}" \
+            --jq '.assets[].name' > remote-asset-names
+          python3 scripts/plan-release-recovery.py \
+            --manifest .github/release-targets.json \
+            --tag "$tag" \
+            --profile stable \
+            --asset-names remote-asset-names \
+            --retained-output retained-asset-names \
+            --github-output "$GITHUB_OUTPUT"
+          mkdir retained-assets
+          scripts/verify-retained-release-assets.sh \
+            --tag "$tag" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
+            --source-digest "$source_sha" \
+            --asset-names retained-asset-names \
+            --download-dir retained-assets
+
+  dashboard-assets:
+    name: Build dashboard artifact
+    needs: validate-release
+    if: needs.validate-release.outputs.build_required == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: "22"
+          ref: ${{ needs.validate-release.outputs.source_sha }}
+
+      - name: Checkout release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.source_sha }}
+          path: .release-automation
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
-      - name: Build dashboard assets
+      - name: Install dashboard dependencies
         working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
+        run: npm ci
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Validate dashboard bundle
+        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+          if-no-files-found: error
+          include-hidden-files: true
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [validate-release, dashboard-assets]
+    if: needs.validate-release.outputs.build_required == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.validate-release.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.source_sha }}
+
+      - name: Checkout release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.source_sha }}
+          path: .release-automation
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - name: Validate downloaded dashboard bundle
+        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
+
+      # Skip-mode cargo builds require the expected digest of the validated
+      # prebuilt bundle; the CLI build script refuses to skip without it.
+      - name: Export dashboard bundle digest for skip-mode builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
+      - name: Validate portable distribution harnesses
+        run: |
+          python3 .release-automation/scripts/test-check-packaged-lsp-bridge.py
+          python3 .release-automation/scripts/test-build-mcpb.py
+          python3 .release-automation/scripts/test-resolve-installed-binary.py
+          python3 .release-automation/scripts/test-check-packaged-mcp-stdio.py
+          python3 .release-automation/scripts/test-check-distribution-feature-wiring.py
+          python3 .release-automation/scripts/test-resolve-release-source-profile.py
+          python3 .release-automation/scripts/test-package-release-archive.py
+          python3 .release-automation/scripts/test-prepare-release-runtime.py
+          python3 .release-automation/scripts/test-plan-release-recovery.py
+          python3 .release-automation/scripts/test-check-release-artifacts.py
+          bash .release-automation/scripts/test-check-distribution-clean-source.sh
+          bash .release-automation/scripts/test-check-distribution-snapshot.sh
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
-      # Inline instead of ./.github/actions/setup-linux-mold: this workflow
-      # can be dispatched with an old release_tag, and the checkout above
-      # replaces the workspace with that tag, which may predate the local
-      # action. make-default symlinks ld to mold, which works on this
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
+
+      - name: Resolve release source feature profile
+        id: release-profile
+        shell: bash
+        run: |
+          python3 .release-automation/scripts/resolve-release-source-profile.py \
+            --source . \
+            --target "${{ matrix.target }}" \
+            --github-output "$GITHUB_OUTPUT"
+          if [[ -f crates/tracedecay-cli/Cargo.toml ]]; then
+            echo "binary_args=--package tracedecay-cli --bin tracedecay" >> "$GITHUB_OUTPUT"
+          else
+            echo "binary_args=--bin tracedecay" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare target release runtime
+        id: target-runtime
+        shell: bash
+        run: |
+          python3 .release-automation/scripts/prepare-release-runtime.py \
+            --manifest .github/release-targets.json \
+            --name "${{ matrix.name }}" \
+            --output "$RUNNER_TEMP/tracedecay-release-runtime" \
+            --github-env "$GITHUB_ENV" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify target runtime compatibility
+        if: steps.target-runtime.outputs.runtime_library != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="${{ steps.target-runtime.outputs.runtime_library }}"
+          test "$(readelf -d "$runtime" | sed -n 's/.*SONAME.*\[\([^]]*\)\].*/\1/p')" = \
+            "${{ steps.target-runtime.outputs.runtime_entry_name }}"
+          max_glibc="$(readelf --version-info "$runtime" \
+            | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
+            | sort -Vu \
+            | tail -n 1)"
+          test "$max_glibc" = "${{ matrix.runtime.max_glibc }}"
+
+      # make-default symlinks ld to mold, which works on this
       # runner's GCC 11 (unlike -fuse-ld=mold, which needs GCC 12+).
       - name: Install mold
         if: runner.os == 'Linux'
-        uses: rui314/setup-mold@v1
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
         with:
           mold-version: 2.41.0
           make-default: true
@@ -102,344 +273,483 @@ jobs:
           "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-${{ matrix.target }}
           cache-on-failure: true
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Test release distribution
+        if: matrix.name == 'x86_64-linux'
+        run: |
+          python3 .release-automation/scripts/build-controlled-workload-hotpath-helpers.py \
+            --source . \
+            --profile release \
+            --target ${{ matrix.target }}
+          cargo nextest run -p tracedecay-search-eval --release --target ${{ matrix.target }} \
+            --all-features --locked \
+            --run-ignored only \
+            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
+            --no-tests=fail
+          cargo build --workspace --bins --release --target ${{ matrix.target }} --all-features --locked
+          cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
+
+      # Runs before the default build so it never leaves an all-features
+      # binary (e.g. test-transport) on disk at the shared release output
+      # path for later packaging steps to pick up.
+      - name: Verify all-feature release build compiles
+        if: runner.os != 'Windows'
+        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} --all-features --locked
+
+      - name: Build release binary for packaging
+        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
+
+      - name: Install modern Bash for distribution acceptance
+        if: runner.os == 'macOS'
+        run: brew install bash
+
+      - name: Validate immutable FastEmbed fixture pins
+        if: steps.release-profile.outputs.profile == 'production'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gate="scripts/check-distribution-acceptance.sh"
+          prepare="tests/distribution/fastembed/prepare_fixture.py"
+          validator="tests/distribution/fastembed/validate_fixture.py"
+          if [[ ! -x "$gate" || ! -f "$prepare" || ! -f "$validator" ]]; then
+            echo "::error title=FastEmbed acceptance setup missing::Expected executable $gate plus $prepare and $validator from the distribution fixture work."
+            exit 1
+          fi
+          # Pins live in-repo; real model bytes are acquired later by the gate.
+          if ! python3 "$prepare" --check tests/distribution/fastembed; then
+            echo "::error title=FastEmbed fixture pins invalid::The immutable Jina fixture pins must validate before release acceptance acquires real model bytes."
+            exit 1
+          fi
+          cargo fetch --locked --target ${{ matrix.target }}
+
+      - name: Run distribution acceptance
+        if: steps.release-profile.outputs.profile == 'production'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gate_shell="bash"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            gate_shell="$(brew --prefix)/bin/bash"
+          fi
+          lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
+          # Allow curl fixture acquisition; keep Cargo and HF hub offline for the
+          # packaged library/CLI and ORT inference phases inside the gate.
+          CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 \
+            "$gate_shell" scripts/check-distribution-acceptance.sh
+          actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
+          if [[ "$actual_lockfile_sha" != "$lockfile_sha" ]]; then
+            echo "::error title=Cargo.lock changed::Distribution acceptance must preserve the checked-in lockfile."
+            exit 1
+          fi
+
+      - name: Run historical release binary smoke
+        if: steps.release-profile.outputs.profile == 'legacy-default'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/tracedecay"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          test -f "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null
 
       - name: Get version
         id: version
         shell: bash
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.release_tag }}"
-            VERSION="${TAG#v}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-            VERSION="${GITHUB_REF_NAME#v}"
+          echo "tag=${{ needs.validate-release.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          echo "version=${{ needs.validate-release.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+      # --- MCP Registry bundle (all platforms) ---
+
+      - name: Package MCPB
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/tracedecay"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
           fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
+          runtime_args=()
+          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
+            runtime_args+=(
+              --runtime-library "${{ steps.target-runtime.outputs.runtime_library }}"
+              --runtime-license "${{ steps.target-runtime.outputs.runtime_license }}"
+              --runtime-notices "${{ steps.target-runtime.outputs.runtime_notices }}"
+            )
+          fi
+          python3 .release-automation/scripts/build-mcpb.py build \
+            --binary "$binary" \
+            --output "$bundle" \
+            --version "${{ steps.version.outputs.version }}" \
+            --platform "${{ matrix.name }}" \
+            "${runtime_args[@]}"
+          test -s "$bundle"
+          python3 .release-automation/scripts/build-mcpb.py verify \
+            --bundle "$bundle" \
+            --version "${{ steps.version.outputs.version }}" \
+            --platform "${{ matrix.name }}"
+
+      - name: Verify MCPB runtime (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
+          rm -rf verify-mcpb
+          python3 -m zipfile -e "$bundle" verify-mcpb
+          test -x verify-mcpb/server/tracedecay
+          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --version
+          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --help >/dev/null
+
+      - name: Upload MCPB artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mcpb-${{ matrix.name }}
+          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb
+          if-no-files-found: error
 
       # --- Binary archive (all platforms) ---
 
-      - name: Package binary (unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Package binary archive
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.tar.gz tracedecay
-          cd ../../..
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/tracedecay"
+          entry_name="tracedecay"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+            entry_name="${entry_name}.exe"
+          fi
+          companion_args=()
+          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
+            companion_args+=(
+              --companion
+              "${{ steps.target-runtime.outputs.runtime_library }}=${{ steps.target-runtime.outputs.runtime_entry_name }}"
+              --companion
+              "${{ steps.target-runtime.outputs.runtime_license }}=onnxruntime-LICENSE"
+              --companion
+              "${{ steps.target-runtime.outputs.runtime_notices }}=onnxruntime-ThirdPartyNotices.txt"
+            )
+          fi
+          python3 .release-automation/scripts/package-release-archive.py \
+            --binary "$binary" \
+            --output "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}" \
+            --format "${{ matrix.archive }}" \
+            --entry-name "$entry_name" \
+            --epoch "${{ needs.validate-release.outputs.source_epoch }}" \
+            "${companion_args[@]}"
 
-      - name: Generate archive attestation (unix)
-        if: matrix.archive == 'tar.gz' && github.event_name == 'release'
-        uses: actions/attest@v4
-        with:
-          subject-path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
-
-      - name: Upload binary archive artifact (unix)
+      - name: Verify binary archive (unix)
         if: matrix.archive == 'tar.gz'
-        uses: actions/upload-artifact@v6
-        with:
-          name: binary-${{ matrix.name }}
-          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.tar.gz"
+          rm -rf verify-binary
+          mkdir verify-binary
+          tar xzf "$archive" -C verify-binary
+          test -x verify-binary/tracedecay
+          env -u LD_LIBRARY_PATH verify-binary/tracedecay --version
+          env -u LD_LIBRARY_PATH verify-binary/tracedecay --help >/dev/null
 
-      - name: Package binary (windows)
+      - name: Verify binary archive (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.zip -Force
+          $archive = "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.zip"
+          Remove-Item verify-binary -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -Path $archive -DestinationPath verify-binary
+          & "./verify-binary/tracedecay.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --version" }
+          & "./verify-binary/tracedecay.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --help" }
 
-      - name: Generate archive attestation (windows)
-        if: matrix.archive == 'zip' && github.event_name == 'release'
-        uses: actions/attest@v4
-        with:
-          subject-path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
-
-      - name: Upload binary archive artifact (windows)
-        if: matrix.archive == 'zip'
-        uses: actions/upload-artifact@v6
+      - name: Upload binary archive artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.name }}
           path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
+          if-no-files-found: error
 
-      # --- Homebrew bottle (only for platforms with bottle_tag) ---
+  verify-release:
+    name: Verify immutable GitHub release
+    needs: [validate-release, dashboard-assets, build]
+    if: >-
+      always() &&
+      needs.validate-release.result == 'success' &&
+      (needs.dashboard-assets.result == 'success' || needs.dashboard-assets.result == 'skipped') &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate-release.outputs.source_sha }}
+          persist-credentials: false
 
-      - name: Package Homebrew bottle
-        if: matrix.bottle_tag
+      - name: Download validated dashboard artifact
+        if: needs.validate-release.outputs.build_required == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - name: Validate downloaded dashboard bundle
+        if: needs.validate-release.outputs.build_required == 'true'
+        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Revalidate release tag target
+        env:
+          TAG: ${{ needs.validate-release.outputs.tag }}
+          SOURCE_SHA: ${{ needs.validate-release.outputs.source_sha }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          BOTTLE_TAG="${{ matrix.bottle_tag }}"
-          mkdir -p tracedecay/${VERSION}/bin
-          cp target/${{ matrix.target }}/release/tracedecay tracedecay/${VERSION}/bin/tracedecay
-          chmod +x tracedecay/${VERSION}/bin/tracedecay
-          tar czf "tracedecay-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz" tracedecay/
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            test "$(git rev-list -n 1 "$TAG")" = "$SOURCE_SHA"
+          fi
 
-      - name: Generate bottle attestation
-        if: matrix.bottle_tag && github.event_name == 'release'
-        uses: actions/attest@v4
-        with:
-          subject-path: tracedecay-${{ steps.version.outputs.version }}.${{ matrix.bottle_tag }}.bottle.tar.gz
-
-      - name: Upload bottle artifact
-        if: matrix.bottle_tag
-        uses: actions/upload-artifact@v6
-        with:
-          name: bottle-${{ matrix.bottle_tag }}
-          path: "tracedecay-*.bottle.tar.gz"
+      - name: Verify published tag and release target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.validate-release.outputs.tag }}
+          SOURCE_SHA: ${{ needs.validate-release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          test "$(git rev-list -n 1 "$TAG")" = "$SOURCE_SHA"
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null
 
   publish-assets:
     name: Publish release assets
-    if: |
-      needs.build.result == 'success' &&
-      (
-        (github.event_name == 'release' && !github.event.release.prerelease) ||
-        (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-      )
-    needs: build
+    needs: [validate-release, build, verify-release]
+    if: >-
+      always() &&
+      needs.validate-release.result == 'success' &&
+      needs.verify-release.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
+      - name: Checkout release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.source_sha }}
+          path: .release-automation
+          persist-credentials: false
+
       - name: Get release tag
         id: release
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.release_tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ needs.validate-release.outputs.tag }}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.release.outputs.tag }}
           persist-credentials: false
 
-      - name: Download binary artifacts
-        uses: actions/download-artifact@v7
+      - name: Download newly built binary artifacts
+        if: needs.validate-release.outputs.build_required == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: binary-*
-          path: binaries
+          path: new-binaries
           merge-multiple: true
 
-      - name: Upload binaries to release
+      - name: Download newly built MCPB artifacts
+        if: needs.validate-release.outputs.build_required == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mcpb-*
+          path: new-mcpbs
+          merge-multiple: true
+
+      - name: Assemble exact retained and newly built artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.release.outputs.tag }}"
+          SOURCE_SHA="${{ needs.validate-release.outputs.source_sha }}"
+          VERSION="${TAG#v}"
+          mkdir binaries mcpbs retained-assets
+          gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+            --jq '.assets[].name' > remote-asset-names
+          python3 .release-automation/scripts/plan-release-recovery.py \
+            --manifest .release-automation/.github/release-targets.json \
+            --tag "$TAG" \
+            --profile stable \
+            --asset-names remote-asset-names \
+            --retained-output retained-asset-names \
+            --github-output planner-output
+          .release-automation/scripts/verify-retained-release-assets.sh \
+            --tag "$TAG" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
+            --source-digest "$SOURCE_SHA" \
+            --asset-names retained-asset-names \
+            --download-dir retained-assets
+          while IFS= read -r asset; do
+            [[ -z "$asset" ]] && continue
+            if [[ "$asset" == *.mcpb ]]; then
+              cp "retained-assets/$asset" "mcpbs/$asset"
+            else
+              cp "retained-assets/$asset" "binaries/$asset"
+            fi
+          done < retained-asset-names
+          if [[ "${{ needs.validate-release.outputs.build_required }}" == "true" ]]; then
+            for artifact in new-binaries/tracedecay-*; do
+              destination="binaries/$(basename "$artifact")"
+              [[ -e "$destination" ]] || cp "$artifact" "$destination"
+            done
+            for artifact in new-mcpbs/*.mcpb; do
+              destination="mcpbs/$(basename "$artifact")"
+              [[ -e "$destination" ]] || cp "$artifact" "$destination"
+            done
+          fi
+          python3 .release-automation/scripts/check-release-artifacts.py \
+            --manifest .release-automation/.github/release-targets.json \
+            --tag "$TAG" \
+            --binaries binaries \
+            --mcpbs mcpbs
+          for bundle in mcpbs/*.mcpb; do
+            platform="${bundle#mcpbs/tracedecay-"${TAG}"-}"
+            platform="${platform%.mcpb}"
+            python3 .release-automation/scripts/build-mcpb.py verify \
+              --bundle "$bundle" \
+              --version "$VERSION" \
+              --platform "$platform"
+          done
+
+      - name: Attest newly built binary archives
+        if: needs.validate-release.outputs.build_required == 'true'
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: new-binaries/tracedecay-*
+
+      - name: Attest newly built MCPBs
+        if: needs.validate-release.outputs.build_required == 'true'
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: new-mcpbs/*.mcpb
+
+      - name: Upload validated artifacts to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          shopt -s nullglob
+          binaries=(binaries/tracedecay-*)
+          bundles=(mcpbs/*.mcpb)
+          assets=("${binaries[@]}" "${bundles[@]}")
           (
             cd binaries
-            sha256sum tracedecay-* > ../SHA256SUMS
-          )
-          find binaries -type f -name 'tracedecay-*' -print -exec \
-            gh release upload "${{ steps.release.outputs.tag }}" {} --repo "${{ github.repository }}" --clobber \;
-          gh release upload "${{ steps.release.outputs.tag }}" \
-            SHA256SUMS install.sh \
-            --repo "${{ github.repository }}" \
-            --clobber
-
-  update-homebrew:
-    name: Update Homebrew tap
-    if: |
-      needs.build.result == 'success' &&
-      (
-        (github.event_name == 'release' && !github.event.release.prerelease) ||
-        (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-      )
-    needs: [build, publish-assets]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Get version
-        id: version
-        run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.release_tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          VERSION="${TAG#v}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Download bottle artifacts
-        uses: actions/download-artifact@v7
-        with:
-          pattern: bottle-*
-          path: bottles
-          merge-multiple: true
-
-      - name: Upload bottles to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for f in bottles/tracedecay-*.bottle.tar.gz; do
-            gh release upload "${{ steps.version.outputs.tag }}" "$f" --clobber
-          done
-
-      - name: Download source tarball
-        run: |
-          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.version.outputs.tag }}.tar.gz" -o "source.tar.gz"
-
-      - name: Compute SHA256 hashes
-        id: hashes
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          SOURCE_SHA=$(sha256sum source.tar.gz | awk '{print $1}')
-          echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
-
-          for f in bottles/tracedecay-*.bottle.tar.gz; do
-            tag=$(basename "$f" | sed "s/tracedecay-${VERSION}\.\(.*\)\.bottle\.tar\.gz/\1/")
-            sha=$(sha256sum "$f" | awk '{print $1}')
-            echo "${tag}_sha=${sha}" >> "$GITHUB_OUTPUT"
-          done
-
-      # NOTE: the Homebrew tap (ScriptedAlchemy/homebrew-tap) is an external
-      # repo — the previous formula there must be removed/renamed
-      # separately; this step only writes the new Formula/tracedecay.rb.
-      - name: Update formula
-        env:
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          SOURCE_SHA="${{ steps.hashes.outputs.source_sha }}"
-          ARM64_SONOMA_SHA="${{ steps.hashes.outputs.arm64_sonoma_sha }}"
-          X86_64_LINUX_SHA="${{ steps.hashes.outputs.x86_64_linux_sha }}"
-
-          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/homebrew-tap.git" tap
-          mkdir -p tap/Formula
-
-          cat > tap/Formula/tracedecay.rb << EOF
-          class Tracedecay < Formula
-            desc "Code intelligence tool that builds semantic knowledge graphs from source code"
-            homepage "https://github.com/ScriptedAlchemy/tracedecay"
-            url "https://github.com/ScriptedAlchemy/tracedecay/archive/refs/tags/v${VERSION}.tar.gz"
-            sha256 "${SOURCE_SHA}"
-            license "MIT"
-
-            bottle do
-              root_url "https://github.com/ScriptedAlchemy/tracedecay/releases/download/v${VERSION}"
-              sha256 cellar: :any_skip_relocation, arm64_sonoma: "${ARM64_SONOMA_SHA}"
-              sha256 cellar: :any_skip_relocation, x86_64_linux: "${X86_64_LINUX_SHA}"
-            end
-
-            depends_on "rust" => :build
-
-            def install
-              system "cargo", "install", *std_cargo_args
-            end
-
-            test do
-              system "#{bin}/tracedecay", "--help"
-            end
-          end
-          EOF
-
-          cd tap
-          # Clean up the legacy pre-rebrand formula if it still exists.
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/tracedecay.rb
-          git diff --cached --quiet || git commit -m "tracedecay ${VERSION}"
-          git push
-
-  update-scoop:
-    name: Update Scoop bucket
-    if: |
-      needs.build.result == 'success' &&
-      (
-        (github.event_name == 'release' && !github.event.release.prerelease) ||
-        (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-      )
-    needs: [build, publish-assets]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Get release info
-        id: release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.release_tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          VERSION="${TAG#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
-          gh release download "${TAG}" \
-            --repo "${{ github.repository }}" \
-            --pattern "tracedecay-${TAG}-x86_64-windows.zip" \
-            --dir .
-          SHA256=$(sha256sum "tracedecay-${TAG}-x86_64-windows.zip" | cut -d' ' -f1)
-          echo "sha256_win64=${SHA256}" >> "$GITHUB_OUTPUT"
-
-      # NOTE: the Scoop bucket (ScriptedAlchemy/scoop-bucket) is an external
-      # repo — the previous bucket manifest there must be removed separately;
-      # this step only writes the new bucket/tracedecay.json.
-      - name: Update Scoop manifest
-        env:
-          SCOOP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ steps.release.outputs.version }}"
+            sha256sum tracedecay-*
+          ) > SHA256SUMS
+          (
+            cd mcpbs
+            sha256sum -- *.mcpb
+          ) >> SHA256SUMS
+          assets+=(SHA256SUMS install.sh)
           TAG="${{ steps.release.outputs.tag }}"
-          SHA256="${{ steps.release.outputs.sha256_win64 }}"
+          SOURCE_SHA="${{ needs.validate-release.outputs.source_sha }}"
+          git -C .release-automation fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          test "$(git -C .release-automation rev-list -n 1 "$TAG")" = "$SOURCE_SHA"
 
-          cat > tracedecay.json << EOF
-          {
-            "version": "${VERSION}",
-            "description": "Code intelligence tool that builds semantic knowledge graphs from source code",
-            "homepage": "https://github.com/ScriptedAlchemy/tracedecay",
-            "license": "MIT",
-            "architecture": {
-              "64bit": {
-                "url": "https://github.com/ScriptedAlchemy/tracedecay/releases/download/${TAG}/tracedecay-${TAG}-x86_64-windows.zip",
-                "hash": "${SHA256}"
-              }
-            },
-            "bin": "tracedecay.exe",
-            "checkver": {
-              "github": "https://github.com/ScriptedAlchemy/tracedecay"
-            },
-            "autoupdate": {
-              "architecture": {
-                "64bit": {
-                  "url": "https://github.com/ScriptedAlchemy/tracedecay/releases/download/v\$version/tracedecay-v\$version-x86_64-windows.zip"
-                }
-              }
-            }
-          }
-          EOF
+          gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+            --jq '.assets[].name' > remote-asset-names
+          while IFS= read -r remote_name; do
+            [[ -z "$remote_name" ]] && continue
+            found=false
+            for asset in "${assets[@]}"; do
+              if [[ "$(basename "$asset")" == "$remote_name" ]]; then
+                found=true
+                break
+              fi
+            done
+            if [[ "$found" != true ]]; then
+              echo "::error::unexpected existing release asset: ${remote_name}"
+              exit 1
+            fi
+          done < remote-asset-names
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            if grep -Fxq "$name" remote-asset-names; then
+              if [[ "$name" != tracedecay-* ]]; then
+                mkdir -p retained-metadata
+                gh release download "$TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir retained-metadata
+                if ! cmp -s "$asset" "retained-metadata/$name"; then
+                  echo "::error::existing release metadata differs: ${name}"
+                  exit 1
+                fi
+              fi
+            else
+              gh release upload "$TAG" "$asset" --repo "${{ github.repository }}"
+            fi
+          done
 
-          git clone "https://x-access-token:${SCOOP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/scoop-bucket.git" scoop-repo
-          cd scoop-repo
-          mkdir -p bucket
-          cp ../tracedecay.json bucket/tracedecay.json
-          # Clean up legacy pre-rebrand manifests (root-level and bucket/).
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bucket/tracedecay.json
-          git diff --cached --quiet || git commit -m "tracedecay ${VERSION}"
-          git push
+          mkdir -p remote-assets/{binaries,mcpbs}
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern "tracedecay-${TAG}-*.tar.gz" --dir remote-assets/binaries
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern "tracedecay-${TAG}-*.zip" --dir remote-assets/binaries
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern "tracedecay-${TAG}-*.mcpb" --dir remote-assets/mcpbs
+          python3 .release-automation/scripts/check-release-artifacts.py \
+            --manifest .release-automation/.github/release-targets.json \
+            --tag "$TAG" \
+            --binaries remote-assets/binaries \
+            --mcpbs remote-assets/mcpbs
+          .release-automation/scripts/verify-retained-release-assets.sh \
+            --tag "$TAG" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
+            --source-digest "$SOURCE_SHA" \
+            --files remote-assets/binaries/* remote-assets/mcpbs/*
 
-  # Rewrites the MCP registry manifest (server.json) from the actual release
-  # artifacts so the version, download URLs, and fileSha256 digests always
-  # describe real uploaded assets. Skips (with a warning) when the release has
-  # no MCPB packages, since those are not yet produced by the build matrix.
+      - name: Mark stable release as latest
+        if: needs.validate-release.outputs.prerelease == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release edit "${{ needs.validate-release.outputs.tag }}"
+          --repo "${{ github.repository }}"
+          --latest
+
+  # Rewrites the MCP registry manifest (server.json) from the actual nonempty
+  # platform MCPBs so version, URLs, and fileSha256 values describe uploaded
+  # assets. A missing package is a release failure, never a successful skip.
   update-server-json:
     name: Update server.json manifest
-    if: |
-      needs.build.result == 'success' &&
-      (
-        (github.event_name == 'release' && !github.event.release.prerelease) ||
-        (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-      )
-    needs: [build, publish-assets]
+    if: >-
+      always() &&
+      needs.validate-release.result == 'success' &&
+      needs.publish-assets.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      needs.validate-release.outputs.prerelease == 'false'
+    needs: [validate-release, build, publish-assets]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: master
 
@@ -448,39 +758,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.release_tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release.outputs.tag }}"
+          VERSION="${{ needs.validate-release.outputs.version }}"
           REPO="${{ github.repository }}"
-          PLATFORMS="aarch64-macos:mcp.tar.gz x86_64-linux:mcp.tar.gz aarch64-linux:mcp.tar.gz x86_64-windows:mcp.zip"
 
           mkdir -p assets
-          missing=0
-          for entry in $PLATFORMS; do
-            platform="${entry%%:*}"
-            ext="${entry#*:}"
-            asset="tracedecay-${TAG}-${platform}.${ext}"
-            if ! gh release download "$TAG" --repo "$REPO" --pattern "$asset" --dir assets; then
-              echo "::warning::release asset ${asset} not found"
-              missing=1
-            fi
+          gh release download "$TAG" \
+            --repo "$REPO" \
+            --pattern "tracedecay-${TAG}-*.mcpb" \
+            --dir assets
+          shopt -s nullglob
+          bundles=(assets/tracedecay-"${TAG}"-*.mcpb)
+          test "${#bundles[@]}" -gt 0
+          for bundle in "${bundles[@]}"; do
+            platform="${bundle#*tracedecay-"${TAG}"-}"
+            platform="${platform%.mcpb}"
+            python3 scripts/build-mcpb.py verify \
+              --bundle "$bundle" \
+              --version "$VERSION" \
+              --platform "$platform"
           done
-          if [ "$missing" -ne 0 ]; then
-            echo "::warning::server.json not updated — this release has no complete MCPB package set"
-            exit 0
-          fi
 
           printf '[' > sha-map.json
           sep=""
-          for entry in $PLATFORMS; do
-            platform="${entry%%:*}"
-            ext="${entry#*:}"
-            asset="tracedecay-${TAG}-${platform}.${ext}"
-            sha=$(sha256sum "assets/${asset}" | cut -d' ' -f1)
-            printf '%s{"platform":"%s","ext":"%s","sha":"%s"}' "$sep" "$platform" "$ext" "$sha" >> sha-map.json
+          for bundle in "${bundles[@]}"; do
+            platform="${bundle#*tracedecay-"${TAG}"-}"
+            platform="${platform%.mcpb}"
+            sha=$(sha256sum "$bundle" | cut -d' ' -f1)
+            printf '%s{"platform":"%s","sha":"%s"}' "$sep" "$platform" "$sha" >> sha-map.json
             sep=","
           done
           printf ']' >> sha-map.json
@@ -490,15 +795,9 @@ jobs:
             | .packages = ($map[0] | map(
                 {
                   "registryType": "mcpb",
-                  "identifier": "https://github.com/\($repo)/releases/download/\($tag)/tracedecay-\($tag)-\(.platform).\(.ext)",
+                  "identifier": "https://github.com/\($repo)/releases/download/\($tag)/tracedecay-\($tag)-\(.platform).mcpb",
                   "version": $v,
                   "fileSha256": .sha,
-                  "packageArguments": [
-                    {
-                      "type": "positional",
-                      "valueHint": "serve"
-                    }
-                  ],
                   "transport": {
                     "type": "stdio"
                   }
@@ -507,9 +806,206 @@ jobs:
               )
           ' server.json > server.json.tmp
           mv server.json.tmp server.json
+          test "$(jq '.packages | length' server.json)" -gt 0
+          jq -e '
+            all(
+              .packages[];
+              .registryType == "mcpb"
+              and (.identifier | length > 0)
+              and (.version | length > 0)
+              and (.fileSha256 | test("^[0-9a-f]{64}$"))
+              and .transport.type == "stdio"
+            )
+          ' server.json >/dev/null
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add server.json
           git diff --cached --quiet || git commit -m "chore(release): update server.json for ${VERSION}"
           git push
+
+  # --- TypeScript SDK npm publication ---
+  #
+  # Owner decision 2026-08-07: GitHub Releases stay the binary authority, the
+  # TypeScript SDK publishes to npm on this same stable release trigger, and
+  # crates.io publication waits until the crate structure is settled.
+  #
+  # The build job never holds registry credentials or publish authority. It
+  # regenerates the client from the canonical SDK executable-binding registry
+  # and verifies byte-for-byte codegen parity, then runs typecheck, unit
+  # tests, a package dry-run, and real-daemon installed-package conformance
+  # against the exact tarball whose digest it records. It also stages and
+  # digest-verifies the reviewed npm CLI. Only the publish job gets the
+  # protected environment and the OIDC identity that npm trusted publishing
+  # exchanges for a short-lived publish credential; it verifies those exact
+  # bytes without installing executable code and holds no registry token.
+  build-typescript:
+    name: Build & test @tracedecay/sdk (unprivileged)
+    needs: validate-release
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.source_sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: |
+            dashboard/package-lock.json
+            sdks/typescript/package-lock.json
+
+      - name: Install reviewed npm
+        run: npm install -g npm@12.0.2
+
+      - name: Install dependencies
+        working-directory: sdks/typescript
+        run: npm ci
+
+      - name: Verify canonical SDK registry-client parity
+        run: scripts/check-sdk-codegen.sh
+
+      - name: Typecheck
+        working-directory: sdks/typescript
+        run: npm run typecheck
+
+      - name: Fast unit suite
+        working-directory: sdks/typescript
+        run: npm test
+
+      - name: Build
+        working-directory: sdks/typescript
+        run: npm run build
+
+      - name: Verify package dry run
+        working-directory: sdks/typescript
+        run: npm pack --dry-run --json --ignore-scripts
+
+      - name: Pack the exact publish artifact once
+        id: pack
+        working-directory: sdks/typescript
+        run: |
+          set -euo pipefail
+          json="$(npm pack --json --ignore-scripts)"
+          filename="$(node -e 'console.log(JSON.parse(process.argv[1])[0].filename)' "$json")"
+          test -f "$filename"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the reviewed npm publish tool
+        working-directory: sdks/typescript
+        run: |
+          set -euo pipefail
+          npm pack npm@12.0.2 --ignore-scripts
+          echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  npm-12.0.2.tgz" \
+            | sha256sum -c -
+
+      - name: Build embedded dashboard for the conformance daemon
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      # The workflow-global skip flag applies here too, so the freshly built
+      # bundle's digest must accompany it for the CLI build script.
+      - name: Export dashboard bundle digest for skip-mode builds
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
+      - name: Build the real production daemon for conformance
+        run: cargo build -p tracedecay-cli --bin tracedecay
+
+      - name: Real-daemon conformance against the exact packed tarball
+        working-directory: sdks/typescript
+        run: npx vitest run test/installed-package.test.ts
+        env:
+          TRACEDECAY_SDK_TARBALL: ${{ github.workspace }}/sdks/typescript/${{ steps.pack.outputs.filename }}
+
+      - name: Record artifact digests
+        working-directory: sdks/typescript
+        run: |
+          sha256sum -- "${{ steps.pack.outputs.filename }}" \
+            > "${{ steps.pack.outputs.filename }}.sha256"
+          sha256sum -- npm-12.0.2.tgz > npm-12.0.2.tgz.sha256
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-tarball
+          path: |
+            sdks/typescript/${{ steps.pack.outputs.filename }}
+            sdks/typescript/${{ steps.pack.outputs.filename }}.sha256
+            sdks/typescript/npm-12.0.2.tgz
+            sdks/typescript/npm-12.0.2.tgz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-typescript:
+    name: Publish @tracedecay/sdk to npm
+    needs: [validate-release, build-typescript, verify-release]
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-latest
+    environment: npm-tracedecay-sdk
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarball
+          path: artifact
+
+      - name: Verify the downloaded artifact digests
+        working-directory: artifact
+        run: sha256sum -c -- *.sha256
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+
+      # Prerelease SDK versions mirror the beta release convention: they take
+      # the beta dist-tag and never take latest. Recovery re-runs are
+      # byte-verified no-ops; a republished version with different bytes is a
+      # hard failure that requires an SDK version bump.
+      #
+      # Authentication is tokenless npm trusted publishing: the reviewed npm
+      # CLI (>= 11.5.1) exchanges this job's GitHub OIDC token itself, and npm
+      # attaches provenance automatically. No token, registry-url, or .npmrc
+      # auth may exist here — a configured token would shadow the OIDC path.
+      - name: Publish the exact conformance-tested tarball with reviewed npm
+        working-directory: artifact
+        run: |
+          set -euo pipefail
+          tarball="$(ls -- tracedecay-sdk-*.tgz)"
+          version="${tarball#tracedecay-sdk-}"
+          version="${version%.tgz}"
+          dist_tag=latest
+          if [[ "$version" == *-* ]]; then
+            dist_tag=beta
+          fi
+          mkdir npm-cli
+          tar -xzf npm-12.0.2.tgz -C npm-cli
+          local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
+          if published_integrity="$(node npm-cli/package/bin/npm-cli.js view "@tracedecay/sdk@${version}" dist.integrity 2>/dev/null)" \
+            && [[ -n "$published_integrity" ]]; then
+            if [[ "$published_integrity" != "$local_integrity" ]]; then
+              echo "::error::@tracedecay/sdk@${version} is already published with different bytes; bump the SDK version"
+              exit 1
+            fi
+            echo "@tracedecay/sdk@${version} already published with identical bytes; nothing to publish"
+            exit 0
+          fi
+          if ! node npm-cli/package/bin/npm-cli.js \
+            publish "$tarball" --access public --tag "$dist_tag"; then
+            echo "::error title=npm trusted publishing failed::If npm reported ENEEDAUTH or a 404, the npm trusted publisher for @tracedecay/sdk is not configured on npmjs.com (GitHub Actions: org ScriptedAlchemy, repository tracedecay, workflow release.yml, environment npm-tracedecay-sdk), or the package does not exist yet and needs its one-time manual first publish. See docs/RELEASE-AUTOMATION.md."
+            exit 1
+          fi

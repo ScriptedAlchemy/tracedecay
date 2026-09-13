@@ -1,13 +1,15 @@
 ---
 name: tracedecay-test-changes
-description: Test current changes by running only affected tests and mapping failures back to source.
+description: Test current changes with relevant checks and map failures back to source.
 ---
 
 # /tracedecay-test-changes
 
 Use `tracedecay:assessing-impact`.
 
-- **Args:** interpret `$ARGUMENTS` as explicit changed paths; if absent, use the current working tree.
-- Preview scope read-only first. `tracedecay_run_affected_tests` and `tracedecay_diagnostics` run cargo-backed checks; respect Cursor approval/run-mode.
-
-Output: pass/fail summary, failing-symbol mapping, and suggested missing tests.
+Interpret `$ARGUMENTS` as changed paths; if absent, use the working tree. Select
+structural candidates, then respect Cursor approval and run mode while executing
+the supported Rust tests. Confirm a nonzero count. Add relevant native or host
+checks when graph selection misses integration, configuration, I/O, generated,
+or external behavior. Report results, mapped failures, and material coverage
+gaps.

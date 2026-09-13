@@ -77,7 +77,7 @@ class CheckedInFixtureTests(unittest.TestCase):
             set(metadata["crate_identities"]),
             {
                 "tracedecay-api",
-                "tracedecay-application",
+                "tracedecay-contracts",
                 "tracedecay-capture",
                 "tracedecay-domain",
                 "tracedecay-hooks",

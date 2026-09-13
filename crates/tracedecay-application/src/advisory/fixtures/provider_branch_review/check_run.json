@@ -1,0 +1,56 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:04:13Z",
+    "method": "GET",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/check-runs/88773147767",
+    "api_version": "2022-11-28",
+    "documentation": "https://docs.github.com/en/rest/checks/runs#get-a-check-run"
+  },
+  "response": {
+    "id": 88773147767,
+    "node_id": "CR_kwDOSzKG2s8AAAAUq0q8dw",
+    "name": "Format",
+    "head_sha": "e29900448db98ae58e90d08770a3bb8bfa710846",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-07-21T21:53:34Z",
+    "completed_at": "2026-07-21T21:54:08Z",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/check-runs/88773147767",
+    "html_url": "https://github.com/ScriptedAlchemy/tracedecay/actions/runs/29871723703/job/88773147767",
+    "check_suite": {
+      "id": 80912696679,
+      "node_id": null
+    },
+    "output": {
+      "title": null,
+      "summary": null,
+      "annotations_count": 1,
+      "annotations_url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/check-runs/88773147767/annotations"
+    },
+    "pull_requests": [
+      {
+        "id": 4026204542,
+        "number": 421,
+        "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/421",
+        "base": {
+          "ref": "master",
+          "sha": "8339371d01311289e2b7cd7b0669ea3549308b8c",
+          "repo": {
+            "id": 1261602522,
+            "name": "tracedecay",
+            "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay"
+          }
+        },
+        "head": {
+          "ref": "codex/tracedecay-total-redesign-plan",
+          "sha": "e29900448db98ae58e90d08770a3bb8bfa710846",
+          "repo": {
+            "id": 1261602522,
+            "name": "tracedecay",
+            "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay"
+          }
+        }
+      }
+    ]
+  }
+}

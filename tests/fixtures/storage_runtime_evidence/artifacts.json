@@ -1,0 +1,66 @@
+{
+  "artifacts": {
+    "authoritative-corrupt.sqlite3": {
+      "bytes": 53248,
+      "sha256": "950a0ec2f085610929d969b66552835e38595ac23bac5fc36cbb65dd4f159d41"
+    },
+    "fts-stale.sqlite3": {
+      "bytes": 6144,
+      "sha256": "1203c0e30a31c8465096ca8ea019aa85a1e98f5dc7c33d6a1bc513db3f3c129a"
+    },
+    "online-backup-copy.sqlite3": {
+      "bytes": 5120,
+      "sha256": "98157a9aa59243ef7cf5b1b9c8883fccaafee5261b57e3d9e24f85a77e03de3f"
+    },
+    "online-backup-digest-mismatch.sqlite3": {
+      "bytes": 5120,
+      "sha256": "0c9e3bf6e2ed6ac69bb4ddd9c86b751cc9b3c8301662642bf9b09ee78909b3e2"
+    },
+    "online-backup-source.sqlite3": {
+      "bytes": 5120,
+      "sha256": "18331f506d032fdff86602b3e194251a32a7b36b420624e11b5ca6c8bfab9167"
+    },
+    "wal-pressure.blocker.json": {
+      "bytes": 305,
+      "sha256": "99dc029a0a9a13c3f90b7ad13248d3d1cf6e2c0f81f9fd4f2c23f38034e67c12"
+    },
+    "wal-pressure.sqlite3": {
+      "bytes": 2048,
+      "sha256": "a2a875b58f67149a887e7a3c74a84aa1ab765c80cf0728d5a62d4210368c4c5d"
+    },
+    "wal-pressure.sqlite3-wal": {
+      "bytes": 137320,
+      "sha256": "40dce0b4bf13f35590087e2b12f24cca6a8e549b6be04278ab807811ac8a6a86"
+    }
+  },
+  "binding": {
+    "authority_epoch": 19,
+    "incarnation": 7,
+    "shard_id": {
+      "brain_id": "brain.s11.evidence",
+      "profile_id": "profile.s11.evidence",
+      "scope": {
+        "kind": "project",
+        "project_id": "project.s11.evidence"
+      }
+    }
+  },
+  "expectations": {
+    "authoritative_rows": 200,
+    "backup_rows": 64,
+    "crash_evidence_id": "evidence.s11.crash",
+    "crash_receipt_id": "receipt.s11.crash",
+    "fts_search_term": "needle",
+    "replacement_authority_epoch": 20,
+    "replacement_incarnation": 8,
+    "wal_pressure_rows": 129
+  },
+  "generator": {
+    "byte_reproducibility": "Byte-for-byte on the recorded Python/SQLite versions; generated WAL salts and checksums are normalized.",
+    "logical_state_deterministic": true,
+    "python": "3.12.3",
+    "script": "generate.py",
+    "sqlite": "3.45.1"
+  },
+  "schema": "tracedecay.storage-runtime-evidence.s11.v1"
+}

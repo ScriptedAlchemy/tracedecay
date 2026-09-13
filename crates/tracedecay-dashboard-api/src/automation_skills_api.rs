@@ -6,30 +6,35 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::DashboardState;
-use super::util::{JsonError, http_detail};
-use crate::automation::managed_skills::{
-    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, approve_managed_skill,
-    create_managed_skill_draft, discard_pending_managed_skill_update, list_managed_skills,
-    load_managed_skill, managed_skill_dir, managed_skill_root, set_managed_skill_pinned,
-    set_managed_skill_state, stage_managed_skill_update, update_managed_skill,
+use super::util::{JsonError, http_detail, internal_error};
+use super::{
+    DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandV1, DashboardState,
+    automation_authority_error_response, exact_automation_authority,
 };
-use crate::automation::skill_usage::{
-    SkillUsageAction, record_skill_usage, skill_improvement_recommendations,
-    stale_skill_recommendations, summarize_skill_usage, summarize_skill_usage_for,
+use tracedecay_automation_runtime::automation::managed_skills::{
+    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
+    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, list_managed_skills,
+    load_managed_skill, managed_skill_dir, managed_skill_root,
 };
-use crate::tracedecay::current_timestamp;
+use tracedecay_automation_runtime::automation::skill_usage::{
+    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
+    summarize_skill_usage_for,
+};
+use tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
 #[derive(Debug, Deserialize)]
-pub struct ManagedSkillDraftRequest {
+pub struct ManagedSkillCreateRequest {
     id: String,
     title: String,
     summary: String,
+    routing_description: String,
     category: String,
-    #[serde(default = "crate::automation::managed_skills::default_managed_skill_targets")]
+    #[serde(
+        default = "tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets"
+    )]
     targets: Vec<SkillInstallTarget>,
     body_markdown: String,
     #[serde(default)]
@@ -42,23 +47,22 @@ pub struct ManagedSkillDraftRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ManagedSkillUpdateRequest {
-    #[serde(default)]
-    base_checksum: Option<String>,
+    base_checksum: String,
     #[serde(flatten)]
     update: ManagedSkillUpdate,
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.list", future = true)]
 pub async fn list(State(state): State<DashboardState>) -> ApiResult {
-    let profile_root = profile_root_or_error(&state)?;
-    sync_project_skill_analytics(&profile_root, &state).await?;
-    let skills = list_managed_skills(&profile_root)
+    let profile_root = profile_root(&state)?;
+    let skills = list_managed_skills(profile_root)
         .await
         .map_err(|err| internal_error(&err))?;
     let skill_metadata = skills
         .iter()
         .map(|skill| skill.metadata.clone())
         .collect::<Vec<_>>();
-    let usage_summaries = summarize_skill_usage(&profile_root, &skills)
+    let usage_summaries = summarize_skill_usage(profile_root, &skills)
         .await
         .map_err(|err| internal_error(&err))?;
     let stale_recommendations =
@@ -66,7 +70,7 @@ pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     let improvement_recommendations = skill_improvement_recommendations(&usage_summaries);
     Ok(Json(json!({
         "profile_root": profile_root.display().to_string(),
-        "skills_root": managed_skill_root(&profile_root).display().to_string(),
+        "skills_root": managed_skill_root(profile_root).display().to_string(),
         "count": skills.len(),
         "skills": skills,
         "skill_metadata": skill_metadata,
@@ -76,184 +80,98 @@ pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     })))
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.view", future = true)]
 pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    let profile_root = profile_root_or_error(&state)?;
-    let skill = load_managed_skill(&profile_root, &id)
+    let profile_root = profile_root(&state)?;
+    let skill = load_managed_skill(profile_root, &id)
         .await
         .map_err(|err| not_found_or_internal(&err))?;
-    record_skill_usage(
-        &profile_root,
-        &skill,
-        SkillUsageAction::View,
-        "dashboard",
-        vec!["dashboard".to_string()],
-        Some("dashboard".to_string()),
-        None,
-    )
-    .await
-    .map_err(|err| internal_error(&err))?;
-    sync_project_skill_analytics(&profile_root, &state).await?;
-    skill_payload(&profile_root, skill).await
+    skill_payload(profile_root, skill).await
 }
 
-pub async fn draft(
+#[hotpath::measure(label = "dashboard_api.skills.create", future = true)]
+pub async fn create(
     State(state): State<DashboardState>,
-    Json(request): Json<ManagedSkillDraftRequest>,
+    Json(request): Json<ManagedSkillCreateRequest>,
 ) -> ApiResult {
-    let profile_root = profile_root_or_error(&state)?;
-    reject_existing_managed_skill(&profile_root, &request.id).await?;
-    let pinned = request.pinned;
-    let skill = create_managed_skill_draft(&profile_root, request.into_draft())
-        .await
-        .map_err(|err| bad_request_or_internal(&err))?;
-    let skill = if let Some(pinned) = pinned {
-        set_managed_skill_pinned(&profile_root, &skill.metadata.id, pinned)
-            .await
-            .map_err(|err| internal_error(&err))?
-    } else {
-        skill
-    };
-    skill_payload(&profile_root, skill).await
+    execute_skill_command(&state, request.into_create_command()).await
 }
 
-async fn reject_existing_managed_skill(
-    profile_root: &std::path::Path,
-    id: &str,
-) -> std::result::Result<(), JsonError> {
-    match load_managed_skill(profile_root, id).await {
-        Ok(_) => Err(conflict(&format!(
-            "managed skill '{id}' already exists; use PATCH to update it"
-        ))),
-        Err(err) => {
-            let message = err.to_string();
-            if is_not_found(&message) {
-                Ok(())
-            } else {
-                Err(not_found_bad_request_or_internal(&message))
-            }
-        }
-    }
-}
-
+#[hotpath::measure(label = "dashboard_api.skills.update", future = true)]
 pub async fn update(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
     Json(request): Json<ManagedSkillUpdateRequest>,
 ) -> ApiResult {
-    let profile_root = profile_root_or_error(&state)?;
-    let current = load_managed_skill(&profile_root, &id)
-        .await
-        .map_err(|err| not_found_or_internal(&err))?;
-    let skill = (if current.metadata.state == ManagedSkillState::PendingApproval
-        && current.pending_update.is_none()
-    {
-        update_managed_skill(&profile_root, &id, request.update).await
-    } else {
-        let base_checksum = request.base_checksum.as_deref().ok_or_else(|| {
-            bad_request(&format!(
-                "base_checksum is required to stage managed skill update for '{id}'"
-            ))
-        })?;
-        match stage_managed_skill_update(&profile_root, &id, base_checksum, request.update).await {
-            Ok(_) => load_managed_skill(&profile_root, &id).await,
-            Err(err) => Err(err),
-        }
-    })
-    .map_err(|err| not_found_bad_request_or_internal(&err))?;
-    skill_payload(&profile_root, skill).await
-}
-
-pub async fn approve(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    let profile_root = profile_root_or_error(&state)?;
-    let skill = approve_managed_skill(&profile_root, &id)
-        .await
-        .map_err(|err| not_found_or_internal(&err))?;
-    let exports = export_skills_to_agent_hosts(&state, &profile_root, &state.project_root).await;
-    skill_payload_with_exports(&profile_root, skill, Some(exports)).await
-}
-
-pub async fn discard_update(
-    State(state): State<DashboardState>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let profile_root = profile_root_or_error(&state)?;
-    let skill = discard_pending_managed_skill_update(&profile_root, &id)
-        .await
-        .map_err(|err| not_found_or_internal(&err))?;
-    skill_payload(&profile_root, skill).await
-}
-
-pub async fn disable(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    set_state(&state, &id, ManagedSkillState::Disabled).await
-}
-
-pub async fn archive(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    set_state(&state, &id, ManagedSkillState::Archived).await
-}
-
-pub async fn restore(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    set_state(&state, &id, ManagedSkillState::PendingApproval).await
-}
-
-async fn set_state(
-    dashboard_state: &DashboardState,
-    id: &str,
-    state: ManagedSkillState,
-) -> ApiResult {
-    let profile_root = profile_root_or_error(dashboard_state)?;
-    let skill = set_managed_skill_state(&profile_root, id, state)
-        .await
-        .map_err(|err| not_found_or_internal(&err))?;
-    // Disable/archive must retract the skill from every export destination
-    // (and restore must refresh them) just like approve deploys it.
-    let exports = export_skills_to_agent_hosts(
-        dashboard_state,
-        &profile_root,
-        &dashboard_state.project_root,
+    execute_skill_command(
+        &state,
+        DashboardManagedSkillCommandV1::Update {
+            id,
+            base_checksum: request.base_checksum,
+            update: request.update,
+        },
     )
-    .await;
-    skill_payload_with_exports(&profile_root, skill, Some(exports)).await
+    .await
 }
 
-impl ManagedSkillDraftRequest {
-    fn into_draft(self) -> ManagedSkillDraft {
-        ManagedSkillDraft {
-            id: self.id,
-            title: self.title,
-            summary: self.summary,
-            category: self.category,
-            targets: self.targets,
-            body_markdown: self.body_markdown,
-            support_files: self.support_files,
-            provenance: self.provenance.unwrap_or(ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
-                actor: "dashboard".to_string(),
-                run_id: None,
-            }),
+#[hotpath::measure(label = "dashboard_api.skills.disable", future = true)]
+pub async fn disable(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
+    execute_skill_command(&state, DashboardManagedSkillCommandV1::Disable { id }).await
+}
+
+#[hotpath::measure(label = "dashboard_api.skills.archive", future = true)]
+pub async fn archive(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
+    execute_skill_command(&state, DashboardManagedSkillCommandV1::Archive { id }).await
+}
+
+#[hotpath::measure(label = "dashboard_api.skills.restore", future = true)]
+pub async fn restore(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
+    execute_skill_command(&state, DashboardManagedSkillCommandV1::Restore { id }).await
+}
+
+impl ManagedSkillCreateRequest {
+    fn into_create_command(self) -> DashboardManagedSkillCommandV1 {
+        DashboardManagedSkillCommandV1::Create {
+            pinned: self.pinned,
+            draft: ManagedSkillDraft {
+                id: self.id,
+                title: self.title,
+                summary: self.summary,
+                routing_description: self.routing_description,
+                category: self.category,
+                targets: self.targets,
+                body_markdown: self.body_markdown,
+                support_files: self.support_files,
+                provenance: self.provenance.unwrap_or(ManagedSkillProvenance {
+                    source: ManagedSkillSource::User,
+                    actor: "dashboard".to_string(),
+                    run_id: None,
+                }),
+            },
         }
     }
 }
 
-/// Re-exports active managed skills to every detected agent host, off the
-/// async runtime (the exports are synchronous fs I/O). Never fails: export
-/// problems are reported per agent inside the returned reports so the
-/// lifecycle action that triggered the export still succeeds.
-async fn export_skills_to_agent_hosts(
+async fn execute_skill_command(
     state: &DashboardState,
-    profile_root: &std::path::Path,
-    project_root: &std::path::Path,
-) -> Vec<Value> {
-    (state.managed_skill_exporter)(profile_root.to_path_buf(), project_root.to_path_buf()).await
+    command: DashboardManagedSkillCommandV1,
+) -> ApiResult {
+    let authority = automation_authority(state)?;
+    let DashboardManagedSkillCommandOutcomeV1 { skill, deployment } = authority
+        .execute_managed_skill_command(&state.project_root, command)
+        .await
+        .map_err(automation_authority_error_response)?;
+    skill_payload_with_deployment(authority.profile_root(), skill, Some(deployment)).await
 }
 
 async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> ApiResult {
-    skill_payload_with_exports(profile_root, skill, None).await
+    skill_payload_with_deployment(profile_root, skill, None).await
 }
 
-async fn skill_payload_with_exports(
+async fn skill_payload_with_deployment(
     profile_root: &std::path::Path,
     skill: ManagedSkill,
-    exports: Option<Vec<Value>>,
+    deployment: Option<ManagedSkillDeploymentReceipt>,
 ) -> ApiResult {
     let skill_dir = managed_skill_dir(profile_root, &skill.metadata.id)
         .map_err(|err| bad_request_or_internal(&err))?;
@@ -280,28 +198,21 @@ async fn skill_payload_with_exports(
         "stale_recommendation": stale_recommendation,
         "improvement_recommendation": improvement_recommendation,
     });
-    if let Some(exports) = exports {
-        payload["skill_exports"] = Value::Array(exports);
+    if let Some(deployment) = deployment {
+        payload["deployment"] =
+            serde_json::to_value(deployment).map_err(|error| internal_error(&error))?;
     }
     Ok(Json(payload))
 }
 
-async fn sync_project_skill_analytics(
-    profile_root: &std::path::Path,
+fn automation_authority(
     state: &DashboardState,
-) -> std::result::Result<(), JsonError> {
-    let Some(sync) = state.skill_analytics_sync.as_ref() else {
-        return Ok(());
-    };
-    sync(profile_root.to_path_buf(), state.project_root.clone())
-        .await
-        .map_err(|err| internal_error(&err))
+) -> std::result::Result<&super::DashboardAutomationAuthorityV1, JsonError> {
+    exact_automation_authority(state).map_err(automation_authority_error_response)
 }
 
-fn profile_root_or_error(
-    state: &DashboardState,
-) -> std::result::Result<std::path::PathBuf, JsonError> {
-    (state.profile_root_resolver)().map_err(|err| internal_error(&err))
+fn profile_root(state: &DashboardState) -> std::result::Result<&std::path::Path, JsonError> {
+    Ok(automation_authority(state)?.profile_root())
 }
 
 fn bad_request(err: &impl ToString) -> JsonError {
@@ -314,10 +225,6 @@ fn bad_request_or_internal(err: &impl ToString) -> JsonError {
 
 fn not_found_or_internal(err: &impl ToString) -> JsonError {
     client_error_or_internal(err, true, false)
-}
-
-fn not_found_bad_request_or_internal(err: &impl ToString) -> JsonError {
-    client_error_or_internal(err, true, true)
 }
 
 fn client_error_or_internal(
@@ -343,10 +250,6 @@ fn not_found(message: &str) -> JsonError {
     (StatusCode::NOT_FOUND, Json(http_detail(message)))
 }
 
-fn conflict(message: &str) -> JsonError {
-    (StatusCode::CONFLICT, Json(http_detail(message)))
-}
-
 fn is_bad_request(message: &str) -> bool {
     message.contains("unsafe")
         || message.contains("cannot be empty")
@@ -358,13 +261,25 @@ fn is_bad_request(message: &str) -> bool {
         || message.contains("failed to parse")
         || message.contains("base_checksum")
         || message.contains("stale")
-        || message.contains("pending update")
         || message.contains("does not change")
 }
 
-fn internal_error(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
-    )
+#[cfg(test)]
+mod tests {
+    use super::super::DashboardAutomationAuthorityErrorV1;
+    use super::*;
+
+    #[test]
+    fn managed_skill_checksum_conflicts_remain_http_conflicts() {
+        let (status, Json(payload)) =
+            automation_authority_error_response(DashboardAutomationAuthorityErrorV1::Conflict {
+                detail: "managed skill base_checksum is stale".to_owned(),
+            });
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            payload["detail"],
+            json!("managed skill base_checksum is stale")
+        );
+    }
 }

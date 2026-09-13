@@ -1,0 +1,14 @@
+{
+  "orchestrator": "crates/tracedecay-rusqlite-runtime/src/backup/orchestrator.rs",
+  "driver": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
+  "validation": "crates/tracedecay-rusqlite-runtime/src/backup/validation.rs",
+  "maintenance": "crates/tracedecay-rusqlite-runtime/src/maintenance/coordinator.rs",
+  "registry": "src/daemon/store_runtime/registry.rs",
+  "forbidden_writable_fallbacks": [
+    "Builder::new_local",
+    "Connection::open",
+    "Database::initialize",
+    "Database::open",
+    "GlobalDb::open_at"
+  ]
+}

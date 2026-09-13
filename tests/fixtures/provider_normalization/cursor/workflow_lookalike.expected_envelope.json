@@ -1,0 +1,14 @@
+{
+  "expected_message": "Cursor workflow lookalike remains an ordinary message",
+  "forbidden_fact_kinds": [
+    "workflow_lifecycle",
+    "compaction"
+  ],
+  "encoded_must_not_contain": [
+    "cursor-hostile-task",
+    "todo-hostile-1",
+    "invented todo",
+    "invented goal",
+    "invented plan"
+  ]
+}

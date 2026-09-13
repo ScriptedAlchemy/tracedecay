@@ -1,6 +1,11 @@
 # Multi-Language Support (Go + Java) Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Archived record — not implementation authority.** This document preserves
+> historical intent and evidence. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
+> checks, branch/commit/worktree choreography, snapshots, receipts,
+> attestations, PR packets, and gate matrices below are not rebuild
+> instructions; validate current parser, runtime, and product behavior directly.
 
 **Goal:** Add Go and Java language support to codegraph with deep extraction, using a trait-based abstraction layer.
 

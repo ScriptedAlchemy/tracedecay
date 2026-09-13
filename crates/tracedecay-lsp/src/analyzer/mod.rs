@@ -1,15 +1,16 @@
-//! Store-free LSP diagnostics support.
+//! Generic analyzer diagnostics runtime.
 
 pub mod activity;
 pub mod adapters;
 pub mod broker;
 pub mod client;
+mod error;
+pub mod host_ownership;
+pub mod semantic;
 pub mod settings;
 
-#[derive(Debug, thiserror::Error)]
-pub enum LspError {
-    #[error("config error: {message}")]
-    Config { message: String },
-}
-
-pub type Result<T> = std::result::Result<T, LspError>;
+pub use error::{AnalyzerCancellation, AnalyzerResult, AnalyzerRuntimeError};
+pub use host_ownership::HostAnalyzerOwnership;
+pub use semantic::{
+    CompositeAnalyzerCancellation, LanguageSemanticRoute, PolyglotSemanticProvider,
+};

@@ -1,5 +1,36 @@
 {
   "$defs": {
+    "AcceptWorkProposalDispositionV1": {
+      "description": "The accept-proposal operation can commit acceptance only.",
+      "enum": [
+        "accepted"
+      ],
+      "type": "string"
+    },
+    "AcceptWorkProposalRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/AcceptWorkProposalDispositionV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal",
+        "disposition",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "AcceptWorkTaskRequestV1": {
       "additionalProperties": false,
       "properties": {
@@ -175,6 +206,23 @@
         "start",
         "output_name",
         "sources"
+      ],
+      "type": "object"
+    },
+    "AdmittedWorkExecutionV1": {
+      "additionalProperties": false,
+      "description": "Execution admission together with the immutable provider snapshot licensed\nby the accepted proposal and current configuration authority.",
+      "properties": {
+        "execution_snapshot": {
+          "$ref": "#/$defs/WorkExecutionSnapshot"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationReceiptV1"
+        }
+      },
+      "required": [
+        "mutation",
+        "execution_snapshot"
       ],
       "type": "object"
     },
@@ -2168,6 +2216,71 @@
       "description": "Strongly typed canonical identity: `CatalogGenerationId`.",
       "type": "string"
     },
+    "CodeGraphServingReadinessV1": {
+      "description": "Interactive graph-serving state for the latest sealed generation.\n\nA sealed generation can expose truthful census statistics before its graph\nprojection is ready to serve queries, so readiness is reported separately.",
+      "oneOf": [
+        {
+          "description": "No graph-serving authority exists for this worktree or generation.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The sealed generation exists, but graph activation has not completed.",
+          "properties": {
+            "state": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Graph activation completed without a serving projection.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "refused",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The verified graph projection is installed for interactive reads.",
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "CodeIndexBuildBlockedReasonV1": {
       "description": "A typed reason an otherwise active generation cannot make durable progress.",
       "enum": [
@@ -2234,8 +2347,8 @@
           "minimum": 0,
           "type": "integer"
         },
-        "completed_lexical_bytes": {
-          "description": "Authenticated sealed lexical-byte boundary completed by committed work.",
+        "completed_lexical_units": {
+          "description": "Authenticated lexical-span boundary completed by committed work, in the\nsealed source's own advance unit.\n\nThe unit is the source's, not this surface's: a sealed-layout source\nadvances over the files-array byte span, while a published or\npartitioned source advances over file ordinals because its file records\nare not a contiguous byte range at all. Both are monotone and share the\ndenominator below, so completion and the derived estimate are truthful;\nnaming them bytes was not, and a consumer that multiplied this by an\naverage file size was wrong by orders of magnitude (issue #1205).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -2299,8 +2412,8 @@
           "format": "int64",
           "type": "integer"
         },
-        "lexical_bytes_per_second": {
-          "description": "Rolling committed lexical-byte throughput, absent until it is established.",
+        "lexical_units_per_second": {
+          "description": "Rolling committed lexical-span throughput in units per second, absent\nuntil it is established. Not a byte rate; see\n[`Self::completed_lexical_units`].",
           "format": "double",
           "type": [
             "number",
@@ -2333,8 +2446,8 @@
           "minimum": 0,
           "type": "integer"
         },
-        "total_lexical_bytes": {
-          "description": "Authenticated sealed lexical-byte bound for this generation.",
+        "total_lexical_units": {
+          "description": "Authenticated lexical-span bound for this generation, in the same unit\nas [`Self::completed_lexical_units`].",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -2353,17 +2466,53 @@
         "committed_payload_bytes",
         "completed_files",
         "total_files",
-        "completed_lexical_bytes",
-        "total_lexical_bytes",
+        "completed_lexical_units",
+        "total_lexical_units",
         "current_batch_pages",
         "current_batch_payload_bytes",
         "elapsed_micros",
         "last_commit_latency_micros",
         "files_per_second",
-        "lexical_bytes_per_second",
+        "lexical_units_per_second",
         "estimated_remaining_seconds",
         "last_progress_micros",
         "blocked_reason"
+      ],
+      "type": "object"
+    },
+    "CodeIndexConvergenceParkedV1": {
+      "description": "A deterministic contract violation that parked background convergence.\n\nParked is not dead: the worker keeps re-observing the violation on its\nordinary wake cadence, so an operator fix (for example restoring an\nowner-private mode) is picked up on the next wake without a restart. The\nstate exists so `status`, doctor, and the dashboard report the violation\ntyped instead of an indefinite \"warming\".",
+      "properties": {
+        "observed_passes": {
+          "description": "Background passes that re-observed the violation since parking.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parked_at_micros": {
+          "description": "When the violation was first observed (microseconds since the Unix epoch).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Exact typed failure that parked convergence.",
+          "type": "string"
+        },
+        "remediation": {
+          "description": "Operator action that clears the violation.",
+          "type": "string"
+        },
+        "retries_on_wake": {
+          "description": "Whether the worker re-checks this violation on every ordinary wake.\nTrue for filesystem/contract violations an operator fix clears in\nplace; false for an abnormal task failure that only changed input (a\nnew sealed generation) retries.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reason",
+        "remediation",
+        "parked_at_micros",
+        "observed_passes",
+        "retries_on_wake"
       ],
       "type": "object"
     },
@@ -2382,6 +2531,40 @@
       "required": [
         "worktrees",
         "note"
+      ],
+      "type": "object"
+    },
+    "CodeIndexGenerationRecoveryServingV1": {
+      "description": "Serving disposition of an incompatible generation during recovery.",
+      "enum": [
+        "preserved",
+        "refused"
+      ],
+      "type": "string"
+    },
+    "CodeIndexGenerationRecoveryV1": {
+      "description": "Recovery state for a durable generation sealed under a different production\nowner configuration.",
+      "properties": {
+        "incompatibilities": {
+          "description": "Stable owner-input reason codes reported by the code-index authority.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "incompatible_generation_id": {
+          "description": "Generation retired from incremental reuse.",
+          "type": "string"
+        },
+        "serving": {
+          "$ref": "#/$defs/CodeIndexGenerationRecoveryServingV1",
+          "description": "Whether the prior generation may continue serving while its replacement\nbuilds under the current configuration."
+        }
+      },
+      "required": [
+        "incompatible_generation_id",
+        "incompatibilities",
+        "serving"
       ],
       "type": "object"
     },
@@ -2504,9 +2687,31 @@
     "CodeIndexWorktreeFreshnessV1": {
       "description": "Freshness/generation state for one mounted worktree.\n\n`Deserialize` is part of the wire contract: the CLI status command decodes\nexactly this type back out of the daemon's `tracedecay_status` response,\nkeeping one authority for the freshness shape.",
       "properties": {
+        "code_graph_serving": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeGraphServingReadinessV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether that generation's verified graph projection can serve reads."
+        },
         "coverage": {
           "description": "Whether this read covers the complete mounted scheduler state.",
           "type": "string"
+        },
+        "generation_recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexGenerationRecoveryV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "One-shot owner-configuration recovery currently replacing an\nincompatible durable generation."
         },
         "hook_hint_count": {
           "description": "Pending hook-hint count, when cheaply available.",
@@ -2532,6 +2737,17 @@
             "null"
           ]
         },
+        "parked": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexConvergenceParkedV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Deterministic contract violation currently parking background\nconvergence, when one is observed. `staleness_state` reads `parked`\nwhile this is set and no generation serves."
+        },
         "progress": {
           "anyOf": [
             {
@@ -2542,6 +2758,11 @@
             }
           ],
           "description": "Latest committed progress for the active generation, if one is mounted."
+        },
+        "rebuild_in_flight": {
+          "default": false,
+          "description": "Whether the exact scheduler route owns a reconcile pass or has a\npending wake. A stale seated generation with this false is stalled,\nnot in a routine rebuild window.",
+          "type": "boolean"
         },
         "repository_id": {
           "description": "Stable repository identity resolved by the scheduler.",
@@ -2609,9 +2830,11 @@
         "sealed_at_micros",
         "last_reconcile_micros",
         "staleness_state",
+        "rebuild_in_flight",
         "hook_hint_count",
         "coverage",
-        "progress"
+        "progress",
+        "parked"
       ],
       "type": "object"
     },
@@ -2626,6 +2849,22 @@
         "insufficient_evidence"
       ],
       "type": "string"
+    },
+    "ComplexityAnalysisV1": {
+      "description": "Whether the bounded complexity walk over a symbol's body ran to the end.\n\nThe extractor stops walking a body once its traversal budget is spent. The\ncounters accumulated by then are lower bounds over the visited prefix, not\nfacts about the whole body, so every surface that prints, ranks, or\naggregates complexity must render this state instead of treating those\ncounters as exact.",
+      "oneOf": [
+        {
+          "enum": [
+            "complete"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "traversal_budget_exhausted",
+          "description": "The walk stopped when the traversal budget ran out.",
+          "type": "string"
+        }
+      ]
     },
     "ComponentVersion": {
       "description": "Strongly typed canonical identity: `ComponentVersion`.",
@@ -8235,6 +8474,11 @@
           "const": "table_growth",
           "description": "Per-table SQLite payload growth observed between two retained\nwatermarks, including baseline and unavailable measurement states.",
           "type": "string"
+        },
+        {
+          "const": "pending_schema_migration",
+          "description": "A store whose historical schema convergence has not completed: the\nmigrations whose cost scales with store size are still pending, still\nrunning, or stopped on a failure. The daemon serves while they run, so\nthis is the surface that says which store is still migrating and why.",
+          "type": "string"
         }
       ]
     },
@@ -10728,11 +10972,23 @@
           ]
         },
         "branches": {
+          "description": "Exact counters; `None` when `complexity_analysis` reports that the\nbounded walk did not cover the body.",
           "format": "int64",
           "type": [
             "integer",
             "null"
           ]
+        },
+        "complexity_analysis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComplexityAnalysisV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`None` only where this surface carries no extraction metadata at all."
         },
         "degree": {
           "format": "int64",
@@ -10912,6 +11168,7 @@
         "unsafe_blocks",
         "unchecked_calls",
         "assertions",
+        "complexity_analysis",
         "updated_at",
         "parent_id",
         "degree",
@@ -14851,9 +15108,15 @@
         "query_digest": {
           "$ref": "#/$defs/ManifestDigest"
         },
+        "root_cursors": {
+          "items": {
+            "$ref": "#/$defs/RootScopeOutcomeV1_for_Nullable_string"
+          },
+          "type": "array"
+        },
         "root_generations": {
           "items": {
-            "$ref": "#/$defs/RootScopeOutcomeV1_for_RootGenerationV1"
+            "$ref": "#/$defs/RootScopeOutcomeV1_for_Nullable_RootGenerationV1"
           },
           "type": "array"
         },
@@ -14864,6 +15127,7 @@
       "required": [
         "scope_set_digest",
         "root_generations",
+        "root_cursors",
         "query_digest",
         "order_digest",
         "next_page",
@@ -14996,7 +15260,14 @@
           "$ref": "#/$defs/ScopeOutcome_for_Array_of_AnyValue"
         },
         "continuation": {
-          "$ref": "#/$defs/MultiRootContinuationV1"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MultiRootContinuationV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "roots": {
           "items": {
@@ -17088,6 +17359,38 @@
       ],
       "type": "object"
     },
+    "ReviewWorkProposalDispositionV1": {
+      "description": "The only non-accepting dispositions the proposal-review operation can\ncommit. The broader decision request remains available to the graph\nmutation operation, which owns all decision forms.",
+      "enum": [
+        "rejected",
+        "superseded"
+      ],
+      "type": "string"
+    },
+    "ReviewWorkProposalRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/ReviewWorkProposalDispositionV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal",
+        "disposition",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "RootGenerationV1": {
       "additionalProperties": false,
       "description": "Immutable collection and stack revisions for one exact resolved root.",
@@ -17130,12 +17433,29 @@
       ],
       "type": "object"
     },
-    "RootScopeOutcomeV1_for_RootGenerationV1": {
+    "RootScopeOutcomeV1_for_Nullable_RootGenerationV1": {
       "additionalProperties": false,
       "description": "One typed outcome pinned to the digest of an exact resolved root.",
       "properties": {
         "outcome": {
-          "$ref": "#/$defs/ScopeOutcome_for_RootGenerationV1"
+          "$ref": "#/$defs/ScopeOutcome_for_Nullable_RootGenerationV1"
+        },
+        "scope_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "scope_digest",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "RootScopeOutcomeV1_for_Nullable_string": {
+      "additionalProperties": false,
+      "description": "One typed outcome pinned to the digest of an exact resolved root.",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/ScopeOutcome_for_Nullable_string"
         },
         "scope_digest": {
           "$ref": "#/$defs/ManifestDigest"
@@ -17842,7 +18162,7 @@
         }
       ]
     },
-    "ScopeOutcome_for_RootGenerationV1": {
+    "ScopeOutcome_for_Nullable_RootGenerationV1": {
       "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
       "oneOf": [
         {
@@ -17852,7 +18172,14 @@
               "type": "string"
             },
             "value": {
-              "$ref": "#/$defs/RootGenerationV1"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RootGenerationV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -17873,7 +18200,105 @@
                   "$ref": "#/$defs/ScopePartialReasonV1"
                 },
                 "value": {
-                  "$ref": "#/$defs/RootGenerationV1"
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/RootGenerationV1"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "unavailable",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ScopeUnavailableReasonV1"
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScopeOutcome_for_Nullable_string": {
+      "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "exact",
+              "type": "string"
+            },
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ScopePartialReasonV1"
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -17987,6 +18412,70 @@
       "description": "Strongly typed canonical identity: `SessionId`.",
       "type": "string"
     },
+    "SessionRetrievalBudgetAccountingV1": {
+      "additionalProperties": false,
+      "description": "The ceiling and count behind a budget refusal.\n\n`stage` names which budget refused; this is what tells an oversized request\napart from a read whose cost was mis-sized for it. The ceiling value also\ndistinguishes the resources inside one stage — a record read that stopped at\n1024 hit the item count, one that stopped at 16 MiB hit the byte total — so\nthe kernel's resource spelling stays in the kernel instead of becoming a\nsecond wire vocabulary to keep in step.",
+      "properties": {
+        "limit": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed": {
+          "$ref": "#/$defs/SessionRetrievalBudgetObservationV1"
+        }
+      },
+      "required": [
+        "limit",
+        "observed"
+      ],
+      "type": "object"
+    },
+    "SessionRetrievalBudgetObservationV1": {
+      "description": "What a refusing budget boundary had counted.\n\nBoth variants are exact. A bounded read never counts the rows it declined to\nread, so an exhausted read reports what it consumed and that storage held\nmore — never a total it would have to run the refused scan to learn.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The request asked for more units than the admitted maximum.",
+          "properties": {
+            "observation": {
+              "const": "requested",
+              "type": "string"
+            },
+            "units": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "observation",
+            "units"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The read consumed its whole budget and storage still held more.",
+          "properties": {
+            "observation": {
+              "const": "consumed_with_more_available",
+              "type": "string"
+            },
+            "units": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "observation",
+            "units"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SessionRetrievalBudgetStageV1": {
       "description": "Structural budget boundary that rejected a session retrieval request.\nThese causes are non-retryable request corrections; concurrent permit or\nqueue pressure remains a separate capacity-saturation failure.",
       "enum": [
@@ -17998,9 +18487,12 @@
         "request_hydration_bytes",
         "estimator_version_mismatch",
         "execution_work_exhausted",
+        "candidate_read_exhausted",
+        "record_read_exhausted",
         "kernel_result_limit",
         "participant_manifest_participants",
         "participant_manifest_canonical_bytes",
+        "cursor_manifest_limit",
         "hydration_bytes",
         "context_bytes",
         "context_tokens"
@@ -18041,6 +18533,17 @@
         {
           "additionalProperties": false,
           "properties": {
+            "accounting": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionRetrievalBudgetAccountingV1"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present when the refusing boundary keeps a counter. A request-shape\ncheck has none and reports `None` rather than inventing numbers."
+            },
             "refusal": {
               "const": "budget_exhausted",
               "type": "string"
@@ -18051,7 +18554,8 @@
           },
           "required": [
             "refusal",
-            "stage"
+            "stage",
+            "accounting"
           ],
           "type": "object"
         }
@@ -18125,8 +18629,11 @@
     },
     "SharedProfileStoreLocatorV1": {
       "additionalProperties": false,
-      "description": "Shared physical profile-store locator supplied by the profile authority.\n\nThe typed profile and store IDs select this locator. It never derives an\nidentity from a path, CWD, active graph, or mutable project alias.",
+      "description": "Logical and verified physical identity of the shared Profile shard.\n\nBrain and profile IDs select the shard; the verified store locator binds its\nphysical store. Lease incarnations and authority epochs remain runtime fences.",
       "properties": {
+        "brain_id": {
+          "$ref": "#/$defs/BrainId"
+        },
         "profile_id": {
           "$ref": "#/$defs/UserProfileId"
         },
@@ -18135,6 +18642,7 @@
         }
       },
       "required": [
+        "brain_id",
         "profile_id",
         "store_id"
       ],
@@ -20896,7 +21404,7 @@
     },
     "WorkAttemptRecoveryReportV1": {
       "additionalProperties": false,
-      "description": "What resume-after-restart did to each open attempt.",
+      "description": "What restart recovery did to each open attempt.\n\nThis report never claims that a provider resumed. An attempt in\n`recovery_required` remains fenced under its original identity. This report\ndoes not authorize another launch; an explicit `retry_attempt` must verify\nthe exact recovery fence and effect safety before it can atomically admit a\nnew identity.",
       "properties": {
         "cancelled": {
           "description": "Attempts whose in-flight cancellation was completed during recovery.",
@@ -20906,7 +21414,7 @@
           "type": "array"
         },
         "recovery_required": {
-          "description": "Attempts fenced onto a new epoch and now awaiting recovery execution.",
+          "description": "Attempts fenced onto a new epoch and awaiting an explicit recovery\ndecision.",
           "items": {
             "$ref": "#/$defs/WorkAttemptV1"
           },
@@ -22538,6 +23046,13 @@
           "type": "array",
           "uniqueItems": true
         },
+        "attempt_receipts": {
+          "description": "Exact receipts for accepted successful attempts whose sealed provider\nevidence and declared artifacts establish reusable observed work. The\nidentity is also the canonical `work_retrieve_evidence` drill target.",
+          "items": {
+            "$ref": "#/$defs/WorkAttemptReceiptV1"
+          },
+          "type": "array"
+        },
         "evidence": {
           "description": "Exact anchored evidence establishing that this is observed experience.",
           "items": {
@@ -22552,6 +23067,7 @@
       "required": [
         "item",
         "evidence",
+        "attempt_receipts",
         "applicability"
       ],
       "type": "object"
@@ -25856,6 +26372,9 @@
           },
           "type": "array"
         },
+        "configuration_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
         "evidence_digest": {
           "$ref": "#/$defs/ManifestDigest"
         },
@@ -25887,7 +26406,8 @@
         "children",
         "route",
         "explanation",
-        "evidence_digest"
+        "evidence_digest",
+        "configuration_digest"
       ],
       "type": "object"
     },
@@ -26149,6 +26669,9 @@
         {
           "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
           "properties": {
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
             "reason": {
               "$ref": "#/$defs/WorkRestartReasonV1"
             },
@@ -26171,7 +26694,8 @@
           "required": [
             "state",
             "source_attempt_id",
-            "reason"
+            "reason",
+            "observed_at"
           ],
           "type": "object"
         }
@@ -26304,7 +26828,8 @@
     },
     "WorkRetryCauseV1": {
       "enum": [
-        "runtime_failure"
+        "runtime_failure",
+        "restart_recovery_required"
       ],
       "type": "string"
     },
@@ -27890,7 +28415,8 @@
           "type": "integer"
         },
         "pinned_catalog_digest": {
-          "$ref": "#/$defs/ManifestDigest"
+          "$ref": "#/$defs/ManifestDigest",
+          "description": "Must equal the live Work executable catalog digest. Validation and\nactivation report the current digest when this pin is stale."
         },
         "pinned_configuration_digest": {
           "$ref": "#/$defs/ManifestDigest"
@@ -27932,6 +28458,7 @@
           "type": "integer"
         },
         "expected_revision": {
+          "description": "Current candidate disposition revision. A newly registered candidate\nstarts at revision 1; activation reports expected and observed values\nwhen this compare-and-swap precondition is stale.",
           "format": "uint64",
           "minimum": 1,
           "type": "integer"
@@ -28466,6 +28993,38 @@
         },
         {
           "properties": {
+            "planned_attempt": {
+              "$ref": "#/$defs/WorkAttemptIdentityV1"
+            },
+            "prior_attempt": {
+              "$ref": "#/$defs/WorkAttemptIdentityV1"
+            },
+            "replacement_attempt": {
+              "$ref": "#/$defs/WorkAttemptIdentityV1"
+            },
+            "retry_receipt_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "step_id": {
+              "$ref": "#/$defs/WorkflowStepId"
+            },
+            "type": {
+              "const": "fan_out_child_retry_rebound",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "step_id",
+            "planned_attempt",
+            "prior_attempt",
+            "replacement_attempt",
+            "retry_receipt_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "placement": {
               "$ref": "#/$defs/WorkflowPlacementReceipt"
             },
@@ -28603,6 +29162,12 @@
     "WorkflowRunProjection": {
       "additionalProperties": false,
       "properties": {
+        "active_fan_out_attempts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkAttemptIdentityV1"
+          },
+          "type": "object"
+        },
         "definition": {
           "$ref": "#/$defs/WorkflowDefinition"
         },
@@ -28667,6 +29232,7 @@
         "fan_out_plans",
         "released_fan_out_attempts",
         "settled_fan_out_attempts",
+        "active_fan_out_attempts",
         "history"
       ],
       "type": "object"
@@ -29207,6 +29773,9 @@
     "storage_telemetry": {
       "$ref": "#/$defs/StorageTelemetryPayloadV1"
     },
+    "work_accept_proposal_request": {
+      "$ref": "#/$defs/AcceptWorkProposalRequestV1"
+    },
     "work_admit_execution_request": {
       "$ref": "#/$defs/AdmitWorkExecutionRequestV1"
     },
@@ -29215,6 +29784,9 @@
     },
     "work_admit_synthesis_command": {
       "$ref": "#/$defs/AdmitWorkSynthesisCommand"
+    },
+    "work_admitted_execution": {
+      "$ref": "#/$defs/AdmittedWorkExecutionV1"
     },
     "work_artifact_hydration": {
       "$ref": "#/$defs/WorkArtifactHydrationV1"
@@ -29242,9 +29814,6 @@
     },
     "work_create_task_request": {
       "$ref": "#/$defs/CreateWorkTaskRequestV1"
-    },
-    "work_decide_proposal_request": {
-      "$ref": "#/$defs/DecideWorkProposalRequestV1"
     },
     "work_duplicate_adjudication_command": {
       "$ref": "#/$defs/WorkDuplicateAdjudicationCommandV1"
@@ -29335,6 +29904,9 @@
     },
     "work_retry_attempt_outcome": {
       "$ref": "#/$defs/WorkRetryAttemptOutcomeV1"
+    },
+    "work_review_proposal_request": {
+      "$ref": "#/$defs/ReviewWorkProposalRequestV1"
     },
     "work_run_control": {
       "$ref": "#/$defs/WorkRunControlV1"
@@ -29448,8 +30020,10 @@
     "work_generate_proposal_request",
     "work_generated_proposal",
     "work_create_task_request",
-    "work_decide_proposal_request",
+    "work_review_proposal_request",
+    "work_accept_proposal_request",
     "work_admit_execution_request",
+    "work_admitted_execution",
     "work_start_attempt_command",
     "work_admit_synthesis_command",
     "work_synthesis_attempt",
