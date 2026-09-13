@@ -18,7 +18,8 @@ use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::plan_temporal_candidates;
 use tracedecay_temporal_query::ports::{
     BindingDigest, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, ExecutionControl,
-    ExecutionLimits, KernelVersions, PageLimits, PageRequest, PageStatus, TemporalAuthorizedRoot,
+    ExecutionLimits, KernelVersions, PageLimits, PageRequest, PageStatus, ReadBudgetAccounting,
+    TemporalAuthorizedRoot,
     TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
     TemporalParticipantManifest, TemporalPortError, TemporalPreparedCandidateCohort,
     TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
@@ -314,7 +315,7 @@ async fn root_candidate_preparation_matches_direct_request_producer() {
 }
 
 #[tokio::test]
-async fn root_candidate_preparation_preserves_item_byte_budget_failure() {
+async fn root_candidate_preparation_sizes_the_clause_byte_refusal() {
     let dir = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
@@ -329,10 +330,24 @@ async fn root_candidate_preparation_preserves_item_byte_budget_failure() {
         ..ExecutionLimits::default()
     });
     let plan = plan_temporal_candidates("needle candidate", None, false);
-    assert!(matches!(
-        adapter.prepare_root_candidate_cohort(&request, &plan).await,
-        Err(TemporalPortError::BudgetExceeded { .. })
-    ));
+    let Err(TemporalPortError::BudgetExceeded {
+        resource,
+        accounting,
+    }) = adapter.prepare_root_candidate_cohort(&request, &plan).await
+    else {
+        panic!("an 8-byte candidate ceiling must refuse the fixture's candidates");
+    };
+    assert_eq!(resource, "candidate clause bytes");
+    // A refusal an operator cannot size is a refusal they cannot act on: the
+    // boundary has to say what it admitted and what the clause text asked for.
+    assert_eq!(
+        accounting,
+        Some(ReadBudgetAccounting::requested(
+            8,
+            "needle candidate".len() as u64
+        )),
+        "an oversized clause is a request against a ceiling, not a consumed budget"
+    );
 }
 
 #[tokio::test]
