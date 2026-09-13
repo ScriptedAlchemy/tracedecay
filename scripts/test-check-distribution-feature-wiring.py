@@ -114,8 +114,10 @@ name = "tracedecay-semantic"
 version = "0.1.0"
 
 [dependencies]
-fastembed = { version = "=5.17.3", optional = true, default-features = false }
 hf-hub = { version = "0.5", optional = true, default-features = false }
+
+[target.'cfg(not(windows))'.dependencies]
+fastembed = { version = "=5.17.3", optional = true, default-features = false }
 
 [features]
 semantic-fastembed = [
@@ -143,7 +145,6 @@ hotpath = [
     "tracedecay/hotpath",
     "hotpath/hotpath",
     "hotpath/tokio",
-    "hotpath/axum-0-8",
     "hotpath/ureq-3",
 ]
 hotpath-alloc = [
