@@ -3435,18 +3435,29 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
     fn into_semantic_vector_runtime(
         self: Box<Self>,
         scope: SemanticVectorGraphScopeV1,
-    ) -> Arc<dyn VerifiedSemanticVectorGraphRuntimeV1> {
+    ) -> std::result::Result<Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>, GraphDbError> {
         let (source_scope, binding) = {
             let (scope, binding) =
                 RetainedCodeGraphRuntimeV1::semantic_vector_staging_binding(self.as_ref());
             (scope.clone(), binding.clone())
         };
-        Arc::new(DaemonVerifiedSemanticVectorGraphRuntimeV1::new(
+        let graph_cancellation: Arc<dyn GraphCancellation> = Arc::new(
+            AtomicGraphCancellationV1::new(Arc::clone(&self.lifecycle_cancelled)),
+        );
+        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
+        let graph_lease = self.graph_registry.resolve(GraphDbRegistration {
+            authority_lease,
+            lifecycle_cancellation: Arc::clone(&graph_cancellation),
+            cancellation: graph_cancellation,
+            deadline: Instant::now() + sealed_projection_deadline(),
+        })?;
+        Ok(Arc::new(DaemonVerifiedSemanticVectorGraphRuntimeV1::new(
             Arc::from(self),
             scope,
             source_scope,
             binding,
-        ))
+            graph_lease,
+        )))
     }
 }
 

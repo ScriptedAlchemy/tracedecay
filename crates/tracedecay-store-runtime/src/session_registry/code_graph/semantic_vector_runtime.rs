@@ -5,8 +5,8 @@ use tracedecay_application::semantic_runtime::{
     SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 use tracedecay_graph_db::{
-    GraphDbError, GraphWriteBatch, VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
-    VerifiedGraphSnapshot,
+    GraphDbError, GraphDbLeaseV1, GraphWriteBatch, VerifiedGenerationBatchCommit,
+    VerifiedGenerationBeginV1, VerifiedGraphSnapshot,
 };
 use tracedecay_store::{
     GraphPublicationKeyV1, GraphVerifiedHeadV1, SemanticVectorPublishedGenerationKey,
@@ -24,6 +24,7 @@ pub(crate) struct DaemonVerifiedSemanticVectorGraphRuntimeV1 {
     scope: SemanticVectorGraphScopeV1,
     source_scope: StoreShardIdV1,
     binding: StoreRuntimeBindingV1,
+    _graph_lease: GraphDbLeaseV1,
 }
 
 impl DaemonVerifiedSemanticVectorGraphRuntimeV1 {
@@ -32,12 +33,14 @@ impl DaemonVerifiedSemanticVectorGraphRuntimeV1 {
         scope: SemanticVectorGraphScopeV1,
         source_scope: StoreShardIdV1,
         binding: StoreRuntimeBindingV1,
+        graph_lease: GraphDbLeaseV1,
     ) -> Self {
         Self {
             retained,
             scope,
             source_scope,
             binding,
+            _graph_lease: graph_lease,
         }
     }
 }

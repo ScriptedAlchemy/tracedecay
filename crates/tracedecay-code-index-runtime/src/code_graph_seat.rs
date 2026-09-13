@@ -95,7 +95,7 @@ pub trait CodeGraphSeatLeaseV1: Send {
     fn into_semantic_vector_runtime(
         self: Box<Self>,
         scope: SemanticVectorGraphScopeV1,
-    ) -> Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>;
+    ) -> std::result::Result<Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>, GraphDbError>;
 }
 
 /// Registry-side seat gate the code-index scheduler consumes.

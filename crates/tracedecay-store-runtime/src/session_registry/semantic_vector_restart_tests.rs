@@ -415,7 +415,9 @@ fn retain_semantic_graph(
         source_dependency,
     )
     .expect("semantic vector graph scope");
-    let runtime = Box::new(runtime).into_semantic_vector_runtime(scope);
+    let runtime = Box::new(runtime)
+        .into_semantic_vector_runtime(scope)
+        .expect("retain semantic vector graph runtime");
     RetainedSemanticVectorGraphV1::new(runtime, Arc::new(NeverCancelled))
 }
 

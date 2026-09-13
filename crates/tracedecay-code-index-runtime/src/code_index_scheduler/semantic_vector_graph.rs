@@ -678,7 +678,9 @@ impl DaemonSemanticVectorGraphProviderV1 {
         )
         .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;
         let _ = lease.semantic_vector_staging_binding();
-        let runtime = lease.into_semantic_vector_runtime(semantic_scope);
+        let runtime = lease
+            .into_semantic_vector_runtime(semantic_scope)
+            .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;
         Ok(
             RetainedSemanticVectorGraphV1::new_with_operation_task_owner(
                 runtime,

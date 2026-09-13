@@ -20,10 +20,11 @@ use tracedecay_domain::{
     sha256_hex_suffix,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1,
-    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphGenerationDependency,
-    GraphProjectionIdentity, GraphProjectorRevision, GraphWriteBatch, NeverCancelled,
-    VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1, VerifiedGraphSnapshot,
+    GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwnerAttachmentV1,
+    GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
+    GraphGenerationDependency, GraphProjectionIdentity, GraphProjectorRevision, GraphWriteBatch,
+    NeverCancelled, VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
+    VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter,
@@ -173,6 +174,7 @@ impl RuntimeRequestProbeV1 for EvaluationOperationProbeV1 {
 
 pub struct IsolatedSemanticEvaluationGraphV1 {
     registry: GraphDbRegistry,
+    _graph_lease: GraphDbLeaseV1,
     _graph_owner: GraphDbOwnerAttachmentV1,
     lease: Arc<EvaluationGraphLeaseV1>,
     binding: StoreRuntimeBindingV1,
@@ -382,8 +384,10 @@ impl IsolatedSemanticEvaluationGraphV1 {
             Arc::clone(&lease),
             Arc::clone(&cancellation),
         )?;
+        let graph_lease = graph_owner.issue_lease()?;
         let runtime = Self {
             registry,
+            _graph_lease: graph_lease,
             _graph_owner: graph_owner,
             lease,
             binding,
