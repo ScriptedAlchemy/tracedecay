@@ -1504,6 +1504,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // becomes a retained pass on its next wake and recreates the
                 // same source and resident-memory contention we avoid above.
                 if prepare_graph
+                    && !graph_already_serves
                     && graph_text
                         .as_ref()
                         .is_none_or(|text| !text.text_serving_is_ready())
