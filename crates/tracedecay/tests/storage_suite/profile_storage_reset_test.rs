@@ -17,6 +17,7 @@ struct HomeEnvGuard {
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
+        crate::common::register_process_runtime_ports();
         Self {
             _home: EnvVarGuard::set("HOME", home),
             _userprofile: EnvVarGuard::set("USERPROFILE", home),

@@ -817,6 +817,7 @@ mod reset_project_store_tests {
 
     #[tokio::test]
     async fn same_version_incompatible_store_is_reset_while_exact_store_survives() {
+        tracedecay::register_runtime_ports().expect("runtime port registration");
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         let project_root = temp.path().join("healthy-project");

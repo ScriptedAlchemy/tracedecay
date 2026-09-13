@@ -45,6 +45,7 @@ struct HomeGuard {
 
 impl HomeGuard {
     fn set(home: &Path) -> Self {
+        crate::common::register_process_runtime_ports();
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);

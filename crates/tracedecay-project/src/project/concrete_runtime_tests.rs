@@ -60,6 +60,10 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
 
 #[tokio::test]
 async fn source_reads_reuse_the_cross_session_cache() {
+    crate::runtime_ports::register_runtime_ports(
+        crate::runtime_ports::fixture_daemon_client_ports(),
+    )
+    .expect("runtime port registration");
     let root = TempDir::new().expect("temporary project");
     fs::create_dir_all(root.path().join("src")).expect("source directory");
     let source = "pub fn first() {}\npub fn second() {}\n";

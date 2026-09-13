@@ -14,6 +14,7 @@ async fn initialize_test_project(
     project_root: &Path,
     profile_root: &Path,
 ) -> tracedecay_runtime_core::storage::StoreLayout {
+    crate::register_runtime_ports().expect("runtime port registration");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

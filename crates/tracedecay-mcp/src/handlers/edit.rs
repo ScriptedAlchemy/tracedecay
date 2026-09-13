@@ -718,6 +718,10 @@ mod tests {
     async fn fixture_graph(
         project_root: &Path,
     ) -> (TraceDecay, tracedecay_runtime_core::db::DaemonDatabaseScope) {
+        tracedecay_project::runtime_ports::register_runtime_ports(
+            tracedecay_project::runtime_ports::fixture_daemon_client_ports(),
+        )
+        .expect("runtime port registration");
         let profile_root = project_root.join(".tracedecay-test-profile");
         let open_options = TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),

@@ -49,6 +49,7 @@ pub(crate) fn fixture_open_options(project_root: &Path) -> TraceDecayOpenOptions
 }
 
 pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
+    crate::common::register_process_runtime_ports();
     fs::create_dir_all(project_root.join("src")).unwrap();
     fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let project_root = fs::canonicalize(project_root).unwrap();
