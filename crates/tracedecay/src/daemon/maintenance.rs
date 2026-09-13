@@ -240,6 +240,7 @@ const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_hours(24);
 #[derive(Clone)]
 pub(super) struct MaintenanceCoordinator {
     cancellation: tracedecay_session_memory::context::CancellationToken,
+    background_cpu: Option<Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>>,
     wake: Arc<MaintenanceWake>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
     metrics: Arc<Mutex<MaintenanceMetricsV1>>,
@@ -262,6 +263,7 @@ impl Default for MaintenanceCoordinator {
     fn default() -> Self {
         Self {
             cancellation: tracedecay_session_memory::context::CancellationToken::new(),
+            background_cpu: None,
             wake: Arc::new(MaintenanceWake::default()),
             task: Arc::new(Mutex::new(None)),
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
@@ -315,7 +317,12 @@ impl MaintenanceCoordinator {
         retention: tracedecay_configuration::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
     ) -> Self {
-        let coordinator = Self::default();
+        let coordinator = Self {
+            background_cpu: administration
+                .session_temporal_refresh_schedulers()
+                .background_cpu(),
+            ..Self::default()
+        };
         // Measured RSS is a process fact that admission trusts, so it is
         // sampled on its own short cadence regardless of whether retention
         // maintenance runs: the retention tick is hours apart, and a cold
@@ -489,6 +496,20 @@ impl MaintenanceCoordinator {
         branch_gc: BranchStoreGcCadenceV1,
         continuation: Option<MaintenanceContinuation>,
     ) -> MaintenanceTickOutcome {
+        let Some(background_cpu) = self.background_cpu.as_ref() else {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "maintenance_tick".to_owned()),
+                    ("failure", "background_cpu_authority_unavailable".to_owned()),
+                ],
+            );
+            return MaintenanceTickOutcome::Retry;
+        };
+        let Some(_background_cpu) = background_cpu.try_acquire() else {
+            hotpath::gauge!("daemon.maintenance.background_cpu_deferred_total").inc(1_u64);
+            return MaintenanceTickOutcome::Retry;
+        };
         administration
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
