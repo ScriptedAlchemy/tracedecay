@@ -813,6 +813,7 @@ _SCOUT_ADDRESS_PREFIX = "TraceDecay Context Scout address for authorized operati
 # published against the current code generation, so the fixture grows one
 # genuine `E0308`: an `-> i32` body returning a `&str`.
 _SCOUT_DIAGNOSTIC_FN = 'pub fn scout_type_error() -> i32 { "not an integer" }'
+_SCOUT_IDLE_DIAGNOSTIC_FN = "pub fn scout_idle_type_error() -> bool { 7 }"
 
 
 def prime_context_scout(
@@ -878,6 +879,198 @@ def _prime_context_scout_diagnostic(
     deadline: Callable[[str], int],
     revision: str,
     source: Path,
+) -> None:
+    _publish_context_scout_diagnostic(client, fixture, deadline)
+
+    session_id = f"tool-sweep-scout-{os.getpid()}-{time.monotonic_ns()}"
+    payload = json.dumps(
+        {
+            "input": {
+                "tool": "apply_patch",
+                "sessionID": session_id,
+                "callID": "scout-producer",
+                "args": {"patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"},
+            },
+            "output": {
+                "title": "Added Scout diagnostic fixture",
+                "metadata": {
+                    "files": [
+                        {
+                            "filePath": str(source),
+                            "relativePath": "src/lib.rs",
+                            "type": "modify",
+                            "additions": 1,
+                            "deletions": 0,
+                        }
+                    ],
+                    "diagnostics": {},
+                    "truncated": False,
+                },
+                "output": "Done",
+            },
+        }
+    )
+    binary = Path(fixture["binary"])
+    _run_checked(
+        [str(binary), "hook-opencode-tool-after"],
+        Path(fixture["root"]),
+        "Context Scout OpenCode producer",
+        timeout_s=60,
+        input_text=payload,
+    )
+    ready_at = time.monotonic() + 60
+    address: dict[str, Any] | None = None
+    while time.monotonic() < ready_at:
+        time.sleep(MOUNT_RETRY_DELAY_S)
+        replay = _run_checked(
+            [str(binary), "hook-opencode-tool-after"],
+            Path(fixture["root"]),
+            "Context Scout OpenCode address replay",
+            timeout_s=60,
+            input_text=payload,
+        )
+        for line in replay.stdout.splitlines():
+            marker = line.find(_SCOUT_ADDRESS_PREFIX)
+            if marker < 0:
+                continue
+            encoded = line[marker + len(_SCOUT_ADDRESS_PREFIX):].strip()
+            candidate = json.loads(encoded)
+            if isinstance(candidate, dict):
+                address = candidate
+                break
+        if address is not None:
+            break
+    if address is None:
+        raise SweepError("OpenCode producer never returned its mounted Context Scout address")
+
+    pending_at = time.monotonic() + 30
+    while True:
+        recent = _producer_call(
+            client,
+            "tracedecay_context_scout_recent",
+            {"address": address, "limit": 8, "format": "json"},
+            deadline("tracedecay_context_scout_recent"),
+        )
+        if _context_scout_pending(recent, "next_boundary") is not None:
+            break
+        if time.monotonic() >= pending_at:
+            raise SweepError("Context Scout saved-edit producer returned no boundary suggestion")
+        time.sleep(MOUNT_RETRY_DELAY_S)
+
+    boundary_payload = json.dumps(
+        {
+            "id": f"scout-boundary-{time.monotonic_ns()}",
+            "type": "session.idle",
+            "properties": {"sessionID": session_id},
+        }
+    )
+    _run_checked(
+        [str(binary), "hook-opencode-event"],
+        Path(fixture["root"]),
+        "Context Scout OpenCode boundary delivery",
+        timeout_s=60,
+        input_text=boundary_payload,
+    )
+    delivered_at = time.monotonic() + 30
+    delivered: dict[str, Any] | None = None
+    while time.monotonic() < delivered_at:
+        recent = _producer_call(
+            client,
+            "tracedecay_context_scout_recent",
+            {"address": address, "limit": 8, "format": "json"},
+            deadline("tracedecay_context_scout_recent"),
+        )
+        delivered = next(
+            (
+                item
+                for value in _objects(recent)
+                for item in value.get("deliveries", [])
+                if isinstance(item, dict) and isinstance(item.get("receipt"), dict)
+            ),
+            None,
+        )
+        if delivered is not None:
+            break
+        time.sleep(MOUNT_RETRY_DELAY_S)
+    if delivered is None:
+        raise SweepError("OpenCode idle boundary did not deliver its pending Scout suggestion")
+
+    receipt = delivered["receipt"]
+    _producer_call(
+        client,
+        "tracedecay_context_scout_feedback",
+        {
+            "address": address,
+            "receipt": receipt,
+            "feedback": {
+                "receipt_id": receipt["receipt_id"],
+                "kind": "explicitly_accepted",
+            },
+            "idempotency_key": f"tool-sweep-scout-prime-feedback-{time.monotonic_ns()}",
+            "format": "json",
+        },
+        deadline("tracedecay_context_scout_feedback"),
+    )
+
+    source.write_text(
+        source.read_text().replace(_SCOUT_DIAGNOSTIC_FN, _SCOUT_IDLE_DIAGNOSTIC_FN)
+    )
+    _publish_context_scout_diagnostic(client, fixture, deadline)
+    saved_edit_payload = json.dumps(
+        {
+            "id": f"scout-saved-edit-{time.monotonic_ns()}",
+            "type": "file.edited",
+            "properties": {"file": str(source), "sessionID": session_id},
+        }
+    )
+    _run_checked(
+        [str(binary), "hook-opencode-event"],
+        Path(fixture["root"]),
+        "Context Scout OpenCode idle-window producer",
+        timeout_s=60,
+        input_text=saved_edit_payload,
+    )
+    pending_at = time.monotonic() + 30
+    while True:
+        recent = _producer_call(
+            client,
+            "tracedecay_context_scout_recent",
+            {"address": address, "limit": 8, "format": "json"},
+            deadline("tracedecay_context_scout_recent"),
+        )
+        pending = _context_scout_pending(recent, "idle_window")
+        if pending is not None:
+            fixture.update(
+                {
+                    "context_scout_address": address,
+                    "context_scout_revision": revision,
+                    "context_scout_work": pending.get("work"),
+                }
+            )
+            if not isinstance(fixture["context_scout_work"], dict):
+                raise SweepError("Context Scout recent producer omitted pending work identity")
+            return
+        if time.monotonic() >= pending_at:
+            raise SweepError("Context Scout producer returned no idle-window suggestion")
+        time.sleep(MOUNT_RETRY_DELAY_S)
+
+
+def _context_scout_pending(response: dict[str, Any], window: str) -> dict[str, Any] | None:
+    return next(
+        (
+            item
+            for value in _objects(response)
+            for item in value.get("pending", [])
+            if isinstance(item, dict) and item.get("delivery_window") == window
+        ),
+        None,
+    )
+
+
+def _publish_context_scout_diagnostic(
+    client: McpClient,
+    fixture: dict[str, Any],
+    deadline: Callable[[str], int],
 ) -> None:
     _run_checked(
         [fixture["binary"], "sync"],
@@ -951,99 +1144,6 @@ def _prime_context_scout_diagnostic(
                 f"current code generation: {reason or 'missing publication receipt'}"
             )
         time.sleep(MOUNT_RETRY_DELAY_S)
-
-    session_id = f"tool-sweep-scout-{os.getpid()}-{time.monotonic_ns()}"
-    payload = json.dumps(
-        {
-            "input": {
-                "tool": "apply_patch",
-                "sessionID": session_id,
-                "callID": "scout-producer",
-                "args": {"patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"},
-            },
-            "output": {
-                "title": "Added Scout diagnostic fixture",
-                "metadata": {
-                    "files": [
-                        {
-                            "filePath": str(source),
-                            "relativePath": "src/lib.rs",
-                            "type": "modify",
-                            "additions": 1,
-                            "deletions": 0,
-                        }
-                    ],
-                    "diagnostics": {},
-                    "truncated": False,
-                },
-                "output": "Done",
-            },
-        }
-    )
-    binary = Path(fixture["binary"])
-    _run_checked(
-        [str(binary), "hook-opencode-tool-after"],
-        Path(fixture["root"]),
-        "Context Scout OpenCode producer",
-        timeout_s=60,
-        input_text=payload,
-    )
-    ready_at = time.monotonic() + 60
-    address: dict[str, Any] | None = None
-    while time.monotonic() < ready_at:
-        time.sleep(MOUNT_RETRY_DELAY_S)
-        replay = _run_checked(
-            [str(binary), "hook-opencode-tool-after"],
-            Path(fixture["root"]),
-            "Context Scout OpenCode address replay",
-            timeout_s=60,
-            input_text=payload,
-        )
-        for line in replay.stdout.splitlines():
-            marker = line.find(_SCOUT_ADDRESS_PREFIX)
-            if marker < 0:
-                continue
-            encoded = line[marker + len(_SCOUT_ADDRESS_PREFIX):].strip()
-            candidate = json.loads(encoded)
-            if isinstance(candidate, dict):
-                address = candidate
-                break
-        if address is not None:
-            break
-    if address is None:
-        raise SweepError("OpenCode producer never returned its mounted Context Scout address")
-
-    pending_at = time.monotonic() + 30
-    while True:
-        recent = _producer_call(
-            client,
-            "tracedecay_context_scout_recent",
-            {"address": address, "limit": 8, "format": "json"},
-            deadline("tracedecay_context_scout_recent"),
-        )
-        pending = next(
-            (
-                value["pending"]
-                for value in _objects(recent)
-                if isinstance(value.get("pending"), list) and value["pending"]
-            ),
-            None,
-        )
-        if pending is not None and isinstance(pending[0], dict):
-            fixture.update(
-                {
-                    "context_scout_address": address,
-                    "context_scout_revision": revision,
-                    "context_scout_work": pending[0].get("work"),
-                }
-            )
-            if not isinstance(fixture["context_scout_work"], dict):
-                raise SweepError("Context Scout recent producer omitted pending work identity")
-            return
-        if time.monotonic() >= pending_at:
-            raise SweepError("Context Scout producer returned no pending suggestion")
-        time.sleep(MOUNT_RETRY_DELAY_S)
-
 
 
 def prime_fixture_values(
@@ -2534,12 +2634,23 @@ def validate_context_scout_read_response(
     values = list(_objects(response))
     if name == "tracedecay_context_scout_recent":
         work = fixture["context_scout_work"]
-        if not any(
-            isinstance(value.get("pending"), list)
-            and any(isinstance(item, dict) and item.get("work") == work for item in value["pending"])
-            for value in values
-        ):
+        pending = next(
+            (
+                item
+                for value in values
+                for item in value.get("pending", [])
+                if isinstance(item, dict) and item.get("work") == work
+            ),
+            None,
+        )
+        if pending is None:
             raise SweepError("Context Scout recent omitted the producer-minted pending work")
+        if (
+            not isinstance(pending.get("envelope_id"), str)
+            or not isinstance(pending.get("suggestion_text"), str)
+            or "envelope" in pending
+        ):
+            raise SweepError("Context Scout recent did not return its declared flat suggestion")
         return
     if name == "tracedecay_context_scout_explain":
         if not any(
