@@ -427,10 +427,20 @@ impl RegisteredTemporalRead {
         candidate: RankingCandidate,
         request: &PageRequest,
     ) -> Vec<TemporalRecord> {
+        self.records_for_candidates(snapshot, vec![candidate], request)
+            .await
+    }
+
+    async fn records_for_candidates(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        candidates: Vec<RankingCandidate>,
+        request: &PageRequest,
+    ) -> Vec<TemporalRecord> {
         let query = build_record_query_with_relations(
             snapshot.retrieval_scope(),
             snapshot,
-            &[candidate],
+            &candidates,
             0,
             &RecordCursor {
                 candidate: 0,
@@ -527,6 +537,7 @@ trait HostAdmissionRetrievalFixture {
     );
     async fn seed_candidate_query_fixture_for_test(&self);
     async fn seed_cross_session_record_fixture_for_test(&self);
+    async fn seed_wide_span_record_fixture_for_test(&self, members: usize);
     async fn seed_derived_record_fixture_for_test(&self);
     async fn seed_oversized_record_fixture_for_test(&self);
     async fn seed_provider_summary_fixture_for_test(&self);
@@ -923,6 +934,108 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
         )
         .await
         .expect("cross-session retrieval fixture");
+    }
+
+    /// Seeds one span whose members are individually anchored, so a test can tell
+    /// the boundary occurrences the group's bounds need apart from the interior
+    /// ones that only their own channels should retrieve.
+    async fn seed_wide_span_record_fixture_for_test(&self, members: usize) {
+        assert!(members >= 2, "a span needs distinct first and last members");
+        self.activate_temporal_generation_for_retrieval_test("session-snapshot", 1)
+            .await;
+        let occurrence_id = |index: usize| format!("sha256:{index:064x}");
+        let anchors = (0..members)
+            .map(|index| format!("('member-anchor-{index}', '{{}}', '{{}}', 'fixture')"))
+            .chain(std::iter::once(
+                "('derived-span-anchor', '{}', '{}', 'fixture')".to_string(),
+            ))
+            .collect::<Vec<_>>()
+            .join(",");
+        let occurrences = (0..members)
+            .map(|index| {
+                format!(
+                    "('session-snapshot', 1, '{}', 'derived-observation', 'claude', {index},
+                      'member-anchor-{index}', 'user', {}, '{{\"kind\":\"unknown\"}}',
+                      '{{\"authority\":\"provider_native\",
+                         \"evidence_class\":\"provider_declared\",
+                         \"source_anchor_id\":\"source-evidence-anchor\",
+                         \"sanitization_receipt\":{{
+                            \"receipt_id\":\"derived-receipt\",
+                            \"sanitizer_version\":\"derived-sanitizer\"
+                         }}}}',
+                      '0000000000000000000000000000000000000000000000000000000000000000', 15,
+                      'member {index}', 'member {index}')",
+                    occurrence_id(index),
+                    index + 5,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let member_rows = (0..members)
+            .map(|index| {
+                let role = match index {
+                    0 => "first",
+                    last if last == members - 1 => "last",
+                    _ => "member",
+                };
+                format!(
+                    "('session-snapshot', 1, 'span', 'span-evidence-id', {index}, '{}', '{role}')",
+                    occurrence_id(index)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let database = self
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        Executor::execute_batch(
+            &database
+                .writer_connection()
+                .expect("registered profile writer"),
+            &format!(
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path
+                 ) VALUES ('claude', 'session-snapshot', 'user', '/wide-span-test');
+                 INSERT INTO sanitization_receipts (
+                    receipt_id, sanitizer_version, payload_digest, receipt_json
+                 ) VALUES ('derived-receipt', 'fixture', 'sha256:derived', '{{}}');
+                 INSERT INTO observations (
+                    observation_id, payload_digest, receipt_id, observation_json,
+                    committed_cursor_json
+                 ) VALUES (
+                    'derived-observation', 'sha256:derived', 'derived-receipt',
+                    '{{\"identity\":{{\"source\":{{\"provider\":\"claude\"}}}}}}', '{{}}'
+                 );
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES {anchors};
+                 INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, source_observation_id,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id,
+                    role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
+                    snippet_text, index_text
+                 ) VALUES {occurrences};
+                 INSERT INTO session_derived_evidence (
+                    session_id, generation, evidence_kind, evidence_id,
+                    retrieval_anchor_id, thread_id, first_occurrence_id, last_occurrence_id,
+                    algorithm_version, configuration_digest, member_count, member_digest,
+                    evidence_json
+                 ) VALUES (
+                    'session-snapshot', 1, 'span', 'span-evidence-id',
+                    'derived-span-anchor', NULL, '{first}', '{last}',
+                    'span-v1', 'sha256:configuration', {members}, 'sha256:members', '{{}}'
+                 );
+                 INSERT INTO session_derived_evidence_members (
+                    session_id, generation, evidence_kind, evidence_id,
+                    ordinal, occurrence_id, member_role
+                 ) VALUES {member_rows};",
+                first = occurrence_id(0),
+                last = occurrence_id(members - 1),
+            ),
+        )
+        .await
+        .expect("wide span retrieval fixture");
     }
 
     async fn seed_derived_record_fixture_for_test(&self) {
@@ -2507,7 +2620,7 @@ async fn current_record_hydration_retains_non_superseding_assertions_for_resolut
 }
 
 #[tokio::test]
-async fn derived_candidate_materializes_members_with_canonical_evidence_linkage() {
+async fn derived_candidate_materializes_boundaries_with_canonical_evidence_linkage() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
@@ -2522,7 +2635,7 @@ async fn derived_candidate_materializes_members_with_canonical_evidence_linkage(
     let records = read.records(&snapshot, candidate, &record_request()).await;
     assert_eq!(records.len(), 1);
     let TemporalRecord::Occurrence(member) = &records[0] else {
-        panic!("derived candidate must materialize its member occurrence");
+        panic!("derived candidate must materialize its boundary occurrence");
     };
     assert_eq!(
         member.anchor_id,
@@ -2540,6 +2653,128 @@ async fn derived_candidate_materializes_members_with_canonical_evidence_linkage(
             .supporting_anchor_ids
             .contains(&RetrievalAnchorId::new("derived-span-anchor").unwrap())
     );
+}
+
+/// A group's cost must follow what the ranking needs from it — its bounds — not
+/// how many messages happen to sit inside it. Charging every member against the
+/// record budget is what let one wide span refuse a whole query.
+#[tokio::test]
+async fn derived_candidate_reads_only_its_boundary_occurrences() {
+    async fn boundary_records(members: usize) -> Vec<TemporalRecord> {
+        let dir = tempdir().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        runtime.seed_wide_span_record_fixture_for_test(members).await;
+        let read = runtime.retrieval_read_for_test().await;
+        let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
+        let mut candidate = candidate_for_anchor("derived-span-anchor");
+        candidate.channel = CandidateChannel::Span;
+        candidate.retriever_record_id = "span-evidence-id".to_string();
+        read.records(&snapshot, candidate, &record_request()).await
+    }
+
+    let narrow = boundary_records(4).await;
+    let wide = boundary_records(40).await;
+
+    assert_eq!(
+        narrow.len(),
+        2,
+        "a span contributes its first and last occurrence, not its membership"
+    );
+    assert_eq!(
+        wide.len(),
+        narrow.len(),
+        "a ten-times wider span must not read ten times the records"
+    );
+    let anchors = narrow
+        .iter()
+        .map(|record| {
+            let TemporalRecord::Occurrence(occurrence) = record else {
+                panic!("a span's boundary records are occurrences");
+            };
+            assert!(
+                occurrence
+                    .evidence
+                    .supporting_anchor_ids
+                    .contains(&RetrievalAnchorId::new("derived-span-anchor").unwrap()),
+                "a boundary record keeps the group it bounds as provenance"
+            );
+            occurrence.anchor_id.clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        anchors,
+        vec![
+            RetrievalAnchorId::new("member-anchor-0").unwrap(),
+            RetrievalAnchorId::new("member-anchor-3").unwrap(),
+        ]
+    );
+}
+
+/// The interior of a group is reachable, just not through the group: a member
+/// that matches on its own arrives on its own channel.
+#[tokio::test]
+async fn interior_span_member_is_read_through_its_own_candidate() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_wide_span_record_fixture_for_test(4).await;
+    let read = runtime.retrieval_read_for_test().await;
+    let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
+    let mut candidate = candidate_for_anchor("member-anchor-2");
+    candidate.channel = CandidateChannel::Lexical;
+
+    let records = read.records(&snapshot, candidate, &record_request()).await;
+
+    assert_eq!(records.len(), 1);
+    let TemporalRecord::Occurrence(interior) = &records[0] else {
+        panic!("a lexical candidate resolves to its occurrence");
+    };
+    assert_eq!(
+        interior.anchor_id,
+        RetrievalAnchorId::new("member-anchor-2").unwrap()
+    );
+}
+
+/// One occurrence is one record. When a group boundary also matched on its own,
+/// the two channels must not each charge the budget for the same row.
+#[tokio::test]
+async fn a_boundary_that_also_matches_directly_is_charged_once() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_wide_span_record_fixture_for_test(4).await;
+    let read = runtime.retrieval_read_for_test().await;
+    let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
+    let mut group = candidate_for_anchor("derived-span-anchor");
+    group.channel = CandidateChannel::Span;
+    group.retriever_record_id = "span-evidence-id".to_string();
+    let mut direct = candidate_for_anchor("member-anchor-0");
+    direct.channel = CandidateChannel::Lexical;
+
+    let records = read
+        .records_for_candidates(&snapshot, vec![direct, group], &record_request())
+        .await;
+
+    let occurrences = records
+        .iter()
+        .filter_map(|record| match record {
+            TemporalRecord::Occurrence(occurrence) => Some(occurrence.occurrence_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut deduplicated = occurrences.clone();
+    deduplicated.sort();
+    deduplicated.dedup();
+    assert_eq!(
+        occurrences.len(),
+        deduplicated.len(),
+        "the same occurrence must not be charged twice: {occurrences:?}"
+    );
+    assert_eq!(occurrences.len(), 2, "boundary-zero, boundary-three");
 }
 
 #[tokio::test]
@@ -2648,9 +2883,14 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
     // is that no branch falls back to scanning `session_occurrences`: every
     // candidate row is reached by an index seek.
     assert!(
-        plan.iter().all(
-            |detail| !detail.contains("SCAN O") && !detail.contains("SCAN SESSION_OCCURRENCES")
-        ),
+        plan.iter().all(|detail| {
+            let words = detail.split_whitespace().collect::<Vec<_>>();
+            // Whole-word, because the plan also names derived aliases that merely
+            // start with `O`; a substring test would read `SCAN OC` as `SCAN O`.
+            !words
+                .windows(2)
+                .any(|pair| pair[0] == "SCAN" && matches!(pair[1], "O" | "SESSION_OCCURRENCES"))
+        }),
         "record hydration must index-seek every candidate occurrence: {plan:?}"
     );
 

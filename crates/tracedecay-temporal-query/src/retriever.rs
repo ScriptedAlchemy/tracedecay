@@ -364,7 +364,7 @@ pub async fn hydrate_temporal_candidate_export(
         ranked,
         next_cursor,
         coverage: _,
-        all_candidate_anchors,
+        result_eligible_anchors,
         visible_anchors,
         resolution,
         summaries,
@@ -384,7 +384,7 @@ pub async fn hydrate_temporal_candidate_export(
         .map_err(map_hydration_error)?;
     check_control(&snapshot)?;
     let frames = temporal_context_frames(
-        &all_candidate_anchors,
+        &result_eligible_anchors,
         &visible_anchors,
         &resolution,
         &resolution.lineage_edges,

@@ -245,7 +245,7 @@ pub struct TemporalCandidateExport {
     ranked: Vec<RankedCandidate>,
     next_cursor: Option<String>,
     coverage: RetrieverCoverage,
-    all_candidate_anchors: BTreeSet<RetrievalAnchorId>,
+    result_eligible_anchors: BTreeSet<RetrievalAnchorId>,
     visible_anchors: BTreeSet<RetrievalAnchorId>,
     resolution: TemporalResolution,
     summaries: Vec<SessionSummaryRecordV1>,
@@ -525,7 +525,12 @@ pub async fn execute_temporal_candidate_export(
         })
         .map(|candidate| candidate.anchor_id.clone())
         .collect::<BTreeSet<_>>();
-    let mut all_candidate_anchors = all_candidates
+    // Coverage answers "of what this query could have returned, how much did it".
+    // The population is therefore the anchors a candidate channel proposed as
+    // results: one per distinct anchor, group containers excluded. A group's
+    // non-matching members never entered that population, so counting them as
+    // hidden results would report omissions the query never had.
+    let result_eligible_anchors = all_candidates
         .iter()
         .filter(|candidate| {
             !matches!(
@@ -535,25 +540,12 @@ pub async fn execute_temporal_candidate_export(
         })
         .map(|candidate| candidate.anchor_id.clone())
         .collect::<BTreeSet<_>>();
-    all_candidate_anchors.extend(
-        resolved
-            .iter()
-            .filter(|item| {
-                item.occurrence
-                    .evidence
-                    .supporting_anchor_ids
-                    .iter()
-                    .any(|anchor| derived_candidate_anchors.contains(anchor))
-            })
-            .map(|item| item.occurrence.anchor_id.clone()),
-    );
     // A derived-evidence group anchor names a span/burst container, never a
     // retrievable payload: no hydration authority resolves a group, so ranking
     // one as a standalone row can only spend a result slot and a diversity
     // slot, then report an unresolvable omission — evicting real messages from
-    // the page it was supposed to enrich. Groups keep their existing role of
-    // pulling every member occurrence into the record read (so a member that
-    // matches on its own is ranked); they never become results themselves.
+    // the page it was supposed to enrich. Groups contribute their bounds to the
+    // record read and their evidence to rank fusion; they never become results.
     let visible_candidates = all_candidates
         .into_iter()
         .filter(|candidate| {
@@ -613,7 +605,7 @@ pub async fn execute_temporal_candidate_export(
             unknown: u64::try_from(resolved.iter().filter(|item| item.uncertain).count())
                 .map_err(|_| TemporalKernelError::BudgetExceeded)?,
         },
-        all_candidate_anchors,
+        result_eligible_anchors,
         visible_anchors,
         resolution: resolved,
         summaries: records.summaries,
@@ -745,7 +737,7 @@ fn is_after(candidate: &RankedCandidate, after: &StableSortKey) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn temporal_context_frames(
-    all_candidate_anchors: &BTreeSet<RetrievalAnchorId>,
+    result_eligible_anchors: &BTreeSet<RetrievalAnchorId>,
     visible_anchors: &BTreeSet<RetrievalAnchorId>,
     resolved: &[ResolvedOccurrence],
     lineage_edges: &[ResolutionLineageEdge],
@@ -776,7 +768,7 @@ fn temporal_context_frames(
         })
         .collect::<BTreeMap<_, _>>();
     let mut coverage = TemporalCoverageCountsV1::default();
-    for anchor_id in all_candidate_anchors {
+    for anchor_id in result_eligible_anchors {
         if let Some(state) = hydration_states.get(anchor_id) {
             increment_hydration_coverage(&mut coverage, *state);
         } else if let Some(class) = summary_states.get(anchor_id) {
