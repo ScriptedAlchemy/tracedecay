@@ -402,10 +402,7 @@ fn example_object_value(
         if !required.contains(&key.as_str()) && !matches!(ty, "array" | "object") {
             continue;
         }
-        example.insert(
-            key.clone(),
-            placeholder_value(root, key, schema, ty, depth),
-        );
+        example.insert(key.clone(), placeholder_value(root, key, schema, ty, depth));
     }
     Value::Object(example)
 }
@@ -453,13 +450,9 @@ fn placeholder_value(root: &Value, key: &str, schema: &Value, ty: &str, depth: u
                 "object" => {
                     example_from_object_schema(root, items.unwrap_or(&Value::Null), depth + 1)
                 }
-                other => placeholder_value(
-                    root,
-                    key,
-                    items.unwrap_or(&Value::Null),
-                    other,
-                    depth + 1,
-                ),
+                other => {
+                    placeholder_value(root, key, items.unwrap_or(&Value::Null), other, depth + 1)
+                }
             };
             Value::Array(vec![element])
         }

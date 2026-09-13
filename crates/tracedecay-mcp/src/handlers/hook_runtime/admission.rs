@@ -419,11 +419,33 @@ pub async fn admit_hook_v2_replayed_envelope_with_lifecycle(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.admit")]
+/// Admission composes the lifecycle mount, guidance lookup, and replay
+/// paths into one future large enough to trip `clippy::large_futures`; box
+/// it here so every caller keeps a small frame.
+async fn admit_hook_v2_envelope_with_lifecycle(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_session_id: Option<SessionId>,
+    mount: Option<HookV2LifecycleMountV1<'_>>,
+    host_response_available: bool,
+    now: UtcMicros,
+) -> HookV2AdmissionOutcomeV1 {
+    Box::pin(admit_hook_v2_envelope_with_lifecycle_inner(
+        cg,
+        envelope,
+        native_session_id,
+        mount,
+        host_response_available,
+        now,
+    ))
+    .await
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Hook v2 admission is one envelope validate, lifecycle bind, and receipt."
 )]
-async fn admit_hook_v2_envelope_with_lifecycle(
+async fn admit_hook_v2_envelope_with_lifecycle_inner(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     native_session_id: Option<SessionId>,
