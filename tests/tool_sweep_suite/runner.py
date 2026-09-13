@@ -1803,10 +1803,20 @@ def missing_effect_journey_row(policy: ToolPolicy) -> dict[str, Any]:
 
 
 def _journey_call(client: McpClient, tool: str, arguments: dict[str, Any], deadline_ms: int) -> dict[str, Any]:
-    response, elapsed_ms = client.call_tool(tool, arguments, deadline_ms)
-    row = response_row("tool", tool, response, elapsed_ms, deadline_ms)
-    if row["verdict"] != "PASS":
-        raise SweepError(f"{tool} journey call failed: {row['problem_code'] or row['note']}")
+    retry_ends_at = time.monotonic() + deadline_ms / 1_000
+    while True:
+        response, elapsed_ms = client.call_tool(tool, arguments, deadline_ms)
+        row = response_row("tool", tool, response, elapsed_ms, deadline_ms)
+        if row["verdict"] == "PASS":
+            break
+        problem_code = response_problem_code(response)[1]
+        retryable_stale = (
+            "code-graph-stale" in json.dumps(response)
+            or problem_code == "application.symbol-graph.claim-generation-stale"
+        )
+        if not retryable_stale or time.monotonic() >= retry_ends_at:
+            raise SweepError(f"{tool} journey call failed: {row['problem_code'] or row['note']}")
+        time.sleep(MOUNT_RETRY_DELAY_S)
     if duration_us(response) is None:
         raise SweepError(f"{tool} journey call omitted the enabled _meta.duration_us receipt")
     return response
