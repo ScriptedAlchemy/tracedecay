@@ -244,6 +244,25 @@ pub(super) fn lookup_hook_v2_delivery_claim(
         .cloned()
 }
 
+pub(super) fn lookup_hook_v2_delivery_claim_for_event(
+    project_id: [u8; 16],
+    event_id: [u8; 16],
+    now: UtcMicros,
+) -> Option<ContextScoutDurableClaimV1> {
+    let claims = retained_hook_v2_delivery_claims().lock().ok()?;
+    let mut matching = claims
+        .iter()
+        .filter(|((candidate_project_id, _), claim)| {
+            *candidate_project_id == project_id && claim.lease.lease_id == event_id
+        })
+        .map(|(_, claim)| claim);
+    let claim = matching.next()?;
+    if matching.next().is_some() || claim.lease.expires_at.0 <= now.0 {
+        return None;
+    }
+    Some(claim.clone())
+}
+
 pub(super) fn remove_hook_v2_delivery_claim(project_id: [u8; 16], envelope_id: [u8; 16]) {
     if let Ok(mut claims) = retained_hook_v2_delivery_claims().lock() {
         claims.remove(&(project_id, envelope_id));
