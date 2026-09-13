@@ -259,7 +259,7 @@ run_agent_turn() {
       printf '%s' "${out}" >"${env_dir}/results/${id}.claude.json"
       ;;
     codex)
-      local -a cmd=(codex exec --json --cd "${cwd}" --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust)
+      local -a cmd=(codex exec --json --cd "${cwd}" --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT:-medium}\"")
       if [[ -n "${model}" ]]; then
         cmd+=(--model "${model}")
       fi
@@ -307,7 +307,7 @@ score_agent_turn() {
 default_model_for_agent() {
   case "$1" in
     claude) printf 'sonnet\n' ;;
-    codex) printf '\n' ;;
+    codex) printf 'gpt-5.6-sol\n' ;;
     *) die "unsupported agent: $1" ;;
   esac
 }
@@ -567,7 +567,7 @@ Common options:
   --agent <name>        Agent driver: claude or codex (default: claude).
   --project <path>      Project to index / default cwd (default: main tracedecay checkout).
   --corpus <path.jsonl> Corpus file for `run`.
-  --model <name>        Model override (default: sonnet for claude; Codex default for codex).
+  --model <name>        Model override (default: sonnet for claude; gpt-5.6-sol for codex).
   --reps <N>            Re-run the corpus N times (default: 1; `run` only).
   --debug               Reuse/produce a debug build instead of release (faster).
   --keep                Do not tear down the env dir on exit.

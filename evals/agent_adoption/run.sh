@@ -28,7 +28,8 @@
 #   SCENARIOS            space-separated scenario ids to run (default: all active)
 #   EVAL_INCLUDE_DEFERRED=1   also run scenarios with status="deferred"
 #   CLAUDE_MODELS        space-separated Claude matrix (default: opus sonnet)
-#   CODEX_MODELS         space-separated Codex matrix (default: gpt-5.5 gpt-5.6-terra)
+#   CODEX_MODELS         space-separated Codex matrix (default: gpt-5.6-sol)
+#   CODEX_REASONING_EFFORT Codex reasoning effort (default: medium)
 #   SCENARIO_TIMEOUT     per scenario wall-clock seconds (default: 240)
 #   REPS                 repetitions per scenario x host x model x condition cell
 #                        (default: 1; >1 suffixes transcripts with __r<N>)
@@ -46,7 +47,8 @@ export EVAL_SCENARIOS_DIR
 
 HOSTS="${HOSTS:-claude}"
 CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"
-CODEX_MODELS="${CODEX_MODELS:-gpt-5.5 gpt-5.6-terra}"
+CODEX_MODELS="${CODEX_MODELS:-gpt-5.6-sol}"
+CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-medium}"
 SCENARIO_TIMEOUT="${SCENARIO_TIMEOUT:-240}"
 REPS="${REPS:-1}"
 PARALLEL="${PARALLEL:-1}"
@@ -435,7 +437,8 @@ run_codex() {
   HOME="$CODEX_EVAL_HOME" CODEX_HOME="$CODEX_EVAL_CONFIG" PATH="$EVAL_PATH" \
     timeout "$SCENARIO_TIMEOUT" codex -a never -s workspace-write exec "$prompt" --json \
       -C "$fixture" --add-dir "$work" --skip-git-repo-check --ephemeral --ignore-rules \
-      -m "$model" </dev/null >"$out" 2>"$err"
+      -m "$model" -c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"" \
+      </dev/null >"$out" 2>"$err"
 }
 
 # Transcript/meta basename includes model identity; ablations append condition.

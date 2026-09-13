@@ -149,6 +149,9 @@ evals/hermetic/run.sh run --agent codex --env-dir "$ENV" \
   --corpus evals/hermetic/corpora/tool-args-ergonomics.jsonl
 ```
 
+Codex runs default to `gpt-5.6-sol` with medium reasoning. Override the model
+with `--model` and the reasoning effort with `CODEX_REASONING_EFFORT`.
+
 Outputs land in `<env>/results/`: `results.jsonl` (one scored object per
 scenario) and `summary.md` (pass count + per-scenario table).
 

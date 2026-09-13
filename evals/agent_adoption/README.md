@@ -75,7 +75,8 @@ paths, so do **not** commit run artifacts.
 | `SCENARIOS` | all active | space-separated scenario ids to run |
 | `EVAL_INCLUDE_DEFERRED` | `0` | also run `status:"deferred"` scenarios |
 | `CLAUDE_MODELS` | `opus sonnet` | space-separated `claude --model` matrix |
-| `CODEX_MODELS` | `gpt-5.5 gpt-5.6-terra` | space-separated `codex exec -m` matrix |
+| `CODEX_MODELS` | `gpt-5.6-sol` | space-separated `codex exec -m` matrix |
+| `CODEX_REASONING_EFFORT` | `medium` | Codex reasoning effort passed through `model_reasoning_effort` |
 | `SCENARIO_TIMEOUT` | `240` | per scenario wall-clock seconds |
 | `REPS` | `1` | repetitions per scenario x host x model x condition cell; `>1` suffixes transcripts with `__r<N>` and the grader pools the repetitions, so a cell of n=15 gives a usable exact-binomial interval instead of a single draw |
 | `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
@@ -86,7 +87,7 @@ paths, so do **not** commit run artifacts.
 
 One scenario x host x model is a single short headless agent turn. There are 44
 active scenarios, so keep smoke runs to 2-3 scenarios before starting the full
-Opus/Sonnet and GPT-5.5/Terra matrix. `--max-turns`
+Opus/Sonnet and Sol matrix. `--max-turns`
 does not exist in the installed Claude Code (2.1.x), so the only hard guardrail
 is `SCENARIO_TIMEOUT`; the tool budget is scored, not enforced.
 
