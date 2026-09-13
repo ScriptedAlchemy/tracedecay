@@ -35,8 +35,8 @@ impl<A> McpRetrievalExecutionControlV1<A> {
         )
     }
 
-    /// Resolves when this request has settled — the async twin of
-    /// [`Self::request_termination`].
+    /// Resolves with this request's terminal reason once it settles — the
+    /// async twin of [`Self::request_termination`].
     ///
     /// `request_termination` only answers where something asks it, and the
     /// execution permit is acquired *before* generation resolution, which is
@@ -49,22 +49,63 @@ impl<A> McpRetrievalExecutionControlV1<A> {
     /// advertises as retryable while guaranteeing the retry fails too.
     /// Awaiting this alongside the execution drops the abandoned work at its
     /// current await point and releases the permit with it.
-    async fn settled(&self) {
-        let cancelled = async {
-            match self.cancellation.as_ref() {
-                Some(cancellation) => cancellation.cancelled().await,
-                None => std::future::pending::<()>().await,
+    async fn settled(&self) -> code_search::CodeIndexSearchUnavailableReasonV1 {
+        mcp_search_request_settlement(self.deadline.as_ref(), self.cancellation.as_ref()).await
+    }
+}
+
+/// Resolves with the request's terminal reason when its cancellation fires or
+/// its dispatch deadline elapses, and never for a request that carries
+/// neither.
+async fn mcp_search_request_settlement(
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
+) -> code_search::CodeIndexSearchUnavailableReasonV1 {
+    let cancelled = async {
+        match cancellation {
+            Some(cancellation) => {
+                cancellation.cancelled().await;
+                code_search::CodeIndexSearchUnavailableReasonV1::Cancelled
             }
-        };
-        let expired = async {
-            match self.deadline.as_ref() {
-                Some(deadline) => crate::project_reads::sleep_until_deadline(deadline).await,
-                None => std::future::pending::<()>().await,
+            None => std::future::pending().await,
+        }
+    };
+    let expired = async {
+        match deadline {
+            Some(deadline) => {
+                crate::project_reads::sleep_until_deadline(deadline).await;
+                code_search::CodeIndexSearchUnavailableReasonV1::TimedOut
             }
-        };
-        tokio::select! {
-            () = cancelled => (),
-            () = expired => (),
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        reason = cancelled => reason,
+        reason = expired => reason,
+    }
+}
+
+/// Await `work` under the request's own deadline and cancellation.
+///
+/// Every scheduler read an admitted search takes — authority resolution before
+/// the execution permit, text-serving and cursor resolution after it — parks
+/// on the scheduler's mounted map, and none of them consults a request
+/// control while parked. A daemon holding that map across a mount, retire, or
+/// shutdown is exactly the window a settled request waited out with its caller
+/// already gone, returning long after the deadline it was dispatched under
+/// instead of the typed state that deadline names. Only the deadline itself
+/// can end that wait, so it bounds the await rather than a checkpoint inside
+/// it. `work` is polled first, so an unsettled request is unchanged.
+async fn bounded_by_settlement<F: std::future::Future>(
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
+    work: F,
+) -> Result<F::Output, code_search::CodeIndexSearchOutcomeV1> {
+    tokio::select! {
+        biased;
+        output = work => Ok(output),
+        reason = mcp_search_request_settlement(deadline, cancellation) => {
+            Err(code_index_search_unavailable(reason, reason.as_str()))
         }
     }
 }
@@ -571,17 +612,32 @@ where
                         "linked_worktree_disabled",
                     );
                 }
-                if exact_source_bound
-                    && schedulers.query_authority_for_scope(&scope).await.is_none()
-                    && schedulers
-                        .mount_query_authority_from_project_peer(&request.project_root, &scope)
-                        .await
-                        .is_err()
-                {
-                    return code_index_search_unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        "query_authority_unavailable",
-                    );
+                if exact_source_bound {
+                    match bounded_by_settlement(
+                        request.deadline.as_ref(),
+                        request.cancellation.as_ref(),
+                        async {
+                            schedulers.query_authority_for_scope(&scope).await.is_none()
+                                && schedulers
+                                    .mount_query_authority_from_project_peer(
+                                        &request.project_root,
+                                        &scope,
+                                    )
+                                    .await
+                                    .is_err()
+                        },
+                    )
+                    .await
+                    {
+                        Ok(false) => (),
+                        Ok(true) => {
+                            return code_index_search_unavailable(
+                                code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                                "query_authority_unavailable",
+                            );
+                        }
+                        Err(outcome) => return outcome,
+                    }
                 }
                 let admission = match admission_provider.admit_current(&scope) {
                     Ok(admission) => admission,
@@ -835,7 +891,7 @@ where
                         tokio::select! {
                             biased;
                             output = &mut work => output,
-                            () = settlement_control.settled() => Err(
+                            _ = settlement_control.settled() => Err(
                                 code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
                                     code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::Retrieval(
                                         tracedecay_query::retrieval::RetrievalPortError::Cancelled,
@@ -1035,12 +1091,19 @@ where
                     None,
                 ),
             };
-                let display_source = if let Some(text) = schedulers
-                    .latest_text_serving_for_scope(&terminal_scope)
-                    .await
-                    .filter(|text| {
+                let text_serving = match bounded_by_settlement(
+                    control.deadline.as_ref(),
+                    control.cancellation.as_ref(),
+                    schedulers.latest_text_serving_for_scope(&terminal_scope),
+                )
+                .await
+                {
+                    Ok(text) => text.filter(|text| {
                         text.metadata().manifest().generation_id == executed.query.generation
-                    }) {
+                    }),
+                    Err(outcome) => return outcome,
+                };
+                let display_source = if let Some(text) = text_serving {
                     CodeIndexSearchDisplaySourceV1::Text(text)
                 } else {
                     let latest = match generation_for_hydration(
@@ -1119,14 +1182,22 @@ where
                             generation: executed.query.generation.clone(),
                         }
                     });
-                if let Err(error) = code_index_task_support::bind_exact_source_cursor(
-                    &schedulers,
-                    &terminal_scope,
-                    next_cursor.as_mut(),
-                    exact_source,
+                let cursor_binding = match bounded_by_settlement(
+                    control.deadline.as_ref(),
+                    control.cancellation.as_ref(),
+                    code_index_task_support::bind_exact_source_cursor(
+                        &schedulers,
+                        &terminal_scope,
+                        next_cursor.as_mut(),
+                        exact_source,
+                    ),
                 )
                 .await
                 {
+                    Ok(binding) => binding,
+                    Err(outcome) => return outcome,
+                };
+                if let Err(error) = cursor_binding {
                     use code_index_task_support::ExactCursorPublicationErrorV1;
                     return match error {
                     ExactCursorPublicationErrorV1::AuthorityUnavailable => {
