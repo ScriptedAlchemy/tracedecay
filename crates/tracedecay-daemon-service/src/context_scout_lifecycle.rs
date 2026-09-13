@@ -15,7 +15,8 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 const MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1: usize = 64;
 const CONTEXT_SCOUT_LIFECYCLE_QUERY: &str = "SELECT observation_json
      FROM observations
-     WHERE json_extract(observation_json, '$.__retention_released') IS NULL
+     WHERE json_valid(observation_json)
+       AND json_extract(observation_json, '$.__retention_released') IS NULL
        AND json_extract(
             observation_json,
             '$.identity.source.session_id'
