@@ -125,6 +125,99 @@ struct ProjectionOutputAlias {
     message_id: String,
 }
 
+const LIVE_PROJECTION_AUTHORITY_SQL: &str = "SELECT disposition.reason,
+            alias.output_provider, alias.output_message_id
+         FROM (SELECT ?1 AS projector_version, ?2 AS observation_id) AS target
+         LEFT JOIN observation_projection_dispositions AS disposition
+           ON disposition.projector_version = target.projector_version
+          AND disposition.observation_id = target.observation_id
+         LEFT JOIN observation_projection_aliases AS alias
+           ON alias.projector_version = target.projector_version
+          AND alias.observation_id = target.observation_id";
+
+const REBUILD_PROJECTION_AUTHORITY_SQL: &str = "SELECT disposition.reason,
+            alias.output_provider, alias.output_message_id
+         FROM (
+            SELECT ?1 AS projector_version, ?2 AS generation, ?3 AS observation_id
+         ) AS target
+         LEFT JOIN observation_projection_dispositions AS disposition
+           ON disposition.projector_version = target.projector_version
+          AND disposition.observation_id = target.observation_id
+         LEFT JOIN observation_projection_rebuild_aliases AS alias
+           ON alias.projector_version = target.projector_version
+          AND alias.generation = target.generation
+          AND alias.observation_id = target.observation_id";
+
+struct ProjectionAuthority {
+    disposition: Option<ProjectionSkipReason>,
+    alias: Option<ProjectionOutputAlias>,
+}
+
+async fn read_projection_authority(
+    conn: &impl QueryExecutor,
+    observation_id: &CanonicalObservationIdV1,
+    rebuild_generation: Option<&str>,
+) -> ProjectionStoreResult<ProjectionAuthority> {
+    let mut rows = if let Some(generation) = rebuild_generation {
+        conn.query(
+            REBUILD_PROJECTION_AUTHORITY_SQL,
+            (
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                generation,
+                observation_id.as_str(),
+            ),
+        )
+        .await
+    } else {
+        conn.query(
+            LIVE_PROJECTION_AUTHORITY_SQL,
+            (SESSION_MESSAGE_PROJECTOR_VERSION, observation_id.as_str()),
+        )
+        .await
+    }
+    .map_err(|error| storage("read projection authority", error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection authority", error))?
+        .ok_or_else(|| storage_message("read projection authority", "authority row is missing"))?;
+    let reason = row
+        .get::<Option<String>>(0)
+        .map_err(|error| storage("read projection authority", error))?
+        .map(|reason| {
+            ProjectionSkipReason::from_durable_str(&reason).ok_or_else(|| {
+                storage_message(
+                    "read projection authority",
+                    "projection disposition has an unknown reason",
+                )
+            })
+        })
+        .transpose()?;
+    let provider = row
+        .get::<Option<String>>(1)
+        .map_err(|error| storage("read projection authority", error))?;
+    let message_id = row
+        .get::<Option<String>>(2)
+        .map_err(|error| storage("read projection authority", error))?;
+    let alias = match (provider, message_id) {
+        (Some(provider), Some(message_id)) => Some(ProjectionOutputAlias {
+            provider,
+            message_id,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(storage_message(
+                "read projection authority",
+                "projection alias identity is incomplete",
+            ));
+        }
+    };
+    Ok(ProjectionAuthority {
+        disposition: reason,
+        alias,
+    })
+}
+
 async fn read_projection_alias(
     conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
@@ -190,9 +283,9 @@ async fn derive_projection_with_alias_from_generation(
     observation: &DurableObservationV1,
     rebuild_generation: Option<&str>,
 ) -> ProjectionStoreResult<ObservationProjection> {
-    if durable_projection_disposition(conn, observation.observation_id().as_str()).await?
-        == Some(ProjectionSkipReason::NativeSourceSuperseded)
-    {
+    let authority =
+        read_projection_authority(conn, observation.observation_id(), rebuild_generation).await?;
+    if authority.disposition == Some(ProjectionSkipReason::NativeSourceSuperseded) {
         Box::pin(super::source_transition::verify_native_source_supersession(
             conn,
             observation,
@@ -202,8 +295,7 @@ async fn derive_projection_with_alias_from_generation(
             ProjectionSkipReason::NativeSourceSuperseded,
         ));
     }
-    if let Some(reason) =
-        durable_projection_disposition(conn, observation.observation_id().as_str()).await?
+    if let Some(reason) = authority.disposition
         && matches!(
             reason,
             ProjectionSkipReason::OutputCollision
@@ -219,8 +311,7 @@ async fn derive_projection_with_alias_from_generation(
     // established (thread, objective, status) transition semantics.
     let projection =
         collapse_consecutive_goal_ticks(conn, observation, projection, rebuild_generation).await?;
-    let mut alias =
-        read_projection_alias(conn, observation.observation_id(), rebuild_generation).await?;
+    let mut alias = authority.alias;
     if alias.is_none()
         && let Some(predecessor) =
             super::source_transition::read_native_source_predecessor(conn, observation).await?
@@ -1198,41 +1289,6 @@ async fn apply_provenance(
     Ok(())
 }
 
-/// Durable deterministic dispositions are projection input on every replay and
-/// rebuild. Consulting them before derivation prevents an unchanged invalid
-/// observation from repeating expensive hashing or parsing work.
-#[hotpath::measure(future = true, label = "global_db.observation_apply.query.disposition")]
-pub async fn durable_projection_disposition(
-    conn: &impl QueryExecutor,
-    observation_id: &str,
-) -> ProjectionStoreResult<Option<ProjectionSkipReason>> {
-    let mut rows = conn
-        .query(
-            "SELECT reason FROM observation_projection_dispositions
-             WHERE projector_version = ?1 AND observation_id = ?2",
-            (SESSION_MESSAGE_PROJECTOR_VERSION, observation_id),
-        )
-        .await
-        .map_err(|error| storage("read projection disposition", error))?;
-    let reason = rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection disposition", error))?
-        .map(|row| row.get::<String>(0))
-        .transpose()
-        .map_err(|error| storage("read projection disposition", error))?;
-    reason
-        .map(|reason| {
-            ProjectionSkipReason::from_durable_str(&reason).ok_or_else(|| {
-                storage_message(
-                    "read projection disposition",
-                    "projection disposition has an unknown reason",
-                )
-            })
-        })
-        .transpose()
-}
-
 async fn verify_skip_disposition(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
@@ -1810,6 +1866,9 @@ pub(super) async fn apply_effect(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod authority_tests;
 
 #[cfg(test)]
 mod tests {
