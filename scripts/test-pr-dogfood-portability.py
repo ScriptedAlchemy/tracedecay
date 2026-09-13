@@ -124,6 +124,8 @@ elif [[ "${1:-} ${2:-}" == "tool pr_context" ]]; then
       *) shift ;;
     esac
   done
+  git -C "$project" show-ref --verify --quiet "refs/heads/$base"
+  git -C "$project" show-ref --verify --quiet "refs/heads/$head"
   base_oid="$(git -C "$project" rev-parse "$base^{commit}")"
   head_oid="$(git -C "$project" rev-parse "$head^{commit}")"
   merge_base="$(git -C "$project" merge-base "$base" "$head")"

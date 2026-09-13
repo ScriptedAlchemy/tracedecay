@@ -505,7 +505,7 @@ run_smoke() {
 
   run_timed pr_context 90 "$output_dir/pr-context.json" "$output_dir/pr-context.stderr" \
     "$binary" tool pr_context --project "$project_root" \
-      --base-ref "$base_ref" --head-ref "$head_ref" --format json
+      --base-ref "$tracked_base" --head-ref "$tracked_head" --format json
   run_validation pr_context "$output_dir/pr-context.json" --kind pr_context --strict \
     --base-oid "$base_oid" --head-oid "$head_oid" --merge-base "$merge_base"
 
