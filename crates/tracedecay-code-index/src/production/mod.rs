@@ -100,6 +100,7 @@ pub use sealed_codec::{
     SEALED_GENERATION_FORMAT_REVISION_V1, sealed_generation_format_revision_is_compatible,
     sealed_generation_payload_digest, superseded_sealed_generation_revision,
 };
+use sealed_codec::{decode_file_artifact_checkpoint, encode_file_artifact_checkpoint};
 
 /// Current daemon chunker identity shared by production indexing and native
 /// semantic evaluation fixtures. Historical revisions remain decodable but
@@ -377,6 +378,30 @@ pub trait CodeIndexAtomicPublicationPort {
         scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1>;
 
+    /// Restore one physical file artifact captured by an interrupted successor
+    /// of this predecessor. The default keeps non-durable test and benchmark
+    /// ports simple; the daemon store persists these checkpoints.
+    fn load_file_artifact_checkpoint(
+        &self,
+        _predecessor_generation: Option<&CodeGenerationId>,
+        _reuse_key: &ManifestDigest,
+    ) -> Result<Option<Vec<u8>>, CodeIndexPublicationStoreErrorV1> {
+        Ok(None)
+    }
+
+    /// Persist one fully validated physical artifact before the generation
+    /// publication boundary. Its stable predecessor namespace and exact reuse
+    /// identity let a restarted owner resume completed work without admitting
+    /// stale source or a partially published generation.
+    fn persist_file_artifact_checkpoint(
+        &self,
+        _predecessor_generation: Option<&CodeGenerationId>,
+        _reuse_key: &ManifestDigest,
+        _bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        Ok(())
+    }
+
     fn publish_atomically(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
@@ -404,6 +429,7 @@ enum IncrementFileMaterializationV1 {
     ReExtracted {
         reuse_key: ManifestDigest,
         artifact: Arc<FileGenerationArtifactsV1>,
+        reextracted: bool,
     },
     Deleted,
 }
@@ -705,6 +731,10 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// durable graph has consumed it. The key remains first-success-wins so a
     /// foreign projection identity can never replace the canonical memo.
     graph_manifest: OnceLock<Arc<Mutex<CodeGraphManifestMemoV1>>>,
+    /// Parser/extractor work performed by the process that built this value.
+    /// Restored sealed generations report zero; this is receipt accounting,
+    /// not persisted generation identity.
+    reextracted_files: usize,
 }
 
 /// One successfully built code-graph publication manifest, pinned to the
@@ -728,6 +758,10 @@ enum ChunkPolicyRevisionSummaryV1 {
 }
 
 impl CodeIndexPublishedGenerationV1 {
+    pub fn reextracted_files(&self) -> usize {
+        self.reextracted_files
+    }
+
     pub fn manifest(&self) -> &CodeGenerationManifestV1 {
         &self.manifest
     }
@@ -1481,7 +1515,7 @@ pub struct CodeIndexProductionOwnerV1<P, S> {
 
 impl<P, S> CodeIndexProductionOwnerV1<P, S>
 where
-    P: CodeIndexAtomicPublicationPort,
+    P: CodeIndexAtomicPublicationPort + Sync,
     S: CodeChunkProjectionSink,
 {
     pub fn new(
@@ -1651,7 +1685,6 @@ where
                         &active.manifest,
                         &active.snapshot,
                         &validated,
-                        &request.changed_files,
                         &request.invalidations,
                     )
                     .map_err(CodeIndexProductionErrorV1::Generation)?;
@@ -1687,6 +1720,7 @@ where
                 None,
             ),
         };
+        manifest.capture_changed_files = request.changed_files.iter().cloned().collect();
         Self::checkpoint(control)?;
 
         let parser_registry = Arc::new(tracedecay_code_extraction::LanguageRegistry::new());
@@ -1815,6 +1849,7 @@ where
                 attribution: OnceLock::new(),
                 chunk_policy: OnceLock::new(),
                 graph_manifest: OnceLock::new(),
+                reextracted_files: staged.reextracted_files,
             };
             hotpath::measure_block!(
                 "code_index.build.assemble.validate",
@@ -1890,6 +1925,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn extract_file(
         config: &CodeIndexProductionConfigV1,
+        publication: &P,
         physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
         retained_parses: &SharedRetainedParsePool,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
@@ -1902,7 +1938,8 @@ where
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
         worker: &crate::hotpath_observe::WorkerBusyGuard,
-    ) -> Result<(ManifestDigest, Arc<FileGenerationArtifactsV1>), CodeIndexProductionErrorV1> {
+    ) -> Result<(ManifestDigest, Arc<FileGenerationArtifactsV1>, bool), CodeIndexProductionErrorV1>
+    {
         crate::hotpath_observe::measure_hot_loop!("code_index.materialize.file", {
             Self::checkpoint(control)?;
             let captured = captured_files
@@ -1940,7 +1977,19 @@ where
             ) {
                 crate::hotpath_observe::add_reused_parses(1);
                 Self::checkpoint(control)?;
-                return Ok((physical_reuse_key, reused));
+                return Ok((physical_reuse_key, reused, false));
+            }
+            if let Some(bytes) = publication.load_file_artifact_checkpoint(
+                manifest.parent_generation.as_ref(),
+                &physical_reuse_key,
+            )? {
+                let artifact = decode_file_artifact_checkpoint(&physical_reuse_key, &bytes)?;
+                let reused = artifact
+                    .rematerialize_for_file(&receipt_bound, &descriptor.extractor_revision)
+                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                crate::hotpath_observe::add_reused_parses(1);
+                Self::checkpoint(control)?;
+                return Ok((physical_reuse_key, Arc::new(reused), false));
             }
             let snapshot = &capability.snapshot().snapshot;
             let parser = extractor
@@ -2027,7 +2076,6 @@ where
                     ChunkingFailureV1::Cancelled => Self::interruption_error(control),
                     error => CodeIndexProductionErrorV1::Chunk(error),
                 })?;
-            Self::checkpoint(control)?;
             let (authority, extraction, _) = extraction.into_parts();
             let artifact = Arc::new(FileGenerationArtifactsV1 {
                 authority,
@@ -2035,7 +2083,13 @@ where
                 artifacts,
                 exact_authority,
             });
-            Ok((physical_reuse_key, artifact))
+            let checkpoint = encode_file_artifact_checkpoint(&physical_reuse_key, &artifact)?;
+            publication.persist_file_artifact_checkpoint(
+                manifest.parent_generation.as_ref(),
+                &physical_reuse_key,
+                &checkpoint,
+            )?;
+            Ok((physical_reuse_key, artifact, true))
         })
     }
 
@@ -2091,11 +2145,13 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
+        let publication = &self.publication;
         let extracted = hotpath::measure_block!(
             "code_index.collect.materialize_full",
             collect_bounded_ordered(&present_files, |file, worker| {
                 Self::extract_file(
                     config,
+                    publication,
                     physical_artifacts,
                     retained_parses,
                     intake,
@@ -2115,13 +2171,17 @@ where
         // Record artifacts in canonical snapshot order so bounded eviction and
         // subsequent physical reuse remain deterministic.
         let mut files = Vec::with_capacity(extracted.len());
-        for (reuse_key, artifact) in extracted {
+        let mut reextracted_files = 0;
+        for (reuse_key, artifact, reextracted) in extracted {
             Self::checkpoint(control)?;
             physical_artifacts.insert(reuse_key, &artifact);
             files.push(artifact);
+            reextracted_files += usize::from(reextracted);
         }
         Self::checkpoint(control)?;
-        staged_generation(manifest.generation_id.clone(), files, Vec::new())
+        let mut staged = staged_generation(manifest.generation_id.clone(), files, Vec::new())?;
+        staged.reextracted_files = reextracted_files;
+        Ok(staged)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2160,6 +2220,7 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
+        let publication = &self.publication;
         let file_materializations = hotpath::measure_block!(
             "code_index.collect.materialize_increment",
             collect_bounded_ordered(
@@ -2238,8 +2299,9 @@ where
                             // occurrence rebinding. Re-extract through the parser
                             // authority instead of rewriting that evidence.
                             let file = current_file;
-                            let (reuse_key, artifact) = Self::extract_file(
+                            let (reuse_key, artifact, reextracted) = Self::extract_file(
                                 config,
+                                publication,
                                 physical_artifacts,
                                 retained_parses,
                                 intake,
@@ -2256,12 +2318,14 @@ where
                             Ok(IncrementFileMaterializationV1::ReExtracted {
                                 reuse_key,
                                 artifact,
+                                reextracted,
                             })
                         }
                     }
                     FileExtractionActionV1::ReExtract { file } => {
-                        let (reuse_key, artifact) = Self::extract_file(
+                        let (reuse_key, artifact, reextracted) = Self::extract_file(
                             config,
+                            publication,
                             physical_artifacts,
                             retained_parses,
                             intake,
@@ -2278,6 +2342,7 @@ where
                         Ok(IncrementFileMaterializationV1::ReExtracted {
                             reuse_key,
                             artifact,
+                            reextracted,
                         })
                     }
                     FileExtractionActionV1::Deleted { .. } => {
@@ -2289,6 +2354,7 @@ where
         )?;
 
         let mut files = Vec::new();
+        let mut reextracted_files = 0;
 
         for materialization in file_materializations {
             Self::checkpoint(control)?;
@@ -2297,9 +2363,11 @@ where
                 IncrementFileMaterializationV1::ReExtracted {
                     reuse_key,
                     artifact,
+                    reextracted,
                 } => {
                     physical_artifacts.insert(reuse_key, &artifact);
                     files.push(artifact);
+                    reextracted_files += usize::from(reextracted);
                 }
                 IncrementFileMaterializationV1::Deleted => {}
             }
@@ -2307,6 +2375,7 @@ where
         Self::checkpoint(control)?;
 
         let mut staged = staged_generation(manifest.generation_id.clone(), files, Vec::new())?;
+        staged.reextracted_files = reextracted_files;
         staged.lineage = SymbolLineageResolver::new()
             .resolve(&active.symbols, &staged.symbols)
             .map_err(CodeIndexProductionErrorV1::Lineage)?;

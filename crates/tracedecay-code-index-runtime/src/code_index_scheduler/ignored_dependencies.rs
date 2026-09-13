@@ -249,7 +249,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_bytes,
             mut retained_reservations,
         } = captured;
-        let reextracted_files = changed_paths.len();
         let roster = self.ignored_source_admissions.clone();
         let target_projection_key = match projection_key() {
             Ok(key) => key,
@@ -278,6 +277,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         };
         let generation_id = generation.manifest().generation_id.clone();
+        let reextracted_files = generation.reextracted_files();
         Self::finish_snapshot_build_memory(&mut retained_reservations)?;
         self.retained_snapshot_bytes = retained_bytes;
         self._retained_snapshot_memory = retained_reservations;

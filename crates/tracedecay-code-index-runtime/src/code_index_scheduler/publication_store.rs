@@ -12,6 +12,11 @@ use std::{
     time::SystemTime,
 };
 
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions as CapabilityOpenOptions},
+};
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
@@ -19,13 +24,17 @@ use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationStoreLockV1, DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1,
     DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
     MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
-    acquire_code_generation_store_lock, durable_generation_index_digest,
-    retain_bounded_generation_index, try_acquire_code_generation_store_lock,
+    acquire_code_generation_store_lock, acquire_code_generation_store_read_lock,
+    durable_generation_index_digest, retain_bounded_generation_index,
+    try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_domain::{
     CodeGenerationId, ContentDigest, ManifestDigest, ProjectionBatchRequestV1,
     ProjectionOperationV1, ProjectionOutcomeV1, SanitizerRevision,
     canonical_text::encode_tagged_lowercase_hex, sha256_hex_suffix,
+};
+use tracedecay_private_fs::capability_dir::{
+    remove_open_dir_all_nofollow, rename_noreplace, sync_directory as sync_capability_directory,
 };
 use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
@@ -34,9 +43,10 @@ use crate::code_index::{
     production::{
         CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1,
         CodeIndexInterruptionV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-        CodeIndexPublishedGenerationV1, SealedGenerationSegmentPublicationV1,
-        SealedGenerationSegmentReadV1, SharedPhysicalCodeArtifactPoolV1,
-        UninterruptibleCodeIndexControlV1, VerifiedSealedTextGenerationMetadataV1,
+        CodeIndexPublishedGenerationV1, MAX_SEALED_CODE_GENERATION_BYTES_V1,
+        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+        SharedPhysicalCodeArtifactPoolV1, UninterruptibleCodeIndexControlV1,
+        VerifiedSealedTextGenerationMetadataV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -48,6 +58,7 @@ use super::{CodeIndexSchedulerErrorV1, PendingHintsV1, ProfiledStdMutex};
 
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
+const FILE_ARTIFACT_CHECKPOINT_DIRECTORY_V1: &str = "code-generation-build-checkpoints-v1";
 #[cfg(feature = "hotpath")]
 static CODE_INDEX_GENERATION_DECODES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hotpath")]
@@ -460,6 +471,7 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     active_path: PathBuf,
     pub(super) generations_root: PathBuf,
     segments_root: PathBuf,
+    file_artifact_checkpoints_root: Arc<Dir>,
     pub(super) project_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
@@ -736,6 +748,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
         std::fs::create_dir_all(&generations_root)?;
         let segments_root = store_root.join("code-generation-segments-v1");
         std::fs::create_dir_all(&segments_root)?;
+        let store_directory = Dir::open_ambient_dir(store_root, ambient_authority())?;
+        match store_directory.create_dir(FILE_ARTIFACT_CHECKPOINT_DIRECTORY_V1) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let file_artifact_checkpoints_root =
+            Arc::new(store_directory.open_dir_nofollow(FILE_ARTIFACT_CHECKPOINT_DIRECTORY_V1)?);
+        // The retry after a failed parent sync observes `AlreadyExists`, so
+        // every successful open must prove the ancestor entry durable again.
+        sync_capability_directory(&store_directory)?;
         let _store_lock = acquire_code_generation_store_lock(store_root)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         // Scope reconciliation only sees this directory's hash; the record
@@ -757,6 +780,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
             segments_root,
+            file_artifact_checkpoints_root,
             project_root: project_root.to_path_buf(),
             expected_sanitizer_revision,
             disposition: CodeIndexPublicationDispositionV1::Active,
@@ -852,7 +876,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)
+        acquire_code_generation_store_read_lock(store_root).map_err(Self::unavailable)
     }
 
     fn remove_abandoned_evidence_packs(
@@ -881,6 +905,128 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Self::sync_directory(segments_root)?;
         }
         Ok(())
+    }
+
+    pub(super) fn file_artifact_checkpoint_directory_name(
+        &self,
+        predecessor_generation: Option<&CodeGenerationId>,
+    ) -> String {
+        let predecessor = predecessor_generation.map_or("genesis", CodeGenerationId::as_str);
+        encode_tagged_lowercase_hex("", &Sha256::digest(predecessor.as_bytes()))
+    }
+
+    fn open_file_artifact_checkpoint_directory(
+        &self,
+        predecessor_generation: Option<&CodeGenerationId>,
+        create: bool,
+    ) -> Result<Option<Dir>, CodeIndexPublicationStoreErrorV1> {
+        if let Some(generation_id) = predecessor_generation {
+            generation_id.validate().map_err(Self::unavailable)?;
+        }
+        let name = self.file_artifact_checkpoint_directory_name(predecessor_generation);
+        if create {
+            match self.file_artifact_checkpoints_root.create_dir(&name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(Self::unavailable(error)),
+            }
+        }
+        match self.file_artifact_checkpoints_root.open_dir_nofollow(&name) {
+            Ok(directory) => {
+                if create {
+                    // As with the root, an earlier create may have succeeded
+                    // before its parent sync failed. Re-prove it on every
+                    // create-or-open path before admitting checkpoint writes.
+                    sync_capability_directory(&self.file_artifact_checkpoints_root)
+                        .map_err(Self::unavailable)?;
+                }
+                Ok(Some(directory))
+            }
+            Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(Self::unavailable(error)),
+        }
+    }
+
+    fn file_artifact_checkpoint_name(
+        reuse_key: &ManifestDigest,
+    ) -> Result<String, CodeIndexPublicationStoreErrorV1> {
+        let reuse_key = sha256_hex_suffix(reuse_key.as_str())
+            .ok_or_else(|| Self::unavailable("physical artifact reuse key is not sha256"))?;
+        Ok(format!("artifact-{reuse_key}.json"))
+    }
+
+    fn read_file_artifact_checkpoint(
+        directory: &Dir,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, CodeIndexPublicationStoreErrorV1> {
+        let mut options = CapabilityOpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = match directory.open_with(name, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Self::unavailable(error)),
+        };
+        let metadata = file.metadata().map_err(Self::unavailable)?;
+        if !metadata.is_file() || metadata.len() > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
+            return Err(Self::corruption(
+                "resumable file artifact checkpoint has an invalid file identity",
+            ));
+        }
+        let expected_len = metadata.len();
+        let mut bytes =
+            Vec::with_capacity(usize::try_from(expected_len).map_err(Self::unavailable)?);
+        file.take(MAX_SEALED_CODE_GENERATION_BYTES_V1 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(Self::unavailable)?;
+        if u64::try_from(bytes.len()).map_err(Self::unavailable)? != expected_len {
+            return Err(Self::corruption(
+                "resumable file artifact checkpoint changed while it was read",
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    pub(super) fn clear_file_artifact_checkpoints(
+        &self,
+        predecessor_generation: Option<&CodeGenerationId>,
+    ) {
+        let directory =
+            match self.open_file_artifact_checkpoint_directory(predecessor_generation, false) {
+                Ok(Some(directory)) => directory,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        predecessor_generation = ?predecessor_generation,
+                        error = %error,
+                        "resumable artifact checkpoints could not be opened after publication"
+                    );
+                    return;
+                }
+            };
+        if let Err(error) = remove_open_dir_all_nofollow(directory, &mut || Ok(())) {
+            tracing::warn!(
+                predecessor_generation = ?predecessor_generation,
+                error = %error,
+                "published generation left resumable artifact checkpoints behind"
+            );
+            return;
+        }
+        if let Err(error) = sync_capability_directory(&self.file_artifact_checkpoints_root) {
+            tracing::warn!(
+                predecessor_generation = ?predecessor_generation,
+                error = %error,
+                "resumable artifact checkpoint cleanup could not be synced"
+            );
+        }
+    }
+
+    pub(super) fn finish_file_artifact_checkpoints_after_publication(
+        &self,
+        predecessor_generation: Option<&CodeGenerationId>,
+    ) {
+        if self.disposition == CodeIndexPublicationDispositionV1::Active {
+            self.clear_file_artifact_checkpoints(predecessor_generation);
+        }
     }
 
     pub(super) fn sync_directory(path: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -1247,7 +1393,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        let _lock = try_acquire_code_generation_store_lock(root)
+        let _lock = try_acquire_code_generation_store_read_lock(root)
             .map_err(Self::unavailable)?
             .ok_or_else(|| Self::unavailable("sealed lexical source generation store is busy"))?;
         let pointer = self.read_publication_pointer()?;
@@ -2033,6 +2179,82 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         self.load_active_shared()
     }
 
+    fn load_file_artifact_checkpoint(
+        &self,
+        predecessor_generation: Option<&CodeGenerationId>,
+        reuse_key: &ManifestDigest,
+    ) -> Result<Option<Vec<u8>>, CodeIndexPublicationStoreErrorV1> {
+        let Some(directory) =
+            self.open_file_artifact_checkpoint_directory(predecessor_generation, false)?
+        else {
+            return Ok(None);
+        };
+        let name = Self::file_artifact_checkpoint_name(reuse_key)?;
+        Self::read_file_artifact_checkpoint(&directory, &name)
+    }
+
+    fn persist_file_artifact_checkpoint(
+        &self,
+        predecessor_generation: Option<&CodeGenerationId>,
+        reuse_key: &ManifestDigest,
+        bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let directory = self
+            .open_file_artifact_checkpoint_directory(predecessor_generation, true)?
+            .ok_or_else(|| Self::unavailable("checkpoint directory was not created"))?;
+        let final_name = Self::file_artifact_checkpoint_name(reuse_key)?;
+        if let Some(existing) = Self::read_file_artifact_checkpoint(&directory, &final_name)? {
+            if existing == bytes {
+                return Ok(());
+            }
+            return Err(Self::corruption(
+                "resumable file artifact checkpoint conflicts with its physical reuse key",
+            ));
+        }
+        let temporary_name = format!(".{final_name}.{}.tmp", std::process::id());
+        match directory.symlink_metadata(&temporary_name) {
+            Ok(_) => directory
+                .remove_file(&temporary_name)
+                .map_err(Self::unavailable)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Self::unavailable(error)),
+        }
+        let mut options = CapabilityOpenOptions::new();
+        options
+            .create_new(true)
+            .write(true)
+            .follow(FollowSymlinks::No);
+        let mut temporary = directory
+            .open_with(&temporary_name, &options)
+            .map_err(Self::unavailable)?;
+        temporary.write_all(bytes).map_err(Self::unavailable)?;
+        temporary.sync_all().map_err(Self::unavailable)?;
+        drop(temporary);
+        match rename_noreplace(
+            &directory,
+            std::ffi::OsStr::new(&temporary_name),
+            &directory,
+            std::ffi::OsStr::new(&final_name),
+        ) {
+            Ok(()) => sync_capability_directory(&directory).map_err(Self::unavailable),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                directory
+                    .remove_file(&temporary_name)
+                    .map_err(Self::unavailable)?;
+                match Self::read_file_artifact_checkpoint(&directory, &final_name)? {
+                    Some(existing) if existing == bytes => Ok(()),
+                    _ => Err(Self::corruption(
+                        "resumable file artifact checkpoint conflicts with its physical reuse key",
+                    )),
+                }
+            }
+            Err(error) => {
+                let _ = directory.remove_file(&temporary_name);
+                Err(Self::unavailable(error))
+            }
+        }
+    }
+
     #[hotpath::measure(label = "code_index.generation.publish")]
     fn publish_atomically(
         &mut self,
@@ -2482,6 +2704,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             }
         }
         let generation_id = generation.manifest().generation_id.clone();
+        let predecessor_generation = generation.manifest().parent_generation.clone();
         state.forget(&generation_id);
         match self.disposition {
             CodeIndexPublicationDispositionV1::Active => {
@@ -2505,6 +2728,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 }
             }
         }
+        self.finish_file_artifact_checkpoints_after_publication(predecessor_generation.as_ref());
         *self
             .unpublished_candidate
             .lock()

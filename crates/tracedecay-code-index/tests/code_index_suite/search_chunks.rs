@@ -315,7 +315,10 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
     let privacy_domain = id::<PrivacyDomainId>("privacy.fixture");
     let mut generation = CodeGenerationManifestV1 {
         project_id: id("project.fixture"),
-        generation_id: id("generation.v1.aaaaaaaa.00000001"),
+        generation_id: id(&format!(
+            "generation.v1.aaaaaaaa.00000001.{}",
+            "d".repeat(64)
+        )),
         snapshot_digest: digest('a'),
         invalidation_digest: digest('d'),
         registry_revision: registry.registry_revision(),
@@ -326,6 +329,7 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
         privacy_domain: privacy_domain.clone(),
         privacy_key_epoch: 7,
         parent_generation: None,
+        capture_changed_files: Vec::new(),
         source_commitments: None,
         seal: GenerationSealV1 {
             expected_digest: digest('b'),
@@ -333,9 +337,6 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
             planner: id::<ComponentVersion>("planner.v1"),
         },
     };
-    generation.invalidation_digest = generation
-        .expected_legacy_invalidation_digest()
-        .expect("legacy invalidation digest computes");
     generation.seal.expected_digest =
         expected_seal_digest(&generation).expect("seal digest computes");
 
@@ -372,9 +373,6 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
 
     let mut mixed_registry = generation.clone();
     mixed_registry.registry_revision = id("registry.other.v1");
-    mixed_registry.invalidation_digest = mixed_registry
-        .expected_legacy_invalidation_digest()
-        .expect("mixed invalidation digest computes");
     mixed_registry.seal.expected_digest =
         expected_seal_digest(&mixed_registry).expect("mixed manifest still seals");
     assert_eq!(

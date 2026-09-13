@@ -485,10 +485,9 @@ fn unresolvable_active_tree_falls_back_to_full_capture() {
 }
 
 #[test]
-fn reverted_dirty_file_is_recaptured_from_clean_content() {
-    let committed = "pub fn alpha() -> u32 { 1 }\n";
+fn dirty_active_roster_survives_restart_and_reextracts_only_new_content() {
     let fixture = GitFixture::new(&[
-        ("src/lib.rs", committed),
+        ("src/lib.rs", "pub fn stable() -> u32 { 1 }\n"),
         ("src/other.rs", "pub fn other() -> u32 { 2 }\n"),
     ]);
     let store = TempDir::new().expect("store root");
@@ -497,6 +496,66 @@ fn reverted_dirty_file_is_recaptured_from_clean_content() {
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    published(scheduler.reconcile_now().expect("publish clean generation"));
+
+    fixture.edit("src/overflow.rs", "pub fn overflow() -> u32 { 3 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/overflow.rs")]);
+    let dirty = published(
+        scheduler
+            .reconcile_now()
+            .expect("publish first dirty generation"),
+    );
+    assert_eq!(dirty.reextracted_files, 1);
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("dirty generation")
+            .generation
+            .manifest()
+            .capture_changed_files,
+        ["src/overflow.rs"]
+    );
+    drop(scheduler);
+
+    for index in 0..3 {
+        fixture.edit(
+            &format!("src/batch_{index}.rs"),
+            &format!("pub fn batch_{index}() -> usize {{ {index} }}\n"),
+        );
+    }
+    let mut restarted = CodeIndexWorktreeSchedulerV1::open(
+        test_project_id(),
+        fixture.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("reopen worktree scheduler");
+    let successor = published(
+        restarted
+            .reconcile_now()
+            .expect("publish dirty successor after restart"),
+    );
+    assert_eq!(
+        successor.reextracted_files, 3,
+        "the retained dirty file is re-read for revert safety but its matching digest carries forward"
+    );
+}
+
+#[test]
+fn reverted_dirty_file_is_recaptured_from_clean_content() {
+    let committed = "pub fn alpha() -> u32 { 1 }\n";
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", committed),
+        ("src/other.rs", "pub fn other() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        test_project_id(),
+        fixture.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("reopen worktree scheduler");
     let clean_row = |captured: &super::super::CapturedSnapshotV1| {
         captured
             .snapshot
@@ -516,9 +575,17 @@ fn reverted_dirty_file_is_recaptured_from_clean_content() {
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 99 }\n");
     scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
     published(scheduler.reconcile_now().expect("publish dirty generation"));
+    drop(scheduler);
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        test_project_id(),
+        fixture.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("reopen worktree scheduler");
 
-    // Revert to the committed bytes: the path is git-clean again, but the
-    // active generation still carries the dirty row.
+    // Revert after a process-style reopen: the path is git-clean again, but
+    // the retained active generation still carries the dirty row.
     fixture.edit("src/lib.rs", committed);
     scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
     let captured = scheduler
@@ -10506,13 +10573,14 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, true, true),
         GraphSeatGateV1::Prepare,
-        "a publication prepares once its own text owner is ready, however busy the checkout is; \
-         graph replay follows that projection"
+        "a publication prepares after its first bounded text slice retained source and memory \
+         authority, however busy the checkout is"
     );
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, true, false),
         GraphSeatGateV1::PublishedTextOwnerUnavailable,
-        "a publication whose replacement text owner did not become ready must not start graph work"
+        "a publication whose replacement text owner did not acquire build authority must not \
+         start graph work"
     );
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, false, true),

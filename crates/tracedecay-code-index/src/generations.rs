@@ -140,9 +140,6 @@ pub struct GenerationIncrementPlanV1 {
     pub invalidation_digest: ManifestDigest,
     /// Canonically ordered by logical path.
     pub files: Vec<FileExtractionPlanV1>,
-    /// The capture-declared changed logical paths, recorded as evidence.
-    /// Digest comparison, not this hint, decides reuse.
-    pub capture_changed_files: Vec<String>,
     pub carried_forward: u64,
     pub reextract: u64,
     pub deleted: u64,
@@ -328,6 +325,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             privacy_domain: self.privacy_domain.clone(),
             privacy_key_epoch: self.privacy_key_epoch,
             parent_generation,
+            capture_changed_files: Vec::new(),
             source_commitments: None,
             seal: GenerationSealV1 {
                 expected_digest: placeholder_digest(),
@@ -347,23 +345,16 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
     /// to the current validated snapshot (Plan 25: reuse file and symbol
     /// results only when content, grammar, extractor, identity, and sanitizer
     /// inputs match).
-    ///
-    /// `changed_files` is the capture-declared changed logical-path set. It is
-    /// recorded as evidence; content identity digests alone decide reuse, so a
-    /// hinted-but-identical file carries forward and an unhinted-but-changed
-    /// file still re-extracts.
     pub fn plan_increment(
         &self,
         prior_manifest: &CodeGenerationManifestV1,
         prior_snapshot: &SanitizedCodeSnapshotV1,
         current: &ValidatedCodeSnapshotV1,
-        changed_files: &BTreeSet<String>,
     ) -> Result<GenerationIncrementPlanV1, GenerationPlanningErrorV1> {
         self.plan_increment_with_invalidation(
             prior_manifest,
             prior_snapshot,
             current,
-            changed_files,
             &BTreeSet::new(),
         )
     }
@@ -379,7 +370,6 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         prior_manifest: &CodeGenerationManifestV1,
         prior_snapshot: &SanitizedCodeSnapshotV1,
         current: &ValidatedCodeSnapshotV1,
-        changed_files: &BTreeSet<String>,
         invalidations: &BTreeSet<RebuildTriggerV1>,
     ) -> Result<GenerationIncrementPlanV1, GenerationPlanningErrorV1> {
         let prior_generation = self.verified_parent(prior_manifest)?;
@@ -474,7 +464,6 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             rebuild_triggers,
             invalidation_digest,
             files: plans,
-            capture_changed_files: changed_files.iter().cloned().collect(),
             carried_forward,
             reextract,
             deleted,
@@ -642,22 +631,23 @@ fn repository_discriminator(
         .collect())
 }
 
-/// Parse an identity minted by this planner. Legacy
-/// `generation.v1.<repo>.<seq>` parents remain accepted; current identities
-/// include a SHA-256 invalidation fingerprint suffix.
+/// Parse an identity minted by this planner. Every generation identity binds
+/// its sequence to the exact invalidation fingerprint.
 fn parse_minted_generation_id(generation_id: &CodeGenerationId) -> Option<(String, u64)> {
     let mut parts = generation_id.as_str().split('.');
     let scheme = parts.next()?;
     let version = parts.next()?;
     let discriminator = parts.next()?;
     let sequence = parts.next()?;
-    let fingerprint = parts.next();
+    let fingerprint = parts.next()?;
     if scheme != "generation" || version != "v1" || parts.next().is_some() {
         return None;
     }
-    if fingerprint.is_some_and(|fingerprint| {
-        fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-    }) {
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return None;
     }
     Some((discriminator.to_owned(), sequence.parse().ok()?))
@@ -961,11 +951,12 @@ mod tests {
 
         // Foreign parent: an identity this planner never minted.
         let mut foreign = genesis.clone();
-        foreign.generation_id = id("generation.v1.00000002.00000001");
+        foreign.generation_id = id(&format!(
+            "generation.v1.00000002.00000001.{}",
+            sha256_hex_suffix(foreign.invalidation_digest.as_str())
+                .expect("fixture invalidation digest")
+        ));
         foreign.parent_generation = None;
-        foreign.invalidation_digest = foreign
-            .expected_legacy_invalidation_digest()
-            .expect("foreign invalidation digest");
         foreign.seal.expected_digest = expected_seal_digest(&foreign).expect("foreign reseal");
         assert_eq!(
             planner.plan_generation(&snapshot, Some(&foreign), UtcMicros(4_000)),
@@ -1014,7 +1005,7 @@ mod tests {
             7,
         );
         let plan = rechunked
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &BTreeSet::new())
+            .plan_increment(&prior_manifest, &prior_snapshot, &current)
             .expect("rebuild plan");
         assert!(plan.is_full_rebuild());
         assert_eq!(
@@ -1036,7 +1027,7 @@ mod tests {
             7,
         );
         let plan = regrammared
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &BTreeSet::new())
+            .plan_increment(&prior_manifest, &prior_snapshot, &current)
             .expect("rebuild plan");
         assert_eq!(
             plan.rebuild_triggers,
@@ -1053,7 +1044,7 @@ mod tests {
             8,
         );
         let plan = reprivated
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &BTreeSet::new())
+            .plan_increment(&prior_manifest, &prior_snapshot, &current)
             .expect("rebuild plan");
         assert_eq!(
             plan.rebuild_triggers,

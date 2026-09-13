@@ -158,7 +158,8 @@ pub enum GraphSeatGateV1 {
     ReconcileUnfinished,
     /// A retryable activation failure holds seating until its scheduled retry.
     ActivationDeferred,
-    /// A publication whose replacement text owner did not become ready.
+    /// A publication whose replacement text owner did not acquire its build
+    /// authority in the first bounded advance.
     PublishedTextOwnerUnavailable,
     /// An unchanged pass with no retained owner to recover a head from.
     RetainedGenerationUnavailable,
@@ -175,6 +176,19 @@ enum PublishedTextProjectionOutcomeV1 {
     /// task exit. The owner carries the typed state; the pass seats nothing.
     Unfinished,
     /// Shutdown retired the text control mid-slice.
+    Shutdown,
+}
+
+/// Whether a publication's text owner acquired its source and memory
+/// reservation before optional graph work begins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublishedTextProjectionAdmissionV1 {
+    /// The first bounded advance either finished or retained the build
+    /// reservation needed by every later text slice.
+    Admitted,
+    /// The first advance stopped typed before it could retain that authority.
+    Unfinished,
+    /// Shutdown retired the owner during its first advance.
     Shutdown,
 }
 
@@ -223,9 +237,10 @@ fn record_semantic_candidate_refusal(
 
 impl GraphSeatGateV1 {
     /// `text_owner_admitted_for_graph` means a publication's replacement
-    /// owner is ready, or an unchanged pass has a retained owner from which it
-    /// can first try to recover an already-verified graph head. A retained full
-    /// replay is gated separately on text readiness after that recovery attempt.
+    /// owner acquired its source and memory reservation, or an unchanged pass
+    /// has a retained owner from which it can first try to recover an
+    /// already-verified graph head. A retained full replay is gated separately
+    /// on text readiness after that recovery attempt.
     #[hotpath::skip]
     pub const fn decide(
         activation_enabled: bool,
@@ -2095,15 +2110,20 @@ impl CodeIndexSchedulerRegistryV1 {
         shutting_down: Arc<AtomicBool>,
         convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
         installed: Option<Arc<RwLock<Option<LatestCodeTextGenerationV1>>>>,
+        admission: Option<tokio::sync::oneshot::Sender<PublishedTextProjectionAdmissionV1>>,
         #[cfg(test)] project_root: PathBuf,
     ) -> PublishedTextProjectionOutcomeV1 {
         #[cfg(test)]
         if installed.is_none() {
             Self::wait_for_published_text_projection_gate(&project_root).await;
         }
+        let mut admission = admission;
         let mut advances = 0_usize;
         while text.text_serving_needs_work() {
             if shutting_down.load(Ordering::Acquire) {
+                if let Some(admission) = admission.take() {
+                    let _ = admission.send(PublishedTextProjectionAdmissionV1::Shutdown);
+                }
                 return PublishedTextProjectionOutcomeV1::Shutdown;
             }
             advances += 1;
@@ -2127,10 +2147,16 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 Ok(Ok(true)) => {
                     clear_convergence_park(&convergence_park);
+                    if let Some(admission) = admission.take() {
+                        let _ = admission.send(PublishedTextProjectionAdmissionV1::Admitted);
+                    }
                     break;
                 }
                 Ok(Ok(false)) => {
                     clear_convergence_park(&convergence_park);
+                    if let Some(admission) = admission.take() {
+                        let _ = admission.send(PublishedTextProjectionAdmissionV1::Admitted);
+                    }
                 }
                 Ok(Err(error)) => {
                     if matches!(
@@ -2147,6 +2173,18 @@ impl CodeIndexSchedulerRegistryV1 {
                         {
                             *current = None;
                         }
+                    }
+                    let stopped = if matches!(
+                        &error,
+                        tracedecay_query::retrieval::RetrievalPortError::Cancelled
+                    ) && shutting_down.load(Ordering::Acquire)
+                    {
+                        PublishedTextProjectionAdmissionV1::Shutdown
+                    } else {
+                        PublishedTextProjectionAdmissionV1::Unfinished
+                    };
+                    if let Some(admission) = admission.take() {
+                        let _ = admission.send(stopped);
                     }
                     if error.is_deterministic_contract() {
                         park_convergence(
@@ -2186,6 +2224,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     break;
                 }
                 Err(error) => {
+                    if let Some(admission) = admission.take() {
+                        let _ = admission.send(PublishedTextProjectionAdmissionV1::Unfinished);
+                    }
                     text.mark_text_serving_failed();
                     park_convergence(
                         &convergence_park,
@@ -2201,6 +2242,14 @@ impl CodeIndexSchedulerRegistryV1 {
                     break;
                 }
             }
+        }
+        if let Some(admission) = admission.take() {
+            let outcome = if text.text_serving_is_ready() {
+                PublishedTextProjectionAdmissionV1::Admitted
+            } else {
+                PublishedTextProjectionAdmissionV1::Unfinished
+            };
+            let _ = admission.send(outcome);
         }
         // Readiness, not "nothing left to advance": a latched failed owner
         // also has no work left, and it must not seat.

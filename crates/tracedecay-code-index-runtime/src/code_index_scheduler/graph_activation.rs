@@ -450,9 +450,10 @@ impl CodeGraphActivationAuthorityV1 {
             return Err(CodeIndexSchedulerErrorV1::GraphActivationRefused(reason));
         }
         // Graph activation consumes the sealed generation directly. The
-        // mounted scheduler therefore admits a full replay only after text
-        // projection is ready; verified-head recovery has its own path above
-        // and does not replay the sealed source.
+        // mounted scheduler admits a full replay after the text projection's
+        // first bounded advance has retained its source authority, then joins
+        // both projections before the serving swap. Verified-head recovery
+        // has its own path above and does not replay the sealed source.
         match self {
             Self::Persistent {
                 runtime,
@@ -536,7 +537,7 @@ impl CodeGraphActivationAuthorityV1 {
                         CodeGraphProjectionError::DeadlineExceeded,
                     ));
                 }
-                latest.warm_serving_caches();
+                latest.warm_graph_serving_caches();
                 Ok(())
             }
         }

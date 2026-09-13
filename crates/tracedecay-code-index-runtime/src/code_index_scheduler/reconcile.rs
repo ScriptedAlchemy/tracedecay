@@ -654,10 +654,6 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     pub(super) production_config: CodeIndexProductionConfigV1,
     pub(super) owner: ProductionOwner,
     pub(super) hints: Arc<Mutex<PendingHintsV1>>,
-    /// gix "unchanged" is relative to the index, while active rows may have
-    /// been captured from dirty content, so the exact snapshot identity keeps
-    /// those paths excluded from reuse after they are reverted.
-    active_snapshot_changed_paths: Mutex<Option<(ContentDigest, BTreeSet<String>)>>,
     pub(super) wake: Arc<tokio::sync::Notify>,
     pub(super) epoch: Arc<AtomicU64>,
     pub(super) shutting_down: Arc<AtomicBool>,
@@ -975,7 +971,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             production_config,
             owner,
             hints,
-            active_snapshot_changed_paths: Mutex::new(None),
             wake,
             epoch,
             shutting_down,
@@ -1955,7 +1950,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ));
             }
             let snapshot_content_identity = captured.snapshot.content_identity.clone();
-            let reextracted_files = captured.changed_paths.len();
             let pending = self.publication.take_unpublished().filter(|pending| {
                 pending.snapshot().reference == captured.snapshot.reference
                     && pending.snapshot().source_revision == captured.snapshot.source_revision
@@ -1998,6 +1992,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     &control,
                 )?
             };
+            let reextracted_files = generation.reextracted_files();
             if !self
                 .observe_generation_compatibility(&generation)
                 .is_reusable()
@@ -2559,7 +2554,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             // cloning every file record and changed path.
             let mut snapshot_content_identity = captured.snapshot.content_identity.clone();
             let mut source_manifest = SourceContentManifestV1::for_snapshot(&captured.snapshot);
-            let mut reextracted_files = captured.changed_paths.len();
             let mut generation = self.owner.build_and_publish(
                 CodeIndexBuildRequestV1 {
                     snapshot: captured.snapshot,
@@ -2586,7 +2580,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                     self.capture_authoritative_snapshot_without_active_generation_reuse(None)?;
                 snapshot_content_identity = captured.snapshot.content_identity.clone();
                 source_manifest = SourceContentManifestV1::for_snapshot(&captured.snapshot);
-                reextracted_files = captured.changed_paths.len();
                 generation = self.owner.build_and_publish(
                     CodeIndexBuildRequestV1 {
                         snapshot: captured.snapshot,
@@ -2627,6 +2620,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
+            let reextracted_files = generation.reextracted_files();
             let replacement_compatibility = self.observe_generation_compatibility(&generation);
             if !replacement_compatibility.is_reusable() {
                 return Err(CodeIndexSchedulerErrorV1::Identity(
@@ -3419,46 +3413,32 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        let remembered_active_capture = self
-            .active_snapshot_changed_paths
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let reusable_active_candidate = if allow_active_generation_reuse
-            && self.ignored_source_admissions.is_empty()
-        {
-            match self
-                .publication
-                .load_active_shared()
-                .map_err(CodeIndexProductionErrorV1::Publication)?
-            {
-                Some(active) => {
-                    self.validate_generation_identity(&active)?;
-                    let current_scope = CodeIndexGenerationScopeV1 {
-                        repository: self.repository_id.clone(),
-                        reference: self.identity.head_ref().cloned(),
-                        worktree: Some(self.worktree_id.clone()),
-                    };
-                    (active.sealed_scope() == current_scope
-                        && active
-                            .compatibility_with(&self.production_config)
-                            .is_reusable()
-                        && active.ignored_source_admissions().is_empty())
-                    .then_some(active)
-                    .filter(|active| {
-                        active.repository_parse_identity().dirty == RepositoryDirtyStateV1::Clean
-                            || remembered_active_capture.as_ref().is_some_and(
-                                |(content_identity, _)| {
-                                    content_identity == &active.snapshot().content_identity
-                                },
-                            )
-                    })
+        let reusable_active_candidate =
+            if allow_active_generation_reuse && self.ignored_source_admissions.is_empty() {
+                match self
+                    .publication
+                    .load_active_shared()
+                    .map_err(CodeIndexProductionErrorV1::Publication)?
+                {
+                    Some(active) => {
+                        self.validate_generation_identity(&active)?;
+                        let current_scope = CodeIndexGenerationScopeV1 {
+                            repository: self.repository_id.clone(),
+                            reference: self.identity.head_ref().cloned(),
+                            worktree: Some(self.worktree_id.clone()),
+                        };
+                        (active.sealed_scope() == current_scope
+                            && active
+                                .compatibility_with(&self.production_config)
+                                .is_reusable()
+                            && active.ignored_source_admissions().is_empty())
+                        .then_some(active)
+                    }
+                    None => None,
                 }
-                None => None,
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         let (reusable_active, tree_delta) = match reusable_active_candidate {
             Some(active) => {
                 let tree_delta = match (
@@ -3507,13 +3487,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                     },
                 ) {
                 Ok(captured) => {
-                    *self
-                        .active_snapshot_changed_paths
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
-                        captured.snapshot.content_identity.clone(),
-                        captured.changed_paths.clone(),
-                    ));
                     return Ok(captured);
                 }
                 Err(
@@ -3567,12 +3540,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let registry = StaticLanguageRegistry::new();
         let remembered_dirty_paths = reusable_active.as_ref().and_then(|active| {
             (active.repository_parse_identity().dirty != RepositoryDirtyStateV1::Clean)
-                .then(|| {
-                    remembered_active_capture
-                        .as_ref()
-                        .map(|(_, changed_paths)| changed_paths)
-                })
-                .flatten()
+                .then_some(active.manifest().capture_changed_files.as_slice())
         });
         let active_files = reusable_active
             .as_ref()
@@ -3740,13 +3708,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_bytes,
             retained_reservations,
         };
-        *self
-            .active_snapshot_changed_paths
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
-            captured.snapshot.content_identity.clone(),
-            captured.changed_paths.clone(),
-        ));
         Ok(captured)
     }
 }

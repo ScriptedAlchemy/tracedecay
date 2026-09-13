@@ -8,7 +8,7 @@ use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
 use tracedecay_code_index::languages::StaticLanguageRegistry;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationManifestV1, ContentDigest, FileOccurrenceId, LanguageId,
-    ManifestDigest, PrivacyDomainId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    PrivacyDomainId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
     SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
     canonical_sha256,
 };
@@ -116,13 +116,7 @@ fn explicit_runtime_invalidations_force_typed_full_rebuilds() {
     ]);
 
     let plan = planner
-        .plan_increment_with_invalidation(
-            &prior,
-            &prior_snapshot,
-            &current,
-            &BTreeSet::new(),
-            &invalidations,
-        )
+        .plan_increment_with_invalidation(&prior, &prior_snapshot, &current, &invalidations)
         .expect("full rebuild plan");
 
     assert!(plan.is_full_rebuild());
@@ -159,14 +153,13 @@ fn invalidation_digest_fences_sibling_generation_identity_and_publication() {
     ]);
 
     let incremental = planner
-        .plan_increment(&prior, &prior_snapshot, &current, &BTreeSet::new())
+        .plan_increment(&prior, &prior_snapshot, &current)
         .expect("increment plan");
     let rebuilt = planner
         .plan_increment_with_invalidation(
             &prior,
             &prior_snapshot,
             &current,
-            &BTreeSet::new(),
             &declared_invalidations,
         )
         .expect("declared rebuild plan");
@@ -244,13 +237,13 @@ fn resealing_cannot_hide_a_generation_fingerprint_mismatch() {
 }
 
 #[test]
-fn legacy_v1_manifest_deserialization_migrates_and_remains_a_valid_parent() {
+fn generation_manifest_requires_current_invalidation_and_identity() {
     let planner = planner();
     let snapshot = validated(snapshot(vec![file("file.a", "src/a.rs", 'a')]));
     let current = planner
         .plan_generation(&snapshot, None, UtcMicros(3_000))
         .expect("current manifest");
-    let mut legacy_identity = current
+    let legacy_identity = current
         .generation_id
         .as_str()
         .split('.')
@@ -260,46 +253,14 @@ fn legacy_v1_manifest_deserialization_migrates_and_remains_a_valid_parent() {
     assert_eq!(legacy_identity.matches('.').count(), 3);
 
     let mut wire = serde_json::to_value(&current).expect("manifest wire");
-    let object = wire.as_object_mut().expect("manifest object");
-    object.insert(
-        "generation_id".to_owned(),
-        serde_json::Value::String(std::mem::take(&mut legacy_identity)),
-    );
-    object.remove("invalidation_digest");
-    object
-        .get_mut("seal")
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("seal object")
-        .insert(
-            "expected_digest".to_owned(),
-            serde_json::Value::String(format!("sha256:{}", "0".repeat(64))),
-        );
-
-    let mut migrated: CodeGenerationManifestV1 =
-        serde_json::from_value(wire).expect("legacy wire migrates");
-    migrated.seal.expected_digest = expected_seal_digest(&migrated).expect("legacy seal digest");
-    let mut legacy_wire = serde_json::to_value(&migrated).expect("migrated wire");
-    legacy_wire
-        .as_object_mut()
+    wire.as_object_mut()
         .expect("manifest object")
         .remove("invalidation_digest");
-    let legacy_parent: CodeGenerationManifestV1 =
-        serde_json::from_value(legacy_wire).expect("legacy fixture deserializes");
+    assert!(serde_json::from_value::<CodeGenerationManifestV1>(wire).is_err());
 
-    legacy_parent.validate().expect("legacy parent validates");
-    assert_eq!(
-        legacy_parent.invalidation_digest,
-        migrated.invalidation_digest
-    );
-    assert_ne!(
-        legacy_parent.invalidation_digest,
-        id::<ManifestDigest>(&format!("sha256:{}", "0".repeat(64)))
-    );
-    let child = planner
-        .plan_generation(&snapshot, Some(&legacy_parent), UtcMicros(4_000))
-        .expect("legacy parent accepted");
-    assert_eq!(
-        child.parent_generation.as_ref(),
-        Some(&legacy_parent.generation_id)
-    );
+    let mut short_identity = current;
+    short_identity.generation_id = id(&legacy_identity);
+    short_identity.seal.expected_digest =
+        expected_seal_digest(&short_identity).expect("short identity reseals");
+    assert!(short_identity.validate().is_err());
 }

@@ -1271,6 +1271,20 @@ impl LatestCompleteCodeIndexV1 {
         // abstention instead of warm owners. Each advance inside stays
         // bounded and cancellation-checkpointed.
         let _ = self.production_query_owners();
+        self.warm_graph_serving_caches();
+    }
+
+    /// Build the in-memory graph serving derivations without joining text.
+    ///
+    /// Text and graph are independent projections of the same immutable
+    /// generation. Graph activation calls this after the text owner has
+    /// retained its source authority, while the remaining text projection is
+    /// still running. Keeping the text join out of this helper lets those two
+    /// corpus-sized derivations actually overlap; the mount owner still joins
+    /// both before publishing the serving swap.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn warm_graph_serving_caches(&self) {
         // Mirror the persistent-graph activation warm set: the record lookup
         // indices and the test-attribution join are pure functions of the
         // sealed generation and must exist before the first request, not be

@@ -17,6 +17,7 @@ use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent, HookEventNotifyO
 use crate::common::{DaemonProcess, tracedecay_command_with_home};
 
 pub const RECEIPT_TIMEOUT: Duration = Duration::from_secs(45);
+const RECEIPT_OBSERVATION_CADENCE: Duration = Duration::from_millis(100);
 
 pub fn daemon_log_for_failure() -> String {
     let Some(path) = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG") else {
@@ -396,21 +397,25 @@ pub async fn wait_for_terminal_generation(
                 && prior_generation.is_none_or(|prior| generation.as_deref() != Some(prior));
             last_status = observed;
             if !terminal {
+                tokio::time::sleep(RECEIPT_OBSERVATION_CADENCE).await;
                 continue;
             }
             let observed_search = search(socket, handshake, query).await;
             last_search = observed_search;
             if last_search["code_generation"].as_str() != generation.as_deref() {
+                tokio::time::sleep(RECEIPT_OBSERVATION_CADENCE).await;
                 continue;
             }
             let paths = result_paths(&last_search);
             let query_matches = expected_path
                 .map_or_else(|| paths.is_empty(), |expected| paths.contains(&expected));
             if !query_matches {
+                tokio::time::sleep(RECEIPT_OBSERVATION_CADENCE).await;
                 continue;
             }
             let incomplete = crate::common::incomplete_code_index_query_lanes(&last_search);
             if !incomplete.is_empty() {
+                tokio::time::sleep(RECEIPT_OBSERVATION_CADENCE).await;
                 continue;
             }
             assert_exact_identity(

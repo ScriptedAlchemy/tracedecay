@@ -33,6 +33,101 @@ use crate::{
     code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1},
 };
 
+fn checkpoint_publication_store(
+    store: &Path,
+    project: &Path,
+) -> super::super::DaemonCodeIndexPublicationStoreV1 {
+    super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store,
+        project,
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open checkpoint publication store")
+}
+
+#[cfg(unix)]
+#[test]
+fn file_artifact_checkpoint_symlinks_are_denied_without_touching_their_targets() {
+    let store = TempDir::new().expect("store root");
+    let external = TempDir::new().expect("external root");
+    std::fs::write(external.path().join("sentinel"), b"preserve").expect("external sentinel");
+    std::os::unix::fs::symlink(
+        external.path(),
+        store.path().join("code-generation-build-checkpoints-v1"),
+    )
+    .expect("checkpoint root symlink");
+    let denied = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        store.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    );
+    assert!(denied.is_err(), "checkpoint root symlink must be denied");
+    assert_eq!(
+        std::fs::read(external.path().join("sentinel")).expect("retained sentinel"),
+        b"preserve"
+    );
+
+    let store = TempDir::new().expect("second store root");
+    let publication = checkpoint_publication_store(store.path(), store.path());
+    let predecessor =
+        CodeGenerationId::new("generation.v1.aaaaaaaa.00000001").expect("predecessor generation");
+    let directory_name = publication.file_artifact_checkpoint_directory_name(Some(&predecessor));
+    std::os::unix::fs::symlink(
+        external.path(),
+        store
+            .path()
+            .join("code-generation-build-checkpoints-v1")
+            .join(directory_name),
+    )
+    .expect("predecessor symlink");
+    let reuse_key =
+        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("physical reuse key");
+    assert!(
+        publication
+            .persist_file_artifact_checkpoint(Some(&predecessor), &reuse_key, b"checkpoint")
+            .is_err(),
+        "checkpoint predecessor symlink must be denied"
+    );
+    publication.clear_file_artifact_checkpoints(Some(&predecessor));
+    assert_eq!(
+        std::fs::read(external.path().join("sentinel")).expect("sentinel survives cleanup"),
+        b"preserve"
+    );
+}
+
+#[test]
+fn retained_history_publication_does_not_clear_active_successor_checkpoints() {
+    let store = TempDir::new().expect("store root");
+    let publication = checkpoint_publication_store(store.path(), store.path());
+    let predecessor =
+        CodeGenerationId::new("generation.v1.aaaaaaaa.00000001").expect("predecessor generation");
+    let reuse_key =
+        ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("physical reuse key");
+    publication
+        .persist_file_artifact_checkpoint(Some(&predecessor), &reuse_key, b"checkpoint")
+        .expect("persist active successor checkpoint");
+
+    publication
+        .retained_history()
+        .finish_file_artifact_checkpoints_after_publication(Some(&predecessor));
+    assert_eq!(
+        publication
+            .load_file_artifact_checkpoint(Some(&predecessor), &reuse_key)
+            .expect("load after retained publication"),
+        Some(b"checkpoint".to_vec())
+    );
+
+    publication.finish_file_artifact_checkpoints_after_publication(Some(&predecessor));
+    assert_eq!(
+        publication
+            .load_file_artifact_checkpoint(Some(&predecessor), &reuse_key)
+            .expect("load after active publication"),
+        None
+    );
+}
+
 #[test]
 fn partitioned_publication_reuses_unchanged_file_segments() {
     let unchanged = (0..256).fold(String::new(), |mut source, index| {

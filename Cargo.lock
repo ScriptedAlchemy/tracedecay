@@ -6258,6 +6258,8 @@ dependencies = [
 name = "tracedecay-code-index-runtime"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "filetime",
  "futures-util",
  "gix",

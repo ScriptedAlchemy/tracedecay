@@ -11,6 +11,7 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracedecay::daemon::call_tool;
 use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
@@ -27,6 +28,10 @@ use crate::code_index_journey::{
     initialize_tracedecay, result_paths, search, status, tool, wait_for_terminal_generation,
 };
 use crate::common::{EnvVarGuard, IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with};
+
+const CANCELLATION_BATCH_FILES: usize = 768;
+const MINIMUM_CHECKPOINTS_BEFORE_CANCELLATION: usize = 641;
+const OBSERVATION_CADENCE: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn initialize_repository(project: &Path) -> (String, String) {
     fs::create_dir_all(project.join("src")).expect("fixture source directory");
@@ -119,12 +124,85 @@ async fn wait_for_overflow_cadence_receipt(log_path: &Path) {
     .unwrap_or_else(|_| panic!("overflow omitted its terminal cadence receipt; log={last}"));
 }
 
+async fn wait_for_reextraction_receipt(log_path: &Path, generation_id: &str) -> usize {
+    let mut last = String::new();
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            last = fs::read_to_string(log_path).unwrap_or_default();
+            if let Some(reextracted_files) = last.lines().find_map(|line| {
+                if !line.contains("code_index_generation_published")
+                    || !line.contains(generation_id)
+                {
+                    return None;
+                }
+                let suffix = line.split_once("reextracted_files=")?.1;
+                let digits = suffix
+                    .trim_start_matches('"')
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>();
+                digits.parse().ok()
+            }) {
+                return reextracted_files;
+            }
+            tokio::time::sleep(OBSERVATION_CADENCE).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("generation {generation_id} omitted its re-extraction receipt; log={last}")
+    })
+}
+
+fn code_index_store_scope(home: &Path, project: &Path) -> std::path::PathBuf {
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))
+            .expect("profile-sharded project layout");
+    scoped_code_index_store_root(&layout.data_root.join("code-index-v1"), project)
+}
+
+fn successor_checkpoint_count(
+    home: &Path,
+    project: &Path,
+    predecessor_generation_id: &str,
+) -> usize {
+    let predecessor_directory = hex::encode(Sha256::digest(predecessor_generation_id.as_bytes()));
+    let checkpoints = code_index_store_scope(home, project)
+        .join("code-generation-build-checkpoints-v1")
+        .join(predecessor_directory);
+    fs::read_dir(checkpoints)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .count()
+}
+
+async fn wait_for_successor_checkpoint(
+    home: &Path,
+    project: &Path,
+    predecessor_generation_id: &str,
+) -> usize {
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            let artifact_count =
+                successor_checkpoint_count(home, project, predecessor_generation_id);
+            if artifact_count >= MINIMUM_CHECKPOINTS_BEFORE_CANCELLATION {
+                return artifact_count;
+            }
+            tokio::time::sleep(OBSERVATION_CADENCE).await;
+        }
+    })
+    .await
+    .expect("successor produced no durable file checkpoint before cancellation")
+}
+
 fn write_cancellation_batch(project: &Path, scratch: &Path) {
     let batch = scratch.join("cancelled_batch_staging");
     fs::create_dir_all(&batch).expect("cancellation batch directory");
-    for file_index in 0..768_u32 {
+    for file_index in 0..CANCELLATION_BATCH_FILES {
         let mut source = String::new();
-        for symbol_index in 0..128_u32 {
+        for symbol_index in 0..128 {
             writeln!(
                 source,
                 "pub fn cancellation_probe_{file_index:04}_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}"
@@ -174,10 +252,7 @@ async fn wait_for_refreshing_old_generation(
 }
 
 fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGenerationV1 {
-    let layout =
-        tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))
-            .expect("profile-sharded project layout");
-    let scope = scoped_code_index_store_root(&layout.data_root.join("code-index-v1"), project);
+    let scope = code_index_store_scope(home, project);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &fs::read(scope.join("active-code-generation-v1.json"))
             .expect("active code generation pointer"),
@@ -599,6 +674,13 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         overflowed.generation_id,
         "cancellation must intersect the observed in-flight refresh"
     );
+    let observed_checkpoint_progress =
+        wait_for_successor_checkpoint(environment.home(), &project, &overflowed.generation_id)
+            .await;
+    assert!(
+        observed_checkpoint_progress >= MINIMUM_CHECKPOINTS_BEFORE_CANCELLATION,
+        "checkpoint wait returned before the mid-build interruption boundary"
+    );
 
     let signal_result = unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
     assert_eq!(signal_result, 0, "send graceful cancellation to daemon");
@@ -614,6 +696,14 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     assert!(
         exit.success(),
         "daemon cancellation was not graceful: {exit}"
+    );
+    let carried_progress =
+        successor_checkpoint_count(environment.home(), &project, &overflowed.generation_id);
+    assert!(
+        carried_progress >= observed_checkpoint_progress
+            && carried_progress <= CANCELLATION_BATCH_FILES,
+        "graceful cancellation must retain the observed successor checkpoints: \
+         observed={observed_checkpoint_progress}, retained={carried_progress}"
     );
 
     let retained = read_active_generation(environment.home(), &project);
@@ -651,6 +741,17 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         Some("src/cancelled_batch/file_0000.rs"),
     )
     .await;
+    let reextracted_files =
+        wait_for_reextraction_receipt(&log_path, &restarted.generation_id).await;
+    println!(
+        "successor checkpoint recovery: carried_checkpoints={carried_progress} \
+         reextracted_files={reextracted_files}"
+    );
+    assert_eq!(
+        reextracted_files,
+        CANCELLATION_BATCH_FILES - carried_progress,
+        "restart must re-extract exactly the successor files without durable checkpoints"
+    );
     assert_eq!(
         restarted.status["code_index_freshness"]["status"], "current",
         "restart must publish only a current complete generation"

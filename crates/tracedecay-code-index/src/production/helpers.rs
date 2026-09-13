@@ -13,6 +13,7 @@ pub(crate) struct StagedGenerationV1 {
     pub(crate) chunks: GenerationChunkManifestV1,
     pub(crate) symbols: GenerationSymbolIndexV1,
     pub(crate) lineage: Vec<SymbolLineageCandidateV1>,
+    pub(crate) reextracted_files: usize,
 }
 
 pub(crate) fn staged_generation(
@@ -54,6 +55,7 @@ pub(crate) fn staged_generation(
         chunks,
         symbols,
         lineage,
+        reextracted_files: 0,
     })
 }
 

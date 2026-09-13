@@ -217,7 +217,6 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                 content_digest: prior_file.document.content_digest.clone(),
             },
         }],
-        capture_changed_files: vec![],
         carried_forward: 1,
         reextract: 0,
         deleted: 0,
