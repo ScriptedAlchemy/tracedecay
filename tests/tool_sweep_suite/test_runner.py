@@ -791,6 +791,51 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["expected_authority_version"], 1)
         self.assertIn("durable run-control", note)
 
+    def test_fresh_work_task_observes_time_after_create_commits(self) -> None:
+        runner = load_runner()
+        journeys = sys.modules[runner.prime_work_lifecycle.__module__]
+        created = False
+        original_time = journeys.time.time
+
+        def observed_time():
+            self.assertTrue(created, "proposal time was sampled before task creation")
+            return 123.0
+
+        def call(tool, _arguments, _deadline_ms):
+            nonlocal created
+            if tool == "tracedecay_work_prepare_graph_mutation":
+                return {"request": {"prepared": True}}
+            if tool == "tracedecay_work_create":
+                created = True
+                return {}
+            if tool == "tracedecay_work_generate_proposal":
+                return {"proposal": {"proposal_id": "proposal.fixture"}}
+            raise AssertionError(tool)
+
+        fixture = {
+            "work_selection": {"selection": "relations", "relation_scopes": []},
+            "work_prepare_create_arguments": {
+                "change": {
+                    "initiative": {"id": "initiative.fixture"},
+                    "plan": {"id": "plan.fixture"},
+                    "milestone": {"id": "milestone.fixture"},
+                    "item": {"input": {"task_id": "task.fixture"}},
+                }
+            },
+        }
+        journeys.time.time = observed_time
+        try:
+            task_id, proposal, snapshot = journeys._fresh_work_task(
+                fixture, call, lambda _tool: 1_000, "temporal.fixture", admit=False
+            )
+        finally:
+            journeys.time.time = original_time
+
+        self.assertTrue(created)
+        self.assertTrue(task_id.startswith("task.temporal.fixture."))
+        self.assertEqual(proposal["proposal_id"], "proposal.fixture")
+        self.assertIsNone(snapshot)
+
     def test_git_apply_consumes_preview_and_verifies_its_inverse(self) -> None:
         runner = load_runner()
         calls = []

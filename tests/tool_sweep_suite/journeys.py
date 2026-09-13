@@ -1288,7 +1288,6 @@ def _fresh_work_task(
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     """Create a distinct task from the canonical prepared fixture shape."""
     suffix = f"{purpose}.{time.monotonic_ns()}"
-    occurred_at = int(time.time() * 1_000_000)
     source = fixture["work_prepare_create_arguments"]
     original = source["change"]
     replacements = {
@@ -1318,6 +1317,7 @@ def _fresh_work_task(
     )
     call("tracedecay_work_create", created_request, deadline("tracedecay_work_create"))
     task_id = replacements[original["item"]["input"]["task_id"]]
+    occurred_at = int(time.time() * 1_000_000)
     generated = call(
         "tracedecay_work_generate_proposal",
         {
