@@ -17,7 +17,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
+use tracedecay_code_index_retention::code_index_generations::{
+    CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
+    code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
+    run_code_generation_retention,
+};
 use tracedecay_domain::{
     CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
     sha256_hex_suffix,
@@ -604,6 +608,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         )
         .await
         .expect("retain code graph runtime");
+    let (_, generation_a_replay_key, _) = publication_replay(&runtime, latest.generation());
 
     std::fs::write(&canonical_seal, &mutated_seal).expect("mutate sealed generation in place");
     assert!(matches!(
@@ -783,12 +788,12 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     };
     let mut next_runtime = registry
         .retain_code_graph_runtime(
-            project_id,
+            project_id.clone(),
             next.generation().snapshot().repository.clone(),
             scheduler.identity().worktree_id().clone(),
             next.generation().snapshot().reference.clone(),
             next.generation().manifest().generation_id.clone(),
-            project_database,
+            Arc::clone(&project_database),
             next_binding,
             None,
         )
@@ -810,14 +815,85 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         .as_str()
     );
 
+    // The detached staging release is allowed to remove duplicate native
+    // rows, but the durable generation index still makes A addressable to a
+    // stateless cursor. Only code-generation retention may retire its replay.
+    next_runtime
+        .operation_task_owner
+        .shutdown()
+        .await
+        .expect("join detached staging releases");
+    with_publication_context("inspect-retained-generation-a", |context| {
+        let mut storage = project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .replay(&generation_a_replay_key, context)
+                .expect("generation A replay lookup"),
+            GraphPublicationReplayLookupV1::Active(_)
+        ));
+    });
+    let next_generation = next_snapshot.generation().clone();
+    let next_head = next_snapshot.verified_head().clone();
+    drop(next_snapshot);
+    drop(runtime);
+    drop(latest);
+    std::fs::remove_dir_all(&foreign_destination)
+        .expect("remove foreign replay collision before retention");
+
+    let retention = run_code_generation_retention(
+        &scoped_store,
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        tracedecay_contracts::clock::now_micros(),
+        Some(&replay_root),
+    )
+    .expect("collect superseded generation A");
+    assert_eq!(retention.deleted_generations.len(), 1);
+    assert_eq!(
+        retention.deleted_generations[0].generation_id,
+        generation_id
+    );
+    let release_page = code_generation_graph_replay_release_page(&scoped_store, None)
+        .expect("generation replay release page");
+    assert_eq!(release_page.releases.len(), 1);
+    let release = release_page
+        .releases
+        .first()
+        .expect("generation A release event");
+    assert_eq!(release.generation.generation_id, generation_id);
+    assert!(
+        registry
+            .reconcile_deleted_code_generation_graph_replays(
+                project_id.clone(),
+                &project_database,
+                &release.generation.generation_id,
+                &release.generation.generation_file,
+                &tracedecay_session_memory::context::CancellationToken::new(),
+            )
+            .await
+            .expect("reconcile generation A replay release")
+    );
+    complete_code_generation_graph_replay_release(&scoped_store, release)
+        .expect("complete generation A replay release");
+    with_publication_context("inspect-retired-generation-a", |context| {
+        let mut storage = project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .replay(&generation_a_replay_key, context)
+                .expect("retired generation A replay lookup"),
+            GraphPublicationReplayLookupV1::Retired(_)
+        ));
+    });
+
     // A cold daemon has the durable relational head and the derived sealed
     // graph store produced by the successful publication above, but no shared
     // staging runtime in its new GraphDB registry. Reopening the exact active
     // publication must use that verified sealed artifact directly and leave
     // the staging shard unregistered.
-    let next_generation = next_snapshot.generation().clone();
-    let next_head = next_snapshot.verified_head().clone();
-    drop(next_snapshot);
     let manifest_provider: Arc<dyn tracedecay_graph_db::GraphGenerationManifestProvider> =
         next_runtime.graph_manifest_provider.clone();
     let cold_graph_registry = tracedecay_graph_db::GraphDbRegistry::new_with_manifest_provider(
@@ -830,7 +906,6 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     // registry owner, then seat the retained publication inputs in a fresh
     // lifecycle and GraphDB registry. The old registry's final drop releases
     // its staging and sealed Grafeo handles without bypassing lease checks.
-    drop(runtime);
     drop(registry);
     next_runtime.lifecycle_cancelled = Arc::new(AtomicBool::new(false));
     drop(std::mem::replace(

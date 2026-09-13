@@ -561,51 +561,79 @@ fn observe_sealed_staging_release(
     }
 }
 
-/// Retires the replays a freshly installed head superseded and reports what
-/// the pass decided. Runs beside the staging release on the same lease: the
-/// release trims the head's duplicate rows, this reclaims every predecessor's
-/// journal row, native rows, and sealed artifact. Failure is logged, never
-/// propagated — the next publish or maintenance pass revisits the projection.
-fn retire_superseded_replays(
-    stage: &'static str,
+/// Retries ordinary inline replay retirement after a reader or transient
+/// failure retained a superseded generation during publication. Sealed code
+/// replay lifetime belongs to the code-generation release queue instead.
+fn retire_superseded_inline_replays(
     graph_registry: &tracedecay_graph_db::GraphDbRegistry,
     registration: GraphDbRegistration,
     storage: &mut dyn GraphPublicationStoreV1,
     context: &GraphPublicationOperationContextV1<'_>,
     projection: &GraphProjectionIdentityV1,
 ) {
+    let source = (|| -> std::result::Result<Option<GraphGenerationReplaySource>, GraphDbError> {
+        let Some(head) = storage
+            .verified_head(projection, context)
+            .map_err(GraphDbError::from)?
+        else {
+            return Ok(None);
+        };
+        let replay = match storage
+            .replay(&head.key, context)
+            .map_err(GraphDbError::from)?
+        {
+            GraphPublicationReplayLookupV1::Active(replay) => replay,
+            GraphPublicationReplayLookupV1::Retired(_)
+            | GraphPublicationReplayLookupV1::Missing => {
+                return Err(GraphDbError::Corrupt {
+                    message: "verified graph head has no active replay".to_owned(),
+                });
+            }
+        };
+        serde_json::from_slice(&replay.publication.canonical_replay_source)
+            .map(Some)
+            .map_err(|error| GraphDbError::Corrupt {
+                message: format!("verified graph replay source is corrupt: {error}"),
+            })
+    })();
+    match source {
+        Ok(Some(GraphGenerationReplaySource::InlineManifest(_))) => {}
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(
+                event = "graph_superseded_inline_replay_classification_failed",
+                namespace = projection.namespace.as_str(),
+                projection = projection.projection.as_str(),
+                error = ?error,
+                "could not classify the installed graph replay for inline retirement"
+            );
+            return;
+        }
+    }
     match graph_registry.retire_superseded_projection_replays(
         registration,
         storage,
         context,
         projection,
     ) {
-        Ok(receipt) if receipt == tracedecay_graph_db::SupersededReplayRetirement::default() => {
-            tracing::debug!(
-                event = "graph_superseded_replays_clean",
-                stage,
-                namespace = projection.namespace.as_str(),
-                projection = projection.projection.as_str(),
-                "no superseded graph replays behind the installed head"
-            );
-        }
+        Ok(receipt) if receipt == tracedecay_graph_db::SupersededReplayRetirement::default() => {}
         Ok(receipt) => tracing::info!(
             event = "graph_superseded_replays_retired",
-            stage,
+            stage = "sweep",
             namespace = projection.namespace.as_str(),
             projection = projection.projection.as_str(),
             retired = receipt.retired,
             retained = receipt.retained,
             pending = receipt.pending,
-            "retired the graph replays superseded by the installed head"
+            "retired superseded inline graph replays"
         ),
         Err(error) => tracing::warn!(
             event = "graph_superseded_replay_retirement_failed",
-            stage,
+            stage = "sweep",
             namespace = projection.namespace.as_str(),
             projection = projection.projection.as_str(),
             error = ?error,
-            "superseded graph replay retirement will be retried by the next pass"
+            "superseded inline replay retirement will be retried by the next pass"
         ),
     }
 }
@@ -1802,14 +1830,9 @@ impl RetainedCodeGraphRuntimeV1 {
                     &projection,
                 )?;
                 observe_sealed_staging_release("publish", &projection, outcome);
-                retire_superseded_replays(
-                    "publish",
-                    &graph_registry,
-                    registration,
-                    &mut storage,
-                    &context,
-                    &projection,
-                );
+                // Code-generation retention owns sealed replay retirement.
+                // Its bounded durable release event preserves exact historical
+                // cursors until the matching generation leaves the code store.
                 Ok(outcome)
             })();
             if let Err(error) = release {
@@ -3041,11 +3064,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ))),
                 deadline: deadline_at,
             };
-            // Retirement first: it deletes the superseded generations' rows,
-            // so when the release below opens a hibernated engine it opens the
-            // container those rows no longer inflate.
-            retire_superseded_replays(
-                "sweep",
+            retire_superseded_inline_replays(
                 &graph_registry,
                 registration.clone(),
                 &mut storage,

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tempfile::TempDir;
-use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{RepositoryId, UtcMicros};
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
@@ -13,10 +13,10 @@ use tracedecay_graph_db::{
 use tracedecay_store::{
     FactReadControl, GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1,
-    GraphPublicationOperationContextV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
-    ProjectId, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1,
-    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    StoreShardIdV1, StoreShardScopeV1,
+    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationStoreV1,
+    GraphReplayAppendOutcomeV1, ProjectId, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, StoreShardIdV1, StoreShardScopeV1,
 };
 
 use super::DaemonSessionRuntimeRegistryV1;
@@ -897,6 +897,98 @@ impl RuntimeRequestProbeV1 for NeverInterruptedProbe {
     fn try_begin_commit(&self) -> bool {
         true
     }
+}
+
+#[tokio::test]
+async fn staging_sweep_retries_inline_replay_retained_during_publication() {
+    let fixture = ContractFixture::new("inline-retirement-retry").await;
+    let project_id = project_id("inline-retirement-retry");
+    let (project_database, _sessions) = fixture.mount_project(&project_id).await;
+    let projection = projection("inline-retirement-retry");
+    let first_manifest = manifest(&projection, "inline-retirement-first", "1");
+    let second_manifest = manifest(&projection, "inline-retirement-second", "2");
+    let first = publish_through_database(
+        &project_database,
+        &first_manifest,
+        key("inline-retirement-first"),
+        false,
+    )
+    .expect("publish first inline generation");
+    let first_key = first.verified_head().key.clone();
+    let second = publish_through_database(
+        &project_database,
+        &second_manifest,
+        key("inline-retirement-second"),
+        false,
+    )
+    .expect("publish second inline generation");
+
+    let cancellation_identity = RuntimeCancellationIdentityV1 {
+        cancellation_id: RuntimeCancellationIdV1::new("inline-retirement-cancellation")
+            .expect("cancellation id"),
+        generation: 1,
+    };
+    let deadline_identity = RuntimeDeadlineV1 {
+        deadline_id: RuntimeDeadlineIdV1::new("inline-retirement-deadline").expect("deadline id"),
+    };
+    let control = RuntimeRequestControlV1 {
+        requested_at: UtcMicros(1),
+        deadline: deadline_identity.clone(),
+        cancellation: cancellation_identity.clone(),
+    };
+    let probe = NeverInterruptedProbe {
+        cancellation: cancellation_identity,
+        deadline: deadline_identity,
+    };
+    let context = GraphPublicationOperationContextV1::new(&control, &probe)
+        .expect("publication operation context");
+    {
+        let mut storage = project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .replay(&first_key, &context)
+                .expect("first inline replay after successor publication"),
+            GraphPublicationReplayLookupV1::Active(_)
+        ));
+    }
+
+    drop(first);
+    let repository_id =
+        RepositoryId::new("repository.inline-retirement-retry").expect("repository id");
+    let generations_root = fixture.root.join("unused-code-generations");
+    let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+    let mut after = None;
+    loop {
+        let released = fixture
+            .registry
+            .release_one_sealed_generation_staging_rows(
+                project_id.clone(),
+                &repository_id,
+                generations_root.clone(),
+                &project_database,
+                &cancellation,
+                after,
+            )
+            .await
+            .expect("sweep one graph projection");
+        let Some(projection) = released else {
+            break;
+        };
+        after = Some(projection);
+    }
+
+    let mut storage = project_database
+        .graph_publication_storage()
+        .expect("graph publication storage after sweep");
+    assert!(matches!(
+        storage
+            .replay(&first_key, &context)
+            .expect("first inline replay after retry sweep"),
+        GraphPublicationReplayLookupV1::Retired(_)
+    ));
+    assert_eq!(second.generation(), &second_manifest.generation);
 }
 
 /// A publish interrupted between the relational journal append and the

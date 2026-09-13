@@ -571,22 +571,37 @@ impl GraphDbRegistry {
                 .cloned(),
         );
         if candidates.is_empty() {
-            for (locator, _) in retired_cleanup {
-                if matches!(
-                    database.delete_generation_contents(&locator, &|| {
-                        check_registration_request(&registration, "publication.retired_cleanup")
-                    })?,
-                    GenerationContentsDeletion::RetentionPending
-                ) {
-                    tracing::info!(
-                        event = "graph_replay_retirement_pending",
-                        generation = generation.as_str(),
-                        "retired cleanup deferred until the staging engine is already open"
-                    );
-                    return Ok(GraphReplayCollectionOutcome::RetentionPending);
-                }
+            let opened_for_retirement =
+                !retired_cleanup.is_empty() && !database.native_engine_open()?;
+            if opened_for_retirement {
+                database.ensure_opened()?;
             }
-            return Ok(GraphReplayCollectionOutcome::Absent);
+            let cleanup = (|| {
+                for (locator, _) in retired_cleanup {
+                    if matches!(
+                        database.delete_generation_contents(&locator, &|| {
+                            check_registration_request(&registration, "publication.retired_cleanup")
+                        })?,
+                        GenerationContentsDeletion::RetentionPending
+                    ) {
+                        tracing::info!(
+                            event = "graph_replay_retirement_pending",
+                            generation = generation.as_str(),
+                            "retired cleanup remained pending after opening the staging engine"
+                        );
+                        return Ok(GraphReplayCollectionOutcome::RetentionPending);
+                    }
+                }
+                Ok(GraphReplayCollectionOutcome::Absent)
+            })();
+            if opened_for_retirement && let Err(error) = database.hibernate_if_lazy() {
+                tracing::warn!(
+                    %error,
+                    generation = generation.as_str(),
+                    "staging engine opened for exact replay cleanup could not hibernate again"
+                );
+            }
+            return cleanup;
         }
         let selected = {
             let mut state = database.wait_verified_generations_write()?;
@@ -630,6 +645,11 @@ impl GraphDbRegistry {
             );
             return Ok(GraphReplayCollectionOutcome::Retained);
         };
+        let opened_for_retirement = !database.native_engine_open()?;
+        if opened_for_retirement && let Err(error) = database.ensure_opened() {
+            clear_retiring_fence(&database, &locator)?;
+            return Err(error);
+        }
         tracing::debug!(
             event = "graph_replay_retirement_selected",
             generation = generation.as_str(),
@@ -637,118 +657,127 @@ impl GraphDbRegistry {
             replay_sequence = replay.sequence.get(),
             "unreferenced sealed code-generation replay selected for retirement"
         );
-        let retirement = match GraphPublicationReplayRetirementV1::new(
-            replay.publication.key.clone(),
-            replay.publication.input_digest.clone(),
-            replay
-                .publication
-                .dependency_generation_closure_digest
-                .clone(),
-            replay.publication.direct_dependency_generations.clone(),
-            replay.publication.expected_prior_head.clone(),
-            replay.publication.expected_recovered_digest.clone(),
-            replay.publication.canonical_replay_source_digest.clone(),
-        ) {
-            Ok(retirement) => retirement,
-            Err(error) => {
-                clear_retiring_fence(&database, &locator)?;
-                return Err(GraphDbError::invalid(error.to_string()));
-            }
-        };
-        let selected_head = heads.get(&locator);
-        let retirement_outcome = match selected_head {
-            Some(head) => authority.retire_verified_head_replay(&retirement, head, context),
-            None => authority.retire_replay(&retirement, context),
-        };
-        let retirement_outcome = match retirement_outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                clear_retiring_fence(&database, &locator)?;
-                return Err(GraphDbError::from(error));
-            }
-        };
-        match retirement_outcome {
-            GraphReplayRetirementOutcomeV1::Retired(_)
-            | GraphReplayRetirementOutcomeV1::ExactReplay(_) => {
-                let legacy_layout = is_legacy_per_generation_code_graph_namespace_str(
-                    replay.publication.key.projection.namespace.as_str(),
-                );
-                if selected_head.is_some() {
-                    tracing::info!(
-                        event = "graph_replay_head_retired",
+        let retirement = (|| {
+            let retirement = match GraphPublicationReplayRetirementV1::new(
+                replay.publication.key.clone(),
+                replay.publication.input_digest.clone(),
+                replay
+                    .publication
+                    .dependency_generation_closure_digest
+                    .clone(),
+                replay.publication.direct_dependency_generations.clone(),
+                replay.publication.expected_prior_head.clone(),
+                replay.publication.expected_recovered_digest.clone(),
+                replay.publication.canonical_replay_source_digest.clone(),
+            ) {
+                Ok(retirement) => retirement,
+                Err(error) => {
+                    clear_retiring_fence(&database, &locator)?;
+                    return Err(GraphDbError::invalid(error.to_string()));
+                }
+            };
+            let selected_head = heads.get(&locator);
+            let retirement_outcome = match selected_head {
+                Some(head) => authority.retire_verified_head_replay(&retirement, head, context),
+                None => authority.retire_replay(&retirement, context),
+            };
+            let retirement_outcome = match retirement_outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    clear_retiring_fence(&database, &locator)?;
+                    return Err(GraphDbError::from(error));
+                }
+            };
+            match retirement_outcome {
+                GraphReplayRetirementOutcomeV1::Retired(_)
+                | GraphReplayRetirementOutcomeV1::ExactReplay(_) => {
+                    let legacy_layout = is_legacy_per_generation_code_graph_namespace_str(
+                        replay.publication.key.projection.namespace.as_str(),
+                    );
+                    if selected_head.is_some() {
+                        tracing::info!(
+                            event = "graph_replay_head_retired",
+                            generation = generation.as_str(),
+                            graph_generation = %locator.generation,
+                            replay_sequence = replay.sequence.get(),
+                            legacy_layout,
+                            "verified per-generation graph replay head retired"
+                        );
+                    }
+                    if legacy_layout {
+                        // Migration evidence for issue #836: this projection was
+                        // written under the retired per-generation namespace, so
+                        // reclaiming it is the explicit drain of pre-cutover
+                        // persisted state, not ordinary supersession.
+                        tracing::info!(
+                            event = "graph_legacy_code_graph_projection_retired",
+                            generation = generation.as_str(),
+                            graph_generation = %locator.generation,
+                            namespace = replay.publication.key.projection.namespace.as_str(),
+                            head_retired = selected_head.is_some(),
+                            "reclaimed a code-graph projection persisted under the retired \
+                             per-generation namespace layout"
+                        );
+                    }
+                    // Retirement is the linearization point. A failure after it
+                    // may leak derived bytes, but cannot destroy the source of an
+                    // active relational replay. The staging engine is open for
+                    // this bounded cleanup and returns to hibernation below.
+                    let deletion = match database.delete_generation_contents(&locator, &|| {
+                        check_registration_request(&registration, "publication.replay_retirement")
+                    }) {
+                        Ok(deletion) => deletion,
+                        Err(error) => {
+                            clear_retiring_fence(&database, &locator)?;
+                            return Err(error);
+                        }
+                    };
+                    if matches!(deletion, GenerationContentsDeletion::RetentionPending) {
+                        clear_retiring_fence(&database, &locator)?;
+                        tracing::info!(
+                            event = "graph_replay_retirement_pending",
+                            generation = generation.as_str(),
+                            graph_generation = %locator.generation,
+                            "native row delete remained pending after opening the staging engine"
+                        );
+                        return Ok(GraphReplayCollectionOutcome::RetentionPending);
+                    }
+                    Ok(GraphReplayCollectionOutcome::Retired(Box::new(source)))
+                }
+                GraphReplayRetirementOutcomeV1::CurrentVerifiedHead { .. }
+                | GraphReplayRetirementOutcomeV1::PendingReplay { .. } => {
+                    clear_retiring_fence(&database, &locator)?;
+                    Ok(GraphReplayCollectionOutcome::Retained)
+                }
+                GraphReplayRetirementOutcomeV1::Conflict => {
+                    clear_retiring_fence(&database, &locator)?;
+                    tracing::warn!(
+                        event = "graph_replay_retirement_conflict",
                         generation = generation.as_str(),
                         graph_generation = %locator.generation,
                         replay_sequence = replay.sequence.get(),
-                        legacy_layout,
-                        "verified per-generation graph replay head retired"
+                        "relational replay retirement conflicted with a concurrent authority change"
                     );
+                    Err(GraphDbError::conflict(
+                        "publication.retire_one_code_generation_replay",
+                    ))
                 }
-                if legacy_layout {
-                    // Migration evidence for issue #836: this projection was
-                    // written under the retired per-generation namespace, so
-                    // reclaiming it is the explicit drain of pre-cutover
-                    // persisted state, not ordinary supersession.
-                    tracing::info!(
-                        event = "graph_legacy_code_graph_projection_retired",
-                        generation = generation.as_str(),
-                        graph_generation = %locator.generation,
-                        namespace = replay.publication.key.projection.namespace.as_str(),
-                        head_retired = selected_head.is_some(),
-                        "reclaimed a code-graph projection persisted under the retired \
-                         per-generation namespace layout"
-                    );
-                }
-                // Retirement is the linearization point. A failure after it
-                // may leak derived bytes, but cannot destroy the source of an
-                // active relational replay. A hibernated engine must not be
-                // opened here: keep the queue entry and finish native delete
-                // on a later tick that already holds the engine open.
-                let deletion = match database.delete_generation_contents(&locator, &|| {
-                    check_registration_request(&registration, "publication.replay_retirement")
-                }) {
-                    Ok(deletion) => deletion,
-                    Err(error) => {
-                        clear_retiring_fence(&database, &locator)?;
-                        return Err(error);
-                    }
-                };
-                if matches!(deletion, GenerationContentsDeletion::RetentionPending) {
+                GraphReplayRetirementOutcomeV1::Missing => {
                     clear_retiring_fence(&database, &locator)?;
-                    tracing::info!(
-                        event = "graph_replay_retirement_pending",
-                        generation = generation.as_str(),
-                        graph_generation = %locator.generation,
-                        "native row delete deferred until the staging engine is already open"
-                    );
-                    return Ok(GraphReplayCollectionOutcome::RetentionPending);
+                    Err(GraphDbError::Corrupt {
+                        message: "graph replay disappeared during exact retirement".to_owned(),
+                    })
                 }
-                Ok(GraphReplayCollectionOutcome::Retired(Box::new(source)))
             }
-            GraphReplayRetirementOutcomeV1::CurrentVerifiedHead { .. }
-            | GraphReplayRetirementOutcomeV1::PendingReplay { .. } => {
-                clear_retiring_fence(&database, &locator)?;
-                Ok(GraphReplayCollectionOutcome::Retained)
-            }
-            GraphReplayRetirementOutcomeV1::Conflict => {
-                clear_retiring_fence(&database, &locator)?;
-                tracing::warn!(
-                    event = "graph_replay_retirement_conflict",
-                    generation = generation.as_str(),
-                    graph_generation = %locator.generation,
-                    replay_sequence = replay.sequence.get(),
-                    "relational replay retirement conflicted with a concurrent authority change"
-                );
-                Err(GraphDbError::conflict(
-                    "publication.retire_one_code_generation_replay",
-                ))
-            }
-            GraphReplayRetirementOutcomeV1::Missing => {
-                clear_retiring_fence(&database, &locator)?;
-                Err(GraphDbError::Corrupt {
-                    message: "graph replay disappeared during exact retirement".to_owned(),
-                })
-            }
+        })();
+        if opened_for_retirement && let Err(error) = database.hibernate_if_lazy() {
+            tracing::warn!(
+                %error,
+                generation = generation.as_str(),
+                "staging engine opened for exact replay retirement could not hibernate again"
+            );
         }
+        retirement
     }
 
     /// Discard one interrupted publication: the journaled pending replay row
