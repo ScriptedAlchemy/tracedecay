@@ -7116,25 +7116,12 @@ async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
     )
     .expect("resolved scope");
 
-    // Let the mount pass finish, then keep the worker from starting another
-    // one so the wake this query leaves behind stays observable.
-    let settled_deadline = Instant::now() + Duration::from_secs(10);
-    while registry
-        .reconcile_in_progress_for_test(fixture.path())
-        .await
-    {
-        assert!(
-            Instant::now() <= settled_deadline,
-            "initial graph-off mount never released its owner pass"
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    let admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
-        .await
-        .expect("hold background reconcile admission");
+    // Fence new work before settling the mount pass, so no worker can enter
+    // between the quiescence observation and admission acquisition.
+    let admission =
+        quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
+    let receipts_before = registry.event_to_ready_receipts().len();
     // Stand in for the worker's own pass: in-progress, scheduler mutex free.
     let owner_pass = registry
         .hold_reconcile_pass_for_test(fixture.path())
@@ -7249,14 +7236,20 @@ async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
         current.snapshot.content_identity,
         "the pass serves the edit that arrived during its predecessor"
     );
-    let busy_follow_ups = registry
+    let new_receipts = registry
         .event_to_ready_receipts()
         .into_iter()
-        .filter(|receipt| receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp)
+        .skip(receipts_before)
+        .collect::<Vec<_>>();
+    let busy_follow_ups = new_receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp && !receipt.is_noop()
+        })
         .count();
     assert_eq!(
         busy_follow_ups, 1,
-        "coalesced reads and superseding edits produce one completed follow-up pass"
+        "coalesced reads and superseding edits produce one publishing follow-up pass"
     );
     registry.shutdown().await;
 }
