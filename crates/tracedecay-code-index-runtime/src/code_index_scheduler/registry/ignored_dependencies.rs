@@ -851,6 +851,19 @@ async fn acquire_daemon_admission(
     }
 }
 
+fn refuse_if_interrupted(
+    control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
+    shutting_down: &AtomicBool,
+) -> Result<(), CodeIndexSchedulerErrorV1> {
+    if shutting_down.load(Ordering::Acquire) || control.is_cancelled() {
+        Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into())
+    } else if control.is_deadline_exceeded() {
+        Err(CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod flight_recovery_tests {
     use super::*;
@@ -880,18 +893,5 @@ mod flight_recovery_tests {
         flight.owner_abandoned();
         flight.publication_committed();
         assert_eq!(epoch.load(Ordering::Acquire), 1);
-    }
-}
-
-fn refuse_if_interrupted(
-    control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
-    shutting_down: &AtomicBool,
-) -> Result<(), CodeIndexSchedulerErrorV1> {
-    if shutting_down.load(Ordering::Acquire) || control.is_cancelled() {
-        Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into())
-    } else if control.is_deadline_exceeded() {
-        Err(CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into())
-    } else {
-        Ok(())
     }
 }
