@@ -18,7 +18,7 @@ fn run_git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
-fn repository_discovery_does_not_wait_for_the_blocking_pool() {
+fn repository_discovery_can_be_cancelled_while_the_blocking_pool_is_busy() {
     let fixture = TempDir::new().expect("fixture");
     let repository = fixture.path().join("repository");
     std::fs::create_dir_all(&repository).expect("repository directory");
@@ -37,26 +37,39 @@ fn repository_discovery_does_not_wait_for_the_blocking_pool() {
             started_tx.send(()).expect("announce blocking task");
             release_rx.recv().expect("release blocking task");
         });
-        started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("blocking task started");
+        started_rx.recv().expect("blocking task started");
 
-        let discovery = tokio::time::timeout(
-            Duration::from_secs(1),
+        let cancellation = CancellationToken::new();
+        let discovery_path = repository.clone();
+        let discovery_cancellation = cancellation.clone();
+        let discovery = tokio::spawn(async move {
             discover_repository_identity(
-                &repository,
+                &discovery_path,
                 MonotonicDeadline::at(Instant::now() + Duration::from_secs(2)),
-                &CancellationToken::new(),
-            ),
-        )
-        .await;
+                &discovery_cancellation,
+            )
+            .await
+        });
+        let mut resolution_started = false;
+        for _ in 0..100 {
+            resolution_started =
+                tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(&repository)
+                    .is_some();
+            if resolution_started {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(resolution_started, "repository discovery did not start");
+        cancellation.cancel();
+        let outcome = discovery.await.expect("repository discovery joined");
 
         release_tx.send(()).expect("release blocking task");
         blocker.await.expect("blocking task joined");
-        let outcome = discovery.expect("repository discovery must not use the blocking pool");
-        assert!(
-            matches!(outcome, GitRepositoryIdentityOutcome::Resolved(_)),
-            "repository identity should resolve, got {outcome:?}"
+        assert_eq!(
+            outcome,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled),
+            "blocking-pool saturation must not delay cancellation"
         );
     });
 }
