@@ -365,9 +365,7 @@ mod tests {
     use super::*;
 
     fn profile_scope() -> SessionRefreshScopeV1 {
-        SessionRefreshScopeV1::Profile {
-            profile_id: "profile.fixture".to_owned(),
-        }
+        SessionRefreshScopeV1::Profile {}
     }
 
     #[test]

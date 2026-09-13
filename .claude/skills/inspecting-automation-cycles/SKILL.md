@@ -9,36 +9,25 @@ TraceDecay automation is a loop, not a single artifact: config schedules jobs,
 runs produce artifacts, dashboards expose outcomes/telemetry, and usage
 analytics prove whether generated output was adopted.
 
-## Workflow
+## Choose the relevant evidence
 
-1. Start from the exact run if known. For scheduling or loop-health questions,
-   use `tracedecay automation config get` to inspect enabled tasks, schedules,
-   locks, and profile paths.
-2. When the operator requests an immediate memory-curation cycle, use the sole
-   public semantic launcher, `fact_store_curate`, through its MCP adapter
-   `tracedecay_fact_store_curate`, generic CLI adapter `tracedecay tool
-   fact_store_curate`, or HTTP adapter `POST
-   /api/application/retained/fact_store_curate`. Its request accepts only the
-   optional `fact_review_limit` and `min_confidence_millionths` bounds. Each
-   adapter invokes the same daemon-owned operation; the daemon derives run
-   identity, task selection, operations, validation, policy, and effect
-   settlement.
-3. When locating runs or reviewing aggregate health, use
-   `tracedecay automation runs list --limit 100`; bound the review window and
-   group by task/status before opening suspicious artifacts.
-4. Inspect one exact run with `tracedecay automation runs view <run_id>`.
-   Read its verified artifacts with
-   `tracedecay automation runs artifact <run_id> <kind> --json`,
-   `GET /api/automation/runs/<run_id>/artifacts/<kind>`, or the read-only MCP
-   tool `tracedecay_automation_run_artifact_view`. MCP automation analytics
-   summarizes run history; exact MCP run list/view is not currently exposed.
-5. For memory or skill outcomes, inspect the relevant terminal state with
-   `tracedecay automation facts list`, dashboard telemetry, and
-   `tracedecay_skill_list --state active`.
-6. When adoption is in scope, use `tracedecay analytics diagnostics --no-sync`
-   (add `--all` only for a cross-project question),
-   `tracedecay sessions search "mcp__tracedecay" --provider all`, and managed
-   skill usage counts.
+- For a known run, start with `tracedecay automation runs view <run_id>` and
+  read only an artifact kind it advertises through `tracedecay automation runs
+  artifact <run_id> <kind> --json` or
+  `tracedecay_automation_run_artifact_view`.
+- For scheduler or aggregate health, inspect `tracedecay automation config get`
+  and a bounded `tracedecay automation runs list`; group by task, status, and
+  skip reason before opening suspicious runs.
+- For memory or skill settlement, use `tracedecay automation facts list`,
+  dashboard telemetry, and `tracedecay_skill_list --state active` as relevant.
+  Add analytics and session evidence only when adoption is part of the question.
+
+When the operator explicitly requests an immediate memory-curation cycle, use
+the sole semantic launcher, `fact_store_curate`, through
+`tracedecay_fact_store_curate`, `tracedecay tool fact_store_curate`, or `POST
+/api/application/retained/fact_store_curate`. It accepts only
+`fact_review_limit` and `min_confidence_millionths`; the daemon owns run
+identity, validation, policy, and settlement.
 
 ## Reading Results
 

@@ -124,7 +124,6 @@ struct ProjectOpenAdvisoryFeedbackCycleV1 {
 struct ProjectOpenAdvisoryCycleExecutionV1 {
     context: RequestContext,
     outcome: AdvisoryCycleOutcome,
-    observed_at: UtcMicros,
     configuration_digest: ManifestDigest,
     feedback_cycle: Arc<FeedbackCycleRuntime>,
 }
@@ -303,7 +302,6 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         Ok(ProjectOpenAdvisoryCycleExecutionV1 {
             context: invocation.context,
             outcome,
-            observed_at,
             configuration_digest,
             feedback_cycle: pin.runtime,
         })
@@ -802,7 +800,18 @@ async fn run_production_hook_cycle(
     if work_cancellation.is_cancelled() {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
-    let observed_at = execution.observed_at;
+    // The feedback publication revalidates its authority while the cycle is
+    // running. Scout evidence must use a real observation made after that
+    // publication, while the hook event keeps its original observation time.
+    let Some(observed_at) = admit_context_scout_observed_at(
+        now_micros(),
+        execution
+            .outcome
+            .publication()
+            .map(|publication| publication.authority.revalidated_at),
+    ) else {
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
+    };
     // The Scout tail re-pins the current configuration: a revision that
     // landed while the advisory half ran must not produce guidance under the
     // superseded control state.
@@ -954,6 +963,15 @@ async fn run_production_hook_cycle(
             HookOrchestrationWorkOutcomeV1::RetryableFailure
         }
     }
+}
+
+fn admit_context_scout_observed_at(
+    observed_at: UtcMicros,
+    publication_revalidated_at: Option<UtcMicros>,
+) -> Option<UtcMicros> {
+    publication_revalidated_at
+        .is_none_or(|revalidated_at| revalidated_at <= observed_at)
+        .then_some(observed_at)
 }
 
 fn observe_hook_feedback_cycle_terminal(

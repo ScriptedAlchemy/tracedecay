@@ -2005,11 +2005,10 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
     cg.close();
 }
 
-/// The MCP root handler routes a canonical `scope.kind=profile` refresh to
+/// The MCP root handler routes a public `scope.kind=profile` refresh to
 /// the profile session authority (never the active project's store): begin
-/// issues a handle bound to the profile store, status reads it back through
-/// the same daemon-wide refresh service, and an unmounted refresh service is
-/// a typed unavailable terminal rather than a project fallback.
+/// issues a handle bound to the profile store, status reads it, cancel returns
+/// a durable terminal receipt, and an unmounted service is typed unavailable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -2067,12 +2066,8 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
         None,
     );
     let selectors = json!({
-        "scope": { "kind": "profile", "profile_id": profile_id },
-        "session": {
-            "id": "session.mcp.profile-refresh",
-            "store_id": store_id,
-            "root_id": root_id
-        },
+        "scope": { "kind": "profile" },
+        "session": { "id": "session.mcp.profile-refresh" },
         "source": { "scope": "codex" },
         "target": {
             "temporal_mode": { "kind": "current" },
@@ -2137,7 +2132,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
     assert!(handle.starts_with("srh_"), "{handle}");
 
     let mut status_arguments = selectors.clone();
-    status_arguments["handle"] = json!(handle);
+    status_arguments["handle"] = json!(handle.clone());
     let observed = call("tracedecay_session_refresh_status", status_arguments, true).await;
     let envelope: tracedecay_contracts::ApplicationEnvelope<Value> =
         serde_json::from_value(observed.clone()).unwrap_or_else(|error| {
@@ -2152,6 +2147,23 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
         "{status}"
     );
     assert_eq!(status["scope"], "profile");
+
+    let mut cancel_arguments = selectors.clone();
+    cancel_arguments["handle"] = json!(handle);
+    let cancelled = call("tracedecay_session_refresh_cancel", cancel_arguments, true).await;
+    let envelope: tracedecay_contracts::ApplicationEnvelope<Value> =
+        serde_json::from_value(cancelled.clone()).unwrap_or_else(|error| {
+            panic!("cancel must answer an application envelope: {error}\n{cancelled}")
+        });
+    let tracedecay_contracts::ApplicationOutcome::Effect(effect) = envelope.outcome else {
+        panic!("cancel must be an effect: {cancelled}");
+    };
+    let cancel = effect.payload.expect("cancel payload");
+    assert!(
+        matches!(cancel["outcome"].as_str(), Some("cancelled" | "complete")),
+        "{cancel}"
+    );
+    assert!(cancel["receipt"].is_object(), "{cancel}");
 
     let unmounted = call("tracedecay_session_refresh_begin", selectors, false).await;
     assert_eq!(

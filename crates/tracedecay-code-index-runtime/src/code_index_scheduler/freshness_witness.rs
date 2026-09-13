@@ -21,16 +21,14 @@ use gix::bstr::BStr;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     ContentDigest, LanguageId, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
 };
 
-use super::{
-    CodeIndexSchedulerErrorV1, StaticLanguageRegistry, classification, encode_tagged_lowercase_hex,
-    ignored_dependencies, privacy,
-};
+use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, privacy};
 use crate::code_index::chunks::content_digest;
-use crate::code_index::languages::LanguageRegistry;
+use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use crate::code_index::parallelism;
 use crate::config::is_generated_path_segment;
 

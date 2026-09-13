@@ -107,6 +107,8 @@ jobs:
           TRACEDECAY_BIN: target/debug/tracedecay
           TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
           TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          TRACEDECAY_DOGFOOD_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          TRACEDECAY_DOGFOOD_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
 
   # One dev-profile `tracedecay` binary for every job that only exercises the
   # built CLI (`pr-dogfood`, Hermes, Claude Code, OpenCode). Each of those

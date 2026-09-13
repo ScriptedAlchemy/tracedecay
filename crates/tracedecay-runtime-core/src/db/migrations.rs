@@ -14,6 +14,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_rusqlite_runtime::runtime_ledger;
 
 mod final_shape;
+mod released_shape;
 
 pub use final_shape::{expected_final_schema_fingerprint, fingerprint_schema_objects};
 
@@ -460,6 +461,7 @@ pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()>
 /// [`verify_final_schema_connection`] to refuse.
 pub(crate) async fn step_schema_if_pending(conn: &Connection) -> Result<bool> {
     if get_version(conn).await? == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        converge_released_project_schema_connection(conn).await?;
         step_payload_digests(conn).await?;
         return Ok(true);
     }
@@ -475,11 +477,61 @@ async fn ensure_schema_current_engine_connection(
         return create_schema_engine_connection(conn).await;
     }
     if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        converge_released_project_schema_engine_connection(conn).await?;
         step_payload_digests(conn).await?;
     }
     install_runtime_writer_ledger_engine_connection(conn).await?;
     repair_shipped_v35_alias_trigger_engine_connection(conn).await?;
     verify_final_schema_connection(conn).await
+}
+
+const RELEASED_SCHEMA_OPERATION: &str = "converge released project schema";
+
+/// Converges a released store to the current shape in one transaction, so an
+/// interrupted upgrade leaves the released shape rather than a half-rebuilt
+/// table. Runs before the payload-digest step, whose admission check requires
+/// the current shape everywhere but the digest objects.
+async fn converge_released_project_schema_engine_connection(
+    conn: &DatabaseEngineWriteConnection,
+) -> Result<()> {
+    let transaction = conn
+        .authorized_long_lease_transaction()
+        .await
+        .map_err(|error| released_schema_failure(format!("failed to acquire lock: {error}")))?;
+    match released_shape::converge_released_project_schema(&transaction).await {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| released_schema_failure(format!("failed to commit: {error}"))),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(trigger_repair_rollback_failure(error, rollback_error)),
+        },
+    }
+}
+
+async fn converge_released_project_schema_connection(conn: &Connection) -> Result<()> {
+    let transaction = conn
+        .authorized_long_lease_transaction()
+        .await
+        .map_err(|error| released_schema_failure(format!("failed to acquire lock: {error}")))?;
+    match released_shape::converge_released_project_schema(&transaction).await {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| released_schema_failure(format!("failed to commit: {error}"))),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(trigger_repair_rollback_failure(error, rollback_error)),
+        },
+    }
+}
+
+fn released_schema_failure(message: String) -> TraceDecayError {
+    TraceDecayError::Database {
+        message,
+        operation: RELEASED_SCHEMA_OPERATION.to_owned(),
+    }
 }
 
 const LEDGER_INSTALL_OPERATION: &str = "install runtime-writer ledger";
@@ -834,6 +886,7 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
         return create_schema_connection(conn).await;
     }
     if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        converge_released_project_schema_connection(conn).await?;
         step_payload_digests(conn).await?;
     }
     repair_shipped_v35_alias_trigger_connection(conn).await?;

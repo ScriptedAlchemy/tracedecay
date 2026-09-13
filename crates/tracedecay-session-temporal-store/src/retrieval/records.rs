@@ -39,6 +39,7 @@ pub(super) fn build_record_query_with_relations(
     if candidates.len() > request.page_item_limit().saturating_add(1) {
         return Err(TemporalPortError::BudgetExceeded {
             resource: "record candidate window",
+            accounting: None,
         });
     }
     let mut params = Vec::with_capacity(
@@ -165,6 +166,7 @@ pub(super) fn build_record_query_with_relations(
     if params.len() > MAX_RECORD_QUERY_PARAMETERS {
         return Err(TemporalPortError::BudgetExceeded {
             resource: "record query parameters",
+            accounting: None,
         });
     }
     let mode = RecordModeSql::new(snapshot.temporal_mode(), cutoff_param);
@@ -210,65 +212,72 @@ pub(super) fn build_record_query_with_relations(
              GROUP BY input.session_id, input.anchor_id, input.derived_kind,
                       input.retriever_record_id, input.generation
          ),
+         occurrence_candidate(
+             ordinal, session_id, generation, occurrence_id, group_anchor_id
+         ) AS (
+             -- One row per occurrence, whichever channels reached it. A group
+             -- boundary that also matched on its own must be charged against the
+             -- record budget once, and MAX() over the group anchor keeps the
+             -- group provenance that MIN(ordinal) alone would drop.
+             SELECT MIN(source.ordinal), source.session_id, source.generation,
+                    source.occurrence_id, MAX(source.group_anchor_id)
+             FROM (
+                 SELECT c.ordinal, o.session_id, o.generation, o.occurrence_id,
+                        NULL AS group_anchor_id
+                 FROM candidate AS c
+                 JOIN session_occurrences AS o
+                   ON o.retrieval_anchor_id = c.anchor_id
+                  {occurrence_condition}
+                 WHERE c.derived_kind IS NULL
+                 UNION ALL
+                 -- A span or burst is a container: ranking needs where it starts
+                 -- and ends, never a census of what sits between. Its interior
+                 -- members reach the record read through their own candidates.
+                 SELECT c.ordinal, o.session_id, o.generation, o.occurrence_id,
+                        c.anchor_id
+                 FROM candidate AS c
+                 JOIN session_derived_evidence AS derived
+                   ON derived.session_id = c.session_id
+                  AND derived.generation = c.generation
+                  AND derived.retrieval_anchor_id = c.anchor_id
+                  AND derived.evidence_kind = c.derived_kind
+                  AND derived.evidence_id = c.retriever_record_id
+                 JOIN session_occurrences AS o
+                   ON o.session_id = derived.session_id
+                  AND o.generation = derived.generation
+                  AND o.occurrence_id IN (
+                      derived.first_occurrence_id, derived.last_occurrence_id
+                  )
+                  {occurrence_condition}
+                 WHERE c.derived_kind IS NOT NULL
+             ) AS source
+             GROUP BY source.session_id, source.generation, source.occurrence_id
+         ),
          records AS (
-             SELECT c.ordinal, 0 AS kind_rank, o.occurrence_id AS stable_id,
+             SELECT oc.ordinal, 0 AS kind_rank, o.occurrence_id AS stable_id,
                     'occurrence' AS record_kind,
-                    o.occurrence_id AS a, o.retrieval_anchor_id AS b, NULL AS c,
+                    o.occurrence_id AS a, o.retrieval_anchor_id AS b,
+                    oc.group_anchor_id AS c,
                     o.knowledge_at, o.valid_time_json, o.evidence_json,
                     NULL AS extra_json, NULL AS source_json, NULL AS predecessor,
                     NULL AS publication_json, NULL AS state, o.session_id AS scope_session
-             FROM candidate AS c
+             FROM occurrence_candidate AS oc
              JOIN session_occurrences AS o
-               ON o.retrieval_anchor_id = c.anchor_id
-              {occurrence_condition}
+               ON o.session_id = oc.session_id
+              AND o.generation = oc.generation
+              AND o.occurrence_id = oc.occurrence_id
              {occurrence_generation_join}
              {occurrence_join}
-             WHERE c.derived_kind IS NULL
-               AND {occurrence_predicate}
+             WHERE {occurrence_predicate}
                AND (?{provider_param} IS NULL OR o.source_provider = ?{provider_param})
                AND length(CAST(o.occurrence_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?{item_cap_param}
+               AND length(CAST(COALESCE(oc.group_anchor_id, '') AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(o.valid_time_json AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(o.evidence_json AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(o.occurrence_id AS BLOB))
                    + length(CAST(o.retrieval_anchor_id AS BLOB))
-                   + length(CAST(o.valid_time_json AS BLOB))
-                   + length(CAST(o.evidence_json AS BLOB)) <= ?{item_cap_param}
-             UNION ALL
-             SELECT c.ordinal, 0, o.occurrence_id, 'occurrence',
-                    o.occurrence_id, o.retrieval_anchor_id, c.anchor_id,
-                    o.knowledge_at, o.valid_time_json, o.evidence_json,
-                    NULL, NULL, NULL, NULL, NULL, o.session_id
-             FROM candidate AS c
-             JOIN session_derived_evidence AS derived
-               ON derived.session_id = c.session_id
-              AND derived.generation = c.generation
-              AND derived.retrieval_anchor_id = c.anchor_id
-              AND derived.evidence_kind = c.derived_kind
-              AND derived.evidence_id = c.retriever_record_id
-             JOIN session_derived_evidence_members AS member
-               ON member.session_id = derived.session_id
-              AND member.generation = derived.generation
-              AND member.evidence_kind = derived.evidence_kind
-              AND member.evidence_id = derived.evidence_id
-             JOIN session_occurrences AS o
-               ON o.session_id = member.session_id
-              AND o.generation = member.generation
-              AND o.occurrence_id = member.occurrence_id
-              {occurrence_condition}
-             {occurrence_generation_join}
-             {occurrence_join}
-             WHERE c.derived_kind IS NOT NULL
-               AND {occurrence_predicate}
-               AND (?{provider_param} IS NULL OR o.source_provider = ?{provider_param})
-               AND length(CAST(o.occurrence_id AS BLOB)) <= ?{item_cap_param}
-               AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?{item_cap_param}
-               AND length(CAST(c.anchor_id AS BLOB)) <= ?{item_cap_param}
-               AND length(CAST(o.valid_time_json AS BLOB)) <= ?{item_cap_param}
-               AND length(CAST(o.evidence_json AS BLOB)) <= ?{item_cap_param}
-               AND length(CAST(o.occurrence_id AS BLOB))
-                   + length(CAST(o.retrieval_anchor_id AS BLOB))
-                   + length(CAST(c.anchor_id AS BLOB))
+                   + length(CAST(COALESCE(oc.group_anchor_id, '') AS BLOB))
                    + length(CAST(o.valid_time_json AS BLOB))
                    + length(CAST(o.evidence_json AS BLOB)) <= ?{item_cap_param}
              UNION ALL

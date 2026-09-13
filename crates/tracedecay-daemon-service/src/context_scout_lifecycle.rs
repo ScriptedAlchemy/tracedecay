@@ -13,6 +13,15 @@ use tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleA
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 const MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1: usize = 64;
+const CONTEXT_SCOUT_LIFECYCLE_QUERY: &str = "SELECT observation_json
+     FROM observations
+     WHERE json_extract(observation_json, '$.__retention_released') IS NULL
+       AND json_extract(
+            observation_json,
+            '$.identity.source.session_id'
+       ) = ?1
+     ORDER BY sequence DESC
+     LIMIT ?2";
 
 type ContextScoutLifecycleKeyV1 = ([u8; 16], [u8; 16]);
 
@@ -475,35 +484,30 @@ async fn lookup_context_scout_lifecycle_inner(
         return Err(Failure::UnauthorizedBinding);
     }
 
-    let snapshot = sessions
-        .read_snapshot()
-        .await
-        .map_err(|_| Failure::SnapshotUnavailable)?;
     let limit = i64::try_from(MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1 + 1)
         .map_err(|_| Failure::ObservationBudgetExceeded)?;
-    let mut rows = snapshot
-        .query(
-            "SELECT observation_json
-             FROM observations
-             WHERE json_extract(observation_json, '$.__retention_released') IS NULL
-               AND json_extract(
-                    observation_json,
-                    '$.identity.source.session_id'
-               ) = ?1
-             ORDER BY sequence DESC
-             LIMIT ?2",
-            tracedecay_runtime_core::db::engine::params![session_id.as_str(), limit],
-        )
-        .await
-        .map_err(|_| Failure::ObservationQueryFailed)?;
+    let snapshot = hotpath::measure_block!("daemon.context_scout.lifecycle_lookup.snapshot", {
+        sessions.read_snapshot().await
+    })
+    .map_err(|_| Failure::SnapshotUnavailable)?;
+    let mut rows = hotpath::measure_block!("daemon.context_scout.lifecycle_lookup.query", {
+        snapshot
+            .query(
+                CONTEXT_SCOUT_LIFECYCLE_QUERY,
+                tracedecay_runtime_core::db::engine::params![session_id.as_str(), limit],
+            )
+            .await
+    })
+    .map_err(|_| Failure::ObservationQueryFailed)?;
 
     let project_scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
     let mut count = 0usize;
-    while let Some(row) = rows
-        .next()
-        .await
+    while let Some(row) =
+        hotpath::measure_block!("daemon.context_scout.lifecycle_lookup.rows_next", {
+            rows.next().await
+        })
         .map_err(|_| Failure::ObservationRowUnreadable)?
     {
         count = count
@@ -515,8 +519,10 @@ async fn lookup_context_scout_lifecycle_inner(
         let observation_json = row
             .get::<String>(0)
             .map_err(|_| Failure::ObservationRowUnreadable)?;
-        let durable = serde_json::from_str::<DurableObservationV1>(&observation_json)
-            .map_err(|_| Failure::MalformedDurableObservation)?;
+        let durable = hotpath::measure_block!("daemon.context_scout.lifecycle_lookup.decode", {
+            serde_json::from_str::<DurableObservationV1>(&observation_json)
+        })
+        .map_err(|_| Failure::MalformedDurableObservation)?;
         if durable.scope() != &project_scope || durable.source().session_id() != session_id {
             return Err(Failure::DurableScopeMismatch);
         }

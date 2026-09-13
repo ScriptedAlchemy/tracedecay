@@ -1,6 +1,6 @@
 ---
 name: project-memory
-description: 'Recall or maintain durable TraceDecay project facts, decisions, and preferences, or inspect a requested curation run. Use session context for raw transcript replay.'
+description: Recall or maintain durable TraceDecay project facts; use session context for raw transcript replay.
 ---
 
 # Project memory

@@ -1,5 +1,36 @@
 {
   "$defs": {
+    "AcceptWorkProposalDispositionV1": {
+      "description": "The accept-proposal operation can commit acceptance only.",
+      "enum": [
+        "accepted"
+      ],
+      "type": "string"
+    },
+    "AcceptWorkProposalRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/AcceptWorkProposalDispositionV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal",
+        "disposition",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "AcceptWorkTaskRequestV1": {
       "additionalProperties": false,
       "properties": {
@@ -175,6 +206,23 @@
         "start",
         "output_name",
         "sources"
+      ],
+      "type": "object"
+    },
+    "AdmittedWorkExecutionV1": {
+      "additionalProperties": false,
+      "description": "Execution admission together with the immutable provider snapshot licensed\nby the accepted proposal and current configuration authority.",
+      "properties": {
+        "execution_snapshot": {
+          "$ref": "#/$defs/WorkExecutionSnapshot"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationReceiptV1"
+        }
+      },
+      "required": [
+        "mutation",
+        "execution_snapshot"
       ],
       "type": "object"
     },
@@ -17311,6 +17359,38 @@
       ],
       "type": "object"
     },
+    "ReviewWorkProposalDispositionV1": {
+      "description": "The only non-accepting dispositions the proposal-review operation can\ncommit. The broader decision request remains available to the graph\nmutation operation, which owns all decision forms.",
+      "enum": [
+        "rejected",
+        "superseded"
+      ],
+      "type": "string"
+    },
+    "ReviewWorkProposalRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/ReviewWorkProposalDispositionV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal",
+        "disposition",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "RootGenerationV1": {
       "additionalProperties": false,
       "description": "Immutable collection and stack revisions for one exact resolved root.",
@@ -18332,6 +18412,70 @@
       "description": "Strongly typed canonical identity: `SessionId`.",
       "type": "string"
     },
+    "SessionRetrievalBudgetAccountingV1": {
+      "additionalProperties": false,
+      "description": "The ceiling and count behind a budget refusal.\n\n`stage` names which budget refused; this is what tells an oversized request\napart from a read whose cost was mis-sized for it. The ceiling value also\ndistinguishes the resources inside one stage — a record read that stopped at\n1024 hit the item count, one that stopped at 16 MiB hit the byte total — so\nthe kernel's resource spelling stays in the kernel instead of becoming a\nsecond wire vocabulary to keep in step.",
+      "properties": {
+        "limit": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed": {
+          "$ref": "#/$defs/SessionRetrievalBudgetObservationV1"
+        }
+      },
+      "required": [
+        "limit",
+        "observed"
+      ],
+      "type": "object"
+    },
+    "SessionRetrievalBudgetObservationV1": {
+      "description": "What a refusing budget boundary had counted.\n\nBoth variants are exact. A bounded read never counts the rows it declined to\nread, so an exhausted read reports what it consumed and that storage held\nmore — never a total it would have to run the refused scan to learn.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The request asked for more units than the admitted maximum.",
+          "properties": {
+            "observation": {
+              "const": "requested",
+              "type": "string"
+            },
+            "units": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "observation",
+            "units"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The read consumed its whole budget and storage still held more.",
+          "properties": {
+            "observation": {
+              "const": "consumed_with_more_available",
+              "type": "string"
+            },
+            "units": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "observation",
+            "units"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SessionRetrievalBudgetStageV1": {
       "description": "Structural budget boundary that rejected a session retrieval request.\nThese causes are non-retryable request corrections; concurrent permit or\nqueue pressure remains a separate capacity-saturation failure.",
       "enum": [
@@ -18343,9 +18487,12 @@
         "request_hydration_bytes",
         "estimator_version_mismatch",
         "execution_work_exhausted",
+        "candidate_read_exhausted",
+        "record_read_exhausted",
         "kernel_result_limit",
         "participant_manifest_participants",
         "participant_manifest_canonical_bytes",
+        "cursor_manifest_limit",
         "hydration_bytes",
         "context_bytes",
         "context_tokens"
@@ -18386,6 +18533,17 @@
         {
           "additionalProperties": false,
           "properties": {
+            "accounting": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionRetrievalBudgetAccountingV1"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present when the refusing boundary keeps a counter. A request-shape\ncheck has none and reports `None` rather than inventing numbers."
+            },
             "refusal": {
               "const": "budget_exhausted",
               "type": "string"
@@ -18396,7 +18554,8 @@
           },
           "required": [
             "refusal",
-            "stage"
+            "stage",
+            "accounting"
           ],
           "type": "object"
         }
@@ -26213,6 +26372,9 @@
           },
           "type": "array"
         },
+        "configuration_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
         "evidence_digest": {
           "$ref": "#/$defs/ManifestDigest"
         },
@@ -26244,7 +26406,8 @@
         "children",
         "route",
         "explanation",
-        "evidence_digest"
+        "evidence_digest",
+        "configuration_digest"
       ],
       "type": "object"
     },
@@ -29610,6 +29773,9 @@
     "storage_telemetry": {
       "$ref": "#/$defs/StorageTelemetryPayloadV1"
     },
+    "work_accept_proposal_request": {
+      "$ref": "#/$defs/AcceptWorkProposalRequestV1"
+    },
     "work_admit_execution_request": {
       "$ref": "#/$defs/AdmitWorkExecutionRequestV1"
     },
@@ -29618,6 +29784,9 @@
     },
     "work_admit_synthesis_command": {
       "$ref": "#/$defs/AdmitWorkSynthesisCommand"
+    },
+    "work_admitted_execution": {
+      "$ref": "#/$defs/AdmittedWorkExecutionV1"
     },
     "work_artifact_hydration": {
       "$ref": "#/$defs/WorkArtifactHydrationV1"
@@ -29645,9 +29814,6 @@
     },
     "work_create_task_request": {
       "$ref": "#/$defs/CreateWorkTaskRequestV1"
-    },
-    "work_decide_proposal_request": {
-      "$ref": "#/$defs/DecideWorkProposalRequestV1"
     },
     "work_duplicate_adjudication_command": {
       "$ref": "#/$defs/WorkDuplicateAdjudicationCommandV1"
@@ -29738,6 +29904,9 @@
     },
     "work_retry_attempt_outcome": {
       "$ref": "#/$defs/WorkRetryAttemptOutcomeV1"
+    },
+    "work_review_proposal_request": {
+      "$ref": "#/$defs/ReviewWorkProposalRequestV1"
     },
     "work_run_control": {
       "$ref": "#/$defs/WorkRunControlV1"
@@ -29851,8 +30020,10 @@
     "work_generate_proposal_request",
     "work_generated_proposal",
     "work_create_task_request",
-    "work_decide_proposal_request",
+    "work_review_proposal_request",
+    "work_accept_proposal_request",
     "work_admit_execution_request",
+    "work_admitted_execution",
     "work_start_attempt_command",
     "work_admit_synthesis_command",
     "work_synthesis_attempt",

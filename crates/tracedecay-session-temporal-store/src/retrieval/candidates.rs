@@ -6,8 +6,8 @@ use tracedecay_capture::parse_rfc3339_timestamp;
 use tracedecay_runtime_core::db::engine::Value as SqlValue;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidateClause};
 use tracedecay_temporal_query::ports::{
-    CandidateFieldCaps, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
-    TemporalRetrievalScope, TemporalSnapshotRequest,
+    CandidateFieldCaps, PageRequest, ReadBudgetAccounting, TemporalExecutionSnapshot,
+    TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 
@@ -25,9 +25,16 @@ pub(super) fn validate_clause(
         request.max_item_bytes(),
         CandidateFieldCaps::metadata_field_bytes,
     );
-    if clause.value.len() > request.max_item_bytes() || clause.value.len() > metadata_cap {
+    let clause_cap = request.max_item_bytes().min(metadata_cap);
+    if clause.value.len() > clause_cap {
         return Err(TemporalPortError::BudgetExceeded {
             resource: "candidate clause bytes",
+            // The clause text is the request, so the tighter of the two caps is
+            // the ceiling the operator has to see next to the length that missed it.
+            accounting: Some(ReadBudgetAccounting::requested(
+                clause_cap as u64,
+                clause.value.len() as u64,
+            )),
         });
     }
     Ok(())
@@ -807,11 +814,13 @@ pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortErro
         .checked_mul(1_000_000)
         .ok_or(TemporalPortError::BudgetExceeded {
             resource: "time range",
+            accounting: None,
         })?;
     let end = start
         .checked_add(86_400_000_000)
         .ok_or(TemporalPortError::BudgetExceeded {
             resource: "time range",
+            accounting: None,
         })?;
     Ok((start, end))
 }

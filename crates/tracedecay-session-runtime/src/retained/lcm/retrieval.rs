@@ -429,6 +429,13 @@ pub(super) async fn execute_expand(
     let provider = specific_provider(&request.provider)?;
     let session_id = session_id(&request.session_id)?;
     let (target, grain, summary) = match &request.target {
+        LcmExpandTargetV1::CanonicalOccurrence { message_id } => (
+            LcmExpandTarget::CanonicalOccurrence {
+                message_id: required(message_id)?.to_owned(),
+            },
+            RetrievalGrainV1::Occurrence,
+            false,
+        ),
         LcmExpandTargetV1::RawMessage { store_id } => {
             let store_id = i64::try_from(*store_id)
                 .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
@@ -714,8 +721,8 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
         } => {
             RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
         }
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage, accounting)
         }
         SessionRetrievalServiceOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_contracts::CancellationStage::DuringRead,
@@ -754,8 +761,8 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
         | LcmDescribeServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        LcmDescribeServiceOutcome::BudgetExhausted => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+        LcmDescribeServiceOutcome::BudgetExhausted { stage, accounting } => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage, accounting)
         }
         LcmDescribeServiceOutcome::CursorStale => {
             RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
@@ -799,8 +806,8 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
         | LcmExpandServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        LcmExpandServiceOutcome::BudgetExhausted => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+        LcmExpandServiceOutcome::BudgetExhausted { stage, accounting } => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage, accounting)
         }
         LcmExpandServiceOutcome::CursorStale => {
             RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()

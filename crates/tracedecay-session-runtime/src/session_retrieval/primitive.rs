@@ -141,9 +141,9 @@ fn map_outcome(
                 maximum,
             },
         )),
-        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
             Err(TemporalRetrievalFailure::StructuralRefusal(
-                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, accounting },
             ))
         }
     }
@@ -473,18 +473,27 @@ mod tests {
     }
 
     #[test]
-    fn budget_refusal_preserves_stage() {
+    fn budget_refusal_preserves_stage_and_accounting() {
         let stage =
             tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ContextTokens;
+        let accounting = Some(
+            tracedecay_session_memory::session::SessionRetrievalBudgetAccountingV1 {
+                limit: 4_096,
+                observed:
+                    tracedecay_session_memory::session::SessionRetrievalBudgetObservationV1::Requested {
+                        units: 8_192,
+                    },
+            },
+        );
 
         assert_eq!(
             map_outcome(
-                SessionRetrievalServiceOutcome::BudgetExhausted { stage },
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting },
                 &request(),
                 UtcMicros(7),
             ),
             Err(TemporalRetrievalFailure::StructuralRefusal(
-                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage }
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, accounting }
             ))
         );
     }

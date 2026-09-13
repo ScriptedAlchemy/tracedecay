@@ -1,8 +1,6 @@
 //! Backend-owned preparation of exact Work mutation commands.
 
-use tracedecay_contracts::{
-    ApplicationProblem, RequestContext, RequestId, RetryDirective, SafeDiagnostic,
-};
+use tracedecay_contracts::{ApplicationProblem, RequestContext, RequestId, SafeDiagnostic};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -123,6 +121,81 @@ pub(super) fn current_work_product_revision_pins(
     })
 }
 
+pub(super) fn prepare_execution_snapshot(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    binding: &tracedecay_contracts::WorkProductBindingV1,
+    request: &tracedecay_contracts::AdmitWorkExecutionRequestV1,
+) -> Result<tracedecay_domain::WorkExecutionSnapshot, ApplicationProblem> {
+    let services = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
+        &registered.database,
+        binding.clone(),
+    )
+    .map_err(|_| work_product_authority_unavailable())?;
+    let read = services
+        .reads()
+        .read_graph(
+            context,
+            tracedecay_contracts::WorkGraphReadRequestV1::current(
+                request.selection.clone(),
+                request.mutation.occurred_at,
+            ),
+        )
+        .map_err(work_product_problem)?;
+    if read.selection_coverage().is_partial() {
+        return Err(work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::SelectionCoverageIncomplete,
+        ));
+    }
+    let tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. } = read else {
+        return Err(work_product_authority_unavailable());
+    };
+    let tracedecay_contracts::WorkProductExpectedAuthorityV1::Verified { verified_version } =
+        &request.mutation.expected_authority
+    else {
+        return Err(work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::InvalidRequest,
+        ));
+    };
+    if snapshot.verified_version() != verified_version
+        || snapshot.graph().version() != request.based_on_version
+    {
+        return Err(work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::VersionConflict,
+        ));
+    }
+    let item = snapshot.graph().item(&request.task_id).ok_or_else(|| {
+        work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::NotFoundOrNotAuthorized,
+        )
+    })?;
+    let accepted_proposal = item.accepted_proposal().ok_or_else(|| {
+        work_product_problem(tracedecay_contracts::WorkProductApplicationErrorV1::InvalidRequest)
+    })?;
+    let proposal = snapshot
+        .graph()
+        .proposal_decisions()
+        .iter()
+        .find(|decision| {
+            decision.proposal().proposal_id() == accepted_proposal
+                && decision.disposition() == &tracedecay_domain::WorkProposalDispositionV1::Accepted
+        })
+        .map(tracedecay_domain::WorkProposalDecisionV1::proposal)
+        .ok_or_else(|| {
+            work_product_problem(
+                tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+            )
+        })?;
+    registered
+        .proposal_routing
+        .execution_snapshot(
+            proposal,
+            &registered.work_topology_policy,
+            request.mutation.occurred_at,
+        )
+        .map_err(|_| work_product_authority_unavailable())
+}
+
 pub(super) fn current_work_product_attempt_topology(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -187,12 +260,7 @@ pub(super) fn decide_product_proposal(
     capability: &str,
     use_case: &UseCaseId,
     request: tracedecay_contracts::DecideWorkProposalRequestV1,
-    accepting: bool,
 ) -> Result<tracedecay_contracts::WorkProductMutationReceiptV1, ApplicationProblem> {
-    if (request.disposition == tracedecay_domain::WorkProposalDispositionV1::Accepted) != accepting
-    {
-        return Err(invalid_work_product_request());
-    }
     let capability =
         CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
     let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
@@ -210,17 +278,6 @@ pub(super) fn decide_product_proposal(
         .mutations()
         .decide_proposal(context, &binding, request)
         .map_err(work_product_problem)
-}
-
-fn invalid_work_product_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "work.invalid_graph_operation".to_owned(),
-            message: "The Work graph request is invalid".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-    }
 }
 
 fn work_product_authority_unavailable() -> ApplicationProblem {

@@ -98,6 +98,7 @@ fn fan_out_input(
         WorkRouteDecisionV1::abstain("fixture route").unwrap(),
         format!("Proposal {identity}"),
         input_digest.clone(),
+        input_digest.clone(),
     )
     .unwrap();
     tracedecay_contracts::WorkflowFanOutInput {

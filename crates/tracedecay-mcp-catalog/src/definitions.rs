@@ -241,14 +241,9 @@ pub fn context_description(node_count: u64, budget: u8) -> String {
     format!(
         "Build an AI-ready context for a task description. Returns relevant symbols, \
          relationships, up to three untracked project memory matches when available, \
-         and optionally code snippets.\n\n\
-         CALL BUDGET (applies to tracedecay_context ONLY): {budget} calls maximum for \
-         this project ({node_count} nodes). The narrow follow-up tools — tracedecay_search, \
-         tracedecay_grep, tracedecay_callers, tracedecay_callees, tracedecay_body, \
-         tracedecay_read, tracedecay_outline — are cheap and UNBUDGETED; call them freely. \
-         When the context budget is spent, keep going with those narrow tracedecay tools to \
-         drill in; do NOT fall back to native grep/glob/file reads. Only re-run \
-         tracedecay_context if you genuinely need another broad semantic sweep."
+         and optionally code snippets. Use it for broad semantic questions that need \
+         relationship synthesis across the code graph. This project ({node_count} nodes) \
+         allows {budget} broad context calls."
     )
 }
 
@@ -319,14 +314,9 @@ pub fn context_warming_description(budget: u8) -> String {
     format!(
         "Build an AI-ready context for a task description. Returns relevant symbols, \
          relationships, up to three untracked project memory matches when available, \
-         and optionally code snippets.\n\n\
-         CALL BUDGET (applies to tracedecay_context ONLY): {budget} calls maximum while \
-         this project graph is warming. The narrow follow-up tools — tracedecay_search, \
-         tracedecay_grep, tracedecay_callers, tracedecay_callees, tracedecay_body, \
-         tracedecay_read, tracedecay_outline — are cheap and UNBUDGETED; call them freely. \
-         When the context budget is spent, keep going with those narrow tracedecay tools \
-         to drill in; do NOT fall back to native grep/glob/file reads. Only re-run \
-         tracedecay_context if you genuinely need another broad semantic sweep."
+         and optionally code snippets. Use it for broad semantic questions that need \
+         relationship synthesis across the code graph. The graph is still warming, and \
+         {budget} broad context calls are available."
     )
 }
 

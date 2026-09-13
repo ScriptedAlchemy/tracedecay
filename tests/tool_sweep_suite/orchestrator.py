@@ -270,23 +270,41 @@ def run_phase(
 ) -> PhaseResult:
     root = out / "phases" / label
     root.mkdir(parents=True, exist_ok=False)
-    command = [
+    launcher = [
         str(repo / "scripts/with-isolated-tracedecay-daemon.sh"), "--bin", str(binary),
-        "--ready-timeout", "60", "--stop-timeout", "10", "--lifecycle-label", f"MCP catalog sweep {label}",
-        "--", sys.executable, str(repo / "tests/tool_sweep_suite/runner.py"),
-        "--bin", str(binary), "--out", str(root), "--phase", phase,
+        "--ready-timeout", "60", "--stop-timeout", "10",
     ]
+    runner_base = [
+        sys.executable, str(repo / "tests/tool_sweep_suite/runner.py"),
+        "--bin", str(binary), "--out", str(root),
+    ]
+    runner = [*runner_base, "--phase", phase]
     if effect is not None:
-        command.extend(["--effect", effect])
+        runner.extend(["--effect", effect])
     if catalog is not None:
-        command.extend(["--catalog", str(catalog)])
+        runner.extend(["--catalog", str(catalog)])
     # The daemon wrapper appends another random directory and a Unix socket below
     # TMPDIR. Keep that root short even when the retained artifact path is deep.
     with tempfile.TemporaryDirectory(prefix="tds-") as raw_tmp:
         environment = _phase_environment(root, temp_root=Path(raw_tmp))
+        profile = Path(raw_tmp) / "profile"
+        profile.mkdir()
+        environment["TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR"] = str(profile)
+        prepare = [
+            *launcher, "--lifecycle-label", f"MCP catalog sweep {label} setup",
+            "--", *runner_base, "--phase", "prepare",
+        ]
+        with (root / "prepare.stdout.log").open("wb") as stdout, (root / "prepare.stderr.log").open("wb") as stderr:
+            prepared = run_bounded_command(
+                prepare, cwd=repo, environment=environment, remaining_s=deadline.remaining_s(),
+                stdout=stdout, stderr=stderr,
+            )
+        if prepared.returncode != 0 or prepared.cancelled or prepared.launch_error:
+            return PhaseResult(label, root, prepared)
         with (root / "stdout.log").open("wb") as stdout, (root / "stderr.log").open("wb") as stderr:
             outcome = run_bounded_command(
-                command, cwd=repo, environment=environment, remaining_s=deadline.remaining_s(),
+                [*launcher, "--lifecycle-label", f"MCP catalog sweep {label}", "--", *runner],
+                cwd=repo, environment=environment, remaining_s=deadline.remaining_s(),
                 stdout=stdout, stderr=stderr,
             )
     return PhaseResult(label, root, outcome)

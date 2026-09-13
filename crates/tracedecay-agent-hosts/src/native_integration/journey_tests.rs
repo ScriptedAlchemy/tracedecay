@@ -46,9 +46,10 @@ use tracedecay_domain::{
     NativeIntegrationAnalysisGapV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationDirectionV1, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewId, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
-    NativeIntegrationTransactionId, ProjectId, RefId, ScopeSetId, ScopeSetRevision,
-    ScopeSourceBinding, SourceBindingId, SourceKindV1, StackNodeId, StackSignalKindV1, UtcMicros,
-    WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId, canonical_sha256,
+    NativeIntegrationTransactionId, NativeIntegrationUnavailabilityV1, ProjectId, RefId,
+    ScopeSetId, ScopeSetRevision, ScopeSourceBinding, SourceBindingId, SourceKindV1, StackNodeId,
+    StackSignalKindV1, UtcMicros, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    canonical_sha256,
 };
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{GitHubStackDeliveryStateV1, RegisteredGlobalDbLeaseV1};
@@ -697,11 +698,27 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         preview.repository_snapshot.destination_worktree_id,
         Some(destination_scope.worktree_id.clone())
     );
+    let occupied_preview = tracedecay_domain::NativeIntegrationPreviewV1 {
+        preview_id: NativeIntegrationPreviewId::new(
+            "preview.native.journey.declared-destination-occupied",
+        )
+        .expect("occupied preview id"),
+        disposition: NativeIntegrationPreviewDispositionV1::Partial {
+            reason: NativeIntegrationUnavailabilityV1::DestinationOccupied,
+        },
+        ..preview.clone()
+    }
+    .seal()
+    .expect("sealed occupied preview");
 
     let signal = signal_from_preflight(&destination_scope, &preview)
         .expect("stack signal")
         .expect("actual conflict signal");
     assert_eq!(signal.kind, StackSignalKindV1::ActualConflict);
+    let occupied_signal = signal_from_preflight(&destination_scope, &occupied_preview)
+        .expect("stack signal")
+        .expect("destination-occupied dependency-ready signal");
+    assert_eq!(occupied_signal.kind, StackSignalKindV1::DependencyReady);
 
     let runtime = HostAdmissionTestRuntimeV1::project(
         directory.path().join("profile"),
@@ -779,6 +796,10 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         .store()
         .save_preview(preview.clone())
         .expect("save canonical conflict preview");
+    owner
+        .store()
+        .save_preview(occupied_preview.clone())
+        .expect("save canonical occupied preview");
     let stack_runtime = owner
         .mount_github_stack_runtime(
             database.clone(),
@@ -816,11 +837,14 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     stack_runtime
         .enqueue_from_preflight(signal.clone(), &live_context)
         .expect("enqueue actual conflict");
+    stack_runtime
+        .enqueue_from_preflight(occupied_signal.clone(), &live_context)
+        .expect("enqueue destination-occupied dependency-ready signal");
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if stack_runtime
                 .pending_host_deliveries()
-                .is_ok_and(|pending| pending.len() == 2)
+                .is_ok_and(|pending| pending.len() == 3)
             {
                 break;
             }
@@ -844,13 +868,13 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     let expanded = stack_runtime
         .expand(
             GitHubStackSignalExpandSurfaceRequest {
-                signal_id: None,
+                signal_id: Some(signal.signal_id.clone()),
                 expected_watermark_id: Some(signal.watermark_id.clone()),
             }
-            .into_application_request(live_context),
+            .into_application_request(live_context.clone()),
             &cancellation,
         )
-        .expect("expand oldest authorized signal");
+        .expect("expand exact authorized conflict signal");
     let GitHubStackSignalExpandSurfaceResultV1::Expanded { evidence } = expanded else {
         panic!("expected expanded stack conflict evidence");
     };
@@ -875,6 +899,31 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     assert!(matches!(
         expanded_preview.disposition,
         NativeIntegrationPreviewDispositionV1::NativeConflict { .. }
+    ));
+    let occupied = stack_runtime
+        .expand(
+            GitHubStackSignalExpandSurfaceRequest {
+                signal_id: Some(occupied_signal.signal_id.clone()),
+                expected_watermark_id: Some(occupied_signal.watermark_id.clone()),
+            }
+            .into_application_request(live_context),
+            &cancellation,
+        )
+        .expect("expand destination-occupied dependency-ready signal");
+    let GitHubStackSignalExpandSurfaceResultV1::Expanded { evidence } = occupied else {
+        panic!("expected destination-occupied stack evidence");
+    };
+    assert_eq!(evidence.kind, StackSignalKindV1::DependencyReady);
+    let tracedecay_contracts::git::GitHubStackSignalNativeSourceV1::Preflight { preview } =
+        evidence.native_source
+    else {
+        panic!("expected preflight-backed destination-occupied evidence");
+    };
+    assert!(matches!(
+        preview.disposition,
+        NativeIntegrationPreviewDispositionV1::Partial {
+            reason: NativeIntegrationUnavailabilityV1::DestinationOccupied
+        }
     ));
     assert_eq!(
         database

@@ -35,8 +35,17 @@ pub(crate) fn session_retrieval_budget_stage(stage: SessionRetrievalBudgetStageV
         SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
             hotpath::gauge!("session.retrieval.budget.execution_work").inc(1.0);
         }
+        SessionRetrievalBudgetStageV1::CandidateReadExhausted => {
+            hotpath::gauge!("session.retrieval.budget.candidate_read").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::RecordReadExhausted => {
+            hotpath::gauge!("session.retrieval.budget.record_read").inc(1.0);
+        }
         SessionRetrievalBudgetStageV1::KernelResultLimit => {
             hotpath::gauge!("session.retrieval.budget.kernel_results").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::CursorManifestLimit => {
+            hotpath::gauge!("session.retrieval.budget.cursor_manifest").inc(1.0);
         }
         SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
             hotpath::gauge!("session.retrieval.budget.manifest_participants").inc(1.0);

@@ -188,7 +188,7 @@ pub(super) fn memory_curator_review_value(
         "facts": facts,
         "messages": [{
             "role": "system",
-            "content": "Return strict JSON {\"ops\":[]} with at most 256 operations. Review only the supplied canonical facts and current relations. Supported operations are add, update, merge, remove, normalize_tags, and link_facts. Every target, relation endpoint, and evidence item must copy the exact fact_id plus last_event_id pair from facts. Every operation requires nonempty evidence_facts, a bounded reason (except normalize_tags/link_facts), and confidence in [min_confidence,1]. Do not repeat a relation already listed. Link facts must use distinct source and target snapshots plus source_label and metadata. Never use timestamps as truth or freshness evidence."
+            "content": "Return strict JSON {\"ops\":[]} with at most 256 operations. Review only the supplied canonical facts and current relations; absent or unavailable facts are not evidence, and no warranted change returns an empty ops array. Supported operations are add, update, merge, remove, normalize_tags, and link_facts. Every target, relation endpoint, and evidence item must copy the exact fact_id plus last_event_id pair from facts. Every operation requires nonempty evidence_facts, a bounded reason (except normalize_tags/link_facts), and confidence in [min_confidence,1]. Do not repeat a relation already listed. Link facts must use distinct source and target snapshots plus source_label and metadata. Never use timestamps as truth or freshness evidence."
         }],
     })
 }

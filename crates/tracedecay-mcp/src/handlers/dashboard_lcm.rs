@@ -193,7 +193,7 @@ impl DashboardLcmReadAdapter {
                     let (state, reason) = cursor_manifest_not_ready(kind);
                     return not_ready(state, reason);
                 }
-                SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, .. } => {
                     return not_ready(
                         DashboardLcmReadStateV1::BudgetExhausted,
                         session_budget_reason(stage),
@@ -587,9 +587,9 @@ impl DashboardLcmReadAdapter {
             LcmDescribeServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
                 Err(cursor_manifest_not_ready(kind))
             }
-            LcmDescribeServiceOutcome::BudgetExhausted => Err((
+            LcmDescribeServiceOutcome::BudgetExhausted { stage, .. } => Err((
                 DashboardLcmReadStateV1::BudgetExhausted,
-                "lcm_temporal_budget_exhausted",
+                session_budget_reason(stage),
             )),
             LcmDescribeServiceOutcome::TimedOut => Err((
                 DashboardLcmReadStateV1::TimedOut,
@@ -715,8 +715,17 @@ const fn session_budget_reason(
         SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
             "lcm_temporal_budget_execution_work_exhausted"
         }
+        SessionRetrievalBudgetStageV1::CandidateReadExhausted => {
+            "lcm_temporal_budget_candidate_read_exhausted"
+        }
+        SessionRetrievalBudgetStageV1::RecordReadExhausted => {
+            "lcm_temporal_budget_record_read_exhausted"
+        }
         SessionRetrievalBudgetStageV1::KernelResultLimit => {
             "lcm_temporal_budget_kernel_result_limit"
+        }
+        SessionRetrievalBudgetStageV1::CursorManifestLimit => {
+            "lcm_temporal_budget_cursor_manifest_limit"
         }
         SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
             "lcm_temporal_budget_participant_manifest_participants"

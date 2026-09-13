@@ -113,6 +113,34 @@ pub fn publish_daemon_bindings(
     let (project_id, repository_id, worktree_id, worktree_epoch) =
         binding_identity_from_scope(&scope, revision);
     for host in NATIVE_HOOK_HOSTS {
+        // Publish a binding only after its transport is ready. Otherwise the
+        // first live callback initializes the shared host spool while holding
+        // its writer lease, and sibling callbacks can exhaust their bounded
+        // admission waits behind that cold filesystem work.
+        drop(
+            tracedecay_hooks::HookSpoolV1::open(
+                tracedecay_hooks::hook_v2_spool_root(&layout.data_root, *host),
+                tracedecay_hooks::HookSpoolConfigV1::stock(*host),
+                now,
+            )
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "failed to prepare {} Hook capture spool: {error}",
+                    host.hook_key()
+                ),
+            })?,
+        );
+        drop(
+            tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+                tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, *host),
+            )
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "failed to prepare {} Hook delivery spool: {error}",
+                    host.hook_key()
+                ),
+            })?,
+        );
         let capabilities = [
             tracedecay_hooks::HookEventFamily::SessionBoundary,
             tracedecay_hooks::HookEventFamily::PromptBoundary,

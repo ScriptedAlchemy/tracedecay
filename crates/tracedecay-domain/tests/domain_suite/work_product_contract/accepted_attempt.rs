@@ -15,6 +15,7 @@ fn accept_proposal(
         WorkRouteDecisionV1::abstain("route selected by execution admission").unwrap(),
         "Admit the selected execution after proposal acceptance".to_owned(),
         digest('d'),
+        digest('e'),
     )
     .unwrap();
     graph
