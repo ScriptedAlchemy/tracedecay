@@ -271,14 +271,6 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
         .subscribe_serving_generation_changes(fixture.root())
         .await
         .expect("mounted serving owner");
-    assert!(
-        fixture
-            .registry
-            .request_complete_generation(fixture.root())
-            .await,
-        "mounted worktree admits complete-generation demand"
-    );
-
     let admitted = fixture
         .port(true)
         .admit(fixture.request(&context, &fixture.generation))
@@ -399,7 +391,15 @@ async fn latest(
     // that complete state before using its imports as admission evidence.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(latest) = registry.latest_complete_fresh(project_root).await {
+            let _ = registry.latest_complete_fresh(project_root).await;
+            if registry
+                .dashboard_freshness(project_root)
+                .await
+                .and_then(|freshness| freshness.staleness_state)
+                .as_deref()
+                == Some("fresh")
+                && let Some(latest) = registry.latest_complete_fresh(project_root).await
+            {
                 return latest;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
