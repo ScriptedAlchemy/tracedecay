@@ -27,6 +27,7 @@ from dispatch_policy import READ_EFFECTS, ToolPolicy, decode_tool_policy
 from journeys import (
     FACT_READ_TOOLS,
     JourneyError,
+    NATIVE_LIFECYCLE_EFFECTS,
     WORKFLOW_LIFECYCLE_EFFECTS,
     api_migration_plan_arguments,
     prepare as prepare_journey,
@@ -693,6 +694,33 @@ def _producer_call(client: McpClient, tool: str, arguments: dict[str, Any], dead
     if duration_us(response) is None:
         raise SweepError(f"{tool} producer omitted the enabled _meta.duration_us receipt")
     return response
+
+
+def _mounting_producer_call(
+    client: McpClient,
+    tool: str,
+    arguments: dict[str, Any],
+    deadline_ms: int,
+) -> dict[str, Any]:
+    """Wait through the daemon's typed project-runtime mounting state."""
+    ends_at = time.monotonic() + MOUNT_RETRY_BUDGET_S
+    while True:
+        response, elapsed_ms = client.call_tool(tool, arguments, deadline_ms)
+        row = response_row("tool", tool, response, elapsed_ms, deadline_ms)
+        if row["verdict"] == "PASS":
+            if duration_us(response) is None:
+                raise SweepError(
+                    f"{tool} producer omitted the enabled _meta.duration_us receipt"
+                )
+            return response
+        if (
+            row["problem_code"] != "application.surface.unavailable"
+            or time.monotonic() >= ends_at
+        ):
+            raise SweepError(
+                f"{tool} producer failed: {row['problem_code'] or row['note']}"
+            )
+        time.sleep(MOUNT_RETRY_DELAY_S)
 
 
 def _probe_call(client: McpClient, tool: str, arguments: dict[str, Any], deadline_ms: int) -> dict[str, Any]:
@@ -1368,31 +1396,37 @@ def prime_fixture_values(
     with prime_group("work"):
         prime_work_lifecycle(
             fixture,
-            lambda tool, arguments, deadline_ms: _producer_call(
+            lambda tool, arguments, deadline_ms: _mounting_producer_call(
                 client, tool, arguments, deadline_ms
             ),
             deadline,
             effect_target,
         )
-    if "tracedecay_multi_root_scope_set_compare_and_swap" in policies:
-        prime_native_admin_lifecycle(
-            fixture,
-            lambda tool, arguments, deadline_ms: _producer_call(
-                client, tool, arguments, deadline_ms
-            ),
-            deadline,
-            effect_target,
-        )
-        if "tracedecay_github_stack_signal_expand" in policies:
-            prime_github_stack_signal(
-                client,
+    requires_native = (
+        effect_target is None
+        or effect_target in NATIVE_LIFECYCLE_EFFECTS
+        or effect_target == "tracedecay_github_stack_signal_expand"
+    )
+    if requires_native:
+        if "tracedecay_multi_root_scope_set_compare_and_swap" in policies:
+            prime_native_admin_lifecycle(
                 fixture,
-                deadline("tracedecay_github_stack_signal_expand"),
+                lambda tool, arguments, deadline_ms: _producer_call(
+                    client, tool, arguments, deadline_ms
+                ),
+                deadline,
+                effect_target,
             )
-    elif "tracedecay_github_stack_signal_expand" in policies:
-        raise SweepError(
-            "GitHub stack signal expansion has no native integration producer"
-        )
+            if "tracedecay_github_stack_signal_expand" in policies:
+                prime_github_stack_signal(
+                    client,
+                    fixture,
+                    deadline("tracedecay_github_stack_signal_expand"),
+                )
+        elif "tracedecay_github_stack_signal_expand" in policies:
+            raise SweepError(
+                "GitHub stack signal expansion has no native integration producer"
+            )
 
     with prime_group("workflow"):
         if "tracedecay_workflow_validate_definition" in policies:

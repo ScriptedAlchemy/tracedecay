@@ -1857,7 +1857,7 @@ def _git_apply(call: Call, deadline: Deadline) -> PreparedJourney:
     return PreparedJourney(arguments, cleanup)
 
 
-_NATIVE_EFFECTS = frozenset(
+NATIVE_LIFECYCLE_EFFECTS = frozenset(
     {
         "tracedecay_multi_root_scope_set_compare_and_swap",
         "tracedecay_approve_native_integration",
@@ -3361,9 +3361,9 @@ def prepare(
         )
     if name == "tracedecay_git_apply":
         return _git_apply(call, deadline)
-    if name in _NATIVE_EFFECTS:
+    if name in NATIVE_LIFECYCLE_EFFECTS:
         return _native_effect(name, fixture, call, deadline)
-    if name in _NATIVE_EFFECTS:
+    if name in NATIVE_LIFECYCLE_EFFECTS:
         return _native_effect(name, fixture, call, deadline)
     if name.startswith("tracedecay_workflow_"):
         prepared = fixture.get("workflow_effect_journey")
