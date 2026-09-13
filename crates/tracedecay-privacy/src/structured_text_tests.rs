@@ -420,6 +420,39 @@ fn lcm_non_json_parse_ambiguity_stays_a_structured_quarantine() {
 }
 
 #[test]
+fn sanitizer_verdicts_stay_distinguishable_from_sanitizer_faults() {
+    // Re-rendering an already-captured output converges to a *verdict* — the
+    // sanitizer withheld content it proved it cannot serve — and stays
+    // fail-closed on a *fault*, where nothing about the content was decided.
+    // Collapsing the two either degrades a store forever or serves content the
+    // sanitizer never cleared.
+    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
+    for raw in [
+        "[section]\nnot toml at all\n".to_owned(),
+        format!(r#"{{"{credential_key}":"ordinary-value"}}"#),
+        "# rotate the vault_passphrase monthly\nvault_passphrase: >\n  line-one-of-secret\n  \
+         line-two-of-secret\nregion: us-east\n"
+            .to_owned(),
+    ] {
+        let error = sanitize_lcm_payload_text(&raw).expect_err("quarantine verdict");
+        assert!(
+            error.is_quarantine_verdict(),
+            "the sanitizer's own verdict must read as one: {error}"
+        );
+    }
+    for fault in [
+        DetectionError::Initialization,
+        DetectionError::ScanLimitExceeded,
+        DetectionError::Receipt,
+    ] {
+        assert!(
+            !fault.is_quarantine_verdict(),
+            "a sanitizer fault decides nothing about the content: {fault}"
+        );
+    }
+}
+
+#[test]
 fn code_source_credential_bearing_keys_are_key_quarantine_not_parse_ambiguity() {
     let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
     let raw = format!("{credential_key} = \"ordinary-value\"\nregion = \"us-east\"\n");

@@ -699,6 +699,7 @@ pub async fn upsert_projection_raw_message(
     let sanitization = sanitize_lcm_payload_text(&message.text).map_err(|error| {
         LcmError::SanitizationRefused {
             reason: format!("LCM privacy sanitization failed: {error}"),
+            quarantined: error.is_quarantine_verdict(),
         }
     })?;
     let mut prepared = PreparedMessage {
@@ -897,6 +898,7 @@ fn prepare_message(
     let initial = sanitize_lcm_payload_text(&message.text).map_err(|error| {
         LcmError::SanitizationRefused {
             reason: format!("LCM privacy sanitization failed: {error}"),
+            quarantined: error.is_quarantine_verdict(),
         }
     })?;
     let mut text = initial.sanitized_text().to_owned();
@@ -1189,12 +1191,14 @@ pub fn provider_metadata_requires_resanitization(
     let original = serde_json::from_str::<JsonValue>(provider_metadata_json).map_err(|error| {
         LcmError::SanitizationRefused {
             reason: format!("stored LCM provider metadata is not valid JSON: {error}"),
+            quarantined: false,
         }
     })?;
     let sanitized =
         sanitize_provider_metadata_json(provider_metadata_json, MAX_PROVIDER_METADATA_BYTES)
             .ok_or_else(|| LcmError::SanitizationRefused {
                 reason: "LCM metadata sanitization failed".to_owned(),
+                quarantined: false,
             })?;
     Ok(sanitized != original)
 }
@@ -1205,7 +1209,10 @@ fn protected_metadata_json(
     original: Option<&str>,
     prepared: &PreparedMessage,
 ) -> Result<Option<String>, LcmError> {
-    let refused = |reason: String| LcmError::SanitizationRefused { reason };
+    let refused = |reason: String| LcmError::SanitizationRefused {
+        reason,
+        quarantined: false,
+    };
     let mut metadata =
         sanitize_provider_metadata_json(original.unwrap_or("{}"), MAX_PROVIDER_METADATA_BYTES)
             .ok_or_else(|| refused("LCM metadata sanitization failed".to_owned()))?;

@@ -34,6 +34,16 @@
 //! output provider or message id — or carrying a digest that matches neither
 //! this binary's output nor its own output row is not a rendering difference,
 //! and stays refused, named.
+//!
+//! Convergence has two outcomes because rendering does. Some released
+//! renderings are content the current LCM privacy sanitizer withholds — a
+//! Codex goal-context objective carrying mixed structure renders as an
+//! ambiguous structured document — and a capture running now derives no
+//! servable output for them at all: it records the `sanitization_refused`
+//! disposition instead. A quarantine verdict is therefore the current
+//! rendering, and the released row converges to it. Only a sanitizer *fault*
+//! (an unavailable detector, a receipt construction failure, a payload past
+//! the bounded scan limit) still refuses the store, named.
 
 use std::sync::Mutex;
 
@@ -44,7 +54,7 @@ use tracedecay_store::{
 
 use super::audit::ProjectionProvenanceRow;
 use super::rows::authority_violation;
-use crate::observation_projection::ProjectionRowsBatch;
+use crate::observation_projection::{ConvergedRendering, ProjectionRowsBatch};
 
 /// What this binary must do with one stored provenance row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,8 +112,16 @@ impl ReleasedRenderingLedger {
         if outputs.is_empty() {
             return Ok(0);
         }
+        // Retiring a quarantined observation removes every output it created,
+        // so its remaining recorded outputs are already converged; re-running
+        // the write step for them would resurrect a raw row with no message.
+        let mut retired = std::collections::BTreeSet::new();
+        let mut re_stamped = 0usize;
         for projection in &outputs {
             let provenance = projection.provenance();
+            if retired.contains(provenance.observation_id().as_str()) {
+                continue;
+            }
             tracing::debug!(
                 projector = provenance.projector_version(),
                 observation = provenance.observation_id().as_str(),
@@ -112,21 +130,33 @@ impl ReleasedRenderingLedger {
                 output_message_id = projection.message().message_id.as_str(),
                 "converging a released projection output rendering"
             );
-            crate::observation_projection::converge_released_output_rendering(conn, projection)
-                .await
-                .map_err(|error| {
-                    authority_violation(format!(
-                        "failed to converge the released projection output rendering of \
-                         {}/{}: {error}",
-                        projection.message().provider,
-                        projection.message().message_id,
-                    ))
-                })?;
+            let converged =
+                crate::observation_projection::converge_released_output_rendering(conn, projection)
+                    .await
+                    .map_err(|error| {
+                        authority_violation(format!(
+                            "failed to converge the released projection output rendering: \
+                             projector={} observation={} output_ordinal={} output={}/{}: {error}",
+                            provenance.projector_version(),
+                            provenance.observation_id().as_str(),
+                            projection.output_ordinal(),
+                            projection.message().provider,
+                            projection.message().message_id,
+                        ))
+                    })?;
+            match converged {
+                ConvergedRendering::Output => re_stamped += 1,
+                ConvergedRendering::Quarantined => {
+                    retired.insert(provenance.observation_id().as_str().to_owned());
+                }
+            }
         }
         tracing::info!(
             projector = SESSION_MESSAGE_PROJECTOR_VERSION,
             converged = outputs.len(),
-            "re-stamped released projection output renderings to this binary's rendering"
+            re_stamped,
+            retired = retired.len(),
+            "converged released projection output renderings to this binary's rendering"
         );
         Ok(outputs.len())
     }
@@ -253,11 +283,13 @@ mod tests {
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
     };
+    use tracedecay_domain::derive_exact_observation_anchor_id;
     use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
-        ObservationStore, ObservationWrite, SESSION_MESSAGE_PROJECTOR_VERSION,
-        SessionMessageRecord, SessionRecord,
+        ObservationStore, ObservationWrite, ProjectionSkipReason, ProjectionStoreError,
+        SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord,
+        message_output_digest,
     };
 
     use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
@@ -276,6 +308,11 @@ mod tests {
     /// The native record id, which is also the projected output's message id.
     const RECORD_ID: &str = "record.codex-goal-context";
     const SESSION: &str = "codex-goal-context-session";
+    /// The record whose current rendering the LCM privacy sanitizer withholds:
+    /// its goal objective carries mixed structure, so `Codex active goal: …`
+    /// reads as an ambiguous structured document.
+    const QUARANTINED_RECORD_ID: &str = "record.codex-goal-quarantine";
+    const QUARANTINED_SESSION: &str = "codex-goal-quarantine-session";
 
     /// The derived canonical observation id the provenance row is keyed by.
     fn canonical_observation_id() -> String {
@@ -286,15 +323,30 @@ mod tests {
     /// Identity material, receipt and payload are what any release persisted:
     /// only the *rendering* derived from it changed after the newest tag.
     fn observation() -> DurableObservationV1 {
-        let payload = released()["envelope"].clone();
+        observation_for(released()["envelope"].clone(), RECORD_ID, SESSION)
+    }
+
+    fn quarantined_observation() -> DurableObservationV1 {
+        observation_for(
+            released()["quarantined"]["envelope"].clone(),
+            QUARANTINED_RECORD_ID,
+            QUARANTINED_SESSION,
+        )
+    }
+
+    fn observation_for(
+        payload: serde_json::Value,
+        record_id: &str,
+        session_id: &str,
+    ) -> DurableObservationV1 {
         let source = ObservationSourceIdentityV1::for_provider(
             ProviderId::new("codex").unwrap(),
-            SessionId::new(SESSION).unwrap(),
+            SessionId::new(session_id).unwrap(),
         )
         .unwrap();
         let receipt = SanitizationReceiptV1::new(
             SanitizationReceiptRefV1::new(
-                SanitizationReceiptId::new("receipt.codex-goal-context").unwrap(),
+                SanitizationReceiptId::new(format!("receipt.{record_id}")).unwrap(),
                 ComponentVersion::new("sanitizer.codex-goal-context.v1").unwrap(),
             )
             .unwrap(),
@@ -310,7 +362,7 @@ mod tests {
                 ObservationSourceGenerationV1::new(1).unwrap(),
                 ObservationSourceRangeV1::new(0, 1).unwrap(),
                 ObservationOrderingDomainV1::FileBytes,
-                ObservationId::new(RECORD_ID).unwrap(),
+                ObservationId::new(record_id).unwrap(),
             )
             .unwrap(),
             receipt,
@@ -320,13 +372,17 @@ mod tests {
         .unwrap()
     }
 
-    /// Commits and drains the fixture's observation through the real store, so
-    /// the authority rows under test are the ones production writes.
-    async fn seed(runtime: &HostAdmissionTestRuntimeV1) {
+    /// Commits the observation through the real store and drains it, returning
+    /// the drain's own outcome so a caller can assert a deterministic refusal
+    /// instead of an output. The authority rows under test are the ones
+    /// production writes.
+    async fn seed(
+        runtime: &HostAdmissionTestRuntimeV1,
+        observation: &DurableObservationV1,
+    ) -> Result<(), tracedecay_store::ProjectionStoreError> {
         let store = runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap();
-        let observation = observation();
         let next_cursor = ObservationSourceCursorV1::for_ordering(
             observation.source().clone(),
             observation.scope().clone(),
@@ -361,7 +417,7 @@ mod tests {
         store
             .project_observation(observation.observation_id())
             .await
-            .unwrap();
+            .map(|_| ())
     }
 
     /// Every persisted byte of one projected output: the message row, its LCM
@@ -383,7 +439,7 @@ mod tests {
         digest: String,
     }
 
-    async fn stored_output(conn: &impl QueryExecutor) -> StoredOutput {
+    async fn stored_output(conn: &impl QueryExecutor, message_id: &str) -> StoredOutput {
         let mut rows = conn
             .query(
                 "SELECT m.session_id, m.role, m.timestamp, m.ordinal, m.text, m.kind, m.model,
@@ -395,7 +451,7 @@ mod tests {
                  JOIN observation_projection_provenance AS p
                    ON p.output_provider = m.provider AND p.output_message_id = m.message_id
                  WHERE m.provider = 'codex' AND m.message_id = ?1",
-                tracedecay_runtime_core::params![RECORD_ID],
+                tracedecay_runtime_core::params![message_id],
             )
             .await
             .expect("read the projected output");
@@ -489,13 +545,13 @@ mod tests {
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
             .unwrap();
-        seed(&runtime).await;
+        seed(&runtime, &observation()).await.unwrap();
         let database = runtime
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
 
         let snapshot = database.read_snapshot().await.unwrap();
-        let current = stored_output(&snapshot).await;
+        let current = stored_output(&snapshot, RECORD_ID).await;
         drop(snapshot);
         let fixture = released();
         let released_digest = fixture["released_output_digest"].as_str().unwrap();
@@ -517,7 +573,7 @@ mod tests {
         downgrade_to_released(&transaction, released_digest).await;
         transaction.commit().await.unwrap();
         let snapshot = database.read_snapshot().await.unwrap();
-        let shipped = stored_output(&snapshot).await;
+        let shipped = stored_output(&snapshot, RECORD_ID).await;
         drop(snapshot);
         assert_eq!(shipped.digest, released_digest);
         assert_eq!(shipped.role, "user");
@@ -527,7 +583,7 @@ mod tests {
             .expect("a released output rendering must converge, not degrade the store");
 
         let snapshot = database.read_snapshot().await.unwrap();
-        let converged = stored_output(&snapshot).await;
+        let converged = stored_output(&snapshot, RECORD_ID).await;
         drop(snapshot);
         assert_eq!(
             converged, current,
@@ -539,8 +595,289 @@ mod tests {
             .expect("the converged store must stay admitted");
         let snapshot = database.read_snapshot().await.unwrap();
         assert_eq!(
-            stored_output(&snapshot).await,
+            stored_output(&snapshot, RECORD_ID).await,
             converged,
+            "a second open must be a no-op"
+        );
+    }
+
+    /// One observation's projection authority: whether it still owns a served
+    /// output, and what durable disposition stands in its place.
+    #[derive(Debug, Eq, PartialEq)]
+    struct ProjectionOutcome {
+        message_rows: i64,
+        raw_rows: i64,
+        provenance_rows: i64,
+        disposition: Option<(String, String)>,
+    }
+
+    async fn projection_outcome(
+        conn: &impl QueryExecutor,
+        observation: &DurableObservationV1,
+        message_id: &str,
+    ) -> ProjectionOutcome {
+        let mut rows = conn
+            .query(
+                "SELECT
+                    (SELECT COUNT(*) FROM session_messages
+                     WHERE provider = 'codex' AND message_id = ?2),
+                    (SELECT COUNT(*) FROM lcm_raw_messages
+                     WHERE provider = 'codex' AND message_id = ?2),
+                    (SELECT COUNT(*) FROM observation_projection_provenance
+                     WHERE projector_version = ?1 AND observation_id = ?3),
+                    (SELECT receipt_id FROM observation_projection_dispositions
+                     WHERE projector_version = ?1 AND observation_id = ?3),
+                    (SELECT reason FROM observation_projection_dispositions
+                     WHERE projector_version = ?1 AND observation_id = ?3)",
+                tracedecay_runtime_core::params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    message_id,
+                    observation.observation_id().as_str(),
+                ],
+            )
+            .await
+            .expect("read the observation's projection authority");
+        let row = rows
+            .next()
+            .await
+            .expect("read the projection authority row")
+            .expect("the aggregate row is always present");
+        let receipt_id: Option<String> = row.get(3).unwrap();
+        let reason: Option<String> = row.get(4).unwrap();
+        ProjectionOutcome {
+            message_rows: row.get(0).unwrap(),
+            raw_rows: row.get(1).unwrap(),
+            provenance_rows: row.get(2).unwrap(),
+            disposition: receipt_id.zip(reason),
+        }
+    }
+
+    /// Writes the output rows and provenance a release persisted for the
+    /// quarantined record, and arms an exhaustive audit.
+    ///
+    /// The rows are inserted rather than downgraded because this binary's drain
+    /// produces none for this envelope: the shipped store is the only place
+    /// this output ever existed. The provenance digest is the digest of those
+    /// released rows under the digest chain every tag from v0.1.0-beta.25
+    /// through v0.1.0-beta.37 shares with this tree, which is the digest that
+    /// release wrote.
+    async fn install_released_quarantined_output(
+        conn: &impl Executor,
+        observation: &DurableObservationV1,
+    ) -> String {
+        let fixture = released()["quarantined"].clone();
+        let message: SessionMessageRecord =
+            serde_json::from_value(fixture["released_message"].clone()).unwrap();
+        let session: SessionRecord =
+            serde_json::from_value(fixture["released_session"].clone()).unwrap();
+        assert_eq!(
+            message.session_id, session.session_id,
+            "the fixture's released output must belong to its released session"
+        );
+        conn.execute(
+            "INSERT INTO sessions
+                (provider, session_id, project_key, project_path, title, started_at, ended_at,
+                 transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
+                 parent_tool_use_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            tracedecay_runtime_core::params![
+                session.provider.as_str(),
+                session.session_id.as_str(),
+                session.project_key.as_str(),
+                session.project_path.as_str(),
+                session.title.as_deref(),
+                session.started_at,
+                session.ended_at,
+                session.transcript_path.as_deref(),
+                session.metadata_json.as_deref(),
+                session.parent_session_id.as_deref(),
+                i64::from(session.is_subagent),
+                session.agent_id.as_deref(),
+                session.parent_tool_use_id.as_deref(),
+            ],
+        )
+        .await
+        .expect("install the released session row");
+        conn.execute(
+            "INSERT INTO session_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
+                 tool_names, source_path, source_offset, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            tracedecay_runtime_core::params![
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                message.session_id.as_str(),
+                message.role.as_str(),
+                message.timestamp,
+                message.ordinal,
+                message.text.as_str(),
+                message.kind.as_deref(),
+                message.model.as_deref(),
+                message.tool_names.as_deref(),
+                message.source_path.as_deref(),
+                message.source_offset,
+                message.metadata_json.as_deref(),
+            ],
+        )
+        .await
+        .expect("install the released message row");
+        tracedecay_lcm::raw::upsert_projection_raw_message(conn, &message)
+            .await
+            .expect("the released rendering must still be servable by this binary's sanitizer");
+        let digest = message_output_digest(&session, &message, 0)
+            .expect("digest the released output")
+            .as_str()
+            .to_owned();
+        let anchor =
+            derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
+                .unwrap();
+        conn.execute(
+            "INSERT INTO observation_projection_provenance
+                (projector_version, observation_id, output_ordinal, retrieval_anchor_id,
+                 receipt_id, output_provider, output_message_id, output_digest, message_created)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, 1)",
+            tracedecay_runtime_core::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+                anchor.as_str(),
+                observation.receipt().receipt().receipt_id().as_str(),
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                digest.as_str(),
+            ],
+        )
+        .await
+        .expect("install the released provenance row");
+        conn.execute(
+            "DELETE FROM observation_projection_dispositions
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            tracedecay_runtime_core::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+            ],
+        )
+        .await
+        .expect("a release wrote an output here, not a refusal");
+        conn.execute("DELETE FROM authority_audit_checkpoints", ())
+            .await
+            .expect("arm the exhaustive audit");
+        digest
+    }
+
+    /// The same profile holding a Codex goal-context record whose *current*
+    /// rendering the LCM privacy sanitizer withholds — its objective carries
+    /// mixed structure, so `Codex active goal: …` reads as an ambiguous
+    /// structured document.
+    ///
+    /// The re-stamp path renders the shipped output through this binary's
+    /// projector, so it meets that verdict. Treating the verdict as a
+    /// convergence failure refused the whole store, leaving profile-session
+    /// convergence `degraded` on every open with no remedy but discarding the
+    /// profile's session history. A quarantine is a legitimate current
+    /// rendering, so the released row must converge to exactly the durable
+    /// refusal a fresh capture of the same envelope writes.
+    #[tokio::test]
+    async fn quarantined_codex_goal_rendering_converges_to_the_withheld_capture() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        let observation = quarantined_observation();
+        let error = seed(&runtime, &observation)
+            .await
+            .expect_err("this binary's sanitizer must withhold the fixture's rendering");
+        match &error {
+            ProjectionStoreError::SanitizationRefused {
+                reason,
+                quarantined,
+            } => {
+                assert!(
+                    *quarantined,
+                    "an ambiguous structured document is a quarantine verdict, not a fault: \
+                     {reason}"
+                );
+                assert!(
+                    reason.contains("privacy sanitizer quarantined an ambiguous structured \
+                                     document"),
+                    "the capture path must name the sanitizer's verdict: {reason}"
+                );
+            }
+            other => panic!("the capture path must quarantine, not {other:?}"),
+        }
+
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        // What a fresh capture of this envelope leaves behind: no output, and
+        // the observation's own receipt bound to the durable refusal.
+        let fresh_capture = projection_outcome(&snapshot, &observation, QUARANTINED_RECORD_ID).await;
+        drop(snapshot);
+        assert_eq!(
+            fresh_capture,
+            ProjectionOutcome {
+                message_rows: 0,
+                raw_rows: 0,
+                provenance_rows: 0,
+                disposition: Some((
+                    observation.receipt().receipt().receipt_id().as_str().to_owned(),
+                    ProjectionSkipReason::SanitizationRefused.as_str().to_owned(),
+                )),
+            }
+        );
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("install the released rendering")
+            .await
+            .unwrap();
+        let released_digest = install_released_quarantined_output(&transaction, &observation).await;
+        transaction.commit().await.unwrap();
+        let snapshot = database.read_snapshot().await.unwrap();
+        let shipped = stored_output(&snapshot, QUARANTINED_RECORD_ID).await;
+        drop(snapshot);
+        assert_eq!(shipped.digest, released_digest);
+        assert_eq!(shipped.role, "user");
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("a quarantine verdict must converge, not degrade the store");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(
+            projection_outcome(&snapshot, &observation, QUARANTINED_RECORD_ID).await,
+            fresh_capture,
+            "convergence must reach exactly what a fresh capture of this envelope writes"
+        );
+        // The projection is derived state; the durable observation it came from
+        // is the authority and must survive, so a binary whose sanitizer admits
+        // this content can project it again.
+        let retained: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM observations WHERE observation_id = ?1 AND receipt_id = ?2",
+                tracedecay_runtime_core::params![
+                    observation.observation_id().as_str(),
+                    observation.receipt().receipt().receipt_id().as_str(),
+                ],
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(retained, 1, "retirement must not touch the observation");
+        drop(snapshot);
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("the converged store must stay admitted");
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(
+            projection_outcome(&snapshot, &observation, QUARANTINED_RECORD_ID).await,
+            fresh_capture,
             "a second open must be a no-op"
         );
     }
@@ -555,7 +892,7 @@ mod tests {
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
             .unwrap();
-        seed(&runtime).await;
+        seed(&runtime, &observation()).await.unwrap();
         let database = runtime
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");

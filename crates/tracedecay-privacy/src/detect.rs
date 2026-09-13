@@ -421,6 +421,24 @@ pub enum DetectionError {
     SensitiveFieldQuarantine,
 }
 
+impl DetectionError {
+    /// Whether the sanitizer reached a *verdict* — it proved this content
+    /// cannot be served and withheld it — rather than failing to run.
+    ///
+    /// A verdict is a legitimate rendering outcome that a re-render of
+    /// already-captured bytes converges to; the remaining variants are
+    /// sanitizer faults (unavailable detector, receipt construction, a payload
+    /// past the bounded scan limit) that stay fail-closed.
+    pub const fn is_quarantine_verdict(&self) -> bool {
+        matches!(
+            self,
+            Self::StructuredQuarantine
+                | Self::CredentialKeyQuarantine
+                | Self::SensitiveFieldQuarantine
+        )
+    }
+}
+
 pub enum MemoryFactSanitizationV1 {
     Durable {
         payload: Value,
