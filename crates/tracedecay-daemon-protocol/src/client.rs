@@ -1551,6 +1551,16 @@ fn semantic_evaluation_application_problem(
             )
         }
         ApplicationProblemKind::InvalidRequest | ApplicationProblemKind::Unsupported => {
+            if let Some(diagnostic) = problem
+                .diagnostic()
+                .filter(|diagnostic| diagnostic.code.starts_with("semantic_qualification."))
+            {
+                return tracedecay_domain::errors::TraceDecayError::project_route(
+                    diagnostic.code.replace('.', "_"),
+                    false,
+                    diagnostic.message.clone(),
+                );
+            }
             tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "semantic evaluation publication rejected: {}",

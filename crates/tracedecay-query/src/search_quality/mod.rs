@@ -37,7 +37,8 @@ pub use native_qualification::{
     PackagedNativeQualificationErrorV1, PackagedNativeQualificationV1,
     PortableNativeQualificationEvidenceV1, encode_daemon_native_qualification_blob,
     encode_packaged_native_qualification, load_packaged_native_qualification_from_bytes,
-    packaged_native_qualification_bytes, qualified_default_activation_candidate,
+    packaged_native_qualification_bytes, packaged_native_qualification_failure,
+    packaged_native_qualification_state, qualified_default_activation_candidate,
     validate_packaged_native_activation_report, write_daemon_native_qualification,
     write_packaged_native_qualification,
 };

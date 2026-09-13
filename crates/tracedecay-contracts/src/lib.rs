@@ -401,6 +401,7 @@ pub use sdk_catalog::{
 };
 pub use semantic_activation::{
     SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
+    SemanticQualificationFailureV1, SemanticQualificationStateV1,
 };
 pub use session_temporal_refresh::{
     SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort,

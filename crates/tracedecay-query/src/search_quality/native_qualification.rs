@@ -18,6 +18,7 @@ use flate2::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_contracts::{SemanticQualificationFailureV1, SemanticQualificationStateV1};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1,
@@ -34,7 +35,7 @@ use super::candidate_output::{
 #[cfg(test)]
 use super::evaluate::load_default_evaluated_profile_material;
 use super::evaluate::{
-    DirectActivationEvaluationV1, DirectEvaluationStatusV1, SearchEvalError,
+    DirectActivationEvaluationV1, DirectEvaluationStatusV1, SEMANTIC_PROFILE, SearchEvalError,
     activation_profile_chain, load_authoritative_default_workload_metadata,
 };
 use super::packaged;
@@ -46,6 +47,10 @@ use super::semantic_native::SemanticNativeStageResultV1;
 const PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION: u32 = 1;
 const DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC: &[u8] = b"tracedecay.native-qualification.zlib.v1\0";
 const MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+const REQUALIFY_REMEDY: &str =
+    "run a genuine qualify-native evaluation for this exact workload and package its PASS";
+const INSTALL_EVIDENCE_REMEDY: &str =
+    "install an untampered package containing a genuine PASS for this profile and workload";
 
 // This checked-in gzip is generated only from a genuine `qualify-native` run.
 // The decoded canonical JSON remains the validation authority; compression
@@ -71,6 +76,8 @@ static PACKAGED_NATIVE_QUALIFICATION_CANONICAL: OnceLock<
 static PACKAGED_NATIVE_QUALIFICATION: OnceLock<
     Result<PackagedNativeQualificationV1, PackagedNativeQualificationErrorV1>,
 > = OnceLock::new();
+static PACKAGED_NATIVE_QUALIFICATION_STATE: OnceLock<SemanticQualificationStateV1> =
+    OnceLock::new();
 
 /// Exact evaluator inputs retained inside the report package.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -673,6 +680,132 @@ pub fn qualified_default_activation_candidate(
     activation_candidate_from_qualification(qualification, expectations)
 }
 
+pub fn packaged_native_qualification_failure(
+    error: PackagedNativeQualificationErrorV1,
+    expectations: &NativeQualificationExpectationsV1,
+) -> SemanticQualificationFailureV1 {
+    let canonical = embedded_qualification_bytes().ok();
+    let qualification = canonical
+        .and_then(|bytes| serde_json::from_slice::<PackagedNativeQualificationV1>(bytes).ok());
+    qualification_failure(error, qualification.as_ref(), canonical, expectations)
+}
+
+pub fn packaged_native_qualification_state() -> SemanticQualificationStateV1 {
+    PACKAGED_NATIVE_QUALIFICATION_STATE
+        .get_or_init(compute_packaged_native_qualification_state)
+        .clone()
+}
+
+fn compute_packaged_native_qualification_state() -> SemanticQualificationStateV1 {
+    let qualification = match PACKAGED_NATIVE_QUALIFICATION
+        .get_or_init(load_embedded_qualification)
+        .as_ref()
+    {
+        Ok(qualification) => qualification,
+        Err(error) => {
+            return SemanticQualificationStateV1::Unqualified {
+                failure: qualification_failure_without_expectations(error.clone()),
+            };
+        }
+    };
+    let expectations = match NativeQualificationExpectationsV1::packaged_default(
+        SEMANTIC_PROFILE.to_owned(),
+        qualification.qualification_key.runtime.clone(),
+        NativeQualificationPlatformV1::current(),
+    ) {
+        Ok(expectations) => expectations,
+        Err(error) => {
+            return SemanticQualificationStateV1::Unqualified {
+                failure: qualification_failure_without_expectations(error),
+            };
+        }
+    };
+    match validate_qualification(qualification, &expectations) {
+        Ok(()) => SemanticQualificationStateV1::Qualified {
+            profile_id: expectations.evaluated_profile_id,
+            workload_digest: expectations.workload_digest,
+            evidence_digest: PACKAGED_NATIVE_QUALIFICATION_SHA256.to_owned(),
+        },
+        Err(error) => SemanticQualificationStateV1::Unqualified {
+            failure: qualification_failure(
+                error,
+                Some(qualification),
+                embedded_qualification_bytes().ok(),
+                &expectations,
+            ),
+        },
+    }
+}
+
+fn qualification_failure(
+    error: PackagedNativeQualificationErrorV1,
+    qualification: Option<&PackagedNativeQualificationV1>,
+    canonical: Option<&[u8]>,
+    expectations: &NativeQualificationExpectationsV1,
+) -> SemanticQualificationFailureV1 {
+    let observed_profile =
+        qualification.map(|value| value.qualification_key.evaluated_profile_id.as_str());
+    let observed_workload =
+        qualification.map(|value| value.qualification_key.evaluator.workload_digest.as_str());
+    if error == PackagedNativeQualificationErrorV1::StaleWorkload
+        && qualification.is_some_and(|value| {
+            value.portable_evidence.report.status == DirectEvaluationStatusV1::Pass
+        })
+        && observed_workload.is_some_and(|digest| digest != expectations.workload_digest)
+    {
+        return SemanticQualificationFailureV1::StaleWorkload {
+            profile_id: observed_profile
+                .unwrap_or(&expectations.evaluated_profile_id)
+                .to_owned(),
+            packaged_workload_digest: observed_workload.unwrap_or_default().to_owned(),
+            current_workload_digest: expectations.workload_digest.clone(),
+            remedy: REQUALIFY_REMEDY.to_owned(),
+        };
+    }
+    if error == PackagedNativeQualificationErrorV1::FailedQualification {
+        return SemanticQualificationFailureV1::FailedQualification {
+            profile_id: observed_profile
+                .unwrap_or(&expectations.evaluated_profile_id)
+                .to_owned(),
+            workload_digest: observed_workload
+                .unwrap_or(&expectations.workload_digest)
+                .to_owned(),
+            remedy: REQUALIFY_REMEDY.to_owned(),
+        };
+    }
+    SemanticQualificationFailureV1::NoQualificationEvidence {
+        profile_id: expectations.evaluated_profile_id.clone(),
+        current_workload_digest: expectations.workload_digest.clone(),
+        evidence_digest: canonical.map(canonical_sha256),
+        detail: match observed_profile {
+            Some(profile) if profile != expectations.evaluated_profile_id => format!(
+                "packaged profile {profile} does not match requested profile {}; {error}",
+                expectations.evaluated_profile_id
+            ),
+            _ => error.to_string(),
+        },
+        remedy: INSTALL_EVIDENCE_REMEDY.to_owned(),
+    }
+}
+
+fn qualification_failure_without_expectations(
+    error: PackagedNativeQualificationErrorV1,
+) -> SemanticQualificationFailureV1 {
+    let current_workload_digest = match load_authoritative_default_workload_metadata() {
+        Ok(workload) => {
+            compute_workload_digest(&workload).unwrap_or_else(|_| "unavailable".to_owned())
+        }
+        Err(_) => "unavailable".to_owned(),
+    };
+    SemanticQualificationFailureV1::NoQualificationEvidence {
+        profile_id: SEMANTIC_PROFILE.to_owned(),
+        current_workload_digest,
+        evidence_digest: embedded_qualification_bytes().ok().map(canonical_sha256),
+        detail: error.to_string(),
+        remedy: INSTALL_EVIDENCE_REMEDY.to_owned(),
+    }
+}
+
 /// Revalidate a retained portable report against the evaluator corpus embedded
 /// in this build. This is the durable-authority counterpart to package loading:
 /// it never treats the mounted project as the evaluator fixture and never
@@ -1052,6 +1185,10 @@ fn validate_report_runtime_bindings(
 fn canonical_sha256(bytes: &[u8]) -> String {
     encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }
+
+#[cfg(test)]
+#[path = "native_qualification_truthful_tests.rs"]
+mod truthful_tests;
 
 #[cfg(test)]
 mod tests {
