@@ -520,7 +520,8 @@ fn semantic_evaluation_response(
         ),
         Err(DaemonSemanticEvaluationExecutionErrorV1::Coordination(
             error @ (SemanticActivationCoordinationErrorV1::Rejected
-            | SemanticActivationCoordinationErrorV1::RejectedDetail(_)),
+            | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
+            | SemanticActivationCoordinationErrorV1::Qualification(_)),
         )) => application_problem(request_id, semantic_evaluation_rejection_problem(&error)),
         Err(DaemonSemanticEvaluationExecutionErrorV1::Coordination(
             SemanticActivationCoordinationErrorV1::Conflict,
@@ -545,9 +546,23 @@ fn semantic_evaluation_response(
 fn semantic_evaluation_rejection_problem(
     error: &SemanticActivationCoordinationErrorV1,
 ) -> ApplicationProblem {
+    let code = match error {
+        SemanticActivationCoordinationErrorV1::Qualification(
+            tracedecay_contracts::SemanticQualificationFailureV1::StaleWorkload { .. },
+        ) => "semantic_qualification.stale_workload",
+        SemanticActivationCoordinationErrorV1::Qualification(
+            tracedecay_contracts::SemanticQualificationFailureV1::FailedQualification { .. },
+        ) => "semantic_qualification.failed_qualification",
+        SemanticActivationCoordinationErrorV1::Qualification(
+            tracedecay_contracts::SemanticQualificationFailureV1::NoQualificationEvidence {
+                ..
+            },
+        ) => "semantic_qualification.no_qualification_evidence",
+        _ => "semantic_evaluation.rejected",
+    };
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
-            code: "semantic_evaluation.rejected".to_owned(),
+            code: code.to_owned(),
             message: semantic_evaluation_rejection_message(&error.to_string()),
         },
         retry: RetryDirective::Never,
@@ -574,6 +589,10 @@ fn semantic_evaluation_rejection_message(detail: &str) -> String {
     }
     truncated
 }
+
+#[cfg(test)]
+#[path = "semantic_qualification_truthful_tests.rs"]
+mod qualification_truthful_tests;
 
 #[cfg(test)]
 mod tests {

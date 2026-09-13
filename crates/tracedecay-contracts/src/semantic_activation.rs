@@ -11,9 +11,58 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
+
+#[derive(Clone, Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum SemanticQualificationFailureV1 {
+    #[error(
+        "packaged PASS for profile {profile_id} is stale: packaged workload \
+         {packaged_workload_digest}, current workload {current_workload_digest}; {remedy}"
+    )]
+    StaleWorkload {
+        profile_id: String,
+        packaged_workload_digest: String,
+        current_workload_digest: String,
+        remedy: String,
+    },
+    #[error(
+        "native qualification for profile {profile_id} and workload {workload_digest} did not \
+         pass; {remedy}"
+    )]
+    FailedQualification {
+        profile_id: String,
+        workload_digest: String,
+        remedy: String,
+    },
+    #[error(
+        "no valid qualification evidence for profile {profile_id} and workload \
+         {current_workload_digest}: {detail}; {remedy}"
+    )]
+    NoQualificationEvidence {
+        profile_id: String,
+        current_workload_digest: String,
+        evidence_digest: Option<String>,
+        detail: String,
+        remedy: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SemanticQualificationStateV1 {
+    Qualified {
+        profile_id: String,
+        workload_digest: String,
+        evidence_digest: String,
+    },
+    Unqualified {
+        failure: SemanticQualificationFailureV1,
+    },
+}
 
 /// Typed failure for one configuration-linked semantic activation or rollback.
 ///
@@ -28,6 +77,8 @@ pub enum SemanticActivationCoordinationErrorV1 {
     Rejected,
     #[error("semantic activation input was rejected: {0}")]
     RejectedDetail(String),
+    #[error("semantic activation qualification refused: {0}")]
+    Qualification(SemanticQualificationFailureV1),
     #[error("semantic activation compare-and-swap conflicted")]
     Conflict,
     #[error("semantic runtime activation failed: {0}")]

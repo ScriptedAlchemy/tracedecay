@@ -17,7 +17,8 @@ pub(crate) fn semantic_coordination_error(
             hotpath::gauge!("usecases.semantic.coordination.unavailable").inc(1.0);
         }
         SemanticActivationCoordinationErrorV1::Rejected
-        | SemanticActivationCoordinationErrorV1::RejectedDetail(_) => {
+        | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
+        | SemanticActivationCoordinationErrorV1::Qualification(_) => {
             hotpath::gauge!("usecases.semantic.coordination.rejected").inc(1.0);
         }
         SemanticActivationCoordinationErrorV1::Conflict => {

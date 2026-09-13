@@ -1,4 +1,5 @@
-//! Composed semantic activation journey: evaluate, publish, then activate.
+//! Composed semantic activation journey: validate packaged evidence, publish,
+//! then activate.
 //!
 //! One typed daemon operation carries an operator from an installed model to
 //! an active semantic profile. The daemon composes the installed-model
@@ -85,9 +86,8 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
-        // Preflight the installed material before the multi-minute native
-        // evaluation so a missing model is a fast typed refusal, not a
-        // late one.
+        // Preflight the installed material before qualification validation so
+        // a missing model keeps its distinct typed refusal.
         let material = match semantic_activation_material(
             tracedecay_application::semantic_runtime::project_lifecycle_status(&project_root_path)
                 .as_ref(),

@@ -603,6 +603,11 @@ fn map_semantic_configuration_error(
                 "semantic configuration transition rejected: {detail}"
             ))
         }
+        SemanticActivationCoordinationErrorV1::Qualification(failure) => {
+            ConfigurationError::validation_message(format!(
+                "semantic configuration transition qualification refused: {failure}"
+            ))
+        }
     }
 }
 

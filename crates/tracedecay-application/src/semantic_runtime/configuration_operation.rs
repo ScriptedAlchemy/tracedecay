@@ -30,7 +30,7 @@ use tracedecay_query::search_quality::{
     NativeQualificationExecutionResourceKeyV1, NativeQualificationExpectationsV1,
     NativeQualificationModelKeyV1, NativeQualificationPlatformV1, NativeQualificationRuntimeKeyV1,
     PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1, SEMANTIC_PROFILE,
-    qualified_default_activation_candidate,
+    packaged_native_qualification_failure, qualified_default_activation_candidate,
 };
 use tracedecay_semantic_contracts::SemanticProfileSelection;
 
@@ -435,7 +435,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             let expectations = native_qualification_expectations(&before, &candidate)?;
             let evidence = SemanticActivationPublicationEvidenceV1::Packaged(
                 qualified_default_activation_candidate(&expectations)
-                    .map_err(map_packaged_qualification_error)?,
+                    .map_err(|error| map_packaged_qualification_error(error, &expectations))?,
             );
             (before, candidate, evidence)
         } else {
@@ -716,6 +716,9 @@ fn rejected_with_context(
         SemanticActivationCoordinationErrorV1::RejectedDetail(detail) => {
             SemanticActivationCoordinationErrorV1::RejectedDetail(format!("{context}: {detail}"))
         }
+        SemanticActivationCoordinationErrorV1::Qualification(failure) => {
+            SemanticActivationCoordinationErrorV1::Qualification(failure)
+        }
         error => error,
     }
 }
@@ -728,6 +731,7 @@ fn log_semantic_activation_failure(
         SemanticActivationCoordinationErrorV1::Unavailable => "unavailable",
         SemanticActivationCoordinationErrorV1::Rejected
         | SemanticActivationCoordinationErrorV1::RejectedDetail(_) => "rejected",
+        SemanticActivationCoordinationErrorV1::Qualification(_) => "qualification_refused",
         SemanticActivationCoordinationErrorV1::Conflict => "conflict",
         SemanticActivationCoordinationErrorV1::Runtime(_) => "runtime_failure",
     };
@@ -798,20 +802,21 @@ fn native_qualification_expectations(
         runtime,
         NativeQualificationPlatformV1::current(),
     )
-    .map_err(map_packaged_qualification_error)
+    .map_err(|error| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "cannot construct current native qualification authority: {error}"
+        ))
+    })
 }
 
 fn map_packaged_qualification_error(
     error: PackagedNativeQualificationErrorV1,
+    expectations: &NativeQualificationExpectationsV1,
 ) -> SemanticActivationCoordinationErrorV1 {
-    match error {
-        PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable => {
-            SemanticActivationCoordinationErrorV1::Unavailable
-        }
-        rejected => SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
-            "packaged native qualification rejected: {rejected}"
-        )),
-    }
+    SemanticActivationCoordinationErrorV1::Qualification(packaged_native_qualification_failure(
+        error,
+        expectations,
+    ))
 }
 
 #[hotpath::measure(label = "usecases.semantic_config.prepare_activation")]
