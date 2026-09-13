@@ -323,9 +323,43 @@ struct PartitionedGenerationEvidenceV1 {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PartitionedCompactGenerationEvidenceV1 {
+    #[serde(deserialize_with = "deserialize_evidence_lineage")]
     lineage: Vec<SymbolLineageCandidateV1>,
+    #[serde(deserialize_with = "deserialize_evidence_projection_request")]
     projection_request: ProjectionBatchRequestV1,
+    #[serde(deserialize_with = "deserialize_evidence_compact_receipt")]
     projection_receipt: PartitionedCompactBatchReceiptV1,
+}
+
+/// The generation evidence stream is the largest segment a restore reads and
+/// it decodes on one thread, so each of its three payloads is measured
+/// separately: the lineage roster, the projection request's per-chunk change
+/// rows, and the projector's per-chunk decision rows.
+fn deserialize_evidence_lineage<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<SymbolLineageCandidateV1>, D::Error> {
+    hotpath::measure_block!(
+        "code_index.restore.evidence_lineage",
+        Deserialize::deserialize(deserializer)
+    )
+}
+
+fn deserialize_evidence_projection_request<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ProjectionBatchRequestV1, D::Error> {
+    hotpath::measure_block!(
+        "code_index.restore.evidence_projection_request",
+        Deserialize::deserialize(deserializer)
+    )
+}
+
+fn deserialize_evidence_compact_receipt<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<PartitionedCompactBatchReceiptV1, D::Error> {
+    hotpath::measure_block!(
+        "code_index.restore.evidence_projection_receipt",
+        Deserialize::deserialize(deserializer)
+    )
 }
 
 #[derive(Serialize)]
@@ -2249,9 +2283,19 @@ fn decode_generation_evidence(
                 None,
             ),
             PartitionedEvidenceEncodingV1::CompactReceipts => (
-                serde_json::from_reader::<_, PartitionedCompactGenerationEvidenceV1>(&mut reader)
+                hotpath::measure_block!(
+                    "code_index.restore.evidence_stream",
+                    serde_json::from_reader::<_, PartitionedCompactGenerationEvidenceV1>(
+                        &mut reader
+                    )
                     .map_err(decoding_failure)
-                    .and_then(PartitionedCompactGenerationEvidenceV1::expand),
+                )
+                .and_then(|compact| {
+                    hotpath::measure_block!(
+                        "code_index.restore.evidence_receipt_expand",
+                        compact.expand()
+                    )
+                }),
                 None,
             ),
         }
@@ -2352,25 +2396,32 @@ where
 fn parse_partitioned_manifest(
     bytes: &[u8],
 ) -> Result<Option<PartitionedPublishedGenerationV1>, CodeIndexProductionErrorV1> {
-    let raw: PartitionedRawEnvelopeV1 = serde_json::from_slice(bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation manifest decoding failed: {error}"
-        ))
-    })?;
-    let actual_digest =
+    let raw: PartitionedRawEnvelopeV1 = hotpath::measure_block!(
+        "code_index.restore.manifest_envelope_parse",
+        serde_json::from_slice(bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation manifest decoding failed: {error}"
+            ))
+        })
+    )?;
+    let actual_digest = hotpath::measure_block!(
+        "code_index.restore.manifest_digest",
         ManifestDigest::from_sha256_bytes(&Sha256::digest(raw.generation.get().as_bytes()))
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+    )?;
     if actual_digest != raw.state_digest {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation manifest state digest does not match its payload".to_owned(),
         ));
     }
-    let probe: PartitionedFormatProbeV1 =
+    let probe: PartitionedFormatProbeV1 = hotpath::measure_block!(
+        "code_index.restore.manifest_revision_probe",
         serde_json::from_str(raw.generation.get()).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation manifest format probe failed: {error}"
             ))
-        })?;
+        })
+    )?;
     match probe.format_revision {
         SEALED_GENERATION_FORMAT_REVISION_V1 => {}
         // The monolithic envelope, which its own decoder owns.
@@ -2389,12 +2440,14 @@ fn parse_partitioned_manifest(
             ));
         }
     }
-    let generation: PartitionedPublishedGenerationV1 = serde_json::from_str(raw.generation.get())
-        .map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation manifest payload decoding failed: {error}"
-        ))
-    })?;
+    let generation: PartitionedPublishedGenerationV1 = hotpath::measure_block!(
+        "code_index.restore.manifest_payload_parse",
+        serde_json::from_str(raw.generation.get()).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation manifest payload decoding failed: {error}"
+            ))
+        })
+    )?;
     validate_partitioned_generation_layout(
         generation
             .file_segments
@@ -2901,7 +2954,11 @@ impl CodeIndexPublishedGenerationV1 {
             &mut Vec<u8>,
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
-        let Some(generation) = parse_partitioned_manifest(bytes)? else {
+        let Some(generation) = hotpath::measure_block!(
+            "code_index.restore.manifest",
+            parse_partitioned_manifest(bytes)
+        )?
+        else {
             return Ok(None);
         };
         let mut files = Vec::with_capacity(generation.file_segments.len());
@@ -2931,12 +2988,15 @@ impl CodeIndexPublishedGenerationV1 {
                 &generation.manifest.generation_id,
             )?);
         }
-        let evidence = decode_generation_evidence(
-            &generation.generation_evidence,
-            &generation.manifest.generation_id,
-            &generation.file_segments,
-            &files,
-            read_segment,
+        let evidence = hotpath::measure_block!(
+            "code_index.restore.generation_evidence",
+            decode_generation_evidence(
+                &generation.generation_evidence,
+                &generation.manifest.generation_id,
+                &generation.file_segments,
+                &files,
+                read_segment,
+            )
         )?;
         assemble_published_generation(StreamingPersistedPublishedGenerationV1 {
             format_revision: super::sealed_codec::CompatibleSealedFormatRevisionV1(
