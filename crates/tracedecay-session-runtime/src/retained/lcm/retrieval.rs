@@ -721,8 +721,8 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
         } => {
             RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
         }
-        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage)
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage, accounting)
         }
         SessionRetrievalServiceOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_contracts::CancellationStage::DuringRead,
@@ -761,8 +761,8 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
         | LcmDescribeServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        LcmDescribeServiceOutcome::BudgetExhausted { stage } => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage)
+        LcmDescribeServiceOutcome::BudgetExhausted { stage, accounting } => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage, accounting)
         }
         LcmDescribeServiceOutcome::CursorStale => {
             RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
@@ -806,8 +806,8 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
         | LcmExpandServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        LcmExpandServiceOutcome::BudgetExhausted { stage } => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage)
+        LcmExpandServiceOutcome::BudgetExhausted { stage, accounting } => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage, accounting)
         }
         LcmExpandServiceOutcome::CursorStale => {
             RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()

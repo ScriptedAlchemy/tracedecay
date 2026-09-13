@@ -7,7 +7,7 @@ use tracedecay_domain::{
     TemporalValidityV1, UtcMicros,
 };
 
-use super::super::ports::{ExecutionControl, TemporalPortError};
+use super::super::ports::{ExecutionControl, ReadBudgetAccounting, TemporalPortError};
 use super::resolver::{
     resolve_temporal, resolve_temporal_controlled, resolve_temporal_with_checkpoints,
 };
@@ -462,7 +462,8 @@ fn resolution_checks_live_work_budget_during_occurrence_consumption() {
     assert_eq!(
         resolve_temporal_controlled(&occurrences, &[], &[], TemporalModeV1::Forensic, &control,),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "work units"
+            resource: "work units",
+            accounting: Some(ReadBudgetAccounting::consumed_with_more(1, 1)),
         })
     );
 }
@@ -479,7 +480,7 @@ fn cancellation_and_hook_budget_errors_propagate() {
 
     let mut hook = |_checkpoint: ResolutionCheckpoint| {
         Err(TemporalPortError::BudgetExceeded {
-            resource: "lineage traversal",
+            resource: "lineage traversal", accounting: None,
         })
     };
     assert_eq!(
@@ -492,7 +493,7 @@ fn cancellation_and_hook_budget_errors_propagate() {
             &mut hook,
         ),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "lineage traversal",
+            resource: "lineage traversal", accounting: None,
         })
     );
 }
@@ -563,7 +564,8 @@ fn summary_source_and_predecessor_traversal_preserve_control_errors() {
             &bounded,
         ),
         Err(TemporalPortError::BudgetExceeded {
-            resource: "work units"
+            resource: "work units",
+            accounting: Some(ReadBudgetAccounting::consumed_with_more(6, 6)),
         })
     );
 }

@@ -109,6 +109,35 @@ impl SessionRetrievalBudgetStageV1 {
     }
 }
 
+/// What a refusing budget boundary had counted.
+///
+/// Both variants are exact. A bounded read never counts the rows it declined to
+/// read, so an exhausted read reports what it consumed and that storage held
+/// more — never a total it would have to run the refused scan to learn.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "observation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionRetrievalBudgetObservationV1 {
+    /// The request asked for more units than the admitted maximum.
+    Requested { units: u64 },
+    /// The read consumed its whole budget and storage still held more.
+    ConsumedWithMoreAvailable { units: u64 },
+}
+
+/// The ceiling and count behind a budget refusal.
+///
+/// `stage` names which budget refused; this is what tells an oversized request
+/// apart from a read whose cost was mis-sized for it. The ceiling value also
+/// distinguishes the resources inside one stage — a record read that stopped at
+/// 1024 hit the item count, one that stopped at 16 MiB hit the byte total — so
+/// the kernel's resource spelling stays in the kernel instead of becoming a
+/// second wire vocabulary to keep in step.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRetrievalBudgetAccountingV1 {
+    pub limit: u64,
+    pub observed: SessionRetrievalBudgetObservationV1,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "refusal", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionRetrievalStructuralRefusalV1 {
@@ -120,6 +149,9 @@ pub enum SessionRetrievalStructuralRefusalV1 {
     },
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
+        /// Present when the refusing boundary keeps a counter. A request-shape
+        /// check has none and reports `None` rather than inventing numbers.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
 }
 

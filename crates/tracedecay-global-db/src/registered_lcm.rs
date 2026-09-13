@@ -24,7 +24,7 @@ fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
     control.checkpoint().map_err(|error| match error {
         TemporalPortError::Cancelled => LcmError::Cancelled,
         TemporalPortError::DeadlineExceeded => LcmError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { resource } => LcmError::Db(format!(
+        TemporalPortError::BudgetExceeded { resource, .. } => LcmError::Db(format!(
             "LCM relation execution exhausted {resource} budget"
         )),
         other => LcmError::Db(format!("LCM relation execution control failed: {other}")),

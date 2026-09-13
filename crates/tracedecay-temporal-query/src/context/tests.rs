@@ -16,7 +16,7 @@ use super::{
     MAX_CONTEXT_FRAME_ITEMS, MAX_CONTEXT_OUTPUT_BYTES, OrderedTextContextAssembler,
     TemporalContextFrames, TokenPolicy, VersionedTokenEstimator,
 };
-use crate::ports::{ExecutionControl, TemporalPortError};
+use crate::ports::{ExecutionControl, ReadBudgetAccounting, TemporalPortError};
 use crate::resolution::summary::{SummaryLineageRejection, SummaryOmission};
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HydratedPayload {
@@ -432,7 +432,8 @@ fn context_checks_live_work_budget_while_streaming_payload() {
         ),
         Err(ContextError::Interrupted(
             TemporalPortError::BudgetExceeded {
-                resource: "work units"
+                resource: "work units",
+                accounting: Some(ReadBudgetAccounting::consumed_with_more(2, 2)),
             }
         ))
     );
