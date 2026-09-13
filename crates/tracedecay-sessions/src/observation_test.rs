@@ -1,6 +1,6 @@
 use std::fs;
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -58,6 +58,10 @@ impl ConcurrencyProbe {
     fn peak(&self) -> usize {
         self.peak.load(Ordering::Acquire)
     }
+
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
 }
 
 struct ConcurrencyProbeGuard<'probe> {
@@ -76,35 +80,48 @@ struct PreparationProbe {
     probe: Arc<ConcurrencyProbe>,
 }
 
-static PREPARATION_PROBE: Mutex<Option<PreparationProbe>> = Mutex::new(None);
+/// One entry per live lease: libtest runs these tests concurrently in one
+/// process, so a single slot would let one test's install or drop silently
+/// disarm another test's probe.
+static PREPARATION_PROBE: Mutex<Vec<PreparationProbe>> = Mutex::new(Vec::new());
 
 pub(super) fn observe_capture_preparation(request: &CaptureObservationRequest) {
-    let probe = PREPARATION_PROBE.lock().unwrap().clone();
+    let session_id = request.identity.source().session_id();
+    let probe = PREPARATION_PROBE
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|probe| probe.session_id == session_id.as_str())
+        .cloned();
     let Some(probe) = probe else {
         return;
     };
-    if request.identity.source().session_id().as_str() != probe.session_id {
-        return;
-    }
     let _running = probe.probe.enter();
     std::thread::sleep(Duration::from_millis(50));
 }
 
-struct PreparationProbeLease;
+struct PreparationProbeLease {
+    session_id: String,
+}
 
 impl PreparationProbeLease {
     fn install(session_id: &str, probe: Arc<ConcurrencyProbe>) -> Self {
-        *PREPARATION_PROBE.lock().unwrap() = Some(PreparationProbe {
+        PREPARATION_PROBE.lock().unwrap().push(PreparationProbe {
             session_id: session_id.to_owned(),
             probe,
         });
-        Self
+        Self {
+            session_id: session_id.to_owned(),
+        }
     }
 }
 
 impl Drop for PreparationProbeLease {
     fn drop(&mut self) {
-        *PREPARATION_PROBE.lock().unwrap() = None;
+        PREPARATION_PROBE
+            .lock()
+            .unwrap()
+            .retain(|probe| probe.session_id != self.session_id);
     }
 }
 
@@ -934,6 +951,59 @@ async fn cancellation_after_point_read_and_replay_discards_non_atomic_results() 
         replay,
         Err(ObservationApplicationError::Cancelled)
     ));
+}
+
+/// A slow preparation span must leave the runtime worker free.
+///
+/// Single-record preparation sanitizes the record and captures repository
+/// provenance, which opens the repository and reads loose refs and the Git
+/// index — synchronous and unbounded on a large repository. The probe stands
+/// in for that span at a controllable 50ms. `#[tokio::test]` runs on one
+/// worker, so the watcher can observe `active` above zero only if the span is
+/// genuinely off that worker: preparing inline leaves the watcher unpolled
+/// until the span has already finished and `active` is back to zero.
+#[tokio::test]
+async fn capture_observation_prepares_off_the_runtime_worker() {
+    let session_id = "session.application-single-preparation";
+    let probe = Arc::new(ConcurrencyProbe::default());
+    let _probe = PreparationProbeLease::install(session_id, Arc::clone(&probe));
+    let application = application();
+
+    let observed_in_flight = Arc::new(AtomicBool::new(false));
+    let watcher_probe = Arc::clone(&probe);
+    let watcher_flag = Arc::clone(&observed_in_flight);
+    let watcher = tokio::spawn(async move {
+        for _ in 0..500 {
+            if watcher_probe.active() > 0 {
+                watcher_flag.store(true, Ordering::Release);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    });
+
+    let outcome = application
+        .capture_observation(request_at_for_session(
+            &json!({
+                "type": "user",
+                "message": { "role": "user", "content": "single-preparation" }
+            }),
+            0,
+            session_id,
+            ObservationCancellation::default(),
+        ))
+        .await
+        .expect("single-record capture remains durable");
+    watcher.await.expect("watcher joins");
+
+    assert!(
+        matches!(outcome, CaptureObservationOutcome::Persisted { .. }),
+        "the offloaded preparation must still persist the record"
+    );
+    assert!(
+        observed_in_flight.load(Ordering::Acquire),
+        "a concurrent task must run while preparation blocks the worker"
+    );
 }
 
 #[tokio::test]
