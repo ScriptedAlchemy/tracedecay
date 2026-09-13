@@ -1,13 +1,14 @@
 use tracedecay_domain::canonical_text::sha256_hex;
 
 use super::candidate_output::{
-    CandidateWorkloadV1, compute_corpus_digest_from_embedded_bytes, validate_workload_for_tuning,
+    CandidateWorkloadV1, compute_corpus_digest_from_embedded_bytes,
+    validate_need_provenance_against_embedded_corpus, validate_workload_for_tuning,
 };
 use super::evaluate::SearchEvalError;
 
 const WORKLOAD_PATH: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
-const WORKLOAD_SHA256: &str = "48a698b7b7598e0296b0d2786b5204f0aaf84ce65c50f357b70b95eafd9bcc7b";
+const WORKLOAD_SHA256: &str = "2aa1f772243a83e2cc938409084c8c41fcab4bfc5785405c0125b75c1ec9c7bb";
 
 const FILES: &[(&str, &[u8])] = &[
     (
@@ -126,6 +127,7 @@ pub fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
         SearchEvalError::Contract(format!("parse packaged evaluator workload: {error}"))
     })?;
     validate_workload_for_tuning(&workload)?;
+    validate_need_provenance_against_embedded_corpus(&workload, FILES)?;
     Ok(workload)
 }
 

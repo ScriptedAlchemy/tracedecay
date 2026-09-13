@@ -29,7 +29,7 @@ use tracedecay_query::search_quality::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
     NativeQualificationExecutionResourceKeyV1, NativeQualificationExpectationsV1,
     NativeQualificationModelKeyV1, NativeQualificationPlatformV1, NativeQualificationRuntimeKeyV1,
-    PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1, SEMANTIC_PROFILE,
+    PackagedNativeActivationCandidateV1, SEMANTIC_PROFILE, packaged_native_qualification_failure,
     qualified_default_activation_candidate,
 };
 use tracedecay_semantic_contracts::SemanticProfileSelection;
@@ -435,7 +435,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             let expectations = native_qualification_expectations(&before, &candidate)?;
             let evidence = SemanticActivationPublicationEvidenceV1::Packaged(
                 qualified_default_activation_candidate(&expectations)
-                    .map_err(map_packaged_qualification_error)?,
+                    .map_err(|error| packaged_native_qualification_failure(error, &expectations))?,
             );
             (before, candidate, evidence)
         } else {
@@ -716,6 +716,9 @@ fn rejected_with_context(
         SemanticActivationCoordinationErrorV1::RejectedDetail(detail) => {
             SemanticActivationCoordinationErrorV1::RejectedDetail(format!("{context}: {detail}"))
         }
+        SemanticActivationCoordinationErrorV1::Qualification(failure) => {
+            SemanticActivationCoordinationErrorV1::Qualification(failure)
+        }
         error => error,
     }
 }
@@ -728,6 +731,7 @@ fn log_semantic_activation_failure(
         SemanticActivationCoordinationErrorV1::Unavailable => "unavailable",
         SemanticActivationCoordinationErrorV1::Rejected
         | SemanticActivationCoordinationErrorV1::RejectedDetail(_) => "rejected",
+        SemanticActivationCoordinationErrorV1::Qualification(_) => "qualification_refused",
         SemanticActivationCoordinationErrorV1::Conflict => "conflict",
         SemanticActivationCoordinationErrorV1::Runtime(_) => "runtime_failure",
     };
@@ -798,20 +802,11 @@ fn native_qualification_expectations(
         runtime,
         NativeQualificationPlatformV1::current(),
     )
-    .map_err(map_packaged_qualification_error)
-}
-
-fn map_packaged_qualification_error(
-    error: PackagedNativeQualificationErrorV1,
-) -> SemanticActivationCoordinationErrorV1 {
-    match error {
-        PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable => {
-            SemanticActivationCoordinationErrorV1::Unavailable
-        }
-        rejected => SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
-            "packaged native qualification rejected: {rejected}"
-        )),
-    }
+    .map_err(|error| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "cannot construct current native qualification authority: {error}"
+        ))
+    })
 }
 
 #[hotpath::measure(label = "usecases.semantic_config.prepare_activation")]
@@ -1769,13 +1764,15 @@ mod tests {
         assert!(!uses_packaged_activation(&candidate));
     }
 
+    /// A semantic pass certifies the exact query baseline it was measured
+    /// against, so the fallback stays activatable on the report alone. The
+    /// report here is scored under the methodology this build implements —
+    /// evidence written under any other version is refused before reaching
+    /// this path.
     #[test]
-    fn packaged_semantic_pass_prepares_the_exact_query_fallback() {
-        let qualification: tracedecay_query::search_quality::PackagedNativeQualificationV1 =
-            serde_json::from_slice(
-                tracedecay_query::search_quality::packaged_native_qualification_bytes(),
-            )
-            .expect("reviewed packaged qualification");
+    fn a_semantic_pass_prepares_the_exact_query_fallback() {
+        let report =
+            crate::semantic_runtime::config_inventory::tests::passing_report(EVALUATED_PROFILE_ID);
         let material = tracedecay_query::search_quality::load_default_evaluated_profile_material(
             EVALUATED_PROFILE_ID,
         )
@@ -1788,11 +1785,8 @@ mod tests {
             rerank_ceiling: None,
         };
 
-        let prepared = prepare_query_fallback_publication(
-            &qualification.portable_evidence.report,
-            &observed_runtime,
-        )
-        .expect("the reviewed semantic pass also certifies its query baseline");
+        let prepared = prepare_query_fallback_publication(&report, &observed_runtime)
+            .expect("the semantic pass also certifies its query baseline");
 
         assert!(prepared.accepted_profile.is_exact_query_fallback());
         assert_eq!(prepared.accepted_runtime.semantic, None);

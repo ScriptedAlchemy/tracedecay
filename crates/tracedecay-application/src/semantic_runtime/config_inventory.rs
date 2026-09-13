@@ -724,4 +724,4 @@ fn durable_store_binding_digest(
 
 #[cfg(test)]
 #[path = "config_inventory_tests.rs"]
-mod tests;
+pub(in crate::semantic_runtime) mod tests;

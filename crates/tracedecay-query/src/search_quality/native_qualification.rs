@@ -18,6 +18,7 @@ use flate2::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_contracts::{SemanticQualificationFailureV1, SemanticQualificationStateV1};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1,
@@ -29,12 +30,13 @@ use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
 use super::candidate_output::{
     DirectEvaluatedProfileMaterialV1, EvaluationExecutionContractV1,
-    compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
+    QUALIFICATION_METHODOLOGY_VERSION, compute_profile_material_digest, compute_workload_digest,
+    direct_evaluated_profile_material,
 };
 #[cfg(test)]
 use super::evaluate::load_default_evaluated_profile_material;
 use super::evaluate::{
-    DirectActivationEvaluationV1, DirectEvaluationStatusV1, SearchEvalError,
+    DirectActivationEvaluationV1, DirectEvaluationStatusV1, SEMANTIC_PROFILE, SearchEvalError,
     activation_profile_chain, load_authoritative_default_workload_metadata,
 };
 use super::packaged;
@@ -43,21 +45,30 @@ use super::report::{
 };
 use super::semantic_native::SemanticNativeStageResultV1;
 
-const PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION: u32 = 1;
+// Schema 2 carries the qualification methodology version. Evidence produced
+// under schema 1 was scored against a one-part-per-million gain in a stratum
+// mean, a rule this build no longer implements, so it is refused rather than
+// reinterpreted.
+const PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION: u32 = 2;
 const DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC: &[u8] = b"tracedecay.native-qualification.zlib.v1\0";
 const MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+const REQUALIFY_REMEDY: &str =
+    "run a genuine qualify-native evaluation for this exact workload and package its PASS";
+const INSTALL_EVIDENCE_REMEDY: &str =
+    "install an untampered package containing a genuine PASS for this profile and workload";
 
 // This checked-in gzip is generated only from a genuine `qualify-native` run.
 // The decoded canonical JSON remains the validation authority; compression
 // keeps the package and shipped binary from carrying 7.6 MiB of repeated JSON.
 //
-// These bytes no longer bind the current evaluator: the workload's
-// query-fallback digests have been re-pinned since they were produced, and
-// their retained aggregates were computed before nDCG stopped crediting one
-// label through its aliases. Loading therefore refuses them, which is why
-// nothing here activates semantics from the package. Replacing them requires a
-// genuine `qualify-native` run whose report passes `evaluate.rs` — including
-// the pairwise natural-language gain the candidate currently ties.
+// These bytes no longer bind the current evaluator. They were written under
+// packaged schema 1, whose reports carry no methodology version and no paired
+// effect measurements, so they were scored against a superseded rule: a
+// one-part-per-million gain in the natural-language stratum mean. Loading
+// therefore refuses them as an unsupported schema, which is why nothing here
+// activates semantics from the package. Replacing them requires a genuine
+// `qualify-native` run whose held-out paired effect clears the workload's
+// predeclared practical threshold with a confidence interval above zero.
 const PACKAGED_NATIVE_QUALIFICATION_GZIP: &[u8] =
     include_bytes!("../../assets/native-qualification-v1.json.gz");
 const PACKAGED_NATIVE_QUALIFICATION_BYTES: usize = 7_644_855;
@@ -71,6 +82,8 @@ static PACKAGED_NATIVE_QUALIFICATION_CANONICAL: OnceLock<
 static PACKAGED_NATIVE_QUALIFICATION: OnceLock<
     Result<PackagedNativeQualificationV1, PackagedNativeQualificationErrorV1>,
 > = OnceLock::new();
+static PACKAGED_NATIVE_QUALIFICATION_STATE: OnceLock<SemanticQualificationStateV1> =
+    OnceLock::new();
 
 /// Exact evaluator inputs retained inside the report package.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,6 +342,8 @@ impl NativeQualificationExpectationsV1 {
 #[serde(deny_unknown_fields)]
 pub struct PackagedNativeQualificationV1 {
     pub schema_version: u32,
+    /// Decision rule the retained evidence was scored under.
+    pub methodology_version: u32,
     pub qualification_key: NativeQualificationKeyV1,
     pub portable_evidence: PortableNativeQualificationEvidenceV1,
 }
@@ -411,6 +426,10 @@ pub enum PackagedNativeQualificationErrorV1 {
     IncompleteNativeEvidence,
     #[error("native qualification did not pass")]
     FailedQualification,
+    #[error("native qualification methodology is unsupported")]
+    UnsupportedMethodology,
+    #[error("native qualification shows no held-out superiority")]
+    HeldOutEffectNotQualified,
 }
 
 /// Encode opaque output returned by the genuine evaluator. There is no
@@ -435,6 +454,7 @@ pub fn encode_packaged_native_qualification(
         NativeQualificationEvaluatorKeyV1::from_report(&portable_evidence.report);
     let qualification = PackagedNativeQualificationV1 {
         schema_version: PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION,
+        methodology_version: QUALIFICATION_METHODOLOGY_VERSION,
         qualification_key,
         portable_evidence,
     };
@@ -673,6 +693,226 @@ pub fn qualified_default_activation_candidate(
     activation_candidate_from_qualification(qualification, expectations)
 }
 
+pub fn packaged_native_qualification_failure(
+    error: PackagedNativeQualificationErrorV1,
+    expectations: &NativeQualificationExpectationsV1,
+) -> SemanticQualificationFailureV1 {
+    let canonical = embedded_qualification_bytes().ok();
+    let qualification = canonical
+        .and_then(|bytes| serde_json::from_slice::<PackagedNativeQualificationV1>(bytes).ok());
+    qualification_failure(error, qualification.as_ref(), canonical, expectations)
+}
+
+pub fn packaged_native_qualification_state() -> SemanticQualificationStateV1 {
+    PACKAGED_NATIVE_QUALIFICATION_STATE
+        .get_or_init(compute_packaged_native_qualification_state)
+        .clone()
+}
+
+fn compute_packaged_native_qualification_state() -> SemanticQualificationStateV1 {
+    let qualification = match PACKAGED_NATIVE_QUALIFICATION
+        .get_or_init(load_embedded_qualification)
+        .as_ref()
+    {
+        Ok(qualification) => qualification,
+        Err(error) => {
+            return SemanticQualificationStateV1::Unqualified {
+                failure: qualification_failure_without_expectations(error.clone()),
+            };
+        }
+    };
+    let expectations = match NativeQualificationExpectationsV1::packaged_default(
+        SEMANTIC_PROFILE.to_owned(),
+        qualification.qualification_key.runtime.clone(),
+        NativeQualificationPlatformV1::current(),
+    ) {
+        Ok(expectations) => expectations,
+        Err(error) => {
+            return SemanticQualificationStateV1::Unqualified {
+                failure: qualification_failure_without_expectations(error),
+            };
+        }
+    };
+    match validate_qualification(qualification, &expectations) {
+        Ok(()) => SemanticQualificationStateV1::Qualified {
+            profile_id: expectations.evaluated_profile_id,
+            workload_digest: expectations.workload_digest,
+            evidence_digest: PACKAGED_NATIVE_QUALIFICATION_SHA256.to_owned(),
+        },
+        Err(error) => SemanticQualificationStateV1::Unqualified {
+            failure: qualification_failure(
+                error,
+                Some(qualification),
+                embedded_qualification_bytes().ok(),
+                &expectations,
+            ),
+        },
+    }
+}
+
+fn qualification_failure(
+    error: PackagedNativeQualificationErrorV1,
+    qualification: Option<&PackagedNativeQualificationV1>,
+    canonical: Option<&[u8]>,
+    expectations: &NativeQualificationExpectationsV1,
+) -> SemanticQualificationFailureV1 {
+    let evidence_digest = canonical.map(canonical_sha256).or_else(|| {
+        qualification.map(|value| value.qualification_key.evaluator.raw_output_digest.clone())
+    });
+    superseded_decision_rule_failure(
+        &error,
+        qualification,
+        canonical,
+        &expectations.evaluated_profile_id,
+        evidence_digest.clone(),
+    )
+    .or_else(|| {
+        measured_evidence_refusal(&error, qualification, expectations, evidence_digest.clone())
+    })
+    .unwrap_or_else(|| {
+        absent_qualification_evidence(&error, qualification, expectations, evidence_digest)
+    })
+}
+
+/// Name a refusal that a genuine measurement produced: the evidence is
+/// readable and its identities are known, so the operator learns whether the
+/// workload moved on or the run itself did not pass.
+fn measured_evidence_refusal(
+    error: &PackagedNativeQualificationErrorV1,
+    qualification: Option<&PackagedNativeQualificationV1>,
+    expectations: &NativeQualificationExpectationsV1,
+    evidence_digest: Option<String>,
+) -> Option<SemanticQualificationFailureV1> {
+    let observed_profile =
+        qualification.map(|value| value.qualification_key.evaluated_profile_id.as_str());
+    let observed_workload =
+        qualification.map(|value| value.qualification_key.evaluator.workload_digest.as_str());
+    if *error == PackagedNativeQualificationErrorV1::StaleWorkload
+        && qualification.is_some_and(|value| {
+            value.portable_evidence.report.status == DirectEvaluationStatusV1::Pass
+        })
+        && let Some(profile_id) = observed_profile
+        && let Some(packaged_workload_digest) = observed_workload
+        && observed_workload.is_some_and(|digest| digest != expectations.workload_digest)
+        && let Some(evidence_digest) = evidence_digest.clone()
+    {
+        return Some(SemanticQualificationFailureV1::StaleWorkload {
+            profile_id: profile_id.to_owned(),
+            packaged_workload_digest: packaged_workload_digest.to_owned(),
+            current_workload_digest: expectations.workload_digest.clone(),
+            evidence_digest,
+            remedy: REQUALIFY_REMEDY.to_owned(),
+        });
+    }
+    if *error == PackagedNativeQualificationErrorV1::FailedQualification
+        && let Some(profile_id) = observed_profile
+        && let Some(workload_digest) = observed_workload
+        && let Some(evidence_digest) = evidence_digest
+    {
+        return Some(SemanticQualificationFailureV1::FailedQualification {
+            profile_id: profile_id.to_owned(),
+            workload_digest: workload_digest.to_owned(),
+            evidence_digest,
+            remedy: REQUALIFY_REMEDY.to_owned(),
+        });
+    }
+    None
+}
+
+fn absent_qualification_evidence(
+    error: &PackagedNativeQualificationErrorV1,
+    qualification: Option<&PackagedNativeQualificationV1>,
+    expectations: &NativeQualificationExpectationsV1,
+    evidence_digest: Option<String>,
+) -> SemanticQualificationFailureV1 {
+    let observed_profile =
+        qualification.map(|value| value.qualification_key.evaluated_profile_id.as_str());
+    SemanticQualificationFailureV1::NoQualificationEvidence {
+        profile_id: expectations.evaluated_profile_id.clone(),
+        current_workload_digest: expectations.workload_digest.clone(),
+        evidence_digest,
+        detail: match observed_profile {
+            Some(profile) if profile != expectations.evaluated_profile_id => format!(
+                "packaged profile {profile} does not match requested profile {}; {error}",
+                expectations.evaluated_profile_id
+            ),
+            _ => error.to_string(),
+        },
+        remedy: INSTALL_EVIDENCE_REMEDY.to_owned(),
+    }
+}
+
+/// Present a superseded schema or methodology as itself rather than as absent
+/// evidence: the bytes exist and were produced by a genuine run, they simply
+/// answer a question this build no longer asks. Falls through to the caller's
+/// generic refusal when the packaged version is not readable, because naming a
+/// version nobody wrote would be a fabrication.
+fn superseded_decision_rule_failure(
+    error: &PackagedNativeQualificationErrorV1,
+    qualification: Option<&PackagedNativeQualificationV1>,
+    canonical: Option<&[u8]>,
+    profile_id: &str,
+    evidence_digest: Option<String>,
+) -> Option<SemanticQualificationFailureV1> {
+    let probe = canonical.and_then(PackagedVersionProbeV1::read);
+    match error {
+        PackagedNativeQualificationErrorV1::UnsupportedSchema => {
+            let packaged_schema_version = qualification
+                .map(|value| value.schema_version)
+                .or_else(|| probe.as_ref().map(|probe| probe.schema_version))?;
+            Some(SemanticQualificationFailureV1::SupersededSchema {
+                profile_id: profile_id.to_owned(),
+                packaged_schema_version,
+                current_schema_version: PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION,
+                evidence_digest,
+                remedy: REQUALIFY_REMEDY.to_owned(),
+            })
+        }
+        PackagedNativeQualificationErrorV1::UnsupportedMethodology => {
+            let packaged_methodology_version = qualification
+                .map(|value| value.methodology_version)
+                .or_else(|| probe.as_ref().and_then(|probe| probe.methodology_version))?;
+            Some(SemanticQualificationFailureV1::SupersededMethodology {
+                profile_id: profile_id.to_owned(),
+                packaged_methodology_version,
+                current_methodology_version: QUALIFICATION_METHODOLOGY_VERSION,
+                evidence_digest,
+                remedy: REQUALIFY_REMEDY.to_owned(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn qualification_failure_without_expectations(
+    error: PackagedNativeQualificationErrorV1,
+) -> SemanticQualificationFailureV1 {
+    let canonical = embedded_qualification_bytes().ok();
+    let evidence_digest = canonical.map(canonical_sha256);
+    if let Some(failure) = superseded_decision_rule_failure(
+        &error,
+        None,
+        canonical,
+        SEMANTIC_PROFILE,
+        evidence_digest.clone(),
+    ) {
+        return failure;
+    }
+    let current_workload_digest = match load_authoritative_default_workload_metadata() {
+        Ok(workload) => {
+            compute_workload_digest(&workload).unwrap_or_else(|_| "unavailable".to_owned())
+        }
+        Err(_) => "unavailable".to_owned(),
+    };
+    SemanticQualificationFailureV1::NoQualificationEvidence {
+        profile_id: SEMANTIC_PROFILE.to_owned(),
+        current_workload_digest,
+        evidence_digest,
+        detail: error.to_string(),
+        remedy: INSTALL_EVIDENCE_REMEDY.to_owned(),
+    }
+}
+
 /// Revalidate a retained portable report against the evaluator corpus embedded
 /// in this build. This is the durable-authority counterpart to package loading:
 /// it never treats the mounted project as the evaluator fixture and never
@@ -696,11 +936,35 @@ pub fn validate_packaged_native_activation_report(
         })
 }
 
+/// The envelope versions a packaged asset of any schema can be asked about,
+/// read without committing to the current asset shape. `methodology_version`
+/// is absent in schema 1, which is why it is optional here and not defaulted
+/// to a version that asset never claimed.
+#[derive(Deserialize)]
+struct PackagedVersionProbeV1 {
+    schema_version: u32,
+    methodology_version: Option<u32>,
+}
+
+impl PackagedVersionProbeV1 {
+    fn read(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
 fn load_embedded_qualification()
 -> Result<PackagedNativeQualificationV1, PackagedNativeQualificationErrorV1> {
     let canonical = embedded_qualification_bytes()?;
     if canonical_sha256(canonical) != PACKAGED_NATIVE_QUALIFICATION_SHA256 {
         return Err(PackagedNativeQualificationErrorV1::CorruptBytes);
+    }
+    // Evidence written under an earlier schema is structurally incompatible, not
+    // damaged. Read the version first so the refusal names the real reason.
+    let schema_version = serde_json::from_slice::<PackagedVersionProbeV1>(canonical)
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?
+        .schema_version;
+    if schema_version != PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION {
+        return Err(PackagedNativeQualificationErrorV1::UnsupportedSchema);
     }
     let qualification = serde_json::from_slice::<PackagedNativeQualificationV1>(canonical)
         .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
@@ -785,7 +1049,11 @@ fn validate_qualification(
     {
         return Err(PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence);
     }
-    Ok(())
+    qualification
+        .portable_evidence
+        .report
+        .validate_held_out_effect(&workload, &expectations.evaluated_profile_id)
+        .map_err(|_| PackagedNativeQualificationErrorV1::HeldOutEffectNotQualified)
 }
 
 fn validate_document_bindings(
@@ -793,6 +1061,12 @@ fn validate_document_bindings(
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
     if qualification.schema_version != PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION {
         return Err(PackagedNativeQualificationErrorV1::UnsupportedSchema);
+    }
+    if qualification.methodology_version != QUALIFICATION_METHODOLOGY_VERSION
+        || qualification.portable_evidence.report.methodology_version
+            != QUALIFICATION_METHODOLOGY_VERSION
+    {
+        return Err(PackagedNativeQualificationErrorV1::UnsupportedMethodology);
     }
     validate_key(&qualification.qualification_key)?;
     let report = &qualification.portable_evidence.report;
@@ -1054,6 +1328,10 @@ fn canonical_sha256(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[path = "native_qualification_truthful_tests.rs"]
+mod truthful_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1097,19 +1375,28 @@ mod tests {
         );
     }
 
+    /// The embedded bytes are intact and SHA-pinned, but they were produced
+    /// under packaged schema 1 and scored against a decision rule this build no
+    /// longer implements. Refusing them by schema — rather than reinterpreting
+    /// their aggregates under the paired-effect rule — is what keeps a
+    /// superseded run from activating semantics.
     #[test]
-    fn package_loads_sha_pinned_reviewed_native_evidence() {
+    fn package_refuses_evidence_written_under_a_superseded_methodology_schema() {
         let bytes = packaged_native_qualification_bytes();
         assert_eq!(bytes.len(), PACKAGED_NATIVE_QUALIFICATION_BYTES);
-        let qualification = load_embedded_qualification().expect("reviewed qualification");
-        assert_eq!(qualification.schema_version, 1);
         assert_eq!(
-            qualification.qualification_key.evaluated_profile_id,
-            "hybrid-conservative"
+            canonical_sha256(bytes),
+            PACKAGED_NATIVE_QUALIFICATION_SHA256
         );
         assert_eq!(
-            qualification.portable_evidence.report.status,
-            DirectEvaluationStatusV1::Pass
+            PackagedVersionProbeV1::read(bytes)
+                .expect("packaged schema version")
+                .schema_version,
+            1
+        );
+        assert_eq!(
+            load_embedded_qualification(),
+            Err(PackagedNativeQualificationErrorV1::UnsupportedSchema)
         );
     }
 }

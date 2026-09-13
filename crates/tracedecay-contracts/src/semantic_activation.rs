@@ -11,9 +11,92 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
+
+#[derive(Clone, Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum SemanticQualificationFailureV1 {
+    #[error(
+        "packaged PASS for profile {profile_id} is stale: packaged workload \
+         {packaged_workload_digest}, current workload {current_workload_digest}, evidence \
+         {evidence_digest}; {remedy}"
+    )]
+    StaleWorkload {
+        profile_id: String,
+        packaged_workload_digest: String,
+        current_workload_digest: String,
+        evidence_digest: String,
+        remedy: String,
+    },
+    #[error(
+        "native qualification evidence {evidence_digest} for profile {profile_id} and workload \
+         {workload_digest} did not pass; {remedy}"
+    )]
+    FailedQualification {
+        profile_id: String,
+        workload_digest: String,
+        evidence_digest: String,
+        remedy: String,
+    },
+    /// The packaged bytes predate the current asset schema, so they cannot be
+    /// read as evidence at all — distinct from evidence that was read and
+    /// refused. The methodology version is unreadable here because it lives
+    /// inside the shape that failed to decode.
+    #[error(
+        "qualification evidence for profile {profile_id} was written under packaged schema \
+         {packaged_schema_version}, which this build superseded with schema \
+         {current_schema_version}; {remedy}"
+    )]
+    SupersededSchema {
+        profile_id: String,
+        packaged_schema_version: u32,
+        current_schema_version: u32,
+        evidence_digest: Option<String>,
+        remedy: String,
+    },
+    /// The packaged bytes decode, but they were scored under a decision rule
+    /// this build no longer implements. Reinterpreting them under the current
+    /// rule would assert a measurement nobody made.
+    #[error(
+        "qualification evidence for profile {profile_id} was scored under methodology \
+         {packaged_methodology_version}, and this build decides under methodology \
+         {current_methodology_version}; {remedy}"
+    )]
+    SupersededMethodology {
+        profile_id: String,
+        packaged_methodology_version: u32,
+        current_methodology_version: u32,
+        evidence_digest: Option<String>,
+        remedy: String,
+    },
+    #[error(
+        "no valid qualification evidence for profile {profile_id} and workload \
+         {current_workload_digest}: {detail}; {remedy}"
+    )]
+    NoQualificationEvidence {
+        profile_id: String,
+        current_workload_digest: String,
+        evidence_digest: Option<String>,
+        detail: String,
+        remedy: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SemanticQualificationStateV1 {
+    Qualified {
+        profile_id: String,
+        workload_digest: String,
+        evidence_digest: String,
+    },
+    Unqualified {
+        failure: SemanticQualificationFailureV1,
+    },
+}
 
 /// Typed failure for one configuration-linked semantic activation or rollback.
 ///
@@ -28,10 +111,18 @@ pub enum SemanticActivationCoordinationErrorV1 {
     Rejected,
     #[error("semantic activation input was rejected: {0}")]
     RejectedDetail(String),
+    #[error("semantic activation qualification refused: {0}")]
+    Qualification(Box<SemanticQualificationFailureV1>),
     #[error("semantic activation compare-and-swap conflicted")]
     Conflict,
     #[error("semantic runtime activation failed: {0}")]
     Runtime(String),
+}
+
+impl From<SemanticQualificationFailureV1> for SemanticActivationCoordinationErrorV1 {
+    fn from(failure: SemanticQualificationFailureV1) -> Self {
+        Self::Qualification(Box::new(failure))
+    }
 }
 
 /// Coordination surface the configuration runtime actually calls.

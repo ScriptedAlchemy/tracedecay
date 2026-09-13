@@ -1,4 +1,5 @@
-//! Composed semantic activation journey: evaluate, publish, then activate.
+//! Composed semantic activation journey: validate packaged evidence, publish,
+//! then activate.
 //!
 //! One typed daemon operation carries an operator from the configured model to
 //! an active semantic profile. The evaluation route acquires and projects the
@@ -83,6 +84,7 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
+
         let evaluation = self
             .execute_semantic_evaluation(
                 project_root,

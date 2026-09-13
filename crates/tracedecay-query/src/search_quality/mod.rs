@@ -14,13 +14,15 @@ pub mod semantic_native;
 pub use candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, DirectEvaluatedProfileMaterialV1,
     EvaluationConcurrencyContractV1, EvaluationExecutionContractV1,
-    GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
+    GenerateCandidateOutputsResultV1, NeedProvenanceKindV1, NeedProvenanceV1,
+    OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
     ProductionCandidateNativeExecutionAuthorityV1, ProductionCandidateNativeGenerationResourcesV1,
     ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
     ProductionCandidateNativeResourceContextV1, ProductionCandidateOutputV1,
-    ProductionCandidateSemanticProjectionSourcesV1, ResourceMeasurementStatusV1, WorkloadQueryV1,
-    compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
-    direct_evaluated_profile_material, load_candidate_workload,
+    ProductionCandidateSemanticProjectionSourcesV1, QUALIFICATION_METHODOLOGY_VERSION,
+    QualificationMethodologyV1, QualificationPolicyFreezeV1, ResourceMeasurementStatusV1,
+    WorkloadQueryV1, compute_corpus_digest, compute_profile_material_digest,
+    compute_workload_digest, direct_evaluated_profile_material, load_candidate_workload,
     load_direct_evaluated_profile_material, validate_workload_for_tuning,
 };
 pub use evaluate::{
@@ -37,12 +39,13 @@ pub use native_qualification::{
     PackagedNativeQualificationErrorV1, PackagedNativeQualificationV1,
     PortableNativeQualificationEvidenceV1, encode_daemon_native_qualification_blob,
     encode_packaged_native_qualification, load_packaged_native_qualification_from_bytes,
-    packaged_native_qualification_bytes, qualified_default_activation_candidate,
+    packaged_native_qualification_bytes, packaged_native_qualification_failure,
+    packaged_native_qualification_state, qualified_default_activation_candidate,
     validate_packaged_native_activation_report, write_daemon_native_qualification,
     write_packaged_native_qualification,
 };
 pub use report::{
     DirectEvaluationReportV1, DirectProfileEvaluationV1, DirectQualityMetricsV1,
     DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1, DirectStratumQualityV1,
-    DirectWorstStratumV1,
+    DirectWorstStratumV1, PairedEffectMeasurementV1,
 };

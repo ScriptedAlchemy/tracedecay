@@ -31,7 +31,8 @@ fn classify_reobservation_failure(
 ) -> ReobservationFailureDispositionV1 {
     match error {
         SemanticActivationCoordinationErrorV1::Rejected
-        | SemanticActivationCoordinationErrorV1::RejectedDetail(_) => {
+        | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
+        | SemanticActivationCoordinationErrorV1::Qualification(_) => {
             ReobservationFailureDispositionV1::Refuse
         }
         SemanticActivationCoordinationErrorV1::Unavailable

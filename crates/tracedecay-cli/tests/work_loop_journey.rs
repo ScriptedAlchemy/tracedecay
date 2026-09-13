@@ -136,6 +136,7 @@ struct ProductionDaemon {
     origin: String,
     authorization: String,
     agent: ureq::Agent,
+    retired_project: Option<PathBuf>,
     _home: TempDir,
     _guards: Vec<EnvVarGuard>,
     _env_lock: MutexGuard<'static, ()>,
@@ -175,7 +176,8 @@ impl ProductionDaemon {
 
         run_ok(
             Command::new("git")
-                .args(["init", "--quiet"])
+                .args(["init", "--quiet", "--separate-git-dir"])
+                .arg(root.join("repository.git"))
                 .current_dir(&project),
             "git init",
         );
@@ -233,7 +235,6 @@ impl ProductionDaemon {
             "repository.daemon.{}",
             hex::encode(Sha256::digest(git_common_dir.to_string_lossy().as_bytes()))
         );
-
         let endpoint = authority["http_application_endpoint"]
             .as_str()
             .expect("published HTTP application endpoint")
@@ -256,6 +257,7 @@ impl ProductionDaemon {
                 .timeout_global(Some(Duration::from_secs(60)))
                 .build()
                 .into(),
+            retired_project: None,
             _home: home,
             _guards: guards,
             _env_lock: env_lock,
@@ -263,8 +265,15 @@ impl ProductionDaemon {
     }
 
     fn restart(&mut self) {
-        self.daemon.kill().expect("stop daemon before restart");
-        self.daemon.wait().expect("reap daemon before restart");
+        if self
+            .daemon
+            .try_wait()
+            .expect("query daemon status")
+            .is_none()
+        {
+            self.daemon.kill().expect("stop daemon before restart");
+            self.daemon.wait().expect("reap daemon before restart");
+        }
         let profile = self._home.path().join(".tracedecay");
         let root = self._home.path();
         let authority_path = daemon_authority_path(&profile);
@@ -290,6 +299,71 @@ impl ProductionDaemon {
         self.origin = format!("http://{endpoint}");
         self.authorization = format!("Bearer {token}");
         self.daemon = daemon;
+    }
+
+    fn reopen_from_linked_worktree(&mut self) {
+        let linked = self._home.path().join("linked-project");
+        run_ok(
+            Command::new("git")
+                .args(["worktree", "add", "--detach", "--quiet"])
+                .arg(&linked)
+                .arg("HEAD")
+                .current_dir(&self.project),
+            "git worktree add",
+        );
+        self.daemon
+            .kill()
+            .expect("stop daemon before linked-worktree reopen");
+        self.daemon
+            .wait()
+            .expect("reap daemon before linked-worktree reopen");
+        let retired = self._home.path().join("retired-project");
+        fs::rename(&self.project, &retired).expect("retire primary fixture worktree");
+        self.retired_project = Some(retired);
+        self.project = linked;
+        self.restart();
+        run_ok(
+            isolated(self._home.path(), &self._home.path().join(".tracedecay"))
+                .arg("init")
+                .current_dir(&self.project),
+            "tracedecay init linked worktree",
+        );
+        let context = run_ok(
+            isolated(self._home.path(), &self._home.path().join(".tracedecay"))
+                .args(["projects", "context"])
+                .arg(&self.project)
+                .arg("--json")
+                .current_dir(&self.project),
+            "tracedecay projects context linked worktree",
+        );
+        let context: Value = serde_json::from_slice(&context).expect("linked project context JSON");
+        assert_eq!(
+            context["project"]["project_id"], self.project_id,
+            "linked worktree must retain the registered project identity: {context}"
+        );
+    }
+
+    fn restore_primary_worktree(&mut self) {
+        self.daemon
+            .kill()
+            .expect("stop daemon before primary-worktree restore");
+        self.daemon
+            .wait()
+            .expect("reap daemon before primary-worktree restore");
+        let primary = self._home.path().join("project");
+        let retired = self
+            .retired_project
+            .take()
+            .expect("retired primary fixture worktree");
+        fs::rename(retired, &primary).expect("restore primary fixture worktree");
+        self.project = primary;
+        self.restart();
+        run_ok(
+            isolated(self._home.path(), &self._home.path().join(".tracedecay"))
+                .arg("init")
+                .current_dir(&self.project),
+            "tracedecay init restored primary worktree",
+        );
     }
 
     /// External URL for a canonical route path, which already starts with
@@ -1251,11 +1325,91 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "a cancelled attempt seals a cancelled receipt, never a success: {cancelled}"
     );
 
-    // A completed *runtime* is not an accepted *task*. The product graph read
-    // does not own a verified executor-topology join to the attempt rows, so it
-    // reports that runtime projection as unavailable instead of joining by a
-    // matching-looking identity. The exact attempt authority above remains the
-    // terminal-evidence source.
+    let complete_runtime = product_graph(&fixture, "product graph with complete runtime coverage");
+    assert_eq!(
+        complete_runtime["snapshot"]["runtime"]["coverage"],
+        json!({ "coverage": "complete" }),
+        "the primary worktree authority must hydrate its exact attempts: {complete_runtime}"
+    );
+    assert_eq!(
+        complete_runtime["snapshot"]["runtime"]["attempts"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "complete coverage must include both accepted attempts: {complete_runtime}"
+    );
+    let complete_replan = fixture.payload(
+        "generate a replan proposal with complete runtime coverage",
+        "/application/work/generate-proposal",
+        &json!({
+            "selection": product_selection(&fixture),
+            "task_id": TASK_ID,
+            "proposal_id": "proposal.work-loop-journey.replan.complete",
+            "live_git_evidence": Value::Null,
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(
+        complete_replan["decision"]["disposition"], "allow",
+        "complete terminal coverage must support a product decision: {complete_replan}"
+    );
+    assert_eq!(
+        complete_replan["decision"]["recommended_action"], "replan",
+        "complete terminal coverage must recommend replanning: {complete_replan}"
+    );
+
+    let version_before_applied_replan = graph_version(&complete_runtime);
+    let relation_proposal = WorkRelationReplanProposalV1::new(
+        typed::<ProposalId>("proposal.work-loop-journey.relation-replan"),
+        typed::<TaskId>(TASK_ID),
+        WorkGraphVersionV1::new(version_before_applied_replan).expect("current graph version"),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("valid relation replan proposal");
+    let prepared_replan_decision = prepare_product_mutation(
+        &fixture,
+        "prepare relation replan decision",
+        json!({
+            "change": "decide_relation_replan",
+            "proposal": serde_json::to_value(&relation_proposal).expect("relation proposal JSON"),
+            "disposition": "accepted",
+        }),
+    );
+    let decided_replan = commit_product_mutation(
+        &fixture,
+        "accept relation replan",
+        &prepared_replan_decision,
+    );
+    assert_eq!(
+        decided_replan["verified_graph_version"]["graph_version"],
+        version_before_applied_replan + 1,
+        "accepting the replan proposal advances one graph version: {decided_replan}"
+    );
+    let prepared_replan = prepare_product_mutation(
+        &fixture,
+        "prepare accepted relation replan",
+        json!({
+            "change": "apply_relation_replan",
+            "proposal_id": "proposal.work-loop-journey.relation-replan",
+        }),
+    );
+    let applied = commit_product_mutation(
+        &fixture,
+        "apply the accepted relation replan",
+        &prepared_replan,
+    );
+    assert_eq!(
+        applied["verified_graph_version"]["graph_version"],
+        version_before_applied_replan + 2,
+        "applying the accepted replan advances the next graph version: {applied}"
+    );
+
+    // The linked worktree shares the repository-scoped product graph but owns
+    // a distinct exact runtime authority. With the primary checkout absent,
+    // this route cannot read the primary worktree's accepted attempt receipts.
+    fixture.reopen_from_linked_worktree();
     let with_evidence = product_graph(&fixture, "product graph after terminal runtime evidence");
     assert_eq!(
         with_evidence["snapshot"]["runtime"]["coverage"],
@@ -1318,6 +1472,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         version_before_replan,
         "an indeterminate proposal must not be applied: {after_replan_proposal}"
     );
+    fixture.restore_primary_worktree();
     let attempts_after_replan = fixture.payload(
         "attempt status after the replan proposal",
         "/application/work/attempt-status",
@@ -1326,56 +1481,6 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     assert_eq!(
         attempts_after_replan["terminal"], settled["terminal"],
         "an indeterminate proposal must not disturb runtime receipts: {attempts_after_replan}"
-    );
-
-    // Applying it is a two-event, version-checked product mutation: first the
-    // relation proposal is explicitly accepted, then that accepted proposal is
-    // applied. No direct dependency command survives this authority boundary.
-    let relation_proposal = WorkRelationReplanProposalV1::new(
-        typed::<ProposalId>("proposal.work-loop-journey.relation-replan"),
-        typed::<TaskId>(TASK_ID),
-        WorkGraphVersionV1::new(version_before_replan).expect("current graph version"),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    )
-    .expect("valid relation replan proposal");
-    let prepared_replan_decision = prepare_product_mutation(
-        &fixture,
-        "prepare relation replan decision",
-        json!({
-            "change": "decide_relation_replan",
-            "proposal": serde_json::to_value(&relation_proposal).expect("relation proposal JSON"),
-            "disposition": "accepted",
-        }),
-    );
-    let decided_replan = commit_product_mutation(
-        &fixture,
-        "accept relation replan",
-        &prepared_replan_decision,
-    );
-    assert_eq!(
-        decided_replan["verified_graph_version"]["graph_version"],
-        version_before_replan + 1,
-        "accepting the replan proposal advances one graph version: {decided_replan}"
-    );
-    let prepared_replan = prepare_product_mutation(
-        &fixture,
-        "prepare accepted relation replan",
-        json!({
-            "change": "apply_relation_replan",
-            "proposal_id": "proposal.work-loop-journey.relation-replan",
-        }),
-    );
-    let applied = commit_product_mutation(
-        &fixture,
-        "apply the accepted relation replan",
-        &prepared_replan,
-    );
-    assert_eq!(
-        applied["verified_graph_version"]["graph_version"],
-        version_before_replan + 2,
-        "applying the accepted replan advances the next graph version: {applied}"
     );
 
     // Acceptance closes the loop, and only acceptance does.
