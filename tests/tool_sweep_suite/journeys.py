@@ -1179,6 +1179,20 @@ def prime_work_lifecycle(
     )
     if _object_field(cancelled, "identity").get("attempt_id") != attempt_id:
         raise JourneyError("Work cancellation did not retain the attempt identity")
+    terminal_states = {"succeeded", "failed", "timed_out", "cancelled"}
+    cancellation_deadline = time.monotonic() + 30
+    while first_value(cancelled, {"state"}) not in terminal_states:
+        if time.monotonic() >= cancellation_deadline:
+            state = first_value(cancelled, {"state"})
+            raise JourneyError(
+                f"Work cancellation did not settle before capacity reuse (state {state!r})"
+            )
+        time.sleep(0.1)
+        cancelled = call(
+            "tracedecay_work_attempt_status",
+            status_arguments,
+            deadline("tracedecay_work_attempt_status"),
+        )
     cancelled_attempt = next(
         (
             value
