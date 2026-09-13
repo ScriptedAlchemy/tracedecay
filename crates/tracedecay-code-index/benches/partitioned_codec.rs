@@ -4,7 +4,7 @@ use std::{
     fmt::Debug,
     hint::black_box,
     io::Cursor,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::Instant,
 };
