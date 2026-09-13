@@ -42,6 +42,7 @@ mod remote_project_recovery;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;
+mod route_discovery;
 #[cfg(unix)]
 mod runtime_identity;
 mod scheduler_config;
