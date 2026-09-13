@@ -33,9 +33,9 @@ fn validate_reports_the_direct_checked_in_workload() {
     let payload = stdout_json(&output);
     assert_eq!(payload["command"], "validate");
     assert_eq!(payload["status"], "pass");
-    assert_eq!(payload["query_count"], 32);
-    assert_eq!(payload["partition_counts"]["train"], 16);
-    assert_eq!(payload["partition_counts"]["validation"], 16);
+    assert_eq!(payload["query_count"], 65);
+    assert_eq!(payload["partition_counts"]["train"], 33);
+    assert_eq!(payload["partition_counts"]["validation"], 32);
     assert_eq!(payload["profile_count"], 3);
     assert!(
         payload["workload_digest"]
@@ -60,8 +60,8 @@ fn compare_reports_conceptual_misses_before_pending_optional_stages() {
         "comparison did not retain the measured conceptual misses: {payload}"
     );
     let profiles = payload["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles[0]["failed_queries"], 2, "{payload}");
-    assert_eq!(profiles[1]["failed_queries"], 1, "{payload}");
+    assert_eq!(profiles[0]["failed_queries"], 10, "{payload}");
+    assert_eq!(profiles[1]["failed_queries"], 9, "{payload}");
     for profile in profiles {
         assert_eq!(profile["status"], "fail");
         assert!(matches!(
