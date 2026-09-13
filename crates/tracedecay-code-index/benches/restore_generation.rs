@@ -98,46 +98,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build();
     let cpu_before = process_cpu_ns()?;
     let started = Instant::now();
-    let restores = std::thread::scope(|scope| {
-        let threads = (0..concurrent_restores)
-            .map(|_| {
-                scope.spawn(|| {
-                    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-                        &manifest,
-                        |request, buffer| read_segment(&segments, request, buffer),
-                    )
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| {
-                        "generation manifest is not a partitioned manifest".to_owned()
-                    })?;
-                    let coverage = coverage_identity(&restored);
-                    black_box(restored);
-                    Ok::<_, String>((coverage, u64::try_from(started.elapsed().as_nanos())
-                        .unwrap_or(u64::MAX)))
-                })
-            })
-            .collect::<Vec<_>>();
-        threads
-            .into_iter()
-            .map(|thread| thread.join().map_err(|_| "a restore thread panicked".to_owned())?)
-            .collect::<Result<Vec<_>, String>>()
-    })?;
+    let completions = restore_concurrently(concurrent_restores, &manifest, &segments, started)?;
     let decode_wall_ns = u64::try_from(started.elapsed().as_nanos())?;
     let decode_cpu_ns = process_cpu_ns()?.saturating_sub(cpu_before);
     drop(guard);
 
-    // Every restore verified the same manifest's per-segment and aggregate
-    // digests, so a divergent restore would already have been refused. This
-    // pins the records that survived those checks to each other as well.
-    let expected = &restores[0].0;
-    for (index, (coverage, _)) in restores.iter().enumerate() {
-        if coverage != expected {
-            return Err(format!("restore {index} recovered different records").into());
-        }
-    }
-    let restored_files = expected.len();
-    let mut completions = restores.iter().map(|(_, at)| *at).collect::<Vec<_>>();
-    completions.sort_unstable();
+    let restored_files = completions.restored_files;
     let (file_segment_bytes, evidence_bytes) = directory_bytes(&segments)?;
     let measurement = Measurement {
         schema_version: 2,
@@ -155,22 +121,80 @@ fn main() -> Result<(), Box<dyn Error>> {
             / (decode_cpu_ns as f64 / 1e9),
         decode_cores_busy: decode_cpu_ns as f64 / decode_wall_ns as f64,
         concurrent_restores,
-        first_restore_ns: completions.first().copied().unwrap_or(0),
-        last_restore_ns: completions.last().copied().unwrap_or(0),
+        first_restore_ns: completions.first_restore_ns,
+        last_restore_ns: completions.last_restore_ns,
     };
     println!("{}", serde_json::to_string_pretty(&measurement)?);
     Ok(())
 }
 
-/// A witness that two restores recovered the same records: every restored
-/// file's logical path in canonical order.
-fn coverage_identity(restored: &CodeIndexPublishedGenerationV1) -> Vec<String> {
-    let mut paths = restored
+struct RestoreBatchV1 {
+    restored_files: usize,
+    first_restore_ns: u64,
+    last_restore_ns: u64,
+}
+
+/// Restore the same generation from `count` threads and report when the first
+/// and last of them finished, refusing a batch whose restores disagree on the
+/// files they recovered.
+///
+/// Every restore verified the same manifest's per-segment and aggregate
+/// digests, so a divergent restore would already have been refused. Comparing
+/// the recovered coverage pins the records that survived those checks to each
+/// other as well.
+fn restore_concurrently(
+    count: usize,
+    manifest: &[u8],
+    segments: &Path,
+    started: Instant,
+) -> Result<RestoreBatchV1, Box<dyn Error>> {
+    let restores = std::thread::scope(|scope| {
+        let threads = (0..count)
+            .map(|_| scope.spawn(|| restore_once(manifest, segments, started)))
+            .collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().map_err(|_| "a restore thread panicked".to_owned())?)
+            .collect::<Result<Vec<_>, String>>()
+    })?;
+    let (expected, _) = &restores[0];
+    for (index, (coverage, _)) in restores.iter().enumerate() {
+        if coverage != expected {
+            return Err(format!("restore {index} recovered different records").into());
+        }
+    }
+    let mut completions = restores.iter().map(|(_, at)| *at).collect::<Vec<_>>();
+    completions.sort_unstable();
+    Ok(RestoreBatchV1 {
+        restored_files: expected.len(),
+        first_restore_ns: completions.first().copied().unwrap_or(0),
+        last_restore_ns: completions.last().copied().unwrap_or(0),
+    })
+}
+
+/// One restore's recovered coverage — every restored file's logical path in
+/// canonical order — and the elapsed time at which it completed.
+fn restore_once(
+    manifest: &[u8],
+    segments: &Path,
+    started: Instant,
+) -> Result<(Vec<String>, u64), String> {
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        manifest,
+        |request, buffer| read_segment(segments, request, buffer),
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "generation manifest is not a partitioned manifest".to_owned())?;
+    let mut coverage = restored
         .analysis_coverage()
         .map(|(path, _)| path.to_owned())
         .collect::<Vec<_>>();
-    paths.sort_unstable();
-    paths
+    coverage.sort_unstable();
+    black_box(restored);
+    Ok((
+        coverage,
+        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+    ))
 }
 
 fn read_segment(
