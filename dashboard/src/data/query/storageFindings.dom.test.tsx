@@ -50,6 +50,7 @@ function findingsBody() {
       entries: [],
       report_coverage: null,
       known_families: ['storage'],
+      schema_convergences: [],
       note: 'canonical Doctor storage family contained no entries',
       kind_statuses: [],
     },

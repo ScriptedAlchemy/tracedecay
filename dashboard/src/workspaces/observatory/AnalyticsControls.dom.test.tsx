@@ -177,6 +177,7 @@ function findingsPayload(kindStatuses: unknown[]) {
     family_filter: null,
     kind_statuses: kindStatuses,
     known_families: ['storage'],
+    schema_convergences: [],
     note: 'doctor storage findings',
     report_coverage: null,
   };

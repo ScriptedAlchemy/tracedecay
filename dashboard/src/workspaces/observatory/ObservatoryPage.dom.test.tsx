@@ -333,6 +333,7 @@ function stubTelemetry(
             entries: [],
             report_coverage: null,
             known_families: ['storage'],
+            schema_convergences: [],
             note: 'no admitted Doctor report source is available for this dashboard scope',
           }),
         );
@@ -455,6 +456,7 @@ function emptyStorageFindingsPayload() {
     entries: [],
     report_coverage: null,
     known_families: ['storage'],
+    schema_convergences: [],
     note: 'canonical Doctor storage family contained no entries',
     kind_statuses: sourceStatuses(),
   };

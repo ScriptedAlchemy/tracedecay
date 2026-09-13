@@ -18,12 +18,14 @@ import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { relativeAge } from '../../ui/time.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
+  DoctorFindingsPayloadV1Schema,
   GraphOverviewPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
   MemoryStatusPayloadV1Schema,
   type GraphSubgraphPayloadV1,
   type ProjectContextPayloadV1,
 } from '../../contracts/generated.ts';
+import { SchemaConvergencePanel } from '../observatory/DoctorInspector.tsx';
 
 /**
  * The Brain, scoped to one project: "what does TraceDecay actually know about
@@ -82,6 +84,11 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     ['brain', 'analytics'],
     '/api/plugins/analytics/overview',
     AnalyticsOverviewPayloadV1Schema,
+  );
+  const doctor = useEnvelope(
+    ['brain', 'doctor-convergence'],
+    '/api/doctor/findings',
+    DoctorFindingsPayloadV1Schema,
   );
 
   const activation = useActivationField(3200);
@@ -254,6 +261,9 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           tabIndex={holdingsTabStop}
           className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
         >
+          <SchemaConvergencePanel
+            findings={envelopePayload(doctor.data)?.schema_convergences ?? []}
+          />
           <ReadSection
             title="Project"
             chrome="centered"
