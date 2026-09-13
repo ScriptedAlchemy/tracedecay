@@ -1325,12 +1325,17 @@ impl ProjectOpenInputs<'_> {
         // large store can be mid-migration while the daemon serves. Doctor
         // re-reads that state on every report instead of a snapshot taken
         // before the migrations were scheduled.
-        let pending_schema_migrations = {
+        let schema_convergence = {
             let registry = self.store_administration.session_runtime_registry().await?;
             Arc::new(move || {
-                tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
-                    &registry.unconverged_registered_schemas(),
-                )
+                let unconverged = registry.unconverged_registered_schemas();
+                tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
+                    storage:
+                        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
+                            &unconverged,
+                        ),
+                    findings: registry.registered_schema_convergence_observations(),
+                }
             })
         };
         let doctor_report_reader =
@@ -1345,7 +1350,7 @@ impl ProjectOpenInputs<'_> {
                 core.profile_identity.profile_root().to_path_buf(),
                 core.transcript_source_home.clone(),
                 remote_operational_read,
-                pending_schema_migrations,
+                schema_convergence,
                 cg.get_config().sync.retention.clone(),
                 self.invocation.code_index_schedulers.clone(),
                 Arc::clone(&core.ports.diagnostic_broker),

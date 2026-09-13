@@ -210,6 +210,10 @@ use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
+use tracedecay_contracts::doctor::DoctorReportV1;
+use tracedecay_contracts::storage::{
+    SchemaConvergenceFindingV1, TableGrowthDoctorEvidenceV1,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -365,23 +369,33 @@ pub struct DashboardStateCompositionV1 {
 
 #[derive(Clone)]
 pub struct AdmittedDoctorReportV1 {
-    pub report: tracedecay_contracts::doctor::DoctorReportV1,
-    pub table_growth_evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
+    pub report: DoctorReportV1,
+    pub table_growth_evidence: Vec<TableGrowthDoctorEvidenceV1>,
+    pub schema_convergences: Vec<SchemaConvergenceFindingV1>,
 }
 
 impl AdmittedDoctorReportV1 {
-    pub fn new(report: tracedecay_contracts::doctor::DoctorReportV1) -> Self {
+    pub fn new(report: DoctorReportV1) -> Self {
         Self {
             report,
             table_growth_evidence: Vec::new(),
+            schema_convergences: Vec::new(),
         }
     }
 
     pub fn with_table_growth_evidence(
         mut self,
-        evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
+        evidence: Vec<TableGrowthDoctorEvidenceV1>,
     ) -> Self {
         self.table_growth_evidence = evidence;
+        self
+    }
+
+    pub fn with_schema_convergences(
+        mut self,
+        findings: Vec<SchemaConvergenceFindingV1>,
+    ) -> Self {
+        self.schema_convergences = findings;
         self
     }
 }

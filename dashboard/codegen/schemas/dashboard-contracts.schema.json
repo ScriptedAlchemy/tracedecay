@@ -8390,6 +8390,12 @@
               "type": "null"
             }
           ]
+        },
+        "schema_convergences": {
+          "items": {
+            "$ref": "#/$defs/SchemaConvergenceFindingV1"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -8397,6 +8403,7 @@
         "entries",
         "report_coverage",
         "known_families",
+        "schema_convergences",
         "note"
       ],
       "type": "object"
@@ -18071,6 +18078,119 @@
       ],
       "type": "object"
     },
+    "SchemaConvergenceFindingV1": {
+      "additionalProperties": false,
+      "properties": {
+        "degraded_row": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SchemaConvergenceProgressV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stage": {
+          "$ref": "#/$defs/SchemaConvergenceStageV1"
+        },
+        "started_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/SchemaConvergenceStateV1"
+        },
+        "store": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "store",
+        "stage",
+        "state",
+        "progress",
+        "started_at_micros",
+        "degraded_row"
+      ],
+      "type": "object"
+    },
+    "SchemaConvergenceProgressV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "done": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "remaining": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unit": {
+              "const": "rows",
+              "type": "string"
+            }
+          },
+          "required": [
+            "unit",
+            "done",
+            "remaining"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "done": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "remaining": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unit": {
+              "const": "pages",
+              "type": "string"
+            }
+          },
+          "required": [
+            "unit",
+            "done",
+            "remaining"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SchemaConvergenceStageV1": {
+      "enum": [
+        "registered_schema",
+        "runtime_writer_ledger"
+      ],
+      "type": "string"
+    },
+    "SchemaConvergenceStateV1": {
+      "enum": [
+        "pending_schema_migration",
+        "released_shape_convergence_in_progress",
+        "degraded",
+        "completed"
+      ],
+      "type": "string"
+    },
     "SchemaId": {
       "description": "Stable, canonical catalog identity for `SchemaId`.",
       "type": "string"
@@ -18836,6 +18956,12 @@
               "type": "null"
             }
           ]
+        },
+        "schema_convergences": {
+          "items": {
+            "$ref": "#/$defs/SchemaConvergenceFindingV1"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -18843,6 +18969,7 @@
         "entries",
         "report_coverage",
         "known_families",
+        "schema_convergences",
         "note",
         "kind_statuses"
       ],

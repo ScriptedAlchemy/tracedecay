@@ -29,6 +29,7 @@ use tracedecay_contracts::doctor::{
     advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
     storage_family_read,
 };
+use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
@@ -240,6 +241,11 @@ pub fn pending_schema_migration_read(
         findings.push(finding);
     }
     storage_family_read(findings)
+}
+
+pub struct SchemaConvergenceDoctorReadV1 {
+    pub storage: DoctorStorageFamilyReadV1,
+    pub findings: Vec<SchemaConvergenceFindingV1>,
 }
 
 // === Language server/analyzer (LanguageServer family) ========================
@@ -997,7 +1003,7 @@ pub fn production_doctor_report_reader(
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
-    pending_schema_migrations: Arc<dyn Fn() -> DoctorStorageFamilyReadV1 + Send + Sync>,
+    schema_convergence: Arc<dyn Fn() -> SchemaConvergenceDoctorReadV1 + Send + Sync>,
     retention: tracedecay_configuration::RetentionConfig,
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -1017,7 +1023,7 @@ pub fn production_doctor_report_reader(
         let profile_root = profile_root.clone();
         let host_home = host_home.clone();
         let remote_operational = Arc::clone(&remote_operational);
-        let pending_schema_migrations = Arc::clone(&pending_schema_migrations);
+        let schema_convergence = Arc::clone(&schema_convergence);
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
@@ -1216,6 +1222,7 @@ pub fn production_doctor_report_reader(
                 | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
                 | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
             };
+            let schema_convergence = schema_convergence();
             let storage = [
                 profile_storage.orphan_stores,
                 profile_storage.unregistered_stores,
@@ -1224,7 +1231,7 @@ pub fn production_doctor_report_reader(
                 profile_retention_backlog,
                 project_retention_backlog,
                 code_generation_retention,
-                pending_schema_migrations(),
+                schema_convergence.storage,
             ]
             .into_iter()
             .reduce(merge_storage_reads)
@@ -1277,7 +1284,8 @@ pub fn production_doctor_report_reader(
             let report = compose_doctor_report(&context, &inputs).await?;
             Ok(
                 tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
-                    .with_table_growth_evidence(store_telemetry.table_growth_evidence),
+                    .with_table_growth_evidence(store_telemetry.table_growth_evidence)
+                    .with_schema_convergences(schema_convergence.findings),
             )
         })
     })

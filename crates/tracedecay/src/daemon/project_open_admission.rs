@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
+use tracedecay_contracts::project_open::{
+    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+};
 use tracedecay_daemon_identity::authority;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -141,6 +144,7 @@ pub(super) enum ProjectOpenTaskState {
 pub(super) struct ProjectOpenFailure {
     pub(super) message: String,
     pub(super) retry_at: Option<Instant>,
+    reason: ProjectOpenStatusReasonV1,
     pub(super) typed: Option<ProjectOpenTypedFailure>,
     /// On-disk identity of the refused store's graph databases at the moment
     /// a `ResetRequired` refusal was recorded. A cached refusal is a property
@@ -341,7 +345,9 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
     match error {
         TraceDecayError::Config { message } => (message.contains("identity cutover conflict")
             || message.contains("ambiguous legacy profile stores")
-            || message.contains("enrollment marker did not resolve a profile store"))
+            || message.contains("enrollment marker did not resolve a profile store")
+            || (message.contains("repository discovery")
+                && message.contains(PROJECT_WARMING_RETRY_HINT)))
         .then_some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF),
         // This audit's whole job is to read persisted rows and judge them, so
         // its verdict is a property of the stored data: a row rejected now is
@@ -394,6 +400,7 @@ impl ProjectOpenFailure {
         Self {
             message,
             retry_at: None,
+            reason: ProjectOpenStatusReasonV1::Unavailable,
             typed: None,
             refused_store: None,
         }
@@ -403,10 +410,27 @@ impl ProjectOpenFailure {
         // Operator-repairable authority rejections decline implicit repair.
         // Reopening before maintenance changes that state is not useful and
         // only multiplies daemon warm-up tasks.
-        let retry_at = project_open_retry_backoff(error).map(|backoff| Instant::now() + backoff);
+        let retry_backoff = project_open_retry_backoff(error);
+        let retry_at = retry_backoff.map(|backoff| Instant::now() + backoff);
+        let reason = match error {
+            TraceDecayError::Config { message }
+                if message.contains("repository discovery")
+                    && message.contains(PROJECT_WARMING_RETRY_HINT) =>
+            {
+                ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery
+            }
+            _ => match retry_backoff {
+                Some(backoff) if backoff == PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF => {
+                    ProjectOpenStatusReasonV1::UnrepairableVerdict
+                }
+                Some(_) => ProjectOpenStatusReasonV1::RetryBackoff,
+                None => ProjectOpenStatusReasonV1::Unavailable,
+            },
+        };
         Self {
             message: error.to_string(),
             retry_at,
+            reason,
             typed: match error {
                 TraceDecayError::ProfileResetRequired {
                     component,
@@ -491,7 +515,9 @@ impl ProjectOpenFailure {
             ),
             None => self.message.clone(),
         };
-        TraceDecayError::Config { message }
+        TraceDecayError::Config {
+            message,
+        }
     }
 }
 
@@ -702,6 +728,42 @@ impl ProjectOpenTasks {
             | ProjectOpenTaskState::Ready
             | ProjectOpenTaskState::Failed(_) => None,
         }
+    }
+
+    #[hotpath::skip]
+    pub(super) fn status(&self, route: &ProjectRouteKey) -> Option<ProjectOpenStatusV1> {
+        let now = Instant::now();
+        let mut registry = self.lock_registry();
+        registry.prune(now);
+        let state = registry
+            .routes
+            .get(route)
+            .or_else(|| registry.retiring.get(route))?
+            .state
+            .borrow()
+            .clone();
+        Some(match state {
+            ProjectOpenTaskState::Opening => ProjectOpenStatusV1 {
+                state: ProjectOpenStatusStateV1::Converging,
+                reason: ProjectOpenStatusReasonV1::Converging,
+                retry_after_ms: Some(PROJECT_OPEN_RETRY_INTERVAL.as_millis() as u64),
+                detail: None,
+            },
+            ProjectOpenTaskState::Ready => ProjectOpenStatusV1 {
+                state: ProjectOpenStatusStateV1::Completed,
+                reason: ProjectOpenStatusReasonV1::Ready,
+                retry_after_ms: None,
+                detail: None,
+            },
+            ProjectOpenTaskState::Failed(failure) => ProjectOpenStatusV1 {
+                state: ProjectOpenStatusStateV1::Stalled,
+                reason: failure.reason,
+                retry_after_ms: failure
+                    .retry_at
+                    .map(|retry_at| retry_at.saturating_duration_since(now).as_millis() as u64),
+                detail: Some(failure.message),
+            },
+        })
     }
 
     async fn wait_for_route_completion(&self, route: &ProjectRouteKey) {
@@ -1285,6 +1347,91 @@ mod refused_store_invalidation_tests {
             tasks.cached_failure(&route).is_some(),
             "non-ResetRequired backoffs are time-based and must survive file churn"
         );
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn route(name: &str) -> ProjectRouteKey {
+        ProjectRouteKey {
+            profile_root: PathBuf::from(format!("/profiles/{name}")),
+            global_db_path: PathBuf::from(format!("/profiles/{name}/global.db")),
+            project_path: PathBuf::from(format!("/projects/{name}")),
+            scope_prefix: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn project_open_routes_publish_distinct_typed_status() {
+        let tasks = ProjectOpenTasks::default();
+        let opening_route = route("opening");
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let ProjectOpenTaskClaim::InFlight(_) = tasks.start(opening_route.clone(), async move {
+            let _ = release_rx.await;
+            Ok(())
+        }) else {
+            panic!("opening route must be tracked");
+        };
+
+        let opening = tasks.status(&opening_route).expect("opening route status");
+        assert_eq!(opening.state, ProjectOpenStatusStateV1::Converging);
+        assert_eq!(opening.reason, ProjectOpenStatusReasonV1::Converging);
+        assert_eq!(
+            opening.retry_after_ms,
+            Some(PROJECT_OPEN_RETRY_INTERVAL.as_millis() as u64)
+        );
+
+        let failed_route = route("unrepairable");
+        let ProjectOpenTaskClaim::InFlight(failed) = tasks.start(failed_route.clone(), async {
+            Err(TraceDecayError::Database {
+                message: "released projection row is invalid".to_owned(),
+                operation: "ensure global database authority invariants".to_owned(),
+            })
+        }) else {
+            panic!("failing route must be tracked");
+        };
+        ProjectOpenTasks::wait_for_completion(failed)
+            .await
+            .expect_err("injected invariant rejection");
+
+        let stalled = tasks.status(&failed_route).expect("failed route status");
+        assert_eq!(stalled.state, ProjectOpenStatusStateV1::Stalled);
+        assert_eq!(
+            stalled.reason,
+            ProjectOpenStatusReasonV1::UnrepairableVerdict
+        );
+        assert!(stalled.retry_after_ms.is_some_and(|delay| delay > 1_000));
+        assert!(
+            stalled
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("released projection row is invalid"))
+        );
+
+        let deferred_route = route("deferred-discovery");
+        let deferred_error = crate::daemon::core_proxy::repository_discovery_deferred(
+            &deferred_route.project_path,
+            tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
+        );
+        let ProjectOpenTaskClaim::InFlight(deferred) =
+            tasks.start(deferred_route.clone(), async { Err(deferred_error) })
+        else {
+            panic!("deferred route must be tracked");
+        };
+        ProjectOpenTasks::wait_for_completion(deferred)
+            .await
+            .expect_err("injected repository discovery deferral");
+
+        let deferred = tasks
+            .status(&deferred_route)
+            .expect("deferred route status");
+        assert_eq!(
+            deferred.reason,
+            ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery
+        );
+        assert!(deferred.retry_after_ms.is_some());
     }
 }
 

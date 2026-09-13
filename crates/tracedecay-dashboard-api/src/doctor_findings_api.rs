@@ -19,6 +19,7 @@ use tracedecay_api::doctor::{
 use tracedecay_contracts::doctor::{
     DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1,
 };
+use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
 
 use super::DashboardState;
 use super::read_model::{
@@ -32,6 +33,7 @@ pub struct DoctorFindingsPayloadV1 {
     pub entries: Vec<DoctorReportEntryV1>,
     pub report_coverage: Option<DoctorReportCoverageV1>,
     pub known_families: Vec<DoctorFindingFamilyV1>,
+    pub schema_convergences: Vec<SchemaConvergenceFindingV1>,
     pub note: String,
 }
 
@@ -94,19 +96,19 @@ async fn findings_for_family_with_authorities(
     // The admitted daemon composes the report across every finding producer;
     // this single await is the expensive phase behind both `/api/doctor/*`
     // and `/api/storage/findings`, and the span records failed reads too.
-    let report = match hotpath::future!(reader(), label = "dashboard_api.doctor.report_read").await
-    {
-        Ok(admitted) => admitted.report,
-        Err(error) => {
-            return envelope(
-                scope,
-                DoctorReadPresentationV1::source_failed(),
-                unavailable_payload(family_filter, doctor_report_failure_note(&error)),
-            );
-        }
-    };
+    let admitted =
+        match hotpath::future!(reader(), label = "dashboard_api.doctor.report_read").await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return envelope(
+                    scope,
+                    DoctorReadPresentationV1::source_failed(),
+                    unavailable_payload(family_filter, doctor_report_failure_note(&error)),
+                );
+            }
+        };
 
-    let projection = match project_doctor_report(&report, family_filter) {
+    let projection = match project_doctor_report(&admitted.report, family_filter) {
         Ok(projection) => projection,
         Err(rejection) => {
             return envelope(
@@ -125,6 +127,7 @@ async fn findings_for_family_with_authorities(
             entries: projection.entries,
             report_coverage: Some(projection.report_coverage),
             known_families: KNOWN_DOCTOR_FINDING_FAMILIES.to_vec(),
+            schema_convergences: admitted.schema_convergences,
             note: projection.note,
         },
     )
@@ -154,6 +157,7 @@ fn unavailable_payload(
         entries: Vec::new(),
         report_coverage: None,
         known_families: KNOWN_DOCTOR_FINDING_FAMILIES.to_vec(),
+        schema_convergences: Vec::new(),
         note: note.into(),
     }
 }
@@ -175,6 +179,10 @@ mod tests {
         ObservabilityReadV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
         ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort,
         RuntimeHealthReadV1, StorageDoctorPort,
+    };
+    use tracedecay_contracts::storage::{
+        SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
+        SchemaConvergenceStateV1,
     };
     use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -423,6 +431,47 @@ mod tests {
                 .families()
                 .len(),
             KNOWN_DOCTOR_FINDING_FAMILIES.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn findings_route_preserves_typed_schema_convergence() {
+        let report = compose_report(&DoctorTestSourcesV1::all_unknown()).await;
+        let admitted = crate::AdmittedDoctorReportV1::new(report).with_schema_convergences(vec![
+            SchemaConvergenceFindingV1 {
+                store: "profile-sessions".to_owned(),
+                stage: SchemaConvergenceStageV1::RegisteredSchema,
+                state: SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+                progress: Some(SchemaConvergenceProgressV1::Pages {
+                    done: 4,
+                    remaining: 7,
+                }),
+                started_at_micros: 42,
+                degraded_row: None,
+            },
+        ]);
+        let reader: crate::DoctorReportReader = Arc::new(move || {
+            let admitted = admitted.clone();
+            Box::pin(async move { Ok(admitted) })
+        });
+
+        let envelope = findings_with_authorities(
+            dashboard_scope(),
+            DoctorFindingsQueryV1 { family: None },
+            Some(reader),
+        )
+        .await;
+
+        assert_eq!(
+            envelope.payload.schema_convergences[0].state,
+            SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+        );
+        assert_eq!(
+            envelope.payload.schema_convergences[0].progress,
+            Some(SchemaConvergenceProgressV1::Pages {
+                done: 4,
+                remaining: 7,
+            })
         );
     }
 }

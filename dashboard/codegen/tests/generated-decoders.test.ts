@@ -210,6 +210,7 @@ describe("Doctor findings decoder", () => {
       report_coverage: null,
       remediations: [],
       known_families: ["configuration"],
+      schema_convergences: [],
       note: "configuration drift observed",
     });
 

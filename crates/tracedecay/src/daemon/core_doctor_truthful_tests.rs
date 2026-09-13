@@ -114,6 +114,7 @@ async fn live_runtime_snapshot_does_not_fabricate_store_metadata_after_observati
     let value = super::doctor_runtime_value(
         &handshake,
         &store_administration,
+        None,
         false,
         None,
         build_version,

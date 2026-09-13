@@ -1723,6 +1723,7 @@ export const DoctorFindingsPayloadV1Schema = z.object({
   known_families: z.array(z.lazy(() => DoctorFindingFamilyV1Schema)),
   note: z.string(),
   report_coverage: z.union([z.lazy(() => DoctorReportCoverageV1Schema), z.null()]),
+  schema_convergences: z.array(z.lazy(() => SchemaConvergenceFindingV1Schema)),
 });
 export type DoctorFindingsPayloadV1 = z.infer<typeof DoctorFindingsPayloadV1Schema>;
 
@@ -4347,6 +4348,33 @@ export const SavingsSumV1Schema = z.object({
 });
 export type SavingsSumV1 = z.infer<typeof SavingsSumV1Schema>;
 
+export const SchemaConvergenceFindingV1Schema = z.object({
+  degraded_row: z.string().nullable(),
+  progress: z.union([z.lazy(() => SchemaConvergenceProgressV1Schema), z.null()]),
+  stage: z.lazy(() => SchemaConvergenceStageV1Schema),
+  started_at_micros: z.number().int().safe(),
+  state: z.lazy(() => SchemaConvergenceStateV1Schema),
+  store: z.string(),
+}).strict();
+export type SchemaConvergenceFindingV1 = z.infer<typeof SchemaConvergenceFindingV1Schema>;
+
+export const SchemaConvergenceProgressV1Schema = z.discriminatedUnion("unit", [z.object({
+  done: z.number().int().safe().min(0),
+  remaining: z.number().int().safe().min(0),
+  unit: z.literal("pages"),
+}).strict(), z.object({
+  done: z.number().int().safe().min(0),
+  remaining: z.number().int().safe().min(0),
+  unit: z.literal("rows"),
+}).strict()]);
+export type SchemaConvergenceProgressV1 = z.infer<typeof SchemaConvergenceProgressV1Schema>;
+
+export const SchemaConvergenceStageV1Schema = z.enum(["registered_schema", "runtime_writer_ledger"]);
+export type SchemaConvergenceStageV1 = z.infer<typeof SchemaConvergenceStageV1Schema>;
+
+export const SchemaConvergenceStateV1Schema = z.enum(["completed", "degraded", "pending_schema_migration", "released_shape_convergence_in_progress"]);
+export type SchemaConvergenceStateV1 = z.infer<typeof SchemaConvergenceStateV1Schema>;
+
 /** Stable, canonical catalog identity for `SchemaId`. */
 export const SchemaIdSchema = z.string();
 export type SchemaId = z.infer<typeof SchemaIdSchema>;
@@ -4594,6 +4622,7 @@ export const StorageFindingsPayloadV1Schema = z.object({
   known_families: z.array(z.lazy(() => DoctorFindingFamilyV1Schema)),
   note: z.string(),
   report_coverage: z.union([z.lazy(() => DoctorReportCoverageV1Schema), z.null()]),
+  schema_convergences: z.array(z.lazy(() => SchemaConvergenceFindingV1Schema)),
 });
 export type StorageFindingsPayloadV1 = z.infer<typeof StorageFindingsPayloadV1Schema>;
 

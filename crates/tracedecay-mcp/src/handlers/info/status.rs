@@ -4,6 +4,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_application::tracedecay::BranchDiagnostics;
+use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
@@ -20,6 +21,26 @@ fn display_path(path: &Path) -> String {
 
 fn status_arg_flag(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
+
+fn schema_convergence_status(findings: &[SchemaConvergenceFindingV1]) -> Value {
+    let status = if findings
+        .iter()
+        .any(|finding| finding.state == SchemaConvergenceStateV1::Degraded)
+    {
+        "degraded"
+    } else if findings.iter().any(|finding| {
+        matches!(
+            finding.state,
+            SchemaConvergenceStateV1::PendingSchemaMigration
+                | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+        )
+    }) {
+        "in_progress"
+    } else {
+        "completed"
+    };
+    json!({ "status": status, "findings": findings })
 }
 
 /// Whether exact-scope code retrieval can serve at all, derived from the same
@@ -233,6 +254,10 @@ pub async fn handle_status(
         "project_root": ctx.project_root(),
         "graph_statistics": graph_statistics,
     });
+    output["schema_convergence"] = schema_convergence_status(
+        &ctx.store_runtime()
+            .registered_schema_convergence_observations(),
+    );
     output["semantic_owner"] = match ctx.semantic_owner() {
         McpSemanticOwnerV1::Attached(state) => serde_json::to_value(state)?,
         McpSemanticOwnerV1::AttachedAbsent => json!({
@@ -703,7 +728,10 @@ mod tests {
 
     use super::{
         code_index_freshness_projection, graph_statistics_value, historical_session_catch_up_state,
-        render_status_md,
+        render_status_md, schema_convergence_status,
+    };
+    use tracedecay_contracts::storage::{
+        SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
     };
 
     #[test]
@@ -716,6 +744,36 @@ mod tests {
         assert!(rendered.contains("**code_index_freshness.status:** stale"));
         assert!(rendered.contains("**branch:** {2 field(s)}"));
         assert!(!rendered.contains("coverage"));
+    }
+
+    #[test]
+    fn status_preserves_each_schema_convergence_state() {
+        for (state, expected) in [
+            (
+                SchemaConvergenceStateV1::PendingSchemaMigration,
+                "in_progress",
+            ),
+            (
+                SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+                "in_progress",
+            ),
+            (SchemaConvergenceStateV1::Degraded, "degraded"),
+            (SchemaConvergenceStateV1::Completed, "completed"),
+        ] {
+            let finding = SchemaConvergenceFindingV1 {
+                store: "profile-sessions".to_owned(),
+                stage: SchemaConvergenceStageV1::RegisteredSchema,
+                state,
+                progress: None,
+                started_at_micros: 42,
+                degraded_row: (state == SchemaConvergenceStateV1::Degraded)
+                    .then(|| "observation_id=obs-7".to_owned()),
+            };
+            let value = schema_convergence_status(&[finding]);
+            assert_eq!(value["status"], expected);
+            assert_eq!(value["findings"][0]["state"], serde_json::json!(state));
+            assert_eq!(value["findings"][0]["started_at_micros"], 42);
+        }
     }
 
     /// The daemon serializes `graph_statistics` and `tracedecay status`

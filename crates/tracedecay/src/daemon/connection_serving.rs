@@ -1186,10 +1186,20 @@ fn serve_broker_socket_client_inner(
                 } else {
                     None
                 };
+                let project_open = match handshake.project_path.as_deref() {
+                    Some(project_path) => {
+                        let route = ProjectRouteKey::from_handshake(project_path, &handshake)?;
+                        project_open_tasks(engine.project_open_gates.as_ref())
+                            .await
+                            .status(&route)
+                    }
+                    None => None,
+                };
                 let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
                     &mut transport,
                     &handshake,
                     &engine.store_administration,
+                    project_open,
                     setup_activity,
                     &first_request,
                     git_watcher_health,
@@ -1685,10 +1695,20 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         drop(setup_activity);
         return Ok(());
     }
+    let project_open = match handshake.project_path.as_deref() {
+        Some(project_path) => {
+            let route = ProjectRouteKey::from_handshake(project_path, &handshake)?;
+            project_open_tasks(project_open_gates.as_ref())
+                .await
+                .status(&route)
+        }
+        None => None,
+    };
     let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
         &mut transport,
         &handshake,
         &store_administration,
+        project_open,
         setup_activity,
         &first_request,
         None,

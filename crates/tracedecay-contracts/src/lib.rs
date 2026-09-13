@@ -50,6 +50,7 @@ pub mod observability;
 pub mod observatory_surface;
 pub mod policy;
 mod profile_identity;
+pub mod project_open;
 pub mod project_registry;
 pub mod remote;
 pub mod request_identity;
