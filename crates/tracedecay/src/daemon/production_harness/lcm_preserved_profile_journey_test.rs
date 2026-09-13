@@ -708,11 +708,13 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
                     "tracedecay_body",
                     json!({"symbol": PROBE_SYMBOL, "format": "json"}),
                 ),
+                // This round proves admission, so one evidence result keeps
+                // response-handle storage outside the concurrency assertion.
                 timed_call(
                     &harness,
                     &project,
                     "tracedecay_message_search",
-                    json!({"query": "billing pipeline", "limit": 5, "format": "json"}),
+                    json!({"query": "billing pipeline", "limit": 1, "format": "json"}),
                 ),
             );
             let (session_elapsed, session_envelope) = &round.2;
