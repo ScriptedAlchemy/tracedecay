@@ -7,7 +7,7 @@ use std::sync::{
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver};
+use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver, watch};
 use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use tracedecay_application::semantic_runtime::{
     SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleOutcomeV1,
@@ -47,35 +47,42 @@ async fn published_generation_for_root(
 /// generation so a lost enqueue is retried, and the production hook dedupes
 /// downstream. Tests therefore assert on which generations a hook observed,
 /// never on exact call counts.
-type SemanticDeliveryLogV1 = Arc<Mutex<Vec<CodeGenerationId>>>;
+type SemanticDeliveryLogV1 = Arc<watch::Sender<Vec<CodeGenerationId>>>;
+
+fn semantic_delivery_log() -> SemanticDeliveryLogV1 {
+    Arc::new(watch::channel(Vec::new()).0)
+}
 
 fn recording_semantic_hook(
     deliveries: &SemanticDeliveryLogV1,
 ) -> SavedCodeGenerationScheduleHookV1 {
     let deliveries = Arc::clone(deliveries);
     Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
-        deliveries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(generation.manifest().generation_id.clone());
+        deliveries.send_modify(|generations| {
+            generations.push(generation.manifest().generation_id.clone());
+        });
         SavedGenerationScheduleOutcomeV1::Scheduled
     })
 }
 
 fn delivered_generations(deliveries: &SemanticDeliveryLogV1) -> Vec<CodeGenerationId> {
-    deliveries
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+    deliveries.borrow().clone()
 }
 
 async fn wait_for_semantic_delivery(
     deliveries: &SemanticDeliveryLogV1,
     generation: &CodeGenerationId,
 ) {
+    let mut changed = deliveries.subscribe();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while !delivered_generations(deliveries).contains(generation) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        loop {
+            if delivered_generations(deliveries).contains(generation) {
+                break;
+            }
+            changed
+                .changed()
+                .await
+                .expect("semantic delivery authority stays open");
         }
     })
     .await
@@ -87,7 +94,7 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
-    let first_deliveries: SemanticDeliveryLogV1 = Arc::new(Mutex::new(Vec::new()));
+    let first_deliveries = semantic_delivery_log();
     let first_hook = recording_semantic_hook(&first_deliveries);
     assert!(
         registry
@@ -103,7 +110,7 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
     let first_generation = wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_semantic_delivery(&first_deliveries, &first_generation).await;
 
-    let second_deliveries: SemanticDeliveryLogV1 = Arc::new(Mutex::new(Vec::new()));
+    let second_deliveries = semantic_delivery_log();
     let second_hook = recording_semantic_hook(&second_deliveries);
     assert!(
         !registry
@@ -467,7 +474,7 @@ async fn retained_partitioned_generation_reaches_semantics_after_source_proof_ex
     drop(reconcile_admission);
     registry.shutdown().await;
 
-    let refreshed_deliveries: SemanticDeliveryLogV1 = Arc::new(Mutex::new(Vec::new()));
+    let refreshed_deliveries = semantic_delivery_log();
     let refreshed_registry = CodeIndexSchedulerRegistryV1::new(1);
     assert!(
         refreshed_registry
@@ -656,12 +663,13 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     let mut publications = registry.subscribe_generation_publications();
-    let panic_calls = Arc::new(AtomicUsize::new(0));
+    let (panic_called, mut panic_calls) = tokio::sync::mpsc::unbounded_channel();
     let panicking_hook = {
-        let calls = Arc::clone(&panic_calls);
         Arc::new(
             move |_: Arc<CodeIndexPublishedGenerationV1>| -> SavedGenerationScheduleOutcomeV1 {
-                calls.fetch_add(1, Ordering::SeqCst);
+                panic_called
+                    .send(())
+                    .expect("report panicking semantic schedule");
                 panic!("semantic schedule panic fixture");
             },
         ) as SavedCodeGenerationScheduleHookV1
@@ -678,17 +686,14 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
             .expect("mount scheduler")
     );
     let first_generation = wait_for_initial_generation(&registry, fixture.path()).await;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while panic_calls.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("panicking hook was called");
+    tokio::time::timeout(Duration::from_secs(3), panic_calls.recv())
+        .await
+        .expect("panicking hook was called")
+        .expect("panicking hook authority stays open");
     let first_publication = published_generation_for_root(&mut publications, &project_root).await;
     assert_eq!(first_publication, first_generation);
 
-    let replacement_deliveries: SemanticDeliveryLogV1 = Arc::new(Mutex::new(Vec::new()));
+    let replacement_deliveries = semantic_delivery_log();
     let replacement_hook = recording_semantic_hook(&replacement_deliveries);
     assert!(
         !registry

@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_application::semantic_runtime::{
     SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleOutcomeV1,
@@ -71,13 +71,14 @@ async fn unchanged_reconcile_retries_semantic_admission_for_the_serving_generati
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let accepting = Arc::new(AtomicBool::new(false));
-    let accepted = Arc::new(AtomicUsize::new(0));
+    let (accepted, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
     let semantic_hook = {
         let accepting = Arc::clone(&accepting);
-        let accepted = Arc::clone(&accepted);
         Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| {
             if accepting.load(Ordering::Acquire) {
-                accepted.fetch_add(1, Ordering::AcqRel);
+                accepted
+                    .send(())
+                    .expect("report accepted semantic schedule");
                 SavedGenerationScheduleOutcomeV1::Scheduled
             } else {
                 SavedGenerationScheduleOutcomeV1::QueueRefused
@@ -95,9 +96,12 @@ async fn unchanged_reconcile_retries_semantic_admission_for_the_serving_generati
         .await
         .expect("mount");
     let serving_generation = wait_for_initial_generation(&registry, fixture.path()).await;
-    assert_eq!(
-        accepted.load(Ordering::Acquire),
-        0,
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
+    assert!(
+        matches!(
+            accepted_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
         "the initial bounded semantic admission is refused"
     );
 
@@ -106,13 +110,10 @@ async fn unchanged_reconcile_retries_semantic_admission_for_the_serving_generati
         registry.notify_hook_overflow(fixture.path()).await,
         "mounted worktree accepts an unchanged reconcile"
     );
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while accepted.load(Ordering::Acquire) == 0 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("unchanged reconcile retries semantic admission");
+    tokio::time::timeout(Duration::from_secs(3), accepted_rx.recv())
+        .await
+        .expect("unchanged reconcile retries semantic admission")
+        .expect("semantic admission authority stays open");
 
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
