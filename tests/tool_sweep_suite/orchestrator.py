@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -264,6 +265,20 @@ def _phase_environment(root: Path, *, temp_root: Path | None = None) -> dict[str
     return environment
 
 
+def _stage_codex_auth(temp_root: Path) -> Path | None:
+    """Give the real provider short-lived credentials without retaining them."""
+    source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    source = source_home / "auth.json"
+    if not source.is_file():
+        return None
+    destination_home = temp_root / "codex"
+    destination_home.mkdir(mode=0o700, parents=True)
+    destination = destination_home / "auth.json"
+    shutil.copyfile(source, destination)
+    destination.chmod(0o600)
+    return destination_home
+
+
 def _phase_label(name: str, index: int) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-.")
     if not safe:
@@ -273,7 +288,8 @@ def _phase_label(name: str, index: int) -> str:
 
 def run_phase(
     *, repo: Path, binary: Path, out: Path, deadline: WholeRunDeadline, label: str,
-    phase: str, effect: str | None = None, catalog: Path | None = None,
+    phase: str, read: str | None = None, effect: str | None = None,
+    catalog: Path | None = None,
 ) -> PhaseResult:
     root = out / "phases" / label
     root.mkdir(parents=True, exist_ok=False)
@@ -286,6 +302,8 @@ def run_phase(
         "--bin", str(binary), "--out", str(root),
     ]
     runner = [*runner_base, "--phase", phase]
+    if read is not None:
+        runner.extend(["--read", read])
     if effect is not None:
         runner.extend(["--effect", effect])
     if catalog is not None:
@@ -293,7 +311,11 @@ def run_phase(
     # The daemon wrapper appends another random directory and a Unix socket below
     # TMPDIR. Keep that root short even when the retained artifact path is deep.
     with tempfile.TemporaryDirectory(prefix="tds-") as raw_tmp:
-        environment = _phase_environment(root, temp_root=Path(raw_tmp))
+        temp_root = Path(raw_tmp)
+        environment = _phase_environment(root, temp_root=temp_root)
+        codex_home = _stage_codex_auth(temp_root)
+        if codex_home is not None:
+            environment["CODEX_HOME"] = str(codex_home)
         profile = Path(raw_tmp) / "profile"
         profile.mkdir()
         environment["TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR"] = str(profile)
