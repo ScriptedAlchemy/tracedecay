@@ -27,7 +27,21 @@ def objects(value: Any) -> list[dict[str, Any]]:
         try:
             found.extend(objects(json.loads(value)))
         except json.JSONDecodeError:
-            pass
+            blocks: list[list[str]] = []
+            for line in value.splitlines():
+                if line.startswith("    "):
+                    if not blocks or not blocks[-1]:
+                        blocks.append([])
+                    blocks[-1].append(line[4:])
+                elif blocks and blocks[-1]:
+                    blocks.append([])
+            for block in blocks:
+                if not block:
+                    continue
+                try:
+                    found.extend(objects(json.loads("\n".join(block))))
+                except json.JSONDecodeError:
+                    pass
     return found
 
 
@@ -144,7 +158,13 @@ def has_success_framed_not_found(response: dict[str, Any]) -> bool:
     kind, code = response_problem_code(response)
     if kind == "not_found" or code is not None and "not_found" in code:
         return True
-    return any(_NOT_FOUND.search(text) is not None for text in text_blocks(response))
+    for text in text_blocks(response):
+        try:
+            json.loads(text)
+        except json.JSONDecodeError:
+            if _NOT_FOUND.search(text) is not None:
+                return True
+    return False
 
 
 def duration_us(response: dict[str, Any]) -> int | None:

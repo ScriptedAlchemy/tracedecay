@@ -32,6 +32,7 @@ use crate::result::{
     AuthorityReceipt, EvidenceCoverage, IdempotencyKey, Omission, ResultContractRef,
     RetrieverContributionState, TemporalState,
 };
+use crate::retained_surfaces::RetainedOutputFormatV1;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 
 const SCOUT_SURFACES: [BindingSurface; 3] = [
@@ -501,6 +502,7 @@ pub struct ContextScoutDeliveryResultV1 {
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutExactAddressRequestV1 {
     pub address: ContextScoutAddressV1,
+    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -509,6 +511,7 @@ pub struct ContextScoutRecentRequestV1 {
     pub address: ContextScoutAddressV1,
     #[serde(default = "default_context_scout_recent_limit")]
     pub limit: usize,
+    pub format: Option<RetainedOutputFormatV1>,
 }
 
 const fn default_context_scout_recent_limit() -> usize {
@@ -521,6 +524,7 @@ pub struct ContextScoutControlRequestV1 {
     pub address: ContextScoutAddressV1,
     pub expected_revision: ConfigurationRevisionId,
     pub idempotency_key: ConfigurationIdempotencyKey,
+    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -529,6 +533,7 @@ pub struct ContextScoutCancelRequestV1 {
     pub address: ContextScoutAddressV1,
     pub work: ContextScoutWorkV1,
     pub idempotency_key: IdempotencyKey,
+    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -537,6 +542,7 @@ pub struct ContextScoutClaimRequestV1 {
     pub address: ContextScoutAddressV1,
     pub window: ContextScoutClaimWindowV1,
     pub idempotency_key: IdempotencyKey,
+    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -547,6 +553,7 @@ pub struct ContextScoutDeliveryRequestV1 {
     pub delivered_at: UtcMicros,
     pub outcome: ContextScoutDeliveryOutcomeV1,
     pub idempotency_key: IdempotencyKey,
+    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -556,6 +563,7 @@ pub struct ContextScoutFeedbackRequestV1 {
     pub receipt: ContextScoutDeliveryReceiptV1,
     pub feedback: ContextScoutFeedbackV1,
     pub idempotency_key: IdempotencyKey,
+    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
