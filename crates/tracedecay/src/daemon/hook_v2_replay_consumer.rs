@@ -127,7 +127,7 @@ async fn drain_all_hosts(
                 envelope,
                 None,
                 |project_id, worktree_id, protected_session_id| async move {
-                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
+                    tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_native_session(
                         project_id,
                         worktree_id,
                         protected_session_id,
@@ -206,7 +206,7 @@ async fn drain_admitted_host_spool(
                         envelope,
                         native_lifecycle,
                         |project_id, worktree_id, protected_session_id| async move {
-                            crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
+                            tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_native_session(
                                 project_id,
                                 worktree_id,
                                 protected_session_id,

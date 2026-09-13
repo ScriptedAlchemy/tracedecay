@@ -15,7 +15,7 @@ use tracedecay_store::{
 };
 
 use super::*;
-use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 fn id<T: TryFrom<String>>(value: &str) -> T
@@ -219,7 +219,7 @@ fn wrong_session_fails_closed() {
 #[test]
 fn checked_in_native_fixture_without_complete_lifecycle_fails_closed() {
     let fixture = include_str!(
-        "../../../../../tests/fixtures/provider_normalization/codex/agent_message.expected_envelope.json"
+        "../../../../tests/fixtures/provider_normalization/codex/agent_message.expected_envelope.json"
     )
     .replace("$STABLE_RECORD_ID", "message.native.fixture");
     let observation = serde_json::from_str::<CanonicalObservationEnvelopeV1>(&fixture).unwrap();

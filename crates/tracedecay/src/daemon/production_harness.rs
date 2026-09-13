@@ -604,7 +604,9 @@ impl ProductionProjectCompositionHarnessV1 {
     ) -> ProductionHarnessOpenFuture {
         // Embedded compositions skip the binary logging bootstrap; surface
         // activation retry/refusal diagnostics in the product journey.
-        install_stderr_tracing(StderrTracingDefault::Warn);
+        tracedecay_daemon_service::logging::install_stderr_tracing(
+            tracedecay_daemon_service::logging::StderrTracingDefault::Warn,
+        );
         Box::pin(async move {
             let _composition_admission = production_composition_admission_gate().acquire().await?;
             // Embedded test compositions never pass through the binary's

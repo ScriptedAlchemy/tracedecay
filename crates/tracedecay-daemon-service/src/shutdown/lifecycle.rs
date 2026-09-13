@@ -5,12 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokio::time::Duration;
 
-pub(crate) use tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE;
+pub use tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE;
 
-use super::shutdown_orchestration::{DaemonShutdownFailures, DaemonShutdownReceipt};
+use super::orchestration::{DaemonShutdownFailures, DaemonShutdownReceipt};
 
-pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration =
-    tracedecay_daemon_service::TASK_ABORT_DEADLINE;
+pub const DAEMON_TASK_ABORT_DEADLINE: Duration = crate::TASK_ABORT_DEADLINE;
 
 /// Per-phase shutdown budgets.
 ///
@@ -26,12 +25,12 @@ pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration =
 /// The store-close reserve is the load-bearing one: closing the graph
 /// runtimes is the only phase whose completion is a *durability* obligation,
 /// so it is guaranteed a slice that no earlier phase can consume.
-pub(crate) const DAEMON_BACKGROUND_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
-pub(crate) const DAEMON_PROJECT_SERVER_DRAIN_DEADLINE: Duration = Duration::from_secs(12);
-pub(crate) const DAEMON_STORE_CLOSE_RESERVE: Duration = Duration::from_secs(12);
+pub const DAEMON_BACKGROUND_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
+pub const DAEMON_PROJECT_SERVER_DRAIN_DEADLINE: Duration = Duration::from_secs(12);
+pub const DAEMON_STORE_CLOSE_RESERVE: Duration = Duration::from_secs(12);
 
 #[derive(Clone)]
-pub(crate) struct DaemonLifecycle {
+pub struct DaemonLifecycle {
     inner: Arc<DaemonLifecycleInner>,
 }
 
@@ -43,7 +42,7 @@ struct DaemonLifecycleInner {
     shutdown: std::sync::Mutex<DaemonShutdownCoordinator>,
 }
 
-pub(crate) struct DaemonActivity {
+pub struct DaemonActivity {
     inner: Arc<DaemonLifecycleInner>,
 }
 
@@ -64,11 +63,11 @@ impl Drop for DaemonShutdownCoordinatorCompletion {
     }
 }
 
-pub(super) struct DaemonShutdownAttempt {
+pub struct DaemonShutdownAttempt {
     receipt: tokio::sync::watch::Sender<Option<Arc<DaemonShutdownReceipt>>>,
 }
 
-pub(super) enum DaemonShutdownClaim {
+pub enum DaemonShutdownClaim {
     Run {
         attempt: Arc<DaemonShutdownAttempt>,
         failures: DaemonShutdownFailures,
@@ -91,26 +90,12 @@ impl Default for DaemonLifecycle {
     }
 }
 
-impl tracedecay_mcp::McpConnectionLifecyclePort for DaemonLifecycle {
-    fn accepting(&self) -> bool {
-        DaemonLifecycle::accepting(self)
-    }
-
-    fn try_enter(&self) -> Option<tracedecay_mcp::McpRequestActivity> {
-        DaemonLifecycle::try_enter(self).map(tracedecay_mcp::McpRequestActivity::retain)
-    }
-
-    fn wait_for_draining(&self) -> tracedecay_mcp::McpLifecycleDrainFuture<'_> {
-        Box::pin(DaemonLifecycle::wait_for_draining(self))
-    }
-}
-
 impl DaemonLifecycle {
-    pub(crate) fn accepting(&self) -> bool {
+    pub fn accepting(&self) -> bool {
         !self.inner.draining.load(Ordering::Acquire)
     }
 
-    pub(crate) fn try_enter(&self) -> Option<DaemonActivity> {
+    pub fn try_enter(&self) -> Option<DaemonActivity> {
         if !self.accepting() {
             return None;
         }
@@ -127,14 +112,14 @@ impl DaemonLifecycle {
         }
     }
 
-    pub(crate) fn begin_draining(&self) {
+    pub fn begin_draining(&self) {
         if !self.inner.draining.swap(true, Ordering::AcqRel) {
             self.inner.draining_notify.notify_waiters();
         }
     }
 
     #[hotpath::measure(label = "daemon.engine.lifecycle.wait_draining", future = true)]
-    pub(crate) async fn wait_for_draining(&self) {
+    pub async fn wait_for_draining(&self) {
         loop {
             let notified = self.inner.draining_notify.notified();
             if !self.accepting() {
@@ -145,7 +130,7 @@ impl DaemonLifecycle {
     }
 
     #[hotpath::measure(label = "daemon.engine.lifecycle.wait_idle", future = true)]
-    pub(crate) async fn wait_for_idle(&self) {
+    pub async fn wait_for_idle(&self) {
         loop {
             let notified = self.inner.idle.notified();
             if self.inner.active.load(Ordering::Acquire) == 0 {
@@ -155,7 +140,7 @@ impl DaemonLifecycle {
         }
     }
 
-    pub(super) fn claim_shutdown_coordination(&self) -> DaemonShutdownClaim {
+    pub fn claim_shutdown_coordination(&self) -> DaemonShutdownClaim {
         let mut shutdown = self
             .inner
             .shutdown
@@ -179,7 +164,7 @@ impl DaemonLifecycle {
     /// Retain the coordinator independently of any caller that is merely
     /// waiting for its receipt. The task is joined after it publishes that
     /// receipt, so cancelling a first waiter cannot detach shutdown work.
-    pub(super) fn spawn_shutdown_coordinator<Task>(
+    pub fn spawn_shutdown_coordinator<Task>(
         &self,
         attempt: &Arc<DaemonShutdownAttempt>,
         task: Task,
@@ -228,7 +213,7 @@ impl DaemonLifecycle {
     /// task completion while leaving its handle in lifecycle ownership, so a
     /// cancelled waiter cannot detach the final coordinator exit.
     #[hotpath::measure(label = "daemon.engine.shutdown.coordinator.wait", future = true)]
-    pub(super) async fn wait_for_finished_shutdown_coordinator(&self) {
+    pub async fn wait_for_finished_shutdown_coordinator(&self) {
         loop {
             let completed = {
                 let shutdown = self
@@ -271,7 +256,7 @@ impl DaemonLifecycle {
     /// Reap only an already-finished coordinator. Its join cannot suspend,
     /// which keeps cancellation from taking ownership out of lifecycle state.
     #[hotpath::measure(label = "daemon.engine.shutdown.coordinator.join", future = true)]
-    pub(super) async fn join_finished_shutdown_coordinator(&self) {
+    pub async fn join_finished_shutdown_coordinator(&self) {
         let coordinator_task = {
             let shutdown = self
                 .inner
@@ -298,7 +283,7 @@ impl DaemonLifecycle {
         }
     }
 
-    pub(super) fn finish_shutdown_attempt(
+    pub fn finish_shutdown_attempt(
         &self,
         attempt: &Arc<DaemonShutdownAttempt>,
         receipt: Arc<DaemonShutdownReceipt>,
@@ -327,7 +312,7 @@ impl DaemonLifecycle {
 
 impl DaemonShutdownAttempt {
     #[hotpath::measure(label = "daemon.engine.shutdown.wait_receipt", future = true)]
-    pub(super) async fn wait_for_receipt(
+    pub async fn wait_for_receipt(
         &self,
     ) -> std::result::Result<Arc<DaemonShutdownReceipt>, String> {
         let mut receipt = self.receipt.subscribe();

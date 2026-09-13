@@ -5,11 +5,11 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use tokio::time::{Duration, timeout};
 
-use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use tracedecay_application::semantic_runtime::{
     SemanticConfigurationPinV1, project_lifecycle_status,
 };
+use tracedecay_daemon_service::shutdown::DaemonActivity;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 

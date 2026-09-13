@@ -50,7 +50,7 @@ fn adoption_family(capability_id: &str) -> Option<&'static str> {
 /// Enumerates the complete composed catalog into per-family eligibility
 /// observations. Only families with a non-zero eligible population appear.
 #[hotpath::measure(label = "daemon.adoption.census")]
-pub(in crate::daemon) fn adoption_eligibility_census()
+pub fn adoption_eligibility_census()
 -> Result<Vec<AdoptionEligibilityObservedV1>, ApplicationContractError> {
     let contributions = application_catalog_contributions()?;
     let default_profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?;
@@ -85,10 +85,7 @@ pub(in crate::daemon) fn adoption_eligibility_census()
 /// project-bound observation authority. Telemetry only: every failure is
 /// logged and discarded so project open never blocks or fails on it.
 #[hotpath::measure(label = "daemon.adoption.record", future = true)]
-pub(in crate::daemon) async fn record_project_open_adoption_census(
-    db: &RegisteredGlobalDb,
-    project_root: &Path,
-) {
+pub async fn record_project_open_adoption_census(db: &RegisteredGlobalDb, project_root: &Path) {
     let observations = match adoption_eligibility_census() {
         Ok(observations) => observations,
         Err(error) => {
@@ -223,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn project_open_census_persists_known_coverage_family_observations() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_project::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let project_id = ProjectId::new("project.adoption.census").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(

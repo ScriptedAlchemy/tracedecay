@@ -3,7 +3,7 @@ use std::path::Path;
 use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_domain::ProjectId;
 
-use crate::daemon::automation_observation::record_run_with_producer;
+use tracedecay_daemon_service::automation_observation::record_run_with_producer;
 
 use super::{DaemonEngine, log_daemon_scheduler_record};
 

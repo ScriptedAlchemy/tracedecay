@@ -207,7 +207,6 @@ use connection_serving::{
     await_project_owner_or_disconnect, serve_routed_rmcp_connection, serve_windows_broker_client,
     serve_windows_broker_client_with_class,
 };
-pub(crate) mod context_scout_lifecycle;
 mod core_admission;
 mod engine;
 #[cfg(unix)]
@@ -216,9 +215,7 @@ use engine::{
     ensure_context_scout_owner_before_advertising,
     ensure_git_index_transactions_for_mutation_owners,
 };
-mod adoption_observation;
-mod automation_observation;
-pub(crate) use automation_observation::{
+pub(crate) use tracedecay_daemon_service::automation_observation::{
     project_run_observation_producer as project_automation_observation_producer,
     record_project_run as record_project_automation_run,
 };
@@ -226,8 +223,6 @@ mod core_client;
 mod core_doctor;
 mod core_handshake;
 mod core_hooks;
-mod core_lifecycle;
-mod core_logging;
 mod core_proxy;
 mod database_owner_registry;
 use database_owner_registry::DatabaseOwnerRegistry;
@@ -235,7 +230,6 @@ pub(crate) mod dashboard_automation;
 #[cfg(feature = "test-transport")]
 #[path = "../tests/common/dashboard_configuration_test_runtime.rs"]
 mod dashboard_configuration_test_runtime;
-pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay_consumer;
 pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
@@ -244,20 +238,21 @@ pub(crate) use dashboard_configuration_test_runtime::{
 };
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) mod retained_test_support;
-mod shutdown_coordination;
-mod shutdown_orchestration;
-mod shutdown_watchdog;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
-pub(crate) use core_lifecycle::*;
-pub use core_logging::*;
 pub use core_proxy::*;
-pub(crate) use shutdown_coordination::ShutdownStatus;
+// Daemon process lifecycle and logging live in `tracedecay-daemon-service`;
+// the root's engine, bootstrap, and connection serving still read them by
+// these names until they move.
+pub(crate) use tracedecay_daemon_service::logging::{recent_watcher_events, unavailable_error};
 #[cfg(feature = "hotpath")]
-pub use shutdown_watchdog::install_hotpath_shutdown_finalizer;
+pub use tracedecay_daemon_service::shutdown::install_hotpath_shutdown_finalizer;
+pub(crate) use tracedecay_daemon_service::shutdown::{
+    DAEMON_CLIENT_DRAIN_DEADLINE, DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle, ShutdownStatus,
+};
 mod github_credential_lifecycle;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;

@@ -18,12 +18,12 @@
 use std::sync::Arc;
 
 use super::DaemonEngine;
-use crate::daemon::shutdown_coordination::{ShutdownOwner, ShutdownStatus};
+use crate::daemon::{project_open_tasks, shutdown_project_servers};
 #[cfg(test)]
-use crate::daemon::shutdown_orchestration::{
+use tracedecay_daemon_service::shutdown::{
     DaemonShutdownPlan, DaemonShutdownReceipt, coordinate_daemon_shutdown,
 };
-use crate::daemon::{project_open_tasks, shutdown_project_servers};
+use tracedecay_daemon_service::shutdown::{ShutdownOwner, ShutdownStatus};
 #[cfg(test)]
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 use tracedecay_runtime_core::logging::log_daemon_event;

@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::DaemonRuntimeConfiguration;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
@@ -35,10 +34,9 @@ use tracedecay_contracts::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
+use tracedecay_project::config::DaemonRuntimeConfiguration;
 
-use tracedecay_daemon_service::{
-    DaemonFeedbackRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
-};
+use crate::{DaemonFeedbackRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar};
 use tracedecay_maintenance::telemetry::GuardedStoreTelemetryPort;
 
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
@@ -158,7 +156,7 @@ fn host_integration_read_from_report(
 /// background reconciliation. Doctor never performs code-index catch-up on its
 /// request path.
 #[hotpath::measure(label = "daemon.doctor.code_index", future = true)]
-pub(in crate::daemon) async fn code_index_read_from_registry(
+pub async fn code_index_read_from_registry(
     registry: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> CodeIndexMountReadV1 {
@@ -201,7 +199,7 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
 /// recorded. An empty set is absent rather than a healthy claim, since a
 /// daemon with no mounted shard has converged nothing.
 #[must_use]
-pub(in crate::daemon) fn pending_schema_migration_read(
+pub fn pending_schema_migration_read(
     unconverged: &[(
         tracedecay_store::StoreShardIdV1,
         tracedecay_store_runtime::RegisteredSchemaConvergenceStatus,
@@ -586,7 +584,7 @@ async fn collect_semantic_vector_retention_finding(
     clippy::too_many_lines,
     reason = "The code-generation census is one blocking plan of superseded, collectable, and stranded bytes joined with the already-proven semantic finding."
 )]
-pub(super) async fn collect_code_generation_retention_findings(
+pub async fn collect_code_generation_retention_findings(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     configuration: Option<
@@ -958,7 +956,7 @@ impl StorageDoctorPort for KernelDoctorSources<'_> {
 /// record, and the report asserts health only when every family was consulted
 /// with complete coverage and every finding is healthy.
 #[hotpath::measure(label = "daemon.doctor.compose", future = true)]
-pub(in crate::daemon) async fn compose_doctor_report(
+pub async fn compose_doctor_report(
     context: &RequestContext,
     inputs: &DoctorKernelInputsV1,
 ) -> Result<DoctorReportV1, ApplicationContractError> {
@@ -988,7 +986,7 @@ pub(in crate::daemon) async fn compose_doctor_report(
     clippy::too_many_lines,
     reason = "The production Doctor report is one composed read of every storage family."
 )]
-pub(in crate::daemon) fn production_doctor_report_reader(
+pub fn production_doctor_report_reader(
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
     layout: tracedecay_runtime_core::storage::StoreLayout,
@@ -1056,7 +1054,10 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     telemetry_ports.push(port);
                 }
             }
-            let pinned = crate::config::runtime_configuration_for_layout(&project_root, &layout);
+            let pinned = tracedecay_project::config::runtime_configuration_for_layout(
+                &project_root,
+                &layout,
+            );
             let graph_authority_current = graph.write_authority().is_ok_and(|authority| {
                 authority
                     .require_active_write_scope("read dashboard Doctor graph authority")
@@ -1104,7 +1105,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             let host_components_root = profile_root.join("host-components");
             // Staleness comparison against the installed plugins' provenance
             // headers requires this binary's exact generator commit.
-            let generator_commit = crate::product_runtime::product_runtime()
+            let generator_commit = tracedecay_project::product_runtime::product_runtime()
                 .map_err(|_| ApplicationContractError::Inconsistent {
                     field: "registered product runtime source provenance",
                 })?
@@ -1282,7 +1283,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     })
 }
 
-pub(crate) fn doctor_report_request_context(
+pub fn doctor_report_request_context(
     scope: tracedecay_contracts::ResolvedScope,
 ) -> Result<RequestContext, ApplicationContractError> {
     let observed_at = now_micros();
