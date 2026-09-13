@@ -99,9 +99,15 @@ fn build_proven_container(
         .verify_existing_generation(&manifest.identity(), &expected, &|| Ok(()))
         .unwrap();
     database.close().unwrap();
+    #[cfg(not(windows))]
     assert!(
         path.with_extension("verified").is_file(),
         "closing a proven container must publish its marker"
+    );
+    #[cfg(windows)]
+    assert!(
+        !path.with_extension("verified").exists(),
+        "Windows must not publish a marker without opened-handle identity"
     );
     expected
 }
@@ -111,6 +117,7 @@ struct Fixture {
     a: PathBuf,
     b: PathBuf,
     /// An empty sibling directory's container path, for moving `A` aside.
+    #[cfg(not(windows))]
     a_aside: PathBuf,
     identity: GraphGenerationManifestIdentity,
     digest_a: GraphRecoveredGenerationDigestV1,
@@ -121,6 +128,7 @@ fn fixture() -> Fixture {
     let temp = TempDir::new().unwrap();
     let a = container_path(&temp, "a");
     let b = container_path(&temp, "b");
+    #[cfg(not(windows))]
     let a_aside = container_path(&temp, "a-aside");
     let manifest_a = manifest("rows-a");
     let manifest_b = manifest("rows-b");
@@ -135,6 +143,7 @@ fn fixture() -> Fixture {
         _temp: temp,
         a,
         b,
+        #[cfg(not(windows))]
         a_aside,
         identity: manifest_a.identity(),
         digest_a,
@@ -211,6 +220,7 @@ fn a_container_replaced_before_the_lazy_first_use_open_is_re_proven() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn a_container_replaced_between_engine_close_and_publish_keeps_a_proofs_off_b() {
     let fixture = fixture();
     // A's own marker resolves A's proof; that proof is what the close is about
@@ -267,6 +277,7 @@ fn a_container_replaced_between_engine_close_and_publish_keeps_a_proofs_off_b() 
 /// marker again after it reopens, instead of paying a full proof for the rest
 /// of the handle's life.
 #[test]
+#[cfg(not(windows))]
 fn a_reopened_engine_re_admits_the_marker_for_its_own_incarnation() {
     let fixture = fixture();
     let database = open_lazy(&fixture.a);
@@ -294,6 +305,7 @@ fn a_reopened_engine_re_admits_the_marker_for_its_own_incarnation() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn an_unchanged_container_still_takes_the_fast_path_on_both_open_sites() {
     let fixture = fixture();
     for database in [open_eager(&fixture.a), open_lazy(&fixture.a)] {

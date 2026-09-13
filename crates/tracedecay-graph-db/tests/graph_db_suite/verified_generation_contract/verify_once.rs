@@ -7,14 +7,17 @@
 //! proportional to the whole generation, and a sealed generation never
 //! changes, so every restart re-derived a digest it had already derived.
 //!
-//! These tests pin the four properties that make skipping it sound:
+//! These tests pin the properties that make skipping it sound where a native
+//! container identity is available, and the Windows fallback where it is not:
 //!
 //! 1. a restart over untouched bytes hits the marker and enumerates nothing;
 //! 2. a byte flipped on disk changes the container's identity, so the marker
 //!    is refused and the full proof runs and fails closed;
 //! 3. a marker forged to name a different digest is never believed, because
 //!    the expected digest comes from the authority and never from the marker;
-//! 4. publishing writes the marker, so the *next* open is the fast one.
+//! 4. publishing writes the marker, so the *next* open is the fast one; and
+//! 5. Windows performs the full proof until the opened handle exposes its
+//!    volume and file ID.
 
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
@@ -93,6 +96,7 @@ fn marker_path(root: &std::path::Path) -> std::path::PathBuf {
 /// The shared `registration` helper carries a 30s deadline, which a
 /// production-width publication legitimately outruns. Only the measurement
 /// harness needs this; every contract test above stays on the default.
+#[cfg(not(windows))]
 fn unhurried_registration(
     binding: tracedecay_store::StoreRuntimeBindingV1,
     root: &std::path::Path,
@@ -106,6 +110,7 @@ fn unhurried_registration(
 /// marker is on disk once the store closes. Nothing is skipped here -- this is
 /// the write that makes the *next* open cheap.
 #[test]
+#[cfg(not(windows))]
 fn publishing_and_closing_writes_the_verified_marker() {
     let published = publish_one("marker:written");
     let marker = marker_path(published.temp.path());
@@ -133,6 +138,7 @@ fn publishing_and_closing_writes_the_verified_marker() {
 /// re-checks the container header the engine loaded instead of re-hashing a
 /// generation.
 #[test]
+#[cfg(not(windows))]
 fn a_restart_over_unchanged_bytes_hits_the_marker_and_enumerates_nothing() {
     let mut published = publish_one("marker:hit");
 
@@ -174,7 +180,10 @@ fn a_restart_over_unchanged_bytes_hits_the_marker_and_enumerates_nothing() {
 fn a_byte_flip_under_a_stale_marker_is_still_caught() {
     let mut published = publish_one("marker:flipped");
     let container = support::graph_path(published.temp.path());
+    #[cfg(not(windows))]
     assert!(marker_path(published.temp.path()).is_file());
+    #[cfg(windows)]
+    assert!(!marker_path(published.temp.path()).exists());
 
     // Corrupt the container magic in place, leaving the marker exactly as the
     // clean close wrote it. The physical midpoint is not a valid target: the
@@ -203,19 +212,16 @@ fn a_byte_flip_under_a_stale_marker_is_still_caught() {
     );
 }
 
-/// The identity gate is about the container the engine loads, not the file
-/// the path happens to name.
+/// A byte-identical replacement exercises the native identity policy without
+/// constructing a synthetic identity.
 ///
 /// Republishing the container byte-for-byte through a fresh inode -- a
 /// backup restore, an atomic replace by a copy -- changes every OS-level file
-/// identity and none of the bytes. The engine reads the same header from the
-/// same bytes, so the marker written against them still applies: the proof it
-/// records ran over exactly these rows. What the marker binds to is what the
-/// engine reports about the container it opened; a replacement holding
-/// *different* rows is refused by the same comparison (see
-/// `runtime::marker_binding_tests`).
+/// identity and none of the bytes. Unix retains the engine-header fast path.
+/// Windows has no usable opened-handle identity yet, so it must miss and
+/// stream the complete row proof.
 #[test]
-fn a_byte_identical_container_through_a_fresh_inode_is_the_same_container() {
+fn a_byte_identical_replacement_obeys_the_native_identity_policy() {
     let mut published = publish_one("marker:reinoded");
     let container = support::graph_path(published.temp.path());
     let staged = container.with_extension("grafeo-copy");
@@ -227,14 +233,32 @@ fn a_byte_identical_container_through_a_fresh_inode_is_the_same_container() {
     remount_and_recover(&mut published).unwrap();
 
     let counters = take_graph_db_verification_counters();
-    assert_eq!(
-        counters.full_verifications, 0,
-        "the same bytes must not be re-hashed because their inode changed, saw {counters:?}"
-    );
-    assert!(
-        counters.marker_hits >= 1,
-        "the marker written against these bytes must still resolve them, saw {counters:?}"
-    );
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            counters.full_verifications, 0,
+            "the Unix fast path must not re-hash byte-identical rows, saw {counters:?}"
+        );
+        assert!(
+            counters.marker_hits >= 1,
+            "the marker written against these bytes must still resolve them, saw {counters:?}"
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            counters.marker_hits, 0,
+            "Windows must not consult a marker without opened-handle identity, saw {counters:?}"
+        );
+        assert!(
+            counters.full_verifications >= 1,
+            "Windows must stream the full proof, saw {counters:?}"
+        );
+        assert!(
+            counters.full_verification_bytes > 0,
+            "the fallback must hash canonical rows, saw {counters:?}"
+        );
+    }
 }
 
 /// A marker naming some other digest cannot make that digest acceptable.
@@ -245,6 +269,7 @@ fn a_byte_identical_container_through_a_fresh_inode_is_the_same_container() {
 /// disk are genuinely intact -- recovery still succeeds. The forgery bought
 /// nothing except the work it was trying to skip.
 #[test]
+#[cfg(not(windows))]
 fn a_marker_forged_for_a_different_digest_is_refused_and_the_proof_runs() {
     let mut published = publish_one("marker:forged");
     let marker = marker_path(published.temp.path());
@@ -305,6 +330,7 @@ fn a_marker_forged_for_a_different_digest_is_refused_and_the_proof_runs() {
 /// ```
 #[test]
 #[ignore = "activation measurement harness; run explicitly with TRACEDECAY_VERIFY_ROWS"]
+#[cfg(not(windows))]
 fn activation_verify_cost_probe() {
     use std::sync::Arc;
     use std::time::Instant;
@@ -466,6 +492,7 @@ fn activation_verify_cost_probe() {
 /// An absent marker is a cache miss, not a fault: recovery still works, it
 /// just pays the proof again.
 #[test]
+#[cfg(not(windows))]
 fn a_deleted_marker_costs_a_full_proof_and_nothing_else() {
     let mut published = publish_one("marker:absent");
     fs::remove_file(marker_path(published.temp.path())).unwrap();

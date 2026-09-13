@@ -24,14 +24,16 @@
 //! * for each generation proven against that container, the recovered digest
 //!   that was proven and the number of canonical bytes the proof hashed.
 //!
-//! On a later open the identity is taken from the engine's own handle, the
-//! moment the engine has opened the container, and compared against the
-//! recorded identity. An exact match means the bytes that back the in-RAM
-//! store are the bytes the proof already ran over, so the recorded digest
-//! stands and the enumeration is skipped. Anything else -- a missing marker,
-//! an unparseable one, a self-digest mismatch, an identity mismatch, an
-//! engine that could not report its container, or a generation the marker
-//! does not list -- falls back to the full proof.
+//! On a later supported-platform open the identity is taken from the engine's
+//! own handle, the moment the engine has opened the container, and compared
+//! against the recorded identity. An exact match means the bytes that back the
+//! in-RAM store are the bytes the proof already ran over, so the recorded
+//! digest stands and the enumeration is skipped. Anything else -- a missing
+//! marker, an unparseable one, a self-digest mismatch, an identity mismatch,
+//! an engine that could not report its container, or a generation the marker
+//! does not list -- falls back to the full proof. Windows currently always
+//! takes that fallback because Grafeo does not expose the opened file handle
+//! needed to bind a durable Windows file identity.
 //!
 //! # One owner: the engine
 //!
@@ -168,8 +170,10 @@ impl GenerationVerification {
 /// handle -- it is the identity of the bytes the engine actually consumed,
 /// whatever file the path pointed at a moment earlier or later.
 ///
-/// This is the same on every platform: no device/inode or volume/file-index
-/// is involved, so there is no per-OS identity path to keep honest.
+/// This optimization is disabled on Windows until Grafeo exposes the opened
+/// file handle needed to add the volume and file ID to this header identity.
+/// Length and header fields alone cannot distinguish a byte-identical file
+/// replacement there, so treating them as an identity would be unsafe.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContainerIdentity {
@@ -197,6 +201,7 @@ impl ContainerIdentity {
     /// engine's own handle, or `None` when the engine has no container (an
     /// in-memory store) or cannot report its length. `None` is "no usable
     /// marker", never an error: failing to take a shortcut is not a failure.
+    #[cfg(not(windows))]
     pub(crate) fn from_engine(database: &GrafeoDB) -> Option<Self> {
         let manager = database.file_manager()?;
         let header = manager.active_header();
@@ -213,6 +218,15 @@ impl ContainerIdentity {
             directory_offset: header.directory_offset,
             len: manager.file_size().ok()?,
         })
+    }
+
+    /// Grafeo currently exposes header data and length, but not the opened
+    /// Windows `File` handle required for volume and file-ID identity. A miss
+    /// keeps the optimization fail-closed and sends every recovery through
+    /// the full row proof.
+    #[cfg(windows)]
+    pub(crate) fn from_engine(_database: &GrafeoDB) -> Option<Self> {
+        None
     }
 }
 
@@ -528,7 +542,7 @@ impl GenerationMarkers {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn bound_identity(&self) -> Option<ContainerIdentity> {
         self.engine
             .lock()
