@@ -1210,18 +1210,12 @@ impl CodeIndexPublishedGenerationV1 {
     /// Use this wherever bytes were genuinely re-read (sealed-generation
     /// restore) so the memoized fast path can never mask a real re-read.
     pub(crate) fn validate_fresh(&self) -> Result<(), CodeIndexProductionErrorV1> {
-        self.validate_uncached(true)?;
+        self.validate_uncached()?;
         let _ = self.validated.set(());
         Ok(())
     }
 
-    fn validate_assembled(&self) -> Result<(), CodeIndexProductionErrorV1> {
-        self.validate_uncached(false)?;
-        let _ = self.validated.set(());
-        Ok(())
-    }
-
-    fn validate_uncached(&self, rederive_edges: bool) -> Result<(), CodeIndexProductionErrorV1> {
+    fn validate_uncached(&self) -> Result<(), CodeIndexProductionErrorV1> {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1365,11 +1359,12 @@ impl CodeIndexPublishedGenerationV1 {
                     "published generation does not match file artifacts".to_owned(),
                 ));
             }
-            // Restored bytes must re-prove their derived graph. A fresh
-            // candidate owns the exact edge vector just derived from these
-            // same immutable files in `build_and_publish`, so repeating the
-            // 1.7M-reference resolution here proves no additional boundary.
-            let edges_match = !rederive_edges || collect_edge_evidence(&files)?.0 == self.edges;
+            // Edges are never persisted: every generation, restored or freshly
+            // built, owns the vector `collect_edge_evidence` just derived from
+            // these same immutable files. Re-deriving it here would compare a
+            // deterministic function against itself at the price of a second
+            // 1.7M-reference resolution, so the persisted per-file abstentions
+            // are what this check can actually falsify.
             let mut edge_abstentions = files
                 .iter()
                 .flat_map(|file| file.artifacts.edge_abstentions.iter())
@@ -1380,7 +1375,7 @@ impl CodeIndexPublishedGenerationV1 {
                     .iter()
                     .zip(&self.edge_abstentions)
                     .all(|(left, right)| *left == right);
-            if !edges_match || !abstentions_match {
+            if !abstentions_match {
                 return Err(CodeIndexProductionErrorV1::Contract(
                     "published graph evidence does not match file artifacts".to_owned(),
                 ));
@@ -1823,7 +1818,7 @@ where
             };
             hotpath::measure_block!(
                 "code_index.build.assemble.validate",
-                candidate.validate_assembled()
+                candidate.validate_fresh()
             )?;
             Ok::<_, CodeIndexProductionErrorV1>(candidate)
         })?;
