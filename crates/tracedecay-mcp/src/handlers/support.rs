@@ -73,6 +73,11 @@ pub fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value
     value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
 }
 
+/// A compact JSON payload rendered as the tool's text content.
+pub fn json_result(value: &Value) -> ToolResult {
+    text_tool_result(&value.to_string(), Vec::new())
+}
+
 pub fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),

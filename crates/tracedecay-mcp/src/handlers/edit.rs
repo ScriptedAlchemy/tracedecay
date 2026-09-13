@@ -13,12 +13,12 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::handlers::{generic_tool_result, rendered_tool_result};
-use tracedecay_mcp::tools::render;
+use crate::ToolResult;
+use crate::handlers::{generic_tool_result, rendered_tool_result};
+use crate::tools::render;
 
 fn missing_required_param(name: &str) -> TraceDecayError {
     TraceDecayError::Config {
@@ -45,7 +45,7 @@ fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
 /// MCP response rendering and is therefore removed before application input
 /// validation; every operation field remains subject to the DTO's strict
 /// shape.
-pub(super) fn deserialize_source_edit_surface<T>(args: &Value) -> Result<T>
+pub fn deserialize_source_edit_surface<T>(args: &Value) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -143,15 +143,15 @@ async fn source_edit_tool_result(
 }
 
 #[derive(Clone)]
-pub(super) struct SourceEditInvocationContext<'a> {
-    pub(super) executor: Option<&'a dyn DaemonInvocationExecutor>,
-    pub(super) request_id: Option<RequestId>,
-    pub(super) deadline: Option<Deadline>,
-    pub(super) cancellation: Option<CancellationSignal>,
+pub struct SourceEditInvocationContext<'a> {
+    pub executor: Option<&'a dyn DaemonInvocationExecutor>,
+    pub request_id: Option<RequestId>,
+    pub deadline: Option<Deadline>,
+    pub cancellation: Option<CancellationSignal>,
 }
 
 #[hotpath::measure(label = "mcp.edit.rollback.total")]
-pub(super) async fn handle_source_edit_rollback(
+pub async fn handle_source_edit_rollback(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -224,7 +224,7 @@ pub(super) async fn handle_source_edit_rollback(
 }
 
 #[hotpath::measure(label = "mcp.edit.reconcile.total")]
-pub(super) async fn handle_source_edit_reconcile(
+pub async fn handle_source_edit_reconcile(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -391,7 +391,7 @@ fn optional_expected_state(args: &Value) -> Result<Option<ManifestDigest>> {
         .transpose()
 }
 
-pub(super) async fn handle_str_replace(
+pub async fn handle_str_replace(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -417,7 +417,7 @@ pub(super) async fn handle_str_replace(
     .await
 }
 
-pub(super) async fn handle_multi_str_replace(
+pub async fn handle_multi_str_replace(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -460,7 +460,7 @@ pub(super) async fn handle_multi_str_replace(
     .await
 }
 
-pub(super) async fn handle_insert_at(
+pub async fn handle_insert_at(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -489,7 +489,7 @@ pub(super) async fn handle_insert_at(
     .await
 }
 
-pub(super) async fn handle_replace_symbol(
+pub async fn handle_replace_symbol(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -513,7 +513,7 @@ pub(super) async fn handle_replace_symbol(
     .await
 }
 
-pub(super) async fn handle_insert_at_symbol(
+pub async fn handle_insert_at_symbol(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -542,7 +542,7 @@ pub(super) async fn handle_insert_at_symbol(
     .await
 }
 
-pub(super) async fn handle_move_symbol(
+pub async fn handle_move_symbol(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -570,7 +570,7 @@ pub(super) async fn handle_move_symbol(
     .await
 }
 
-pub(super) async fn handle_rename_symbol(
+pub async fn handle_rename_symbol(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -640,7 +640,7 @@ fn move_result_md(result: &tracedecay_contracts::source_edit::MoveResult) -> Str
     out
 }
 
-pub(super) async fn handle_ast_grep_rewrite(
+pub async fn handle_ast_grep_rewrite(
     cg: &TraceDecay,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
@@ -676,7 +676,6 @@ mod tests {
     use tracedecay_store::ProjectId;
 
     use super::*;
-    use crate::project::TraceDecayOpenOptions;
     use tracedecay_contracts::source_edit::EditResult;
     use tracedecay_contracts::source_edit::{
         SourceEditSurfaceOutcomeV1, SourceEditSurfaceResultV1,
@@ -690,6 +689,7 @@ mod tests {
         DaemonInvocationError, DaemonInvocationExecutorFuture, DaemonInvocationPayload,
         DaemonInvocationProblem, DaemonInvocationResponse,
     };
+    use tracedecay_project::project::TraceDecayOpenOptions;
 
     const EXPECTED_STATE: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

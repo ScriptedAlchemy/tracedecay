@@ -460,12 +460,14 @@ async fn projectless_admin_cli_response(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-    match boxed_projectless_phase(crate::mcp::tools::handle_projectless_admin_cli(
-        arguments,
-        &global_db,
-        tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
-        &connection.client_identity.profile_root,
-    ))
+    match boxed_projectless_phase(
+        tracedecay_mcp::handlers::admin_cli::handle_projectless_admin_cli(
+            arguments,
+            &global_db,
+            tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
+            &connection.client_identity.profile_root,
+        ),
+    )
     .await
     {
         Ok(result) => JsonRpcResponse::success(id, result.value),

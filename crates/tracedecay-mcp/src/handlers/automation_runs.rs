@@ -5,17 +5,17 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, find_run_record, load_run_records_page,
 };
 
-use crate::project::TraceDecay;
+use crate::ToolResult;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_mcp::ToolResult;
+use tracedecay_project::project::TraceDecay;
 
-use tracedecay_mcp::handlers::tool_json_with_md;
-use tracedecay_mcp::tools::renderers;
+use crate::handlers::tool_json_with_md;
+use crate::tools::renderers;
 
 const DEFAULT_RUN_LIMIT: usize = 50;
 const MAX_RUN_LIMIT: usize = 200;
 
-fn ledger_unavailable(operation: &str, error: TraceDecayError) -> TraceDecayError {
+fn ledger_unavailable(operation: &str, error: &TraceDecayError) -> TraceDecayError {
     TraceDecayError::project_route(
         "automation_run_ledger_unavailable",
         true,
@@ -69,14 +69,14 @@ fn run_summary(record: &AutomationRunLedgerRecord) -> Value {
 }
 
 #[hotpath::measure(label = "mcp.automation.run_list.total")]
-pub(super) async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let limit = parse_limit(&args);
     let page = hotpath::future!(
         load_run_records_page(&cg.store_layout().dashboard_root, limit),
         label = "mcp.automation.run_list.load"
     )
     .await
-    .map_err(|error| ledger_unavailable("list", error))?;
+    .map_err(|error| ledger_unavailable("list", &error))?;
     let completeness = if page.is_complete() {
         "known"
     } else {
@@ -102,14 +102,14 @@ pub(super) async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResu
 }
 
 #[hotpath::measure(label = "mcp.automation.run_view.total")]
-pub(super) async fn handle_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub async fn handle_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let run_id = required_run_id(&args)?;
     let record = hotpath::future!(
         find_run_record(&cg.store_layout().dashboard_root, run_id),
         label = "mcp.automation.run_view.load"
     )
     .await
-    .map_err(|error| ledger_unavailable("view", error))?
+    .map_err(|error| ledger_unavailable("view", &error))?
     .ok_or_else(|| run_not_found(run_id))?;
     let payload = json!({
         "status": "ok",

@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_automation_runtime::ports::session_store::AutomationSessionStore;
 
-use crate::project::TraceDecay;
+use crate::ToolResult;
 use tracedecay_automation_runtime::automation::hermes_skill_bridge::{
     HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
 };
@@ -24,10 +24,10 @@ use tracedecay_automation_runtime::automation::skill_usage::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_mcp::ToolResult;
+use tracedecay_project::project::TraceDecay;
 
-use tracedecay_mcp::handlers::{tool_json, tool_json_with_md};
-use tracedecay_mcp::tools::renderers;
+use crate::handlers::{tool_json, tool_json_with_md};
+use crate::tools::renderers;
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
 const STALE_SKILL_AFTER_SECS: i64 = 60 * 60 * 24 * 90;
@@ -90,7 +90,7 @@ fn json_by_skill<T: Serialize>(
 }
 
 #[hotpath::measure(label = "mcp.automation.skill_list.total")]
-pub(super) async fn handle_skill_list(
+pub async fn handle_skill_list(
     cg: &TraceDecay,
     args: Value,
     analytics_db: Option<&RegisteredGlobalDb>,
@@ -110,7 +110,7 @@ pub(super) async fn handle_skill_list(
     let usage_summaries = summarize_skill_usage(&profile_root, &skills).await?;
     let recommendations = stale_skill_recommendations(
         &usage_summaries,
-        crate::project::current_timestamp(),
+        tracedecay_project::project::current_timestamp(),
         STALE_SKILL_AFTER_SECS,
     );
     let improvement_recommendations = skill_improvement_recommendations(&usage_summaries);
@@ -156,7 +156,7 @@ pub(super) async fn handle_skill_list(
 }
 
 #[hotpath::measure(label = "mcp.automation.skill_view.total")]
-pub(super) async fn handle_skill_view(
+pub async fn handle_skill_view(
     cg: &TraceDecay,
     args: Value,
     analytics_db: Option<&RegisteredGlobalDb>,
@@ -203,7 +203,7 @@ pub(super) async fn handle_skill_view(
     let usage_summary = summarize_skill_usage_for(&profile_root, &skill).await?;
     let stale_recommendation = stale_skill_recommendations(
         std::slice::from_ref(&usage_summary),
-        crate::project::current_timestamp(),
+        tracedecay_project::project::current_timestamp(),
         STALE_SKILL_AFTER_SECS,
     )
     .into_iter()
@@ -233,7 +233,7 @@ pub(super) async fn handle_skill_view(
 }
 
 #[hotpath::measure(label = "mcp.automation.artifact_view.total")]
-pub(super) async fn handle_automation_run_artifact_view(
+pub async fn handle_automation_run_artifact_view(
     cg: &TraceDecay,
     args: Value,
 ) -> Result<ToolResult> {
@@ -290,7 +290,7 @@ async fn sync_project_skill_analytics(
 }
 
 #[hotpath::measure(label = "mcp.automation.hermes_bridge.total")]
-pub(super) fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+pub fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let snapshot = load_standard_hermes_skill_bridge(HermesSkillBridgeOptions {
         include_skill_bodies: optional_bool(args, "include_skill_bodies", false),
         include_pending_payloads: optional_bool(args, "include_pending_payloads", false),

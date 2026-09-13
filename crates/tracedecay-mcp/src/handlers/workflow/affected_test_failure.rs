@@ -11,7 +11,7 @@ use super::{
     TestTarget, emit_observed_test_results, finish_test_run, managed_test_terminal,
     parse_libtest_output, run_affected_tests_body,
 };
-use tracedecay_mcp::{TestRunFailure, TestRunOutput, ToolResult};
+use crate::{TestRunFailure, TestRunOutput, ToolResult};
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
 #[allow(
@@ -139,7 +139,7 @@ pub(super) async fn terminal_failure(
             test_names,
             truncated,
             selected_targets,
-            managed_test_terminal(emitter, &receipt),
+            &managed_test_terminal(emitter, &receipt),
         );
         body["error"] = json!({
             "kind": kind,
@@ -148,7 +148,7 @@ pub(super) async fn terminal_failure(
         });
         body
     });
-    Ok(tracedecay_mcp::handlers::generic_tool_result(
+    Ok(crate::handlers::generic_tool_result(
         None,
         args,
         &body,
