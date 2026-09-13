@@ -733,6 +733,21 @@ impl ConfigurationRuntimeRefreshPort for ProjectOpenFeedbackConfigurationRefresh
     }
 }
 
+/// The Scout producer tail is detached background work. Every refusal in it
+/// ends the cycle with no claim authority mounted, so the host never receives a
+/// Scout address and nothing in the request path reports why. Name each typed
+/// outcome on the operator event stream, the same way the deferred advisory
+/// mount names its own attempts.
+fn log_scout_producer_outcome(project_root: &Path, outcome: &str) {
+    tracedecay_runtime_core::logging::log_daemon_event(
+        "context_scout_producer_work",
+        &[
+            ("project", project_root.display().to_string()),
+            ("outcome", outcome.to_owned()),
+        ],
+    );
+}
+
 /// One admitted hook boundary's advisory-and-Scout cycle: the one-shot
 /// advisory/hook-notice run, then the Scout producer tail —
 /// canonical input assembly from the latest committed publication, daemon-side
@@ -763,6 +778,7 @@ async fn run_production_hook_cycle(
             &request,
             FeedbackOutcomeV1::Unavailable,
         );
+        log_scout_producer_outcome(&producer.project_root, "indexed_files_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
@@ -771,6 +787,7 @@ async fn run_production_hook_cycle(
         &request,
         observations,
     ) else {
+        log_scout_producer_outcome(&producer.project_root, "document_uri_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let diagnostic_trigger = match request.trigger {
@@ -798,6 +815,7 @@ async fn run_production_hook_cycle(
                 &request,
                 FeedbackOutcomeV1::Unavailable,
             );
+            log_scout_producer_outcome(&producer.project_root, "feedback_cycle_failed");
             return HookOrchestrationWorkOutcomeV1::RetryableFailure;
         }
     };
@@ -814,6 +832,7 @@ async fn run_production_hook_cycle(
             .publication()
             .map(|publication| publication.authority.revalidated_at),
     ) else {
+        log_scout_producer_outcome(&producer.project_root, "observation_time_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     // The Scout tail re-pins the current configuration: a revision that
@@ -826,6 +845,7 @@ async fn run_production_hook_cycle(
         .current()
         .await
     else {
+        log_scout_producer_outcome(&producer.project_root, "configuration_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let current_configuration = ConfigurationCurrentStateV1 {
@@ -835,9 +855,11 @@ async fn run_production_hook_cycle(
     let Some(scout_configuration) =
         ContextScoutConfigurationPinV1::from_current(&current_configuration)
     else {
+        log_scout_producer_outcome(&producer.project_root, "configuration_pin_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     if scout_configuration.configuration_digest() != &execution.configuration_digest {
+        log_scout_producer_outcome(&producer.project_root, "configuration_superseded");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let Ok(model_config) =
@@ -845,6 +867,7 @@ async fn run_production_hook_cycle(
             pinned_configuration.snapshot(),
         )
     else {
+        log_scout_producer_outcome(&producer.project_root, "model_configuration_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     if install_project_open_context_scout_configuration(
@@ -855,9 +878,11 @@ async fn run_production_hook_cycle(
     .await
     .is_err()
     {
+        log_scout_producer_outcome(&producer.project_root, "configuration_install_failed");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let Some(lifecycle) = request.lifecycle else {
+        log_scout_producer_outcome(&producer.project_root, "lifecycle_absent");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let Some(pin) = ContextScoutAuthorityPinV1::new(
@@ -866,6 +891,7 @@ async fn run_production_hook_cycle(
         scout_configuration,
         observed_at,
     ) else {
+        log_scout_producer_outcome(&producer.project_root, "authority_pin_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let feedback_runtime = execution.feedback_cycle.feedback_runtime();
@@ -883,6 +909,7 @@ async fn run_production_hook_cycle(
         )
         .await
     else {
+        log_scout_producer_outcome(&producer.project_root, "canonical_input_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let trigger = match request.trigger {
@@ -929,6 +956,27 @@ async fn run_production_hook_cycle(
                 .collect(),
         },
     ) else {
+        // An empty selection is the one refusal with two distinct causes: no
+        // authorized committed publication matched this pin, or the publication
+        // carried no Scout-projectable finding. Carry both counts so the
+        // operator does not have to guess which.
+        tracedecay_runtime_core::logging::log_daemon_event(
+            "context_scout_producer_work",
+            &[
+                ("project", producer.project_root.display().to_string()),
+                ("outcome", "no_selection_candidates".to_owned()),
+                (
+                    "findings",
+                    canonical
+                        .latest_publication
+                        .as_ref()
+                        .map_or_else(|| "unmatched".to_owned(), |publication| {
+                            publication.result.findings.len().to_string()
+                        }),
+                ),
+                ("candidates", canonical.candidates.len().to_string()),
+            ],
+        );
         return HookOrchestrationWorkOutcomeV1::Completed;
     };
     let outcome = producer
@@ -955,15 +1003,19 @@ async fn run_production_hook_cycle(
                 )
                 .await;
             if mounted {
+                log_scout_producer_outcome(&producer.project_root, "mounted");
                 HookOrchestrationWorkOutcomeV1::Completed
             } else {
+                log_scout_producer_outcome(&producer.project_root, "claim_mount_refused");
                 HookOrchestrationWorkOutcomeV1::RetryableFailure
             }
         }
         Ok(ContextScoutRuntimeOutcomeV1::Suppressed { .. }) => {
+            log_scout_producer_outcome(&producer.project_root, "suppressed");
             HookOrchestrationWorkOutcomeV1::Completed
         }
         Ok(ContextScoutRuntimeOutcomeV1::Unavailable) | Err(_) => {
+            log_scout_producer_outcome(&producer.project_root, "runtime_unavailable");
             HookOrchestrationWorkOutcomeV1::RetryableFailure
         }
     }

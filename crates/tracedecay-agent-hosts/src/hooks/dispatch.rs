@@ -88,13 +88,16 @@ pub fn project_id_for_layout(
         .map(|project_id| envelope_identity_hash16("project", project_id))
 }
 
-pub fn worktree_id_for_layout(
+/// Resolves the repository/worktree scope behind a store layout. Linked
+/// worktrees share their project's `data_root`, so this is what separates one
+/// worktree's hook publication and admission authority from its siblings'.
+fn resolve_hook_scope(
     runtime: &HookRuntimeV1,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
-) -> tracedecay_domain::errors::Result<[u8; 16]> {
+) -> tracedecay_domain::errors::Result<ResolvedScope> {
     let project_key = layout.identity.project_id.as_deref().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
-            message: "cannot resolve Hook worktree without typed project identity".to_owned(),
+            message: "cannot resolve Hook scope without typed project identity".to_owned(),
         }
     })?;
     let project_id = ProjectId::new(project_key.to_owned()).map_err(|error| {
@@ -102,15 +105,23 @@ pub fn worktree_id_for_layout(
             message: format!("cannot validate Hook project identity: {error}"),
         }
     })?;
-    let scope = (runtime.scope_resolver)(&layout.project_root, &project_id).map_err(|error| {
+    (runtime.scope_resolver)(&layout.project_root, &project_id).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("cannot resolve Hook repository/worktree scope: {error}"),
         }
-    })?;
-    Ok(envelope_identity_hash16(
-        "worktree",
-        scope.worktree_id.as_str(),
-    ))
+    })
+}
+
+/// The worktree locator that keys this layout's hook configuration publication.
+/// It is the same value [`project_and_worktree_locators_for_scope`] registers
+/// the Context Scout lifecycle authority under, so a hook that reads this path
+/// resolves the authority its own worktree registered.
+pub fn worktree_id_for_layout(
+    runtime: &HookRuntimeV1,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
+) -> tracedecay_domain::errors::Result<[u8; 16]> {
+    let scope = resolve_hook_scope(runtime, layout)?;
+    Ok(project_and_worktree_locators_for_scope(&scope).1)
 }
 
 pub fn publish_daemon_bindings(
@@ -122,17 +133,7 @@ pub fn publish_daemon_bindings(
             message: "cannot publish Hook binding without typed project identity".to_owned(),
         }
     })?;
-    let typed_project_id = ProjectId::new(project_key.to_owned()).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("cannot validate Hook project identity: {error}"),
-        }
-    })?;
-    let scope =
-        (runtime.scope_resolver)(&layout.project_root, &typed_project_id).map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("cannot resolve Hook repository/worktree scope: {error}"),
-            }
-        })?;
+    let scope = resolve_hook_scope(runtime, layout)?;
     let now = now_utc();
     let revision = now.0.max(1) as u64;
     let (project_id, repository_id, worktree_id, worktree_epoch) =
@@ -213,10 +214,11 @@ fn binding_identity_from_scope(
     scope: &ResolvedScope,
     binding_revision: u64,
 ) -> ([u8; 16], [u8; 16], [u8; 16], u64) {
+    let (project_id, worktree_id) = project_and_worktree_locators_for_scope(scope);
     (
-        envelope_identity_hash16("project", scope.project_id.as_str()),
+        project_id,
         envelope_identity_hash16("repository", scope.repository_id.as_str()),
-        envelope_identity_hash16("worktree", scope.worktree_id.as_str()),
+        worktree_id,
         binding_revision.max(1),
     )
 }
