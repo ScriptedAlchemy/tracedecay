@@ -5,8 +5,8 @@ use tracedecay_domain::{MessageOccurrenceIdV1, SessionId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
-    ExecutionControl, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
-    TemporalRetrievalScope,
+    ExecutionControl, PageRequest, ReadBudgetAccounting, TemporalExecutionSnapshot,
+    TemporalPortError, TemporalRetrievalScope,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 
@@ -98,7 +98,8 @@ pub(in crate::retrieval) fn load_record_relations(
     let relation_limit = request.page_item_limit().saturating_add(1);
     if relation_limit == 0 {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "record relations", accounting: None,
+            resource: RELATION_RESOURCE,
+            accounting: None,
         });
     }
     let cancellation: Arc<dyn GraphCancellation> =
@@ -218,9 +219,7 @@ pub(in crate::retrieval) fn load_record_relations(
             .map_err(|error| read_error(RECORD_OPERATION, error))?;
         let remaining = relation_limit.saturating_sub(copies.len());
         if remaining == 0 {
-            return Err(TemporalPortError::BudgetExceeded {
-                resource: "record relations", accounting: None,
-            });
+            return Err(relations_exhausted(relation_limit));
         }
         let batches = store
             .logical_copies(
@@ -238,9 +237,7 @@ pub(in crate::retrieval) fn load_record_relations(
             .ok_or_else(|| read_message(RECORD_OPERATION, "logical-copy batch is missing"))?;
         for relation in relations {
             if copies.len() == relation_limit {
-                return Err(TemporalPortError::BudgetExceeded {
-                    resource: "record relations", accounting: None,
-                });
+                return Err(relations_exhausted(relation_limit));
             }
             let proof_json = serde_json::to_string(&relation.proof)
                 .map_err(|error| read_error(RECORD_OPERATION, error))?;
@@ -377,6 +374,19 @@ fn candidate_generation(
     Ok(candidate.participant_generation)
 }
 
+const RELATION_RESOURCE: &str = "record relations";
+
+/// The relation budget spent its whole ceiling with more relations to read.
+fn relations_exhausted(limit: usize) -> TemporalPortError {
+    TemporalPortError::BudgetExceeded {
+        resource: RELATION_RESOURCE,
+        accounting: Some(ReadBudgetAccounting::consumed_with_more(
+            limit as u64,
+            limit as u64,
+        )),
+    }
+}
+
 fn map_relation_error(
     error: SessionRelationError,
     control: &ExecutionControl,
@@ -386,7 +396,8 @@ fn map_relation_error(
     }
     match error {
         SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
-            resource: "record relations", accounting: None,
+            resource: RELATION_RESOURCE,
+            accounting: None,
         },
         SessionRelationError::Cancelled => TemporalPortError::Cancelled,
         SessionRelationError::DeadlineExceeded => TemporalPortError::DeadlineExceeded,
