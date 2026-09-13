@@ -589,7 +589,8 @@ mod tests {
             .expect("write decoy generation");
         }
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry =
+            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
@@ -895,7 +896,8 @@ mod tests {
         )
         .expect("dirty worktree source");
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry =
+            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
@@ -1019,7 +1021,8 @@ mod tests {
         drop(dirty);
         drop(scheduler);
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry =
+            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
@@ -1048,28 +1051,19 @@ mod tests {
             deadline: None,
             cancellation: None,
         };
-        let pair = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                match registry
-                    .generations_for_revisions(
-                        &scope,
-                        &reference,
-                        &revision,
-                        &tree,
-                        &reference,
-                        &revision,
-                        &tree,
-                        control.clone(),
-                    )
-                    .await
-                {
-                    Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable) => {
-                        tokio::task::yield_now().await;
-                    }
-                    result => break result,
-                }
-            }
-        })
+        let pair = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            registry.generations_for_revisions(
+                &scope,
+                &reference,
+                &revision,
+                &tree,
+                &reference,
+                &revision,
+                &tree,
+                control.clone(),
+            ),
+        )
         .await
         .expect("bounded exact-generation read")
         .expect("exact generation minted from the commit tree");
@@ -1154,31 +1148,19 @@ mod tests {
         control: &BranchGenerationReadControlV1,
         timeout: std::time::Duration,
     ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
-        tokio::time::timeout(timeout, async {
-            loop {
-                match registry
-                    .generations_for_revisions(
-                        scope,
-                        base.0,
-                        base.1,
-                        base.2,
-                        head.0,
-                        head.1,
-                        head.2,
-                        control.clone(),
-                    )
-                    .await
-                {
-                    // Only scheduler-lock contention may be retried here: a
-                    // capacity answer that outlives the deadline is exactly the
-                    // spin these tests exist to rule out.
-                    Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable) => {
-                        tokio::task::yield_now().await;
-                    }
-                    result => break result,
-                }
-            }
-        })
+        tokio::time::timeout(
+            timeout,
+            registry.generations_for_revisions(
+                scope,
+                base.0,
+                base.1,
+                base.2,
+                head.0,
+                head.1,
+                head.2,
+                control.clone(),
+            ),
+        )
         .await
         .expect("bounded exact-generation read")
     }
@@ -1227,7 +1209,8 @@ mod tests {
             .clone();
         drop(scheduler);
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry =
+            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
@@ -1347,7 +1330,8 @@ mod tests {
         git(project.path(), &["branch", "-q", "-D", "main"]);
         latch_generation_index_truncation(&scoped_store);
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry =
+            CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
