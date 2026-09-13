@@ -159,8 +159,23 @@ pub(super) fn prepare_execution_snapshot(
             tracedecay_contracts::WorkProductApplicationErrorV1::InvalidRequest,
         ));
     };
-    if snapshot.verified_version() != verified_version
-        || snapshot.graph().version() != request.based_on_version
+    // Committing an admission advances the head past the version that very
+    // command pinned, so the head a byte-identical resubmission names is no
+    // longer current. Refusing it outright would answer the resubmission
+    // `stale` and strand a caller that lost the first response, so the task's
+    // own recorded admission instant admits the state that resubmission
+    // observes. Freshness stays fenced either way: the submit this snapshot
+    // feeds compare-and-swaps the verified version and re-derives
+    // `based_on_version`, so a genuinely stale request is refused there and
+    // this snapshot never reaches its caller.
+    let replays_committed_admission = snapshot
+        .graph()
+        .item(&request.task_id)
+        .and_then(tracedecay_domain::WorkItemV1::execution_admitted_at)
+        == Some(request.mutation.occurred_at);
+    if (snapshot.verified_version() != verified_version
+        || snapshot.graph().version() != request.based_on_version)
+        && !replays_committed_admission
     {
         return Err(work_product_problem(
             tracedecay_contracts::WorkProductApplicationErrorV1::VersionConflict,

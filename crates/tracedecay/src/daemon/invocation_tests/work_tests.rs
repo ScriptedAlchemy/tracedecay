@@ -412,7 +412,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     );
     let admitted = invoke!(
         "request.work.admit",
-        WorkApplicationInvocationV1::AdmitExecution(admission)
+        WorkApplicationInvocationV1::AdmitExecution(admission.clone())
     );
     let DaemonInvocationOutcome::WorkApplication {
         outcome: WorkApplicationOutcomeV1::AdmitExecution(ApplicationOutcome::Effect(effect)),
@@ -423,6 +423,34 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     };
     let admitted = effect.payload.expect("execution admission receipt");
     assert!(!admitted.mutation.replayed());
+
+    // Committing the admission advances the Work head past the version the
+    // admission command itself pinned. A byte-identical resubmission is the
+    // same command, so it owes the retained receipt and the same licensed
+    // execution snapshot; answering `stale` there would make the admission
+    // non-idempotent and strand a caller that lost the first response.
+    let replayed_admission = invoke!(
+        "request.work.admit-replay",
+        WorkApplicationInvocationV1::AdmitExecution(admission)
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::AdmitExecution(ApplicationOutcome::Effect(effect)),
+        ..
+    } = replayed_admission
+    else {
+        panic!(
+            "replayed execution admission must return a product mutation effect: \
+             {replayed_admission:?}"
+        );
+    };
+    let replayed_admission = effect.payload.expect("replayed execution admission receipt");
+    assert!(replayed_admission.mutation.replayed());
+    assert_eq!(replayed_admission.mutation.event(), admitted.mutation.event());
+    assert_eq!(
+        replayed_admission.execution_snapshot,
+        admitted.execution_snapshot,
+        "the replayed admission must license the identical execution snapshot"
+    );
 
     let prepared_task_acceptance = invoke!(
         "request.work.prepare-accept-task",
