@@ -421,6 +421,7 @@ def _prepare_workflow_effect_journey(
         suffix = str(time.monotonic_ns())
         actor = fixture["workflow_actor"]
         admitted_scope = fixture["workflow_scope"]
+        task_id = f"task.tool-sweep.workflow.{suffix}"
         scope = {
             "project_id": admitted_scope["project_id"],
             "repository_id": admitted_scope["repository_id"],
@@ -428,16 +429,16 @@ def _prepare_workflow_effect_journey(
             "definition_id": definition_id,
             "definition_version": 1,
             "step_id": fixture["workflow_definition_v1"]["steps"][0]["step_id"],
-            "task_id": fixture["work_task_id"],
+            "task_id": task_id,
             "thread_id": f"thread.tool-sweep.{suffix}",
             "run_id": fixture["workflow_run_id"],
             "from_actor_id": actor,
             "to_actor_id": actor,
         }
         frontier = {
-            "task_id": fixture["work_task_id"],
-            "work_version": fixture["work_admitted_version"]["graph_version"],
-            "attempts": [fixture["work_attempt_frontier"]],
+            "task_id": task_id,
+            "work_version": 1,
+            "attempts": [],
             "unknowns": [],
             "blockers": [],
             "legal_actions": ["Inspect the redeemed disposable frontier."],
@@ -555,16 +556,18 @@ def _prepare_workflow_effect_journey(
         deadline("tracedecay_workflow_activate_definition"),
     )
     active = _workflow_disposition(activated, effect_definition_id, "active")
-    execution_snapshot = fixture["work_execution_snapshot"]
     run_id = f"workflow-run.tool-sweep.effect.{suffix}"
     start = {
         "run_id": run_id,
         "definition_id": effect_definition_id,
         "definition_version": 1,
         "provider": {
-            "route": execution_snapshot["route"],
-            "backend": execution_snapshot["backend"],
-            "model": execution_snapshot["model"],
+            "route": {
+                "provider_id": "provider.work.codex-cli",
+                "route_id": "route.tool-sweep.workflow",
+            },
+            "backend": "codex_cli",
+            "model": "tool-sweep",
             "priority": 1,
         },
         "fan_out": None,
@@ -800,23 +803,21 @@ def prime_workflow_lifecycle(
     active = _workflow_disposition(activated, definition_id, "active")
     workflow_actor, workflow_scope = _workflow_effect_authority(activated)
 
-    execution_snapshot = fixture["work_execution_snapshot"]
-    route = execution_snapshot.get("route")
-    backend = execution_snapshot.get("backend")
-    model = execution_snapshot.get("model")
-    if not isinstance(route, dict) or not isinstance(backend, str) or not isinstance(model, str):
-        raise JourneyError("Work admission omitted Workflow provider registration fields")
+    provider = {
+        "route": {
+            "provider_id": "provider.work.codex-cli",
+            "route_id": "route.tool-sweep.workflow",
+        },
+        "backend": "codex_cli",
+        "model": "tool-sweep",
+        "priority": 1,
+    }
     run_id = f"workflow-run.tool-sweep.{suffix}"
     start_arguments = {
         "run_id": run_id,
         "definition_id": definition_id,
         "definition_version": 1,
-        "provider": {
-            "route": route,
-            "backend": backend,
-            "model": model,
-            "priority": 1,
-        },
+        "provider": provider,
         "fan_out": None,
         "command_id": f"command.workflow.start.{suffix}",
         "format": "json",
