@@ -178,11 +178,19 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     let target_branches = expand["properties"]["target"]["oneOf"]
         .as_array()
         .expect("closed target branches");
-    assert_eq!(target_branches.len(), 3);
-    assert_eq!(target_branches[0]["required"], json!(["kind", "store_id"]));
-    assert_eq!(target_branches[1]["required"], json!(["kind", "node_id"]));
+    assert_eq!(target_branches.len(), 4);
     assert_eq!(
-        target_branches[2]["required"],
+        target_branches[0]["properties"]["kind"]["const"],
+        "canonical_occurrence"
+    );
+    assert_eq!(
+        target_branches[0]["required"],
+        json!(["kind", "message_id"])
+    );
+    assert_eq!(target_branches[1]["required"], json!(["kind", "store_id"]));
+    assert_eq!(target_branches[2]["required"], json!(["kind", "node_id"]));
+    assert_eq!(
+        target_branches[3]["required"],
         json!(["kind", "payload_ref"])
     );
     expect_missing_argument_error(
