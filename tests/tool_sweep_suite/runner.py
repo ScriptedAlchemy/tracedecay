@@ -1022,7 +1022,7 @@ def _prime_context_scout_diagnostic(
                     {
                         "filePath": str(source),
                         "relativePath": "src/lib.rs",
-                        "type": "modify",
+                        "type": "update",
                         "additions": 1,
                         "deletions": 0,
                     }
