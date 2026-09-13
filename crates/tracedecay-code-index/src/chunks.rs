@@ -10,7 +10,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{Arc, Weak},
+    sync::{Arc, OnceLock},
 };
 
 use rayon::prelude::*;
@@ -128,23 +128,45 @@ pub struct ExactExtractionAuthorityV1 {
     chunk_digests: BTreeMap<CodeSearchChunkId, MintedChunkAuthorityV1>,
 }
 
-/// One minted chunk: its canonical digest and the row allocation the digest
-/// was computed over.
+/// One minted chunk: the row allocation the mint covered, and its canonical
+/// digest once some admission has needed one.
 ///
 /// Every production admission presents the very rows the authority was minted
 /// from (a file's `artifacts.chunks` next to its `exact_authority`), so
 /// re-digesting them proved nothing the mint had not already proved and cost
 /// one canonical serialization plus SHA-256 per chunk per pass. A
-/// `CodeSearchChunkV1` has no interior mutability and a shared `Arc` cannot
-/// be written in place while this weak reference is live (`Arc::get_mut`
-/// refuses, `Arc::make_mut` moves the value to a fresh allocation), so a row
-/// that still upgrades to the minted allocation carries the minted bytes.
-/// Any other row — a fresh allocation, a row minted elsewhere, a forgery —
-/// is digested and compared as before.
+/// `CodeSearchChunkV1` has no interior mutability and a shared `Arc` cannot be
+/// written in place while this reference is live (`Arc::get_mut` refuses,
+/// `Arc::make_mut` moves the value to a fresh allocation), so a row that is
+/// still this allocation carries the minted bytes and allocation identity
+/// alone admits it.
+///
+/// The digest is therefore what a row the authority did *not* mint — a fresh
+/// allocation, a row minted elsewhere, a forgery — is compared against, and
+/// only such a row makes the mint pay for one. Minting it up front cost a
+/// corpus-scale digest sweep per generation for a comparison most rows never
+/// reach. The minted row is held, not weakly referenced, so the digest stays
+/// derivable for as long as the authority itself is: it is one more pointer to
+/// an allocation the authority's own file artifacts already share.
 #[derive(Clone, Debug)]
 struct MintedChunkAuthorityV1 {
-    digest: String,
-    minted_row: Weak<CodeSearchChunkV1>,
+    minted_row: Arc<CodeSearchChunkV1>,
+    digest: OnceLock<String>,
+}
+
+impl MintedChunkAuthorityV1 {
+    /// The minted row's canonical digest, derived on the first admission that
+    /// cannot settle on allocation identity and reused after that.
+    fn digest(&self) -> Result<&str, ChunkingFailureV1> {
+        if let Some(digest) = self.digest.get() {
+            return Ok(digest);
+        }
+        let digest = canonical_digest(
+            EXACT_EXTRACTION_AUTHORITY_SEPARATOR,
+            self.minted_row.as_ref(),
+        )?;
+        Ok(self.digest.get_or_init(|| digest))
+    }
 }
 
 /// One chunk re-admitted through parser-backed extraction authority.
@@ -187,32 +209,6 @@ unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
 /// for the coarser per-file fan-out above this layer.
 const PARALLEL_CHUNK_THRESHOLD: usize = 16;
 
-/// Map `operation` over every chunk, fanning out across the pool once the batch
-/// is large enough. Each parallel unit runs through `admit`, which meters it
-/// against the CPU authority the caller executes under. Results are returned
-/// in chunk order and the reported failure is always the lowest-index one, so
-/// the outcome is identical to the sequential sweep this replaces.
-#[hotpath::measure(label = "code_index.chunk.map_ordered")]
-fn map_chunks_ordered<T, F, A>(
-    admit: A,
-    chunks: &[Arc<CodeSearchChunkV1>],
-    operation: F,
-) -> Result<Vec<T>, ChunkingFailureV1>
-where
-    T: Send,
-    F: Fn(&CodeSearchChunkV1) -> Result<T, ChunkingFailureV1> + Send + Sync,
-    A: Fn(&mut dyn FnMut() -> Result<T, ChunkingFailureV1>) -> Result<T, ChunkingFailureV1> + Sync,
-{
-    if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
-        return chunks.iter().map(|chunk| operation(chunk)).collect();
-    }
-    let results: Vec<Result<T, ChunkingFailureV1>> = chunks
-        .par_iter()
-        .map(|chunk| admit(&mut || operation(chunk)))
-        .collect::<Vec<_>>();
-    results.into_iter().collect()
-}
-
 /// Run `operation` over every chunk for its failure only, fanning out across
 /// the pool once the batch is large enough. The lowest-index failure is
 /// returned, matching the sequential sweep's short-circuit outcome.
@@ -245,30 +241,28 @@ where
 }
 
 impl ExactExtractionAuthorityV1 {
-    fn mint(chunks: &[Arc<CodeSearchChunkV1>]) -> Result<Self, ChunkingFailureV1> {
-        let digests = map_chunks_ordered(
-            |unit| crate::parallelism::with_background_cpu_permit(unit),
-            chunks,
-            |chunk| canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk),
-        )?;
-        let mut chunk_digests = BTreeMap::new();
-        for (chunk, digest) in chunks.iter().zip(digests) {
-            chunk_digests.insert(
-                chunk.id.clone(),
-                MintedChunkAuthorityV1 {
-                    digest,
-                    minted_row: Arc::downgrade(chunk),
-                },
-            );
+    fn mint(chunks: &[Arc<CodeSearchChunkV1>]) -> Self {
+        Self {
+            chunk_digests: chunks
+                .iter()
+                .map(|chunk| {
+                    (
+                        chunk.id.clone(),
+                        MintedChunkAuthorityV1 {
+                            minted_row: Arc::clone(chunk),
+                            digest: OnceLock::new(),
+                        },
+                    )
+                })
+                .collect(),
         }
-        Ok(Self { chunk_digests })
     }
 
     #[cfg(test)]
-    fn digests(&self) -> BTreeMap<CodeSearchChunkId, String> {
+    fn digests(&self) -> Result<BTreeMap<CodeSearchChunkId, String>, ChunkingFailureV1> {
         self.chunk_digests
             .iter()
-            .map(|(id, minted)| (id.clone(), minted.digest.clone()))
+            .map(|(id, minted)| Ok((id.clone(), minted.digest()?.to_owned())))
             .collect()
     }
 
@@ -289,7 +283,7 @@ impl ExactExtractionAuthorityV1 {
     /// ```
     pub(crate) fn restore(chunks: &CodeFileChunksV1) -> Result<Self, ChunkingFailureV1> {
         chunks.validate()?;
-        Self::mint(&chunks.chunks)
+        Ok(Self::mint(&chunks.chunks))
     }
 
     fn validate_chunk(&self, chunk: &Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> {
@@ -302,14 +296,11 @@ impl ExactExtractionAuthorityV1 {
             )
         };
         let minted = self.chunk_digests.get(&chunk.id).ok_or_else(mismatch)?;
-        if minted
-            .minted_row
-            .upgrade()
-            .is_some_and(|minted_row| Arc::ptr_eq(&minted_row, chunk))
-        {
+        if Arc::ptr_eq(&minted.minted_row, chunk) {
             return Ok(());
         }
-        if canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk.as_ref())? != minted.digest
+        if canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk.as_ref())?
+            != minted.digest()?
         {
             return Err(mismatch());
         }
@@ -392,7 +383,7 @@ impl ExactExtractionAuthorityV1 {
             ));
         }
         self.validate_all(&prior.chunks)?;
-        Self::mint(&current.chunks)
+        Ok(Self::mint(&current.chunks))
     }
 }
 
@@ -623,7 +614,7 @@ impl DeterministicCodeChunker {
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<(CodeFileIndexArtifactsV1, ExactExtractionAuthorityV1), ChunkingFailureV1> {
         let result = self.index_file(file, batch, descriptor, cancellation)?;
-        let authority = ExactExtractionAuthorityV1::mint(&result.chunks.chunks)?;
+        let authority = ExactExtractionAuthorityV1::mint(&result.chunks.chunks);
         Ok((result, authority))
     }
 
@@ -650,7 +641,7 @@ impl DeterministicCodeChunker {
         let authority = hotpath::measure_block!(
             "code_index.chunk.mint_authority",
             ExactExtractionAuthorityV1::mint(&result.chunks.chunks)
-        )?;
+        );
         Ok((result, authority))
     }
 
@@ -2832,15 +2823,52 @@ mod tests {
             .expect("digests outlive the minted allocations");
     }
 
-    /// The fanned-out digest sweep must produce byte-identical digests, in the
-    /// same association, as the single-threaded reference it replaced.
+    /// A restored authority admits its own rows on allocation identity alone,
+    /// so a generation's worth of rows must come back without deriving one
+    /// canonical digest.
     #[test]
-    fn parallel_digest_sweep_matches_the_sequential_reference() {
+    fn minting_derives_no_digest_until_an_admission_needs_one() {
+        let chunks = wide_chunks(48);
+        let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
+        authority
+            .validate_all(&chunks.chunks)
+            .expect("the minted rows are admitted");
+        assert!(
+            authority
+                .chunk_digests
+                .values()
+                .all(|minted| minted.digest.get().is_none()),
+            "admitting the minted rows must not derive a digest"
+        );
+
+        let copy = Arc::new((*chunks.chunks[7]).clone());
+        authority
+            .admit(copy)
+            .expect("an equal row in a fresh allocation is admitted by digest");
+        assert_eq!(
+            authority
+                .chunk_digests
+                .values()
+                .filter(|minted| minted.digest.get().is_some())
+                .count(),
+            1,
+            "only the row an admission could not settle by identity is digested"
+        );
+    }
+
+    /// Digests derived on demand must be byte-identical, in the same
+    /// association, to the single-threaded reference sweep.
+    #[test]
+    fn derived_digests_and_admission_match_the_sequential_reference() {
         let chunks = wide_chunks(48);
         let reference = sequential_digest_reference(&chunks.chunks);
 
         let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
-        assert_eq!(authority.digests(), reference);
+        assert_eq!(
+            authority.digests().expect("derived digests"),
+            reference,
+            "a digest derived on demand must equal the one the mint used to compute"
+        );
 
         authority
             .validate_all(&chunks.chunks)
