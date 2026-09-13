@@ -635,6 +635,12 @@ async fn active_project_tool_reports_resolved_store_metadata() {
         payload["project_id"].as_str(),
         cg.store_layout().identity.project_id.as_deref()
     );
+    assert!(
+        payload["repository_id"]
+            .as_str()
+            .is_some_and(|identity| identity.starts_with("repository.daemon.")),
+        "active project must expose its admitted repository identity: {payload}"
+    );
     assert_eq!(
         payload["project_root"].as_str(),
         Some(project_root.as_str())
