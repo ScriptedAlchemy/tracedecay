@@ -7,7 +7,10 @@ mod transition;
 
 #[cfg(test)]
 pub(crate) use apply::apply_provider_usage_effects;
-pub(super) use apply::{derive_projection, derive_projection_with_alias, verify_workflow_effects};
+pub(super) use apply::{
+    converge_released_output_rendering, derive_projection, derive_projection_with_alias,
+    verify_workflow_effects,
+};
 pub use rebuild::{
     converge_projection_predecessor, project_observation, project_queued_observations,
     rebuild_projection,

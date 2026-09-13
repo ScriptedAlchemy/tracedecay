@@ -8,6 +8,7 @@ use tracedecay_runtime_core::db::{
 };
 
 mod audit;
+mod released_rendering;
 mod repair;
 mod rows;
 #[cfg(test)]
@@ -19,6 +20,7 @@ use audit::{
     read_audit_checkpoint, validate_projection_authority_chunk,
     validate_projection_authority_suffix, write_audit_checkpoint,
 };
+use released_rendering::ReleasedRenderingLedger;
 use repair::{
     repair_committed_source_cursors, repair_projection_frontier,
     validate_observation_cursor_coverage,
@@ -449,7 +451,10 @@ async fn converge_authority_invariants(
                 provider,
                 "audit observation projection authority page",
                 async |conn| {
-                    let result = validate_projection_authority_chunk(conn, progress).await?;
+                    let released = ReleasedRenderingLedger::default();
+                    let result =
+                        validate_projection_authority_chunk(conn, progress, &released).await?;
+                    released.converge(conn).await?;
                     write_audit_checkpoint(
                         conn,
                         AuditProgress {
@@ -477,7 +482,13 @@ async fn converge_authority_invariants(
         authority_invariant_step(
             provider,
             "audit observation projection authority suffix",
-            async |conn| validate_projection_authority_suffix(conn, projection_start).await,
+            async |conn| {
+                let released = ReleasedRenderingLedger::default();
+                let audited =
+                    validate_projection_authority_suffix(conn, projection_start, &released).await?;
+                released.converge(conn).await?;
+                Ok(audited)
+            },
         )
         .await?
     };
@@ -706,7 +717,11 @@ pub async fn validate_authority_rows_exhaustive(
     validate_observation_authority_rows(conn, 0).await?;
     validate_source_cursor_authority_rows(conn).await?;
     validate_observation_cursor_coverage(conn, 0).await?;
-    validate_projection_authority_suffix(conn, AuditCheckpoint::default()).await?;
+    // Doctor reads a snapshot, so released renderings are recorded and
+    // dropped here rather than converged: they are admitted persisted state,
+    // and schema convergence owns the transaction that rewrites them.
+    let released = ReleasedRenderingLedger::default();
+    validate_projection_authority_suffix(conn, AuditCheckpoint::default(), &released).await?;
     if foreign_key_violation_exists_read_only(conn).await? {
         return Err(global_db_operation_message(
             OPERATION,

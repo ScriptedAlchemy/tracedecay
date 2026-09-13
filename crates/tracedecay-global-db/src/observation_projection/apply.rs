@@ -652,6 +652,80 @@ async fn reconcile_projected_codex_goal_response(
     .map_err(|error| storage("remove paired Codex goal output state", error))
 }
 
+/// Replaces the stored output row with the one this binary derives.
+///
+/// The projected message row is derived state, so every field but its identity
+/// is rewritten from the record. Shared with released-rendering convergence,
+/// which reaches the same row through a different admission path and must not
+/// write it a second way.
+pub(super) async fn supersede_projected_message(
+    conn: &impl Executor,
+    message: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "UPDATE session_messages
+         SET session_id = ?3, role = ?4, timestamp = ?5, ordinal = ?6,
+             text = ?7, kind = ?8, model = ?9, tool_names = ?10,
+             source_path = ?11, source_offset = ?12, metadata_json = ?13
+         WHERE provider = ?1 AND message_id = ?2",
+        params![
+            message.provider.as_str(),
+            message.message_id.as_str(),
+            message.session_id.as_str(),
+            message.role.as_str(),
+            message.timestamp,
+            message.ordinal,
+            message.text.as_str(),
+            message.kind.as_deref(),
+            message.model.as_deref(),
+            message.tool_names.as_deref(),
+            message.source_path.as_deref(),
+            message.source_offset,
+            message.metadata_json.as_deref(),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("supersede projected message", error))
+}
+
+/// Rewrites one output's rows and provenance digest to this binary's
+/// deterministic rendering, keeping the historical `message_created` flag the
+/// releases wrote.
+///
+/// Reached only from the authority audit, which has already proven the stored
+/// provenance row is the digest of the output row this store holds — the
+/// rendering a release wrote — rather than a row disagreeing with its own
+/// output. The message row and its LCM raw twin are pure derivations of the
+/// durable observation, so rewriting them loses nothing; the digest is
+/// re-stamped last so an interrupted transaction leaves the released pairing
+/// intact.
+pub(in super::super) async fn converge_released_output_rendering(
+    conn: &impl Executor,
+    projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<()> {
+    let message = projection.message();
+    supersede_projected_message(conn, message).await?;
+    if message.provider != "hermes" {
+        upsert_projected_raw_message(conn, message).await?;
+    }
+    let provenance = projection.provenance();
+    conn.execute(
+        "UPDATE observation_projection_provenance
+         SET output_digest = ?4
+         WHERE projector_version = ?1 AND observation_id = ?2 AND output_ordinal = ?3",
+        params![
+            provenance.projector_version(),
+            provenance.observation_id().as_str(),
+            projection.output_ordinal(),
+            projection.output_digest()?.as_str(),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("re-stamp released projection provenance", error))
+}
+
 #[hotpath::measure(future = true, label = "global_db.observation_apply.persist.rows")]
 async fn apply_rows(
     conn: &impl Executor,
@@ -714,30 +788,7 @@ async fn apply_rows(
             .map_err(|error| storage("insert projected message", error))?;
         }
         MessageTransition::Supersede => {
-            conn.execute(
-                "UPDATE session_messages
-                 SET session_id = ?3, role = ?4, timestamp = ?5, ordinal = ?6,
-                     text = ?7, kind = ?8, model = ?9, tool_names = ?10,
-                     source_path = ?11, source_offset = ?12, metadata_json = ?13
-                 WHERE provider = ?1 AND message_id = ?2",
-                params![
-                    message.provider.as_str(),
-                    message.message_id.as_str(),
-                    message.session_id.as_str(),
-                    message.role.as_str(),
-                    message.timestamp,
-                    message.ordinal,
-                    message.text.as_str(),
-                    message.kind.as_deref(),
-                    message.model.as_deref(),
-                    message.tool_names.as_deref(),
-                    message.source_path.as_deref(),
-                    message.source_offset,
-                    message.metadata_json.as_deref(),
-                ],
-            )
-            .await
-            .map_err(|error| storage("supersede projected message", error))?;
+            supersede_projected_message(conn, message).await?;
         }
         MessageTransition::Retain => {}
     }

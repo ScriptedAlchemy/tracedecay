@@ -7,11 +7,14 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, WorkflowFactProjection,
 };
 
-use crate::observation_projection::ProjectionOutputAuthority;
+use crate::observation_projection::{ProjectionOutputAuthority, ProjectionRowsBatch};
 
 use crate::global_db_operation_error;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
+use super::released_rendering::{
+    ReleasedRenderingLedger, StoredProvenanceRendering, admit_provenance_row,
+};
 use super::rows::{authority_violation, decode_authority_json};
 use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, OPERATION, projection_checkpoint};
 const AUDIT_NAME: &str = "observation-authority";
@@ -456,13 +459,13 @@ impl ProjectionAliasRow {
     }
 }
 
-struct ProjectionProvenanceRow {
-    retrieval_anchor_id: String,
-    receipt_id: String,
-    output_provider: String,
-    output_message_id: String,
-    output_digest: String,
-    message_created: i64,
+pub(super) struct ProjectionProvenanceRow {
+    pub(super) retrieval_anchor_id: String,
+    pub(super) receipt_id: String,
+    pub(super) output_provider: String,
+    pub(super) output_message_id: String,
+    pub(super) output_digest: String,
+    pub(super) message_created: i64,
 }
 
 /// Observation ids carried by one batched provenance statement.
@@ -687,14 +690,17 @@ impl ProjectionOutputOwnership {
 /// window in which a concurrent drain turns a completed projection back into a
 /// skipped "still pending" one. The reads batched here only supply evidence a
 /// row is *compared against*, never whether the comparison happens.
-struct ResolvedOutputAuthority {
+struct ResolvedOutputAuthority<'a> {
     authorities: HashMap<(String, String), ProjectionOutputAuthority>,
     creators: HashMap<(String, String), i64>,
     provenance: HashMap<(String, i64), ProjectionProvenanceRow>,
-    projection_rows: crate::observation_projection::ProjectionRowsBatch,
+    projection_rows: ProjectionRowsBatch,
+    /// Released renderings this page found. Held here because every row that
+    /// can produce one already reads its stored authority through this struct.
+    released: &'a ReleasedRenderingLedger,
 }
 
-impl ResolvedOutputAuthority {
+impl ResolvedOutputAuthority<'_> {
     fn provenance_row(
         &self,
         observation_id: &str,
@@ -752,34 +758,11 @@ fn validate_alias_binding(
     Ok(())
 }
 
-fn validate_provenance_row(
-    actual: &ProjectionProvenanceRow,
-    projection: &SessionMessageProjection,
-) -> tracedecay_domain::errors::Result<()> {
-    let provenance = projection.provenance();
-    let message = projection.message();
-    let output_digest = projection.output_digest().map_err(|_| {
-        authority_violation("projection output digest is not canonically derivable")
-    })?;
-    if actual.retrieval_anchor_id != provenance.retrieval_anchor_id().as_str()
-        || actual.receipt_id != provenance.receipt_id()
-        || actual.output_provider != message.provider
-        || actual.output_message_id != message.message_id
-        || actual.output_digest != output_digest.as_str()
-        || !matches!(actual.message_created, 0 | 1)
-    {
-        return Err(authority_violation(
-            "projection provenance disagrees with deterministic output",
-        ));
-    }
-    Ok(())
-}
-
 async fn validate_message_projection_row(
     conn: &impl QueryExecutor,
     observation_id: &str,
     effect: &ObservationProjection,
-    resolved: &ResolvedOutputAuthority,
+    resolved: &ResolvedOutputAuthority<'_>,
     projection: &SessionMessageProjection,
 ) -> tracedecay_domain::errors::Result<bool> {
     let message = projection.message();
@@ -788,7 +771,12 @@ async fn validate_message_projection_row(
     else {
         return Ok(false);
     };
-    validate_provenance_row(provenance, projection)?;
+    admit_provenance_row(
+        provenance,
+        projection,
+        &resolved.projection_rows,
+        resolved.released,
+    )?;
     resolved
         .ownership(&message.provider, &message.message_id)
         .validate()?;
@@ -816,25 +804,36 @@ async fn validate_message_projection_row(
     ) else {
         return Ok(false);
     };
-    validate_provenance_row(owner_provenance, &owner_projection)?;
-    let owner_session = owner_projection.session();
-    let owner_message = owner_projection.message();
-    crate::observation_projection::verify_projection_rows_from_records(
-        conn,
+    // A released rendering's stored rows *are* the rendering the provenance
+    // pairs them with — admitted above, and rewritten to this binary's
+    // rendering by the write step that owns the transaction. Comparing them
+    // against this binary's fields here would refuse exactly that.
+    if admit_provenance_row(
+        owner_provenance,
         &owner_projection,
-        resolved
-            .projection_rows
-            .session(&owner_session.provider, &owner_session.session_id),
-        resolved
-            .projection_rows
-            .message(&owner_message.provider, &owner_message.message_id),
-    )
-    .await
-    .map_err(|error| {
-        authority_violation(format!(
-            "projection output rows disagree with deterministic output: {error}"
-        ))
-    })?;
+        &resolved.projection_rows,
+        resolved.released,
+    )? == StoredProvenanceRendering::Current
+    {
+        let owner_session = owner_projection.session();
+        let owner_message = owner_projection.message();
+        crate::observation_projection::verify_projection_rows_from_records(
+            conn,
+            &owner_projection,
+            resolved
+                .projection_rows
+                .session(&owner_session.provider, &owner_session.session_id),
+            resolved
+                .projection_rows
+                .message(&owner_message.provider, &owner_message.message_id),
+        )
+        .await
+        .map_err(|error| {
+            authority_violation(format!(
+                "projection output rows disagree with deterministic output: {error}"
+            ))
+        })?;
+    }
     Ok(true)
 }
 
@@ -845,7 +844,7 @@ async fn validate_message_projection(
     state: ProjectionAuthorityState,
     unaliased: &ObservationProjection,
     effect: &ObservationProjection,
-    resolved: &ResolvedOutputAuthority,
+    resolved: &ResolvedOutputAuthority<'_>,
     projection: &SessionMessageProjection,
 ) -> tracedecay_domain::errors::Result<()> {
     if state.alias_rows > 1 {
@@ -912,7 +911,7 @@ async fn validate_composite_projection(
     state: ProjectionAuthorityState,
     unaliased: &ObservationProjection,
     effect: &ObservationProjection,
-    resolved: &ResolvedOutputAuthority,
+    resolved: &ResolvedOutputAuthority<'_>,
     message: Option<&SessionMessageProjection>,
     derived_messages: &[SessionMessageProjection],
     workflow_facts: &[WorkflowFactProjection],
@@ -1062,11 +1061,12 @@ async fn derive_page_effects(
     feature = "hotpath",
     hotpath::measure(label = "global_db.observation_audit.batch.authority")
 )]
-async fn resolve_output_authority(
+async fn resolve_output_authority<'a>(
     conn: &impl QueryExecutor,
     observations: &[&DurableObservationV1],
     effects: &[ObservationProjection],
-) -> tracedecay_domain::errors::Result<ResolvedOutputAuthority> {
+    released: &'a ReleasedRenderingLedger,
+) -> tracedecay_domain::errors::Result<ResolvedOutputAuthority<'a>> {
     let outputs = requested_outputs(effects);
     let authorities = crate::observation_projection::read_output_authorities(conn, &outputs)
         .await
@@ -1095,6 +1095,7 @@ async fn resolve_output_authority(
                     "projection output rows disagree with deterministic output: {error}"
                 ))
             })?,
+        released,
     })
 }
 
@@ -1105,9 +1106,10 @@ async fn resolve_output_authority(
 async fn validate_projection_effects(
     conn: &impl QueryExecutor,
     observations: &[&DurableObservationV1],
+    released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<()> {
     let effects = derive_page_effects(conn, observations).await?;
-    let resolved = resolve_output_authority(conn, observations, &effects).await?;
+    let resolved = resolve_output_authority(conn, observations, &effects, released).await?;
     for group in observations
         .chunks(DETAILED_AUDIT_CONCURRENCY)
         .zip(effects.chunks(DETAILED_AUDIT_CONCURRENCY))
@@ -1125,7 +1127,7 @@ async fn validate_projection_effect(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
-    resolved: &ResolvedOutputAuthority,
+    resolved: &ResolvedOutputAuthority<'_>,
 ) -> tracedecay_domain::errors::Result<()> {
     // The unaliased projection is only needed to validate alias bindings, so it
     // is derived lazily inside the arms that consume it.
@@ -1363,6 +1365,7 @@ async fn validate_projection_authority_suffix_pages(
     conn: &impl QueryExecutor,
     mut checkpoint: AuditCheckpoint,
     page_limit: Option<i64>,
+    released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     let (provenance_rowid, provenance_audited) = count_suffix_rows(
         conn,
@@ -1580,7 +1583,8 @@ async fn validate_projection_authority_suffix_pages(
             .map(|(_, observation)| observation)
             .collect::<Vec<_>>();
         let page_effects = derive_page_effects(conn, &page_observations).await?;
-        let resolved = resolve_output_authority(conn, &page_observations, &page_effects).await?;
+        let resolved =
+            resolve_output_authority(conn, &page_observations, &page_effects, released).await?;
         for (chunk, chunk_effects) in detailed_observations
             .chunks(validation_concurrency)
             .zip(page_effects.chunks(validation_concurrency))
@@ -1652,7 +1656,7 @@ async fn validate_projection_authority_suffix_pages(
         }
         for chunk in historical_observations.chunks(DETAILED_AUDIT_CONCURRENCY) {
             let chunk_observations = chunk.iter().collect::<Vec<_>>();
-            validate_projection_effects(conn, &chunk_observations).await?;
+            validate_projection_effects(conn, &chunk_observations, released).await?;
         }
     }
     Ok((
@@ -1673,20 +1677,23 @@ async fn validate_projection_authority_suffix_pages(
 pub(super) async fn validate_projection_authority_suffix(
     conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
+    released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
     let (checkpoint, provenance, dispositions, aliases, _) =
-        validate_projection_authority_suffix_pages(conn, checkpoint, None).await?;
+        validate_projection_authority_suffix_pages(conn, checkpoint, None, released).await?;
     Ok((checkpoint, provenance, dispositions, aliases))
 }
 
 pub(super) async fn validate_projection_authority_chunk(
     conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
+    released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     validate_projection_authority_suffix_pages(
         conn,
         checkpoint,
         Some(PROJECTION_PROGRESS_PAGE_INTERVAL),
+        released,
     )
     .await
 }
@@ -1769,9 +1776,9 @@ mod tests {
     };
 
     use super::{
-        AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ResolvedOutputAuthority,
-        ensure_audit_checkpoint_schema, projection_audit_checkpoint_through_sequence,
-        validate_projection_authority_suffix,
+        AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ReleasedRenderingLedger,
+        ResolvedOutputAuthority, ensure_audit_checkpoint_schema,
+        projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
     };
     use crate::tests::harness::{RegisteredGlobalDbTestFixture, open_registered_test_fixture};
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
@@ -2075,10 +2082,13 @@ mod tests {
             inner: &connection,
             queries: AtomicUsize::new(0),
         };
-        let (_, _, dispositions, _) =
-            validate_projection_authority_suffix(&counting, AuditCheckpoint::default())
-                .await
-                .unwrap();
+        let (_, _, dispositions, _) = validate_projection_authority_suffix(
+            &counting,
+            AuditCheckpoint::default(),
+            &ReleasedRenderingLedger::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(dispositions, i64::try_from(OBSERVATIONS).unwrap());
         assert!(
             counting.queries.load(Ordering::Relaxed) < OBSERVATIONS / 2,
@@ -2515,9 +2525,13 @@ mod tests {
             .expect("registered profile database");
         let snapshot = database.read_snapshot().await.unwrap();
         let counting = CountingSnapshot::new(&snapshot);
-        validate_projection_authority_suffix(&counting, AuditCheckpoint::default())
-            .await
-            .expect("a batched audit of well-formed projections must converge");
+        validate_projection_authority_suffix(
+            &counting,
+            AuditCheckpoint::default(),
+            &ReleasedRenderingLedger::default(),
+        )
+        .await
+        .expect("a batched audit of well-formed projections must converge");
 
         // Each batched authority read is issued once for the whole page, not
         // once per projected message.
@@ -2728,6 +2742,7 @@ mod tests {
             )
             .await
             .unwrap(),
+            released: &ReleasedRenderingLedger::default(),
         };
 
         let contested = resolved
