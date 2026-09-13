@@ -5,7 +5,13 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
+use tracedecay_contracts::project_open::{
+    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+};
 use tracedecay_contracts::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
+use tracedecay_contracts::storage::{
+    SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
+};
 
 use crate::commands::reject_truncation_envelope;
 use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
@@ -179,6 +185,49 @@ fn compact_status_tool_args() -> Value {
     })
 }
 
+fn schema_convergence_line(finding: &SchemaConvergenceFindingV1) -> String {
+    let progress = match &finding.progress {
+        Some(SchemaConvergenceProgressV1::Rows { done, remaining }) => {
+            format!(", rows {done} done / {remaining} remaining")
+        }
+        Some(SchemaConvergenceProgressV1::Pages { done, remaining }) => {
+            format!(", pages {done} done / {remaining} remaining")
+        }
+        None => String::new(),
+    };
+    let degraded = finding
+        .degraded_row
+        .as_deref()
+        .map_or_else(String::new, |row| format!(", row {row}"));
+    format!(
+        "schema convergence: {} {} {}{progress}, started_at={}{}",
+        finding.store.as_str(),
+        finding.stage.as_str(),
+        finding.state.as_str(),
+        finding.started_at_micros,
+        degraded,
+    )
+}
+
+fn project_open_line(status: &ProjectOpenStatusV1) -> String {
+    let reason = match status.reason {
+        ProjectOpenStatusReasonV1::Converging => "converging",
+        ProjectOpenStatusReasonV1::Ready => "ready",
+        ProjectOpenStatusReasonV1::UnrepairableVerdict => "unrepairable verdict",
+        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => "deferred repository discovery",
+        ProjectOpenStatusReasonV1::RetryBackoff => "retry backoff",
+        ProjectOpenStatusReasonV1::Unavailable => "unavailable",
+    };
+    let retry = status
+        .retry_after_ms
+        .map_or_else(String::new, |delay| format!(", retry after {delay} ms"));
+    let detail = status
+        .detail
+        .as_deref()
+        .map_or_else(String::new, |detail| format!(": {detail}"));
+    format!("project open: {reason}{retry}{detail}")
+}
+
 async fn daemon_tool_json_within(
     response_deadline: Instant,
     request_deadline: Instant,
@@ -337,6 +386,17 @@ async fn handle_status_command_within(
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
         return Ok(());
     }
+    if let Some(project_open) = daemon_status
+        .get("project_open")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .map(serde_json::from_value::<ProjectOpenStatusV1>)
+        .transpose()?
+        && project_open.state != ProjectOpenStatusStateV1::Completed
+    {
+        println!("{}", project_open_line(&project_open));
+        return Ok(());
+    }
     // Decode the exact wire types the daemon route serialized. Both sides use
     // the same Rust contracts (`GenerationCensusSnapshot`,
     // `CodeIndexWorktreeFreshnessV1`), so absence or drift is a typed decode
@@ -387,6 +447,12 @@ async fn handle_status_command_within(
     let now = current_unix_timestamp();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
+    let schema_convergences: Vec<SchemaConvergenceFindingV1> = daemon_status
+        .pointer("/schema_convergence/findings")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
     let show_online =
         should_fetch_online_status_embellishments(stdout_is_terminal) && upload_enabled;
     // The worldwide counter and country flags are decoration served from the
@@ -447,6 +513,16 @@ async fn handle_status_command_within(
                 cost_info: cost_info.as_ref(),
             });
         }
+        for finding in &schema_convergences {
+            match finding.state {
+                SchemaConvergenceStateV1::PendingSchemaMigration
+                | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+                | SchemaConvergenceStateV1::Degraded
+                | SchemaConvergenceStateV1::Completed => {
+                    println!("{}", schema_convergence_line(finding));
+                }
+            }
+        }
     });
 
     // A parked deterministic contract violation must be visible on the plain
@@ -501,11 +577,19 @@ mod tests {
     use super::{
         COUNTRY_FLAGS_MAX_AGE_SECS, OnlineRefresh, OnlineRefreshPlan, WORLDWIDE_TOTAL_MAX_AGE_SECS,
         await_daemon_tool_result, await_online_refresh, reject_truncation_envelope,
-        status_command_deadline_from, status_server_request_budget,
+        project_open_line, schema_convergence_line, status_command_deadline_from,
+        status_server_request_budget,
     };
     use serde_json::json;
     use std::time::Duration;
     use tokio::time::Instant;
+    use tracedecay_contracts::project_open::{
+        ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+    };
+    use tracedecay_contracts::storage::{
+        SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
+        SchemaConvergenceStateV1,
+    };
     use tracedecay_session_memory::user_config::UserConfig;
 
     #[tokio::test]
@@ -654,6 +738,38 @@ mod tests {
                 "tracedecay_status",
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_lines_preserve_convergence_progress_and_project_open_reason() {
+        let convergence = SchemaConvergenceFindingV1 {
+            store: "profile-sessions".to_owned(),
+            stage: SchemaConvergenceStageV1::RegisteredSchema,
+            state: SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+            progress: Some(SchemaConvergenceProgressV1::Rows {
+                done: 12,
+                remaining: 3,
+            }),
+            started_at_micros: 42,
+            degraded_row: None,
+        };
+        assert_eq!(
+            schema_convergence_line(&convergence),
+            "schema convergence: profile-sessions registered_schema \
+             released_shape_convergence_in_progress, rows 12 done / 3 remaining, started_at=42"
+        );
+
+        let project_open = ProjectOpenStatusV1 {
+            state: ProjectOpenStatusStateV1::Stalled,
+            reason: ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery,
+            retry_after_ms: Some(250),
+            detail: Some("git probe exceeded its deadline".to_owned()),
+        };
+        assert_eq!(
+            project_open_line(&project_open),
+            "project open: deferred repository discovery, retry after 250 ms: \
+             git probe exceeded its deadline"
         );
     }
 }
