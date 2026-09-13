@@ -30,6 +30,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"] }
 tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
+tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 axum = "0.8"
 getrandom = "0.2"
 hex = "0.4"
@@ -42,6 +47,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
@@ -80,7 +86,9 @@ libc = "0.2"
 tempfile = "3"
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tokio = { version = "1", features = ["full", "test-util"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+# The moved lifecycle/doctor tests open projects through the registered test
+# runtime and pin the profile data directory.
+tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37", features = ["test-helpers"] }

@@ -49,13 +49,13 @@ const HOTPATH_FINALIZE_BOUND: Duration = Duration::from_secs(1);
 
 /// Exit status for a forced drain-bound exit (`EX_SOFTWARE`), distinct from a
 /// generic failure so the supervisor journal names the cause.
-pub(crate) const DRAIN_BOUND_EXIT_CODE: i32 = 70;
+pub const DRAIN_BOUND_EXIT_CODE: i32 = 70;
 
 /// Total wall clock the process may live after committing to shutdown.
 ///
 /// Must stay comfortably below the supervisor stop timeout (systemd default
 /// 90s) so a wedged drain exits with a typed receipt instead of a SIGKILL.
-pub(crate) fn shutdown_exit_bound() -> Duration {
+pub fn shutdown_exit_bound() -> Duration {
     DAEMON_SHUTDOWN_DEADLINE + DRAIN_EXIT_RESERVE
 }
 
@@ -64,7 +64,7 @@ static ARMED_AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::
 
 /// Milliseconds since the daemon committed to exiting (0 before arming), so
 /// operator lines without a wall clock still order against the TERM grace.
-pub(super) fn shutdown_elapsed_ms() -> u128 {
+pub fn shutdown_elapsed_ms() -> u128 {
     ARMED_AT.get().map_or(0, |at| at.elapsed().as_millis())
 }
 
@@ -142,7 +142,7 @@ fn drain_bound_exceeded(bound: Duration) -> ! {
     feature = "hotpath",
     hotpath::measure(label = "daemon.shutdown_watchdog.arm")
 )]
-pub(super) fn arm_shutdown_exit_bound() {
+pub fn arm_shutdown_exit_bound() {
     let _ = ARMED_AT.set(std::time::Instant::now());
     if ARMED.swap(true, Ordering::AcqRel) {
         return;

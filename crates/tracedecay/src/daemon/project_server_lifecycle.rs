@@ -4,11 +4,11 @@
 //! Retirement waits for in-flight requests before aborting, so a rekey or a
 //! shutdown never leaves a store mid-write.
 
-use super::shutdown_coordination::ShutdownStatus;
 use super::*;
 use std::collections::HashSet;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
+use tracedecay_daemon_service::shutdown::ShutdownStatus;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store_runtime::{
     ShutdownTaskOutcome, ShutdownTaskReceipt, join_shutdown_tasks_until,

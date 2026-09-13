@@ -18,8 +18,7 @@ async fn pr_autotrack_is_cancelled_before_invocation_join() {
     let owner_phases = engine.shutdown_owner_phases().await;
     assert!(!cancellation.is_cancelled());
 
-    let prepared =
-        crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(owner_phases);
+    let prepared = tracedecay_daemon_service::shutdown::prepare_shutdown_owner_phases(owner_phases);
     assert!(
         cancellation.is_cancelled(),
         "PR auto-track must be cancelled before invocation join begins"
@@ -57,7 +56,7 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
 
     let mut owner_phases = engine.shutdown_owner_phases().await;
     let manual_branch_phase = owner_phases.remove(0);
-    let prepared = crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(vec![
+    let prepared = tracedecay_daemon_service::shutdown::prepare_shutdown_owner_phases(vec![
         manual_branch_phase,
     ]);
     let denied = engine
@@ -125,7 +124,7 @@ async fn stalled_manual_branch_publication_settles_before_shutdown_receipt() {
         .await
         .expect("manual branch publication starts");
 
-    let prepared = crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(
+    let prepared = tracedecay_daemon_service::shutdown::prepare_shutdown_owner_phases(
         engine.shutdown_owner_phases().await,
     );
     let shutdown = tokio::spawn(async move {
@@ -770,11 +769,11 @@ async fn manual_branch_publication_panic_survives_reaping_in_shutdown_receipt() 
         .unwrap();
     let mut phases = engine.shutdown_owner_phases().await;
     let receipt =
-        crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(vec![phases.remove(0)])
+        tracedecay_daemon_service::shutdown::prepare_shutdown_owner_phases(vec![phases.remove(0)])
             .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
             .await;
     assert!(
-        matches!(&receipt.owners[0].status, crate::daemon::shutdown_coordination::ShutdownStatus::Failed(reason) if reason.contains("failed to join"))
+        matches!(&receipt.owners[0].status, tracedecay_daemon_service::shutdown::ShutdownStatus::Failed(reason) if reason.contains("failed to join"))
     );
 }
 

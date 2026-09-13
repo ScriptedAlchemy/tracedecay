@@ -74,10 +74,6 @@ use tracedecay_lsp::{
 use tracedecay_session_memory::context::MonotonicDeadline;
 
 use super::{DaemonInvocationState, POLICY_REVISION_V1, register_semantic_configuration_owners};
-use crate::daemon::context_scout_lifecycle::{
-    AuthorityRegistrationV1, register_context_scout_lifecycle_authority,
-    unregister_context_scout_lifecycle_authority,
-};
 use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
@@ -90,6 +86,10 @@ use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutTriggerV1,
 };
 use tracedecay_daemon_service::RegisteredDeliveryReadAuthorityV1;
+use tracedecay_daemon_service::context_scout_lifecycle::{
+    AuthorityRegistrationV1, register_context_scout_lifecycle_authority,
+    unregister_context_scout_lifecycle_authority,
+};
 use tracedecay_daemon_service::{
     BoundedHookOrchestratorV1, ConfigurationRuntimeRefreshFuture, ConfigurationRuntimeRefreshPort,
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,

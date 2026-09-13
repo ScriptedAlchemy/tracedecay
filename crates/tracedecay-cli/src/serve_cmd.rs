@@ -69,7 +69,9 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
     let socket_path = tracedecay_daemon_control::default_socket_path()?;
     if !tracedecay::daemon::should_proxy_serve_to_daemon(&socket_path).await {
-        return Err(tracedecay::daemon::unavailable_error(&socket_path));
+        return Err(tracedecay_daemon_service::logging::unavailable_error(
+            &socket_path,
+        ));
     }
     let handshake = proxy_serve_handshake(path_arg, original_cwd.as_deref(), timings)?;
     tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None).await

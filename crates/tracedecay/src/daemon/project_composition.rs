@@ -1328,31 +1328,32 @@ impl ProjectOpenInputs<'_> {
         let pending_schema_migrations = {
             let registry = self.store_administration.session_runtime_registry().await?;
             Arc::new(move || {
-                doctor_kernel::pending_schema_migration_read(
+                tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
                     &registry.unconverged_registered_schemas(),
                 )
             })
         };
-        let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
-            self.canonical_project_path.to_path_buf(),
-            code_index.project_id.clone(),
-            cg.store_layout().clone(),
-            cg.db().clone(),
-            core.registered_profile_db.clone(),
-            user_session_db.clone(),
-            session_db.clone(),
-            core.profile_identity.profile_root().to_path_buf(),
-            core.transcript_source_home.clone(),
-            remote_operational_read,
-            pending_schema_migrations,
-            cg.get_config().sync.retention.clone(),
-            self.invocation.code_index_schedulers.clone(),
-            Arc::clone(&core.ports.diagnostic_broker),
-            self.invocation.feedback_runtime_registrar(),
-            self.invocation.semantic_owner_runtime_registrar(),
-            store_telemetry_sampling,
-            Arc::clone(cg.configuration_runtime()),
-        );
+        let doctor_report_reader =
+            tracedecay_daemon_service::doctor_kernel::production_doctor_report_reader(
+                self.canonical_project_path.to_path_buf(),
+                code_index.project_id.clone(),
+                cg.store_layout().clone(),
+                cg.db().clone(),
+                core.registered_profile_db.clone(),
+                user_session_db.clone(),
+                session_db.clone(),
+                core.profile_identity.profile_root().to_path_buf(),
+                core.transcript_source_home.clone(),
+                remote_operational_read,
+                pending_schema_migrations,
+                cg.get_config().sync.retention.clone(),
+                self.invocation.code_index_schedulers.clone(),
+                Arc::clone(&core.ports.diagnostic_broker),
+                self.invocation.feedback_runtime_registrar(),
+                self.invocation.semantic_owner_runtime_registrar(),
+                store_telemetry_sampling,
+                Arc::clone(cg.configuration_runtime()),
+            );
         let (delivery_settlement_authority, delivery_settlement_recorder) =
             project_delivery_settlement_ports(self.invocation, self.canonical_project_path).await?;
         let profile_session_refresh = self

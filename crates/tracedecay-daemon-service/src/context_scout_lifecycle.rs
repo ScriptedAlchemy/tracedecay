@@ -36,7 +36,7 @@ fn registered_context_scout_lifecycle_authorities() -> &'static ContextScoutLife
 /// Distinct from [`AuthorityRegistrationV1::Conflict`]: nothing about the
 /// existing registry contents could have made these requests succeed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthorityRejectionV1 {
+pub enum AuthorityRejectionV1 {
     ZeroHookProjectId,
     ZeroHookWorktreeId,
     InvalidProjectId,
@@ -47,7 +47,7 @@ pub(crate) enum AuthorityRejectionV1 {
 
 impl AuthorityRejectionV1 {
     #[hotpath::skip]
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::ZeroHookProjectId => "zero_hook_project_id",
             Self::ZeroHookWorktreeId => "zero_hook_worktree_id",
@@ -65,7 +65,7 @@ impl AuthorityRejectionV1 {
 /// this hook key", which is an operator-visible misconfiguration rather than
 /// a validation failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthorityRegistrationV1 {
+pub enum AuthorityRegistrationV1 {
     /// A fresh authority was installed for this hook key.
     Registered,
     /// The live authority already binds exactly this identity and store.
@@ -77,7 +77,7 @@ pub(crate) enum AuthorityRegistrationV1 {
     Rejected(AuthorityRejectionV1),
 }
 
-pub(crate) fn register_context_scout_lifecycle_authority(
+pub fn register_context_scout_lifecycle_authority(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
     project_id: ProjectId,
@@ -172,7 +172,7 @@ fn register_context_scout_lifecycle_authority_checked(
 /// Removes exactly the given session store's registration; a different live
 /// authority under the same locator pair is left untouched so a rolled-back
 /// advisory setup can never unregister its successor.
-pub(crate) fn unregister_context_scout_lifecycle_authority(
+pub fn unregister_context_scout_lifecycle_authority(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
     sessions: &RegisteredGlobalDbLeaseV1,
@@ -229,7 +229,7 @@ fn resolve_authority(
 }
 
 #[hotpath::measure(label = "daemon.context_scout.lifecycle_lookup", future = true)]
-pub(crate) async fn lookup_registered_context_scout_lifecycle(
+pub async fn lookup_registered_context_scout_lifecycle(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
     session_id: &SessionId,
@@ -254,7 +254,7 @@ pub(crate) async fn lookup_registered_context_scout_lifecycle(
 /// identity again; no hook payload or workspace path becomes durable replay
 /// identity.
 #[hotpath::measure(label = "daemon.context_scout.lifecycle_lookup_native", future = true)]
-pub(crate) async fn lookup_registered_context_scout_native_session(
+pub async fn lookup_registered_context_scout_native_session(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
     protected_session_id: [u8; 32],
@@ -325,7 +325,7 @@ pub(crate) async fn lookup_registered_context_scout_native_session(
 /// budget, and "this session simply has no complete tuple yet" stay
 /// distinguishable in logs and in tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContextScoutLifecycleLookupFailureV1 {
+pub enum ContextScoutLifecycleLookupFailureV1 {
     InvalidProfileId,
     InvalidProjectId,
     InvalidWorktreeId,
@@ -371,7 +371,7 @@ impl ContextScoutLifecycleLookupFailureV1 {
 
 /// Outcome of one exact Context Scout lifecycle lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ContextScoutLifecycleLookupV1 {
+pub enum ContextScoutLifecycleLookupV1 {
     /// Boxed so the resolved tuple's ~216 bytes do not travel with every
     /// one-byte failure reason.
     Resolved(Box<ContextScoutLifecycleAddressV1>),

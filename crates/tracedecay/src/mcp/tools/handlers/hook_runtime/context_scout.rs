@@ -46,7 +46,7 @@ pub(super) async fn hook_v2_context_scout_lifecycle_for_session(
     session_id: Option<SessionId>,
 ) -> Option<tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1> {
     let session_id = session_id?;
-    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
+    tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
         envelope.project_id,
         envelope.worktree_id,
         &session_id,

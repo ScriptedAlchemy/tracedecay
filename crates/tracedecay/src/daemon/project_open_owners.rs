@@ -771,7 +771,7 @@ pub(super) async fn register_project_open_production_owners(
     let census_db = session_db.clone();
     let census_project_root = project_root.to_path_buf();
     let _adoption_census_admitted = server.spawn_background_task(async move {
-        super::adoption_observation::record_project_open_adoption_census(
+        tracedecay_daemon_service::adoption_observation::record_project_open_adoption_census(
             census_db.as_ref(),
             &census_project_root,
         )

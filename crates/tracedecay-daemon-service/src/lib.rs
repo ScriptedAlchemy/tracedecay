@@ -56,9 +56,14 @@
 /// crate remains the cycle-free owner shared with code-index runtime.
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
 
+pub mod adoption_observation;
 pub mod application_surface;
+pub mod automation_observation;
 pub mod callable_code_authorization;
+pub mod context_scout_lifecycle;
+pub mod doctor_kernel;
 pub mod invocation;
+pub mod logging;
 mod mcp_project_registry;
 mod mcp_workflow_index;
 pub mod profile_host_admission_replay;
@@ -69,6 +74,7 @@ pub mod query_mcp_admission;
 pub mod remote_http_transport;
 mod remote_protocol;
 pub mod request_cancellation;
+pub mod shutdown;
 mod shutdown_coordination;
 
 pub use callable_code_authorization::{

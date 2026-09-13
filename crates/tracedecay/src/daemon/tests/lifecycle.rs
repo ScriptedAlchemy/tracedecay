@@ -1133,11 +1133,11 @@ async fn persistent_idle_client_closes_on_draining_without_timeout() {
         Ok(())
     });
 
-    let receipt = super::super::shutdown_orchestration::coordinate_daemon_shutdown(
+    let receipt = tracedecay_daemon_service::shutdown::coordinate_daemon_shutdown(
         &lifecycle,
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(5),
         async move {
-            super::super::shutdown_orchestration::DaemonShutdownPlan::new(
+            tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(
                 clients,
                 Vec::new(),
                 |_| async { tracedecay_store_runtime::ShutdownTaskReceipt::default() },

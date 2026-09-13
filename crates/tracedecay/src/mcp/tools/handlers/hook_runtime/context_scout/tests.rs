@@ -1,8 +1,8 @@
 use std::sync::Mutex as StdMutex;
 
-use crate::daemon::context_scout_lifecycle::AuthorityRegistrationV1;
 use serde_json::json;
 use tracedecay_agent_hosts::agents::context_scout::ContextScoutDurableStoreOutcomeV1;
+use tracedecay_daemon_service::context_scout_lifecycle::AuthorityRegistrationV1;
 use tracedecay_domain::{ObservationSourceRangeV1, ProjectId, ProviderId, SessionId, UtcMicros};
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -142,7 +142,7 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
     let hook_project_id = [71; 16];
     let hook_worktree_id = [72; 16];
     assert_eq!(
-        crate::daemon::context_scout_lifecycle::register_context_scout_lifecycle_authority(
+        tracedecay_daemon_service::context_scout_lifecycle::register_context_scout_lifecycle_authority(
             hook_project_id,
             hook_worktree_id,
             project_id,
@@ -198,7 +198,7 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
             );
         }
         let lifecycle =
-            crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
+            tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
                 hook_project_id,
                 hook_worktree_id,
                 &SessionId::new(session.to_owned()).unwrap(),

@@ -1025,7 +1025,8 @@ async fn store_sized_migrations_are_reported_and_converge_after_admission() {
         vec![(shard_id.clone(), RegisteredSchemaConvergenceStatus::Running)],
         "the shard still migrating must be the one reported"
     );
-    let report = crate::daemon::doctor_kernel::pending_schema_migration_read(&unconverged);
+    let report =
+        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(&unconverged);
     let tracedecay_contracts::doctor::DoctorStorageFamilyReadV1::Observed { findings } = report
     else {
         panic!("a store mid-migration must be reported, not omitted: {report:?}");

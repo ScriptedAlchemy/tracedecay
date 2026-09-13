@@ -1412,13 +1412,15 @@ mod shutdown_tests {
             .await
             .expect("admit lease worker");
         observed.await.expect("lease worker was polled");
-        let receipt = shutdown_coordination::join_shutdown_owners(
+        let receipt = tracedecay_daemon_service::shutdown::join_shutdown_owners(
             tokio::time::Instant::now() + std::time::Duration::from_secs(1),
-            vec![shutdown_coordination::ShutdownOwner::with_deadline_status(
-                "invocation",
-                || {},
-                move |_| async move { state.shutdown().await },
-            )],
+            vec![
+                tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
+                    "invocation",
+                    || {},
+                    move |_| async move { state.shutdown().await },
+                ),
+            ],
         )
         .await;
         assert_eq!(

@@ -1,12 +1,14 @@
 //! Server-shaped lifecycle observation ports.
 //!
-//! Concrete daemon lifecycle / shutdown types stay in the composition root.
-//! The MCP connection loop observes drain and request admission through this
-//! port.
+//! The concrete daemon lifecycle lives in `tracedecay_daemon_service::shutdown`;
+//! this module adapts it to the port the MCP connection loop observes drain
+//! and request admission through.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 
 /// Request-activity guard retained while one MCP request is admitted.
 ///
@@ -31,6 +33,20 @@ pub trait McpConnectionLifecyclePort: Send + Sync {
     fn accepting(&self) -> bool;
     fn try_enter(&self) -> Option<McpRequestActivity>;
     fn wait_for_draining(&self) -> McpLifecycleDrainFuture<'_>;
+}
+
+impl McpConnectionLifecyclePort for DaemonLifecycle {
+    fn accepting(&self) -> bool {
+        DaemonLifecycle::accepting(self)
+    }
+
+    fn try_enter(&self) -> Option<McpRequestActivity> {
+        DaemonLifecycle::try_enter(self).map(McpRequestActivity::retain)
+    }
+
+    fn wait_for_draining(&self) -> McpLifecycleDrainFuture<'_> {
+        Box::pin(DaemonLifecycle::wait_for_draining(self))
+    }
 }
 
 /// Bound on the join failures retained from tasks reaped during normal

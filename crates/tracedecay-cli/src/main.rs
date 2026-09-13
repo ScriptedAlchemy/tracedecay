@@ -67,7 +67,7 @@ mod workflow_cli;
 mod workflow_command;
 
 use cli::*;
-use tracedecay::daemon::StderrTracingDefault;
+use tracedecay_daemon_service::logging::StderrTracingDefault;
 
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay::project::current_timestamp()
@@ -692,7 +692,9 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // Installed after parsing rather than first thing: hook stderr belongs to
     // the host, so which command is running has to be known before anything
     // is allowed to write there.
-    tracedecay::daemon::install_stderr_tracing(stderr_tracing_default(cli.command.as_ref()));
+    tracedecay_daemon_service::logging::install_stderr_tracing(stderr_tracing_default(
+        cli.command.as_ref(),
+    ));
     // Bound only Rayon's global pool for daemon workloads that actually use
     // it. Code indexing owns a separately planned pool shared by semantic
     // projection, so changing this ceiling cannot silently narrow that budget.

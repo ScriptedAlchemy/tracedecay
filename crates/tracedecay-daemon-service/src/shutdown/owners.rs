@@ -3,19 +3,19 @@ use std::pin::Pin;
 
 use tokio::time::Instant;
 use tracedecay_runtime_core::logging::log_daemon_event;
-pub(crate) use tracedecay_store_runtime::ShutdownStatus;
+pub use tracedecay_store_runtime::ShutdownStatus;
 
 type ShutdownJoin = Pin<Box<dyn Future<Output = ShutdownStatus> + Send + 'static>>;
 type ShutdownJoinFactory = Box<dyn FnOnce(Instant) -> ShutdownJoin + Send + 'static>;
 
-pub(super) struct ShutdownOwner {
+pub struct ShutdownOwner {
     name: &'static str,
     cancel: Box<dyn FnOnce() + Send + 'static>,
     join: ShutdownJoinFactory,
 }
 
 impl ShutdownOwner {
-    pub(super) fn new<Cancel, Join>(name: &'static str, cancel: Cancel, join: Join) -> Self
+    pub fn new<Cancel, Join>(name: &'static str, cancel: Cancel, join: Join) -> Self
     where
         Cancel: FnOnce() + Send + 'static,
         Join: Future<Output = ()> + Send + 'static,
@@ -23,7 +23,7 @@ impl ShutdownOwner {
         Self::with_deadline(name, cancel, |_| join)
     }
 
-    pub(super) fn with_deadline<Cancel, JoinFactory, Join>(
+    pub fn with_deadline<Cancel, JoinFactory, Join>(
         name: &'static str,
         cancel: Cancel,
         join: JoinFactory,
@@ -45,7 +45,7 @@ impl ShutdownOwner {
         }
     }
 
-    pub(super) fn with_deadline_result<Cancel, JoinFactory, Join, Error>(
+    pub fn with_deadline_result<Cancel, JoinFactory, Join, Error>(
         name: &'static str,
         cancel: Cancel,
         join: JoinFactory,
@@ -70,7 +70,7 @@ impl ShutdownOwner {
         }
     }
 
-    pub(super) fn with_deadline_status<Cancel, JoinFactory, Join>(
+    pub fn with_deadline_status<Cancel, JoinFactory, Join>(
         name: &'static str,
         cancel: Cancel,
         join: JoinFactory,
@@ -89,20 +89,20 @@ impl ShutdownOwner {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ShutdownOwnerReceipt {
-    pub(super) name: &'static str,
-    pub(super) status: ShutdownStatus,
+pub struct ShutdownOwnerReceipt {
+    pub name: &'static str,
+    pub status: ShutdownStatus,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ShutdownReceipt {
-    pub(super) deadline: Instant,
-    pub(super) owners: Vec<ShutdownOwnerReceipt>,
+pub struct ShutdownReceipt {
+    pub deadline: Instant,
+    pub owners: Vec<ShutdownOwnerReceipt>,
     unfinished: Vec<&'static str>,
 }
 
 impl ShutdownReceipt {
-    pub(super) fn extend(&mut self, other: Self) {
+    pub fn extend(&mut self, other: Self) {
         self.owners.extend(other.owners);
         for owner in other.unfinished {
             if !self.unfinished.contains(&owner) {
@@ -111,11 +111,11 @@ impl ShutdownReceipt {
         }
     }
 
-    pub(super) fn unfinished(&self) -> &[&'static str] {
+    pub fn unfinished(&self) -> &[&'static str] {
         &self.unfinished
     }
 
-    pub(super) fn failed(deadline: Instant, name: &'static str, error: String) -> Self {
+    pub fn failed(deadline: Instant, name: &'static str, error: String) -> Self {
         Self {
             deadline,
             owners: vec![ShutdownOwnerReceipt {
@@ -126,7 +126,7 @@ impl ShutdownReceipt {
         }
     }
 
-    pub(super) fn timed_out(deadline: Instant, name: &'static str) -> Self {
+    pub fn timed_out(deadline: Instant, name: &'static str) -> Self {
         Self {
             deadline,
             owners: vec![ShutdownOwnerReceipt {
@@ -137,7 +137,7 @@ impl ShutdownReceipt {
         }
     }
 
-    pub(super) fn retain_failures_from(&mut self, failures: &[ShutdownOwnerReceipt]) {
+    pub fn retain_failures_from(&mut self, failures: &[ShutdownOwnerReceipt]) {
         for failure in failures {
             let ShutdownStatus::Failed(prior_error) = &failure.status else {
                 continue;
@@ -168,16 +168,16 @@ impl ShutdownReceipt {
     }
 }
 
-#[cfg(test)]
-pub(super) async fn join_shutdown_owners(
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn join_shutdown_owners(
     deadline: Instant,
     owners: Vec<ShutdownOwner>,
 ) -> ShutdownReceipt {
     join_shutdown_owner_phases(deadline, vec![owners]).await
 }
 
-#[cfg(test)]
-pub(super) async fn join_shutdown_owner_phases(
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn join_shutdown_owner_phases(
     deadline: Instant,
     phases: Vec<Vec<ShutdownOwner>>,
 ) -> ShutdownReceipt {
@@ -188,12 +188,12 @@ pub(super) async fn join_shutdown_owner_phases(
 /// draining and decrements on drop, so cancellation, panic, and abort cannot
 /// leak a phantom straggler. A non-zero gauge during a hung shutdown names the
 /// lane that is still draining live, before any receipt exists to consult.
-pub(super) struct DrainingGauge {
+pub struct DrainingGauge {
     key: &'static str,
 }
 
 impl DrainingGauge {
-    pub(super) fn arm(key: &'static str) -> Self {
+    pub fn arm(key: &'static str) -> Self {
         hotpath::gauge!(key).inc(1_u64);
         Self { key }
     }
@@ -212,13 +212,11 @@ impl Drop for DrainingGauge {
 /// message (if cancelling it panicked), and its join factory.
 type PreparedShutdownOwner = (usize, &'static str, Option<String>, ShutdownJoinFactory);
 
-pub(super) struct PreparedShutdownOwners {
+pub struct PreparedShutdownOwners {
     phases: Vec<Vec<PreparedShutdownOwner>>,
 }
 
-pub(super) fn prepare_shutdown_owner_phases(
-    phases: Vec<Vec<ShutdownOwner>>,
-) -> PreparedShutdownOwners {
+pub fn prepare_shutdown_owner_phases(phases: Vec<Vec<ShutdownOwner>>) -> PreparedShutdownOwners {
     let mut ordinal = 0;
     let phases = phases
         .into_iter()
@@ -242,7 +240,7 @@ pub(super) fn prepare_shutdown_owner_phases(
 
 impl PreparedShutdownOwners {
     #[hotpath::measure(label = "daemon.shutdown.owners.join", future = true)]
-    pub(super) async fn join(self, deadline: Instant) -> ShutdownReceipt {
+    pub async fn join(self, deadline: Instant) -> ShutdownReceipt {
         let mut receipts = Vec::new();
         for phase in self.phases {
             receipts.extend(join_shutdown_phase(deadline, phase).await);
@@ -286,7 +284,7 @@ async fn join_shutdown_phase(
                     ("owner", name.to_string()),
                     (
                         "since_arm_ms",
-                        super::shutdown_watchdog::shutdown_elapsed_ms().to_string(),
+                        super::watchdog::shutdown_elapsed_ms().to_string(),
                     ),
                 ],
             );
@@ -308,7 +306,7 @@ async fn join_shutdown_phase(
                     ("elapsed_ms", started.elapsed().as_millis().to_string()),
                     (
                         "since_arm_ms",
-                        super::shutdown_watchdog::shutdown_elapsed_ms().to_string(),
+                        super::watchdog::shutdown_elapsed_ms().to_string(),
                     ),
                 ],
             );

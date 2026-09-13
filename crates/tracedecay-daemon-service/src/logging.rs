@@ -8,9 +8,11 @@ use tracing_subscriber::Layer as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
-use super::{Path, TraceDecayError};
+use std::path::Path;
+
 #[cfg(unix)]
 use tracedecay_daemon_control::SERVICE_NAME;
+use tracedecay_domain::errors::TraceDecayError;
 #[cfg(unix)]
 use tracedecay_runtime_core::logging::DAEMON_LOG_MARKER;
 use tracedecay_runtime_core::logging::format_daemon_log_line;
@@ -39,7 +41,7 @@ pub struct WatcherEvent {
 /// is recorded as unparsed and reported once, never reinterpreted as
 /// something the operator did not write.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StderrTracingFilter {
+pub struct StderrTracingFilter {
     /// Level for targets that no directive names.
     global: LevelFilter,
     /// Target-prefix directives, most specific (longest prefix) first.
@@ -51,7 +53,7 @@ pub(crate) struct StderrTracingFilter {
 impl StderrTracingFilter {
     /// Parses a `RUST_LOG` value. `default` applies to every target the value
     /// does not name, and is what an unset or empty value resolves to.
-    pub(crate) fn parse(env_value: Option<&str>, default: LevelFilter) -> Self {
+    pub fn parse(env_value: Option<&str>, default: LevelFilter) -> Self {
         let mut filter = Self {
             global: default,
             targets: Vec::new(),
@@ -97,7 +99,7 @@ impl StderrTracingFilter {
 
     /// Level for one event target: the most specific matching directive, or
     /// the global level when no directive names it.
-    pub(crate) fn level_for_target(&self, target: &str) -> LevelFilter {
+    pub fn level_for_target(&self, target: &str) -> LevelFilter {
         self.targets
             .iter()
             .find(|(prefix, _)| target.starts_with(prefix.as_str()))
@@ -107,21 +109,21 @@ impl StderrTracingFilter {
     /// The most verbose level any directive can enable. Only a max-level hint
     /// for the subscriber — [`Self::level_for_target`] still decides each
     /// event, so a target directive never globalizes.
-    pub(crate) fn max_level(&self) -> LevelFilter {
+    pub fn max_level(&self) -> LevelFilter {
         self.targets
             .iter()
             .fold(self.global, |max, (_, level)| max.max(*level))
     }
 
     /// The directives this subset could not honor.
-    pub(crate) fn unparsed(&self) -> &[String] {
+    pub fn unparsed(&self) -> &[String] {
         &self.unparsed
     }
 
     /// One machine-readable line naming every unhonored directive, or `None`
     /// when the whole value was understood. Emitted so a typo in `RUST_LOG`
     /// surfaces as a diagnostic instead of silently changing nothing.
-    pub(crate) fn diagnostic(&self) -> Option<String> {
+    pub fn diagnostic(&self) -> Option<String> {
         let unparsed = self.unparsed();
         if unparsed.is_empty() {
             return None;
@@ -314,7 +316,7 @@ pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> 
 #[hotpath::measure(label = "daemon.engine.logging.read_tail")]
 fn read_daemon_log_tail(max_lines: usize) -> String {
     // macOS launchd: a plain err-log file next to the data dir.
-    if let Some(data_dir) = crate::config::user_data_dir() {
+    if let Some(data_dir) = tracedecay_project::config::user_data_dir() {
         let err_log = data_dir.join("daemon.err.log");
         if let Ok(contents) = std::fs::read_to_string(&err_log) {
             let lines: Vec<&str> = contents.lines().collect();

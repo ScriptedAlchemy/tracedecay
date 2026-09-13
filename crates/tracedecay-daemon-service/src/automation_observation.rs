@@ -7,17 +7,17 @@ use tracedecay_application::observability::{
 use tracedecay_automation_runtime::automation::observation::automation_funnel_observation_from_record;
 use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 
-use tracedecay_daemon_service::DaemonInvocationService;
+use crate::DaemonInvocationService;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-pub(crate) async fn project_run_observation_producer(
+pub async fn project_run_observation_producer(
     service: &DaemonInvocationService,
     project_path: &Path,
 ) -> Option<std::sync::Arc<BoundedObservabilityProducerV1>> {
     service.observability_producer(Some(project_path)).await
 }
 
-pub(crate) fn record_project_run(
+pub fn record_project_run(
     producer: &BoundedObservabilityProducerV1,
     project_path: &Path,
     record: &AutomationRunLedgerRecord,
@@ -27,7 +27,7 @@ pub(crate) fn record_project_run(
 }
 
 #[hotpath::measure(label = "daemon.automation.observation.record")]
-pub(in crate::daemon) fn record_run_with_producer(
+pub fn record_run_with_producer(
     producer: Option<&BoundedObservabilityProducerV1>,
     project_path: &Path,
     record: &AutomationRunLedgerRecord,

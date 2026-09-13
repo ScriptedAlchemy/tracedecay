@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
-use super::shutdown_coordination::{
-    DrainingGauge, ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
-    prepare_shutdown_owner_phases,
-};
-use super::{
+use super::lifecycle::{
     DAEMON_BACKGROUND_DRAIN_DEADLINE, DAEMON_CLIENT_DRAIN_DEADLINE,
     DAEMON_PROJECT_SERVER_DRAIN_DEADLINE, DAEMON_STORE_CLOSE_RESERVE, DAEMON_TASK_ABORT_DEADLINE,
-    DaemonLifecycle, core_lifecycle::DaemonShutdownClaim,
+    DaemonLifecycle, DaemonShutdownClaim,
+};
+use super::owners::{
+    DrainingGauge, ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
+    prepare_shutdown_owner_phases,
 };
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -125,7 +125,7 @@ fn log_shutdown_phase(
     );
 }
 
-pub(super) struct DaemonShutdownPlan {
+pub struct DaemonShutdownPlan {
     clients: JoinSet<Result<()>>,
     owner_phases: Vec<Vec<ShutdownOwner>>,
     terminal_owner_phases: Vec<Vec<ShutdownOwner>>,
@@ -133,7 +133,7 @@ pub(super) struct DaemonShutdownPlan {
 }
 
 impl DaemonShutdownPlan {
-    pub(super) fn new<ProjectServers, ProjectServersFuture>(
+    pub fn new<ProjectServers, ProjectServersFuture>(
         clients: JoinSet<Result<()>>,
         owner_phases: Vec<Vec<ShutdownOwner>>,
         project_server_shutdown: ProjectServers,
@@ -152,7 +152,8 @@ impl DaemonShutdownPlan {
         }
     }
 
-    pub(super) fn with_terminal_owner_phases(
+    #[must_use]
+    pub fn with_terminal_owner_phases(
         mut self,
         terminal_owner_phases: Vec<Vec<ShutdownOwner>>,
     ) -> Self {
@@ -162,11 +163,11 @@ impl DaemonShutdownPlan {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct DaemonShutdownReceipt {
-    pub(super) in_flight: ShutdownStatus,
-    pub(super) clients: ShutdownStatus,
-    pub(super) background: ShutdownReceipt,
-    pub(super) project_servers: ShutdownTaskReceipt,
+pub struct DaemonShutdownReceipt {
+    pub in_flight: ShutdownStatus,
+    pub clients: ShutdownStatus,
+    pub background: ShutdownReceipt,
+    pub project_servers: ShutdownTaskReceipt,
 }
 
 impl DaemonShutdownReceipt {
@@ -192,7 +193,7 @@ impl DaemonShutdownReceipt {
         }
     }
 
-    pub(super) fn is_retryable(&self) -> bool {
+    pub fn is_retryable(&self) -> bool {
         matches!(self.in_flight, ShutdownStatus::TimedOut)
             || matches!(self.clients, ShutdownStatus::TimedOut)
             || self
@@ -205,7 +206,7 @@ impl DaemonShutdownReceipt {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct DaemonShutdownFailures {
+pub struct DaemonShutdownFailures {
     in_flight: Vec<String>,
     clients: Vec<String>,
     background: Vec<ShutdownOwnerReceipt>,
@@ -267,7 +268,7 @@ fn retain_status_failures(status: &mut ShutdownStatus, failures: &[String]) {
     clippy::too_many_lines,
     reason = "Shutdown coordination is one receipt-and-join of the running stop plan."
 )]
-pub(super) async fn coordinate_daemon_shutdown<Prepare>(
+pub async fn coordinate_daemon_shutdown<Prepare>(
     lifecycle: &DaemonLifecycle,
     shutdown_deadline: tokio::time::Instant,
     prepare: Prepare,
@@ -762,10 +763,18 @@ mod tests {
             ),
         ] {
             // A child process exercises the production stderr sink, including formatting.
+            // libtest names the test by its module path without the crate prefix.
+            let test_name = format!(
+                "{}::post_reaper_phase_receipts_reach_stderr",
+                module_path!()
+                    .split_once("::")
+                    .map_or(module_path!(), |(_, rest)| rest)
+            );
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "daemon::shutdown_orchestration::tests::post_reaper_phase_receipts_reach_stderr", "--nocapture"])
+                .args(["--exact", &test_name, "--nocapture"])
                 .env(CHILD_MODE, mode)
-                .output().unwrap();
+                .output()
+                .unwrap();
             assert!(output.status.success(), "{output:?}");
             let stderr = String::from_utf8(output.stderr).unwrap();
             let phases: Vec<_> = stderr

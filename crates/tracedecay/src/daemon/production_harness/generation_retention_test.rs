@@ -949,7 +949,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         "the online inventory reports no degradation"
     );
     assert!(matches!(
-        crate::daemon::doctor_kernel::collect_code_generation_retention_findings(
+        tracedecay_daemon_service::doctor_kernel::collect_code_generation_retention_findings(
             schedulers,
             &observations,
             graph
@@ -1124,18 +1124,19 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         !first_source_file.exists(),
         "the code source becomes collectible only after vector cleanup"
     );
-    let doctor = crate::daemon::doctor_kernel::collect_code_generation_retention_findings(
-        restarted_schedulers,
-        &restarted_observations,
-        restarted_graph
-            .configuration_runtime()
-            .semantic_configuration_inventory_authority()
-            .as_ref(),
-        &code_store_root,
-        &canonical_root,
-        restarted_graph.db(),
-    )
-    .await;
+    let doctor =
+        tracedecay_daemon_service::doctor_kernel::collect_code_generation_retention_findings(
+            restarted_schedulers,
+            &restarted_observations,
+            restarted_graph
+                .configuration_runtime()
+                .semantic_configuration_inventory_authority()
+                .as_ref(),
+            &code_store_root,
+            &canonical_root,
+            restarted_graph.db(),
+        )
+        .await;
     let DoctorStorageFamilyReadV1::ObservedIncomplete { findings, reason } = doctor else {
         panic!("surviving nonconfigured graph head must be reported as incomplete: {doctor:?}");
     };
