@@ -3630,7 +3630,7 @@ def _scout_claim(fixture: dict[str, Any], call: Call, deadline: Deadline, suffix
     response = call(
         "tracedecay_context_scout_claim",
         {"address": fixture["context_scout_address"], "window": "idle_window",
-         "idempotency_key": f"tool-sweep-scout-claim-{suffix}"},
+         "idempotency_key": f"tool-sweep-scout-claim-{suffix}", "format": "json"},
         deadline("tracedecay_context_scout_claim"),
     )
     claimed = next((value for value in objects(response)
@@ -3646,21 +3646,21 @@ def _prepare_context_scout(name: str, fixture: dict[str, Any], call: Call, deadl
     nonce = str(time.monotonic_ns())
     if name == "tracedecay_context_scout_pause":
         arguments = {"address": address, "expected_revision": fixture["context_scout_revision"],
-                     "idempotency_key": f"tool-sweep-scout-pause-{nonce}"}
+                     "idempotency_key": f"tool-sweep-scout-pause-{nonce}", "format": "json"}
         def cleanup(_response: dict[str, Any]) -> str:
             revision, value = _configuration_setting(call, deadline, key)
             if value.get("value", {}).get("state") != "paused":
                 raise JourneyError("Context Scout pause did not persist paused state")
             call("tracedecay_context_scout_resume",
                  {"address": address, "expected_revision": revision,
-                  "idempotency_key": f"tool-sweep-scout-pause-rollback-{nonce}"},
+                  "idempotency_key": f"tool-sweep-scout-pause-rollback-{nonce}", "format": "json"},
                  deadline("tracedecay_context_scout_resume"))
             return "pause persisted and resume restored the disposable Scout"
         return PreparedJourney(arguments, cleanup)
     if name == "tracedecay_context_scout_resume":
         call("tracedecay_context_scout_pause",
              {"address": address, "expected_revision": fixture["context_scout_revision"],
-              "idempotency_key": f"tool-sweep-scout-resume-setup-{nonce}"},
+              "idempotency_key": f"tool-sweep-scout-resume-setup-{nonce}", "format": "json"},
              deadline("tracedecay_context_scout_pause"))
         revision, _ = _configuration_setting(call, deadline, key)
         def cleanup(_response: dict[str, Any]) -> str:
@@ -3669,10 +3669,11 @@ def _prepare_context_scout(name: str, fixture: dict[str, Any], call: Call, deadl
                 raise JourneyError("Context Scout resume did not restore active state")
             return "pause prerequisite and active resume state verified"
         return PreparedJourney({"address": address, "expected_revision": revision,
-                                "idempotency_key": f"tool-sweep-scout-resume-{nonce}"}, cleanup)
+                                "idempotency_key": f"tool-sweep-scout-resume-{nonce}",
+                                "format": "json"}, cleanup)
     if name == "tracedecay_context_scout_claim":
         arguments = {"address": address, "window": "idle_window",
-                     "idempotency_key": f"tool-sweep-scout-claim-{nonce}"}
+                     "idempotency_key": f"tool-sweep-scout-claim-{nonce}", "format": "json"}
         def cleanup(response: dict[str, Any]) -> str:
             claimed = next((value for value in objects(response)
                             if value.get("outcome") == "claimed" and isinstance(value.get("claim"), dict)), None)
@@ -3681,7 +3682,7 @@ def _prepare_context_scout(name: str, fixture: dict[str, Any], call: Call, deadl
             call("tracedecay_context_scout_delivery",
                  {"address": address, "claim": claimed["claim"],
                   "delivered_at": int(time.time() * 1_000_000), "outcome": "displayed",
-                  "idempotency_key": f"tool-sweep-scout-claim-settle-{nonce}"},
+                  "idempotency_key": f"tool-sweep-scout-claim-settle-{nonce}", "format": "json"},
                  deadline("tracedecay_context_scout_delivery"))
             return "claim returned a real lease and delivery settled it"
         return PreparedJourney(arguments, cleanup, settlement="contained")
@@ -3689,7 +3690,8 @@ def _prepare_context_scout(name: str, fixture: dict[str, Any], call: Call, deadl
         claim = _scout_claim(fixture, call, deadline, nonce)
         delivery_arguments = {"address": address, "claim": claim,
                               "delivered_at": int(time.time() * 1_000_000), "outcome": "displayed",
-                              "idempotency_key": f"tool-sweep-scout-delivery-{nonce}"}
+                              "idempotency_key": f"tool-sweep-scout-delivery-{nonce}",
+                              "format": "json"}
         if name == "tracedecay_context_scout_delivery":
             def cleanup(response: dict[str, Any]) -> str:
                 receipt = _object_field(response, "receipt")
@@ -3702,9 +3704,10 @@ def _prepare_context_scout(name: str, fixture: dict[str, Any], call: Call, deadl
         receipt = _object_field(delivered, "receipt")
         arguments = {"address": address, "receipt": receipt,
                      "feedback": {"receipt_id": receipt["receipt_id"], "kind": "explicitly_accepted"},
-                     "idempotency_key": f"tool-sweep-scout-feedback-{nonce}"}
+                     "idempotency_key": f"tool-sweep-scout-feedback-{nonce}", "format": "json"}
         def cleanup(_response: dict[str, Any]) -> str:
-            recent = call("tracedecay_context_scout_recent", {"address": address, "limit": 8},
+            recent = call("tracedecay_context_scout_recent",
+                          {"address": address, "limit": 8, "format": "json"},
                           deadline("tracedecay_context_scout_recent"))
             if first_value(recent, {"kind"}) != "explicitly_accepted":
                 raise JourneyError("Context Scout recent omitted recorded feedback")
@@ -3713,9 +3716,10 @@ def _prepare_context_scout(name: str, fixture: dict[str, Any], call: Call, deadl
     if name == "tracedecay_context_scout_cancel":
         work = fixture["context_scout_work"]
         arguments = {"address": address, "work": work,
-                     "idempotency_key": f"tool-sweep-scout-cancel-{nonce}"}
+                     "idempotency_key": f"tool-sweep-scout-cancel-{nonce}", "format": "json"}
         def cleanup(_response: dict[str, Any]) -> str:
-            recent = call("tracedecay_context_scout_recent", {"address": address, "limit": 8},
+            recent = call("tracedecay_context_scout_recent",
+                          {"address": address, "limit": 8, "format": "json"},
                           deadline("tracedecay_context_scout_recent"))
             for value in objects(recent):
                 if isinstance(value.get("pending"), list) and any(

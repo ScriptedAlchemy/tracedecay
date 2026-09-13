@@ -42,6 +42,20 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(args.read, "tracedecay_context_scout_status")
         self.assertIsNone(args.effect)
 
+    def test_context_scout_reads_request_machine_readable_results(self) -> None:
+        runner = load_runner()
+        fixture = {"context_scout_address": {"project_id": [1] * 16}}
+
+        for name in (
+            "tracedecay_context_scout_status",
+            "tracedecay_context_scout_recent",
+            "tracedecay_context_scout_explain",
+            "tracedecay_context_scout_capability",
+            "tracedecay_context_scout_budget",
+        ):
+            arguments = runner.materialize_tool_arguments({"name": name}, fixture)
+            self.assertEqual(arguments["format"], "json")
+
 
 class ProblemCodeTests(unittest.TestCase):
     def test_problem_code_is_a_first_class_field_for_success_framed_unavailable(self) -> None:
