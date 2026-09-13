@@ -123,6 +123,12 @@ test = false
 required-features = ["hotpath"]
 
 [[bench]]
+name = "restore_generation"
+harness = false
+test = false
+required-features = ["hotpath"]
+
+[[bench]]
 name = "source_search"
 harness = false
 test = false
