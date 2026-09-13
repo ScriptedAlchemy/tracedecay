@@ -27,6 +27,7 @@ from dispatch_policy import READ_EFFECTS, ToolPolicy, decode_tool_policy
 from journeys import (
     FACT_READ_TOOLS,
     JourneyError,
+    LCM_READ_TOOLS,
     NATIVE_LIFECYCLE_EFFECTS,
     WORKFLOW_LIFECYCLE_EFFECTS,
     api_migration_plan_arguments,
@@ -37,6 +38,7 @@ from journeys import (
     prime_workflow_lifecycle,
     profile_refresh_selectors,
     validate_fact_read_response,
+    validate_lcm_read_response,
 )
 from outcomes import (
     duration_us,
@@ -1801,6 +1803,16 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
             },
             "format": "json",
         }
+    if name == "tracedecay_lcm_describe":
+        # The negotiated schema leaves `provider` a free string, so the generic
+        # materializer would describe an invented provider and pass on an empty
+        # session shape. Describe the captured rollout instead.
+        return {
+            "provider": "codex",
+            "session_id": fixture["session_id"],
+            "target": {"kind": "session"},
+            "format": "json",
+        }
     if name == "tracedecay_lcm_load_session":
         return {
             "provider": "codex",
@@ -2409,9 +2421,12 @@ def _read_tool_row(
             row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
             row = _require_navigation_evidence(row, policy.name, response)
     row = _expected_denial_row(row, policy.name, response)
-    if row["verdict"] == "PASS" and policy.name in FACT_READ_TOOLS:
+    if row["verdict"] == "PASS" and (
+        policy.name in FACT_READ_TOOLS or policy.name in LCM_READ_TOOLS
+    ):
         try:
             validate_fact_read_response(policy.name, response, fixture)
+            validate_lcm_read_response(policy.name, response, fixture)
         except JourneyError as error:
             row.update(
                 {
