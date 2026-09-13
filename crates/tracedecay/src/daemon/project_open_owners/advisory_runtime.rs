@@ -119,6 +119,7 @@ struct ProjectOpenAdvisoryFeedbackCycleV1 {
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
     hook_config_root: std::path::PathBuf,
+    hook_worktree_id: [u8; 16],
 }
 
 struct ProjectOpenAdvisoryCycleExecutionV1 {
@@ -319,9 +320,11 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
     ) {
         let project_id = self.feedback_scope.project_id.as_str();
         let worktree_id = self.feedback_scope.worktree_id.as_str();
-        let Some((host, rollback)) =
-            advisory_hook_notice_dispatch(&self.hook_config_root, now_micros())
-        else {
+        let Some((host, rollback)) = advisory_hook_notice_dispatch(
+            &self.hook_config_root,
+            self.hook_worktree_id,
+            now_micros(),
+        ) else {
             tracing::warn!(
                 target: "tracedecay::feedback_advisory_cycle",
                 project_id,
@@ -383,6 +386,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
 /// acknowledge a notice.
 fn advisory_hook_notice_dispatch(
     hook_config_root: &Path,
+    worktree_id: [u8; 16],
     now: UtcMicros,
 ) -> Option<(HostKindV1, HookFeedbackRollbackSwitchV1)> {
     tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS
@@ -390,7 +394,7 @@ fn advisory_hook_notice_dispatch(
         .find_map(|host| {
             let subscriber =
                 HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
-                    hook_configuration_path(hook_config_root, *host),
+                    hook_configuration_path(hook_config_root, worktree_id, *host),
                 ));
             match subscriber.load_current(*host, now) {
                 HookConfigurationReadOutcomeV1::Bound(snapshot) => Some((
@@ -1529,6 +1533,7 @@ async fn register_production_advisory_owner(
         github_pull_request_id,
         ci_discovery_config,
         hook_config_root: state.graph.hook_store_layout().data_root.clone(),
+        hook_worktree_id,
     });
     let work_cycle = Arc::clone(&advisory_cycle);
     let work =

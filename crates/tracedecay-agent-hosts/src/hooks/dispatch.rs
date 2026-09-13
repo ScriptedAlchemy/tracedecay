@@ -88,6 +88,31 @@ pub fn project_id_for_layout(
         .map(|project_id| envelope_identity_hash16("project", project_id))
 }
 
+pub fn worktree_id_for_layout(
+    runtime: &HookRuntimeV1,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
+) -> tracedecay_domain::errors::Result<[u8; 16]> {
+    let project_key = layout.identity.project_id.as_deref().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "cannot resolve Hook worktree without typed project identity".to_owned(),
+        }
+    })?;
+    let project_id = ProjectId::new(project_key.to_owned()).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("cannot validate Hook project identity: {error}"),
+        }
+    })?;
+    let scope = (runtime.scope_resolver)(&layout.project_root, &project_id).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("cannot resolve Hook repository/worktree scope: {error}"),
+        }
+    })?;
+    Ok(envelope_identity_hash16(
+        "worktree",
+        scope.worktree_id.as_str(),
+    ))
+}
+
 pub fn publish_daemon_bindings(
     runtime: &HookRuntimeV1,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
@@ -170,7 +195,7 @@ pub fn publish_daemon_bindings(
             },
         };
         let writer = tracedecay_hooks::HookConfigurationFileWriterV1::new(
-            tracedecay_hooks::hook_configuration_path(&layout.data_root, *host),
+            tracedecay_hooks::hook_configuration_path(&layout.data_root, worktree_id, *host),
         );
         tracedecay_hooks::HookConfigurationPublisherV1::new(writer)
             .publish(snapshot)
@@ -419,7 +444,8 @@ pub(crate) async fn dispatch(
         }
         Err(_) => return unavailable(),
     };
-    let Some(prepared) = prepare_bound_hook(host, event_json, project_root, decoded) else {
+    let Some(prepared) = prepare_bound_hook(runtime, host, event_json, project_root, decoded)
+    else {
         return unavailable();
     };
     let native_session_id = prepared.native_session_id.clone();
@@ -548,9 +574,13 @@ pub(crate) async fn dispatch_opencode_tool_after(
         }
         Err(_) => return unavailable(),
     };
-    let Some(prepared) =
-        prepare_bound_hook(HookHostV1::OpenCode, event_json, project_root, decoded)
-    else {
+    let Some(prepared) = prepare_bound_hook(
+        runtime,
+        HookHostV1::OpenCode,
+        event_json,
+        project_root,
+        decoded,
+    ) else {
         return unavailable();
     };
     let native_session_id = prepared.native_session_id.clone();
@@ -609,13 +639,16 @@ struct PreparedBoundHook {
 }
 
 fn prepare_bound_hook(
+    runtime: &HookRuntimeV1,
     host: HookHostV1,
     event_json: &str,
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
 ) -> Option<PreparedBoundHook> {
     let layout = super::store_layout::layout(project_root)?;
-    let config_path = tracedecay_hooks::hook_configuration_path(&layout.data_root, host);
+    let worktree_id = worktree_id_for_layout(runtime, &layout).ok()?;
+    let config_path =
+        tracedecay_hooks::hook_configuration_path(&layout.data_root, worktree_id, host);
     let subscriber =
         HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(config_path));
     let now = now_utc();
