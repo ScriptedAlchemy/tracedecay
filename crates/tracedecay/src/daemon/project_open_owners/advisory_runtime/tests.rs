@@ -82,7 +82,7 @@ fn hook_notice_dispatch_requires_a_live_daemon_binding() {
     let root = tempfile::tempdir().expect("hook config root");
     let published_at = UtcMicros(1_000_000);
     assert!(
-        advisory_hook_notice_dispatch(root.path(), published_at).is_none(),
+        advisory_hook_notice_dispatch(root.path(), [3; 16], published_at).is_none(),
         "an unpublished binding set must stay typed unbound"
     );
 
@@ -91,6 +91,7 @@ fn hook_notice_dispatch_requires_a_live_daemon_binding() {
     tracedecay_hooks::HookConfigurationPublisherV1::new(
         tracedecay_hooks::HookConfigurationFileWriterV1::new(hook_configuration_path(
             root.path(),
+            [3; 16],
             host,
         )),
     )
@@ -104,14 +105,14 @@ fn hook_notice_dispatch_requires_a_live_daemon_binding() {
     .expect("published hook binding");
 
     let (kind, rollback) =
-        advisory_hook_notice_dispatch(root.path(), UtcMicros(published_at.0 + 1))
+        advisory_hook_notice_dispatch(root.path(), [3; 16], UtcMicros(published_at.0 + 1))
             .expect("live binding authorizes hook notice dispatch");
     assert_eq!(kind, HostKindV1::ClaudeCode);
     assert_eq!(rollback.configuration_revision, 7);
     assert_eq!(rollback.route, HookFeedbackDeliveryRouteV1::HookV2);
 
     assert!(
-        advisory_hook_notice_dispatch(root.path(), expires_at).is_none(),
+        advisory_hook_notice_dispatch(root.path(), [3; 16], expires_at).is_none(),
         "an expired binding is not a live delivery authority"
     );
 }

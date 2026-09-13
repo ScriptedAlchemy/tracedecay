@@ -432,7 +432,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             }],
         };
         HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(
-            tracedecay_hooks::hook_configuration_path(&data_root, host),
+            tracedecay_hooks::hook_configuration_path(&data_root, [3; 16], host),
         ))
         .publish(HookConfigurationSnapshotV1 {
             schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
