@@ -1272,17 +1272,38 @@ fn execute_query_unchecked(
     connection: &Connection,
     request: ExactSqlStatement,
 ) -> Result<ExactSqlRows, ExactSqlError> {
-    let mut statement = prepare_read_statement(connection, &request.sql)?;
+    // A read's cost decomposes into three phases that fail and stall for
+    // different reasons, so they are measured apart: acquiring a preparable
+    // statement (which rides out WAL recovery), SQLite's first step under the
+    // snapshot, and materializing the result set. `reader.exact_sql` alone
+    // cannot distinguish a scan from a wait.
+    let mut statement = hotpath::measure_block!("rusqlite.exact_sql.query.prepare", {
+        prepare_read_statement(connection, &request.sql)
+    })?;
     let columns = statement
         .column_names()
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let column_count = columns.len();
     let values = request.params.into_iter().map(ExactSqlValue::into_rusqlite);
-    let mut query = statement
-        .query(params_from_iter(values))
-        .map_err(|error| sqlite_error("start query", error))?;
+    let mut query = hotpath::measure_block!("rusqlite.exact_sql.query.start", {
+        statement.query(params_from_iter(values))
+    })
+    .map_err(|error| sqlite_error("start query", error))?;
+    let rows = hotpath::measure_block!("rusqlite.exact_sql.query.fetch", {
+        materialize_rows(&mut query, &columns)
+    })?;
+    drop(query);
+    crate::telemetry::observe_statement(&statement);
+    Ok(ExactSqlRows { columns, rows })
+}
+
+/// Materializes a result set under the row-count and byte ceilings.
+fn materialize_rows(
+    query: &mut rusqlite::Rows<'_>,
+    columns: &[String],
+) -> Result<Vec<ExactSqlRow>, ExactSqlError> {
+    let column_count = columns.len();
     let mut rows = Vec::new();
     let mut materialized_bytes = columns
         .iter()
@@ -1326,9 +1347,7 @@ fn execute_query_unchecked(
         }
         rows.push(ExactSqlRow { values });
     }
-    drop(query);
-    crate::telemetry::observe_statement(&statement);
-    Ok(ExactSqlRows { columns, rows })
+    Ok(rows)
 }
 
 fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlError {
