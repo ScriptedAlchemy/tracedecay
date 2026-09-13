@@ -1,0 +1,66 @@
+{
+  "envelope": {
+    "version": 1,
+    "provider": "codex",
+    "native_record_kind": "response_item",
+    "stable_record_id": "record.codex-goal-context",
+    "relations": {
+      "session_id": "codex-goal-context-session",
+      "thread_id": "codex-goal-context-session",
+      "message_id": "record.codex-goal-context"
+    },
+    "facts": [
+      {
+        "kind": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "<codex_internal_context source=\"goal\"><objective>ensure all provider session messages are ingested</objective>\nToken budget: 12000\nTokens remaining: 11000</codex_internal_context>"
+          }
+        ],
+        "timestamp": 1767225602
+      }
+    ],
+    "evidence": {
+      "ordering_domain": "file_bytes",
+      "range": {
+        "start": 0,
+        "end": 1
+      },
+      "native_timestamp": 1767225602
+    }
+  },
+  "released_output_ordinal": 0,
+  "released_session": {
+    "agent_id": null,
+    "ended_at": 1767225602,
+    "is_subagent": false,
+    "metadata_json": null,
+    "parent_session_id": null,
+    "parent_tool_use_id": null,
+    "project_key": "user",
+    "project_path": "user",
+    "provider": "codex",
+    "session_id": "codex-goal-context-session",
+    "started_at": 1767225602,
+    "title": null,
+    "transcript_path": null
+  },
+  "released_message": {
+    "kind": "message",
+    "message_id": "record.codex-goal-context",
+    "metadata_json": "{\"evidence\":{\"native_timestamp\":1767225602,\"ordering_domain\":\"file_bytes\",\"range\":{\"end\":1,\"start\":0}},\"facts\":[{\"content\":[{\"text\":\"<codex_internal_context source=\\\"goal\\\"><objective>ensure all provider session messages are ingested</objective>\\nToken budget: 12000\\nTokens remaining: 11000</codex_internal_context>\",\"type\":\"input_text\"}],\"kind\":\"message\",\"role\":\"user\",\"timestamp\":1767225602}],\"native_record_kind\":\"response_item\",\"provider\":\"codex\",\"relations\":{\"message_id\":\"record.codex-goal-context\",\"session_id\":\"codex-goal-context-session\",\"thread_id\":\"codex-goal-context-session\"},\"stable_record_id\":\"record.codex-goal-context\",\"version\":1}",
+    "model": null,
+    "ordinal": 0,
+    "provider": "codex",
+    "role": "user",
+    "session_id": "codex-goal-context-session",
+    "source_offset": 0,
+    "source_path": null,
+    "text": "[{\"text\":\"<codex_internal_context source=\\\"goal\\\"><objective>ensure all provider session messages are ingested</objective>\\nToken budget: 12000\\nTokens remaining: 11000</codex_internal_context>\",\"type\":\"input_text\"}]",
+    "timestamp": 1767225602,
+    "tool_names": null
+  },
+  "released_output_digest": "sha256:d553d7ab63ad8a3131ae25e7110d3383ed2d489fe9b687ccbceb3528fdd27da7"
+}
