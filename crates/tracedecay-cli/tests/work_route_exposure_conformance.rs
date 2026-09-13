@@ -1218,12 +1218,16 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         (measurements.len(), reported, metric_names, stable)
     };
 
-    let anonymous = agent
-        .post(&route)
-        .header("origin", &fixture.origin)
-        .content_type("application/json")
-        .send(request.to_string())
-        .expect("anonymous operation.work.topology_metrics response");
+    let anonymous = common::http_call_with_retry(
+        "anonymous operation.work.topology_metrics",
+        || {
+            agent
+                .post(&route)
+                .header("origin", &fixture.origin)
+                .content_type("application/json")
+                .send(request.to_string())
+        },
+    );
     assert_eq!(
         anonymous.status().as_u16(),
         StatusCode::UNAUTHORIZED.as_u16(),
@@ -1288,12 +1292,16 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
 
     fixture.restart();
     let restored_route = fixture.external_url(route_path);
-    let anonymous_after_restart = agent
-        .post(&restored_route)
-        .header("origin", &fixture.origin)
-        .content_type("application/json")
-        .send(request.to_string())
-        .expect("anonymous restarted operation.work.topology_metrics response");
+    let anonymous_after_restart = common::http_call_with_retry(
+        "anonymous restarted operation.work.topology_metrics",
+        || {
+            agent
+                .post(&restored_route)
+                .header("origin", &fixture.origin)
+                .content_type("application/json")
+                .send(request.to_string())
+        },
+    );
     assert_eq!(
         anonymous_after_restart.status().as_u16(),
         StatusCode::UNAUTHORIZED.as_u16(),
