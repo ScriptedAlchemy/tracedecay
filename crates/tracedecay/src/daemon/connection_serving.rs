@@ -1515,6 +1515,7 @@ fn serve_broker_socket_client_inner(
                     Box::pin(serve_projectless_client(
                         &mut transport,
                         &handshake.client_identity,
+                        handshake.timings,
                         &engine.lifecycle,
                         &engine.store_administration,
                     ))
@@ -2166,6 +2167,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         Box::pin(serve_projectless_client(
             &mut transport,
             &handshake.client_identity,
+            handshake.timings,
             lifecycle,
             &store_administration,
         ))
