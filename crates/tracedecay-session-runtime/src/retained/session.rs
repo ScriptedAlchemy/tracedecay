@@ -9,9 +9,10 @@ use tracedecay_contracts::retained_surfaces::{
     SessionCoverageIntervalV1, SessionCoverageModeV1, SessionCoverageReasonV1,
     SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1, SessionRecordV1,
     SessionRefreshRequestV1, SessionRefreshScopeV1,
-    SessionSourceCoverageV1 as WireSourceCoverageV1, SessionsForRequestV1, TemporalCoverageV1,
-    TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1,
-    TemporalWatermarksV1, ValidCoverageIntervalV1, WorkflowsRequestV1,
+    SessionSourceCoverageV1 as WireSourceCoverageV1, SessionsForRequestV1,
+    TemporalCoverageOmissionV1, TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1,
+    TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1, TemporalWatermarksV1,
+    ValidCoverageIntervalV1, WorkflowsRequestV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
@@ -36,7 +37,8 @@ use tracedecay_sessions::runtime::{
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::{
-    TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
+    TemporalCandidateFilterV1, TemporalCandidatePopulationCount, TemporalMessageTypeFilterV1,
+    TemporalSessionScopeFilterV1,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
@@ -45,8 +47,9 @@ use super::session_refresh::{
     admitted_session_refresh_command,
 };
 use crate::session_retrieval::{
-    DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
-    SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionTemporalMetadataView,
+    DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
+    SessionRetrievalCoverageOmissionView, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
+    SessionRetrievalStoreScope, SessionTemporalMetadataView,
 };
 use tracedecay_contracts::retained_receipts::{evidence_outcome, session_refresh_effect_outcome};
 use tracedecay_domain::errors::TraceDecayError;
@@ -693,8 +696,7 @@ impl MessageSearchInput {
             }
             SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
                 return Err(RetainedSurfaceExecutionErrorV1::structural_budget_refusal(
-                    stage,
-                    accounting,
+                    stage, accounting,
                 ));
             }
             SessionRetrievalServiceOutcome::TimedOut => {
@@ -1050,6 +1052,11 @@ fn temporal(
                 reason: hydration(omission.reason),
             })
             .collect(),
+        coverage_omissions: value
+            .coverage_omissions
+            .into_iter()
+            .map(coverage_omission)
+            .collect(),
         next_cursor: value.cursor,
         freshness: Some(match freshness {
             SessionDataFreshness::Fresh => TemporalFreshnessV1::Fresh,
@@ -1060,6 +1067,26 @@ fn temporal(
                 TemporalFreshnessV1::Partial { generation_lag }
             }
         }),
+    }
+}
+
+fn coverage_omission(omission: SessionRetrievalCoverageOmissionView) -> TemporalCoverageOmissionV1 {
+    match omission {
+        SessionRetrievalCoverageOmissionView::RootContinuationUnavailable {
+            strict_population,
+        } => {
+            TemporalCoverageOmissionV1::RootContinuationUnavailable {
+                strict_population: match strict_population {
+                    TemporalCandidatePopulationCount::Exact(count) => {
+                        TemporalPopulationCountV1::Exact { count }
+                    }
+                    TemporalCandidatePopulationCount::AtLeast(count) => {
+                        TemporalPopulationCountV1::AtLeast { count }
+                    }
+                },
+                detail: "root continuation unavailable: strict population exceeds the supported window; narrow the scope".to_owned(),
+            }
+        }
     }
 }
 
@@ -1183,8 +1210,13 @@ mod refusal_tests {
         ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
     };
     use tracedecay_domain::CursorManifestLimitKindV1;
+    use tracedecay_temporal_query::ports::TemporalCandidatePopulationCount;
 
-    use super::message_search_cursor_manifest_refusal;
+    use crate::session_retrieval::{
+        SessionRetrievalCoverageOmissionView, SessionTemporalMetadataView,
+    };
+
+    use super::{message_search_cursor_manifest_refusal, temporal};
 
     #[test]
     fn message_search_cursor_manifest_kinds_have_distinct_invalid_request_diagnostics() {
@@ -1214,5 +1246,34 @@ mod refusal_tests {
                 Some(expected_code)
             );
         }
+    }
+
+    #[test]
+    fn root_continuation_omission_carries_scope_guidance() {
+        let metadata = temporal(
+            SessionTemporalMetadataView {
+                coverage_omissions: vec![
+                    SessionRetrievalCoverageOmissionView::RootContinuationUnavailable {
+                        strict_population: TemporalCandidatePopulationCount::Exact(280),
+                    },
+                ],
+                ..SessionTemporalMetadataView::default()
+            },
+            super::SessionDataFreshness::Fresh,
+        );
+        let wire = serde_json::to_value(metadata).expect("temporal metadata");
+
+        assert_eq!(
+            wire["coverage_omissions"][0]["kind"],
+            "root_continuation_unavailable"
+        );
+        assert_eq!(
+            wire["coverage_omissions"][0]["detail"],
+            "root continuation unavailable: strict population exceeds the supported window; narrow the scope"
+        );
+        assert_eq!(
+            wire["coverage_omissions"][0]["strict_population"],
+            serde_json::json!({"kind": "exact", "count": 280})
+        );
     }
 }

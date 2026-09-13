@@ -13,7 +13,8 @@ use tracedecay_domain::{
 };
 use tracedecay_lcm::contracts::LcmRetrievalOutcome;
 use tracedecay_temporal_query::ports::{
-    TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
+    TemporalCandidateFilterV1, TemporalCandidatePopulationCount, TemporalMessageTypeFilterV1,
+    TemporalSessionScopeFilterV1,
 };
 
 use tracedecay_global_db::WorkflowScopeFilter;
@@ -271,6 +272,14 @@ pub struct SessionRetrievalOmissionView {
     pub reason: HydrationStateV1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRetrievalCoverageOmissionView {
+    RootContinuationUnavailable {
+        strict_population: TemporalCandidatePopulationCount,
+    },
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct SessionTemporalWatermarksView {
     pub generation: u64,
@@ -291,6 +300,8 @@ pub struct SessionTemporalMetadataView {
     pub explanations: Vec<SessionRetrievalExplanationView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub omissions: Vec<SessionRetrievalOmissionView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_omissions: Vec<SessionRetrievalCoverageOmissionView>,
     pub authorized_root: Option<String>,
 }
 

@@ -689,6 +689,7 @@ fn hydration_and_omission_values_round_trip_every_variant_and_reject_unknown_val
         ContextOmissionReasonV1::Unavailable,
         ContextOmissionReasonV1::SummaryHorizonMismatch,
         ContextOmissionReasonV1::DuplicateRepresentative,
+        ContextOmissionReasonV1::RootContinuationUnavailable,
     ] {
         assert_json_round_trip!(CompactContextOmissionV1 {
             anchor_id: Some(anchor("anchor.omission")),

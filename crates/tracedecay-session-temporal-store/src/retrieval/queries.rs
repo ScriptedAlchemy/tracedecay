@@ -607,6 +607,38 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     LIMIT ?12"
 );
 
+pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = concat!(
+    "
+    SELECT COUNT(*)
+    FROM (
+        SELECT DISTINCT o.retrieval_anchor_id
+        FROM session_occurrences_fts
+        JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
+        JOIN session_temporal_generations AS frozen
+          ON frozen.session_id = o.session_id
+         AND frozen.generation = o.generation
+         AND frozen.state = 'active'
+        JOIN retrieval_anchors AS authority_anchor
+          ON authority_anchor.anchor_id = o.retrieval_anchor_id
+        JOIN sessions AS authority_session
+          ON authority_session.session_id = o.session_id
+         AND authority_session.provider = o.source_provider
+         AND authority_session.project_key = ?1
+        WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
+          AND (?2 IS NULL OR o.source_provider = ?2)
+          AND session_occurrences_fts MATCH ?3
+          ",
+    occurrence_row_length_bounds!("?4", "?5", "?6", "?7", "authority_session.provider"),
+    "
+          ",
+    root_occurrence_cursor_bound!("?8"),
+    "
+        LIMIT ?9
+    )"
+);
+
 pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,

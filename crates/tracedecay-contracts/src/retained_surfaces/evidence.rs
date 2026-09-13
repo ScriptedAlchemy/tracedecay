@@ -207,6 +207,7 @@ impl RetainedSurfaceEvidenceFactsV1 {
             || temporal.coverage.unknown > 0
             || temporal.coverage.redacted > 0
             || !temporal.omissions.is_empty()
+            || !temporal.coverage_omissions.is_empty()
         {
             self.completeness = CoverageCompleteness::Partial;
         }
@@ -215,6 +216,12 @@ impl RetainedSurfaceEvidenceFactsV1 {
                 omission_reason(omission.reason)
                     .map(|reason| RetainedSurfaceEvidenceOmissionV1 { reason, count: 1 })
             }));
+        if !temporal.coverage_omissions.is_empty() {
+            self.omissions.push(RetainedSurfaceEvidenceOmissionV1 {
+                reason: OmissionReason::Unavailable,
+                count: temporal.coverage.unknown,
+            });
+        }
         Ok(())
     }
 

@@ -250,6 +250,7 @@ pub struct TemporalCandidateExport {
     resolution: TemporalResolution,
     summaries: Vec<SessionSummaryRecordV1>,
     summary_eligibility: SummaryLineageEligibility,
+    strict_population: Option<ports::TemporalCandidatePopulationCount>,
 }
 
 impl TemporalCandidateExport {
@@ -423,6 +424,9 @@ pub async fn execute_temporal_candidate_export(
         .map(|cursor| verify_cursor_position(cursor, &snapshot, authenticator))
         .transpose()?
         .unwrap_or_default();
+    let strict_population = snapshot
+        .prepared_candidate_cohort()
+        .and_then(ports::TemporalPreparedCandidateCohort::strict_population);
     let (candidates, next_window_keyset) = match snapshot.prepared_candidate_cohort() {
         Some(prepared) => (prepared.candidates().to_vec(), None),
         None => read_candidate_window(read_port, &snapshot, request, limits, &resume).await?,
@@ -578,7 +582,9 @@ pub async fn execute_temporal_candidate_export(
         .map_err(|_| TemporalKernelError::BudgetExceeded)?;
     ranked.truncate(request.limit);
     hotpath::gauge!("temporal_query.candidates.paged").set(ranked.len());
-    let next_position = if window_has_more {
+    let next_position = if strict_population.is_some() {
+        None
+    } else if window_has_more {
         ranked.last().map(|candidate| CursorPosition {
             candidate_keyset: resume.candidate_keyset.clone(),
             last_sort_key: Some(stable_sort_key(candidate)),
@@ -610,6 +616,7 @@ pub async fn execute_temporal_candidate_export(
         resolution: resolved,
         summaries: records.summaries,
         summary_eligibility,
+        strict_population,
     })
 }
 

@@ -44,6 +44,21 @@ struct CandidateCohortWire<'a> {
 pub struct TemporalPreparedCandidateCohort {
     candidates: Vec<RankingCandidate>,
     ordered_digest: BindingDigest,
+    strict_population: Option<TemporalCandidatePopulationCount>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub enum TemporalCandidatePopulationCount {
+    Exact(u64),
+    AtLeast(u64),
+}
+
+impl TemporalCandidatePopulationCount {
+    pub const fn lower_bound(self) -> u64 {
+        match self {
+            Self::Exact(value) | Self::AtLeast(value) => value,
+        }
+    }
 }
 
 impl TemporalPreparedCandidateCohort {
@@ -52,7 +67,17 @@ impl TemporalPreparedCandidateCohort {
         Ok(Self {
             candidates,
             ordered_digest,
+            strict_population: None,
         })
+    }
+
+    pub fn partial(
+        candidates: Vec<RankingCandidate>,
+        strict_population: TemporalCandidatePopulationCount,
+    ) -> Result<Self, TemporalPortError> {
+        let mut cohort = Self::new(candidates)?;
+        cohort.strict_population = Some(strict_population);
+        Ok(cohort)
     }
 
     pub fn candidates(&self) -> &[RankingCandidate] {
@@ -61,6 +86,10 @@ impl TemporalPreparedCandidateCohort {
 
     pub fn ordered_digest(&self) -> &BindingDigest {
         &self.ordered_digest
+    }
+
+    pub const fn strict_population(&self) -> Option<TemporalCandidatePopulationCount> {
+        self.strict_population
     }
 }
 
@@ -665,7 +694,8 @@ impl TemporalExecutionSnapshot {
         let limits = self.request.limits();
         if cohort.candidates().len() > limits.candidate_limit {
             return Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item count", accounting: None,
+                resource: "candidate item count",
+                accounting: None,
             });
         }
         let mut cohort_bytes = 0usize;
@@ -673,17 +703,20 @@ impl TemporalExecutionSnapshot {
             let candidate_bytes = candidate.measured_encoded_bytes()?;
             if candidate_bytes > limits.candidate_item_bytes {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "candidate item bytes", accounting: None,
+                    resource: "candidate item bytes",
+                    accounting: None,
                 });
             }
             cohort_bytes = cohort_bytes.checked_add(candidate_bytes).ok_or(
                 TemporalPortError::BudgetExceeded {
-                    resource: "candidate total bytes", accounting: None,
+                    resource: "candidate total bytes",
+                    accounting: None,
                 },
             )?;
             if cohort_bytes > limits.candidate_total_bytes {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "candidate total bytes", accounting: None,
+                    resource: "candidate total bytes",
+                    accounting: None,
                 });
             }
             let Some(session_id) = candidate.session.as_deref() else {

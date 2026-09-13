@@ -120,6 +120,7 @@ impl DaemonSessionRetrievalService {
                     reason: hydrated.state(),
                 })
                 .collect(),
+            coverage_omissions: Vec::new(),
             authorized_root: self.root.authorized_root.clone(),
         }
     }

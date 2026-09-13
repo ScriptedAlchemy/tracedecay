@@ -489,10 +489,10 @@ mod tests {
     use tracedecay_domain::{
         CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
         CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
-        DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
-        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
-        ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1,
-        ProjectionGenerationId, ProviderId, RetentionClass, RetrievalGrainV1,
+        ContextOmissionReasonV1, DurableObservationV1, ObservationId,
+        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+        PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, RetrievalGrainV1,
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1, TemporalModeV1, UtcMicros,
     };
@@ -506,7 +506,8 @@ mod tests {
     use tracedecay_temporal_query::candidates::CandidateChannel;
     use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
     use tracedecay_temporal_query::ports::{
-        ExecutionControl, ExecutionLimits, TemporalSnapshotRequest,
+        ExecutionControl, ExecutionLimits, TemporalCandidatePopulationCount,
+        TemporalSnapshotRequest,
     };
     use tracedecay_temporal_query::ranking::DiversityLimits;
 
@@ -1199,6 +1200,18 @@ mod tests {
             answering_channels(&report)
         );
         assert_eq!(report.result().coverage.total(), Some(2));
+        assert!(
+            report
+                .result()
+                .context
+                .bundle
+                .omissions
+                .iter()
+                .all(|omission| {
+                    omission.reason != ContextOmissionReasonV1::RootContinuationUnavailable
+                })
+        );
+        assert!(report.result().next_cursor.is_none());
     }
 
     /// A strict tier that is verified empty — scanned to exhaustion under these
@@ -1441,40 +1454,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_common_hit_over_256_sessions_reports_candidate_budget_not_manifest_limit() {
+    async fn root_strict_population_over_one_window_returns_truthful_partial_coverage() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
-        seed_root_sessions(&connection, 300, 300, 1).await;
+        seed_root_sessions_with_text(&connection, 300, 280, 1, &|index| {
+            format!("needle strict-{index:03} cohort")
+        })
+        .await;
+        seed_root_cursor_key(&connection).await;
+        for index in 24..280 {
+            publish_root_relation_projection(
+                &database,
+                &connection,
+                &format!("session.{index:03}"),
+            )
+            .await;
+        }
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
-        let result = execution
+        let (_, snapshot, _) = execution
             .freeze(&root_execution_request("needle cohort"))
-            .await;
-
-        let refusal = result.err().map(|error| format!("{error:?}"));
+            .await
+            .expect("full root candidate window");
+        let cohort = snapshot
+            .prepared_candidate_cohort()
+            .expect("prepared root candidate cohort");
+        assert_eq!(cohort.candidates().len(), 256);
         assert_eq!(
-            refusal.as_deref(),
-            Some(
-                format!(
-                    "{:?}",
-                    SessionTemporalExecutionError::BudgetExhausted {
-                        stage: SessionRetrievalBudgetStageV1::CandidateReadExhausted,
-                        // The default candidate ceiling, spent with more in
-                        // storage — the refusal reports its own accounting, not
-                        // a total it would have to finish the scan to learn.
-                        accounting: Some(SessionRetrievalBudgetAccountingV1 {
-                            limit: 256,
-                            observed:
-                                SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
-                                    units: 256,
-                                },
-                        }),
-                    }
-                )
-                .as_str()
-            ),
-            "a common root hit must name the candidate read budget and its \
-             ceiling, not the participant manifest limit"
+            cohort.strict_population(),
+            Some(TemporalCandidatePopulationCount::Exact(280))
+        );
+        let report = execution
+            .execute(root_execution_request("needle cohort"), &WordEstimator)
+            .await
+            .expect("a full root candidate window must return partial coverage");
+        let result = report.result();
+
+        assert_eq!(result.ranked.len(), 10);
+        assert_eq!(
+            result.coverage.total(),
+            Some(280),
+            "unexpected coverage: {:?}",
+            result.coverage
+        );
+        assert_eq!(result.coverage.visible, 256);
+        assert_eq!(result.coverage.hidden, 0);
+        assert_eq!(result.coverage.unknown, 24);
+        assert!(result.next_cursor.is_none());
+        assert_eq!(
+            result
+                .context
+                .bundle
+                .omissions
+                .iter()
+                .find(|omission| omission.anchor_id.is_none())
+                .map(|omission| omission.reason.as_str()),
+            Some("root_continuation_unavailable")
         );
     }
 
