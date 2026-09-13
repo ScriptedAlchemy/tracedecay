@@ -315,6 +315,45 @@ is in daemon-service). `admin_project.rs` waits on the root `bench` runner (used
 and the retained-application family (`retained_catalog.rs`, `ToolCallRegistryOptions`). The owner
 itself goes with `handlers/mod.rs` in slice 3.
 
+### Slice 2 — `src/daemon/` → `tracedecay-daemon-service` (one commit, stacked on slice 1)
+
+Root `src/daemon/` + `daemon.rs` 98,867 → 92,352 lines (−6,515); `tracedecay-daemon-service` 54,177 → 60,737.
+Test attributes conserved: root 862 → 800, daemon-service 262 → 324 (62 moved).
+
+| root module | lines | new home |
+| --- | ---: | --- |
+| `shutdown_coordination.rs` (owners, receipts, `ShutdownStatus`) | 588 | `tracedecay_daemon_service::shutdown::owners` (renamed: the crate already has `shutdown_coordination` for `ShutdownCoordinatorV1`) |
+| `shutdown_orchestration.rs`, `shutdown_watchdog.rs` | 1,700 | `shutdown::{orchestration, watchdog}` |
+| `core_lifecycle.rs` (`DaemonLifecycle`, `DaemonActivity`, drain deadlines) | 399 | `shutdown::lifecycle`; its `McpConnectionLifecyclePort` impl moved beside the port in `tracedecay_mcp::lifecycle` (local trait, foreign type — daemon-service sits below mcp) |
+| `context_scout_lifecycle.rs` + `tests.rs` | 1,227 | `tracedecay_daemon_service::context_scout_lifecycle` |
+| `doctor_kernel.rs` + `tests.rs` | 1,340 | `tracedecay_daemon_service::doctor_kernel` |
+| `core_logging.rs` | 511 | `tracedecay_daemon_service::logging` (CLI retargets `install_stderr_tracing`, `StderrTracingDefault`, `unavailable_error`) |
+| `adoption_observation.rs`, `automation_observation.rs` | 345 | same names |
+
+Edges added to `tracedecay-daemon-service` (each `cargo tree -p <crate> -e normal | rg daemon-service` → empty
+first): project, automation-runtime, code-index-retention, maintenance, session-runtime, `tracing-subscriber`;
+dev: project `test-helpers`. The two `cfg(test)` shutdown join helpers are regated `test-helpers` for the
+root's unit tests. `daemon.rs` keeps `pub(crate)` re-exports only for the names its `use super::*`
+modules (engine, bootstrap, connection serving, projectless, …) still read; the CLI has no root path left.
+The stderr-receipt test now derives its libtest name from `module_path!()` (the hard-coded root path
+made the child run vacuous and the assertion falsified it). ripwire `--clones` over daemon-service after the
+move: no type-1/2 group touches a moved module (only ≤0.90 type-3 label-map near-misses).
+
+**The daemon wall (precise).** Every other (b) row of the plan names one of three root authorities:
+`DaemonInvocationState` (`invocation_state.rs`, 1,446 lines) holds `StoreAdministration`;
+`StoreAdministration` (`branch_admin.rs`, 2,559) holds `Arc<McpServer>`, `SharedHookProjectRouteCache`
+and `tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport, ErrorCode}`; `DaemonEngine`
+(`engine.rs`) holds both. Because slice 1 made `tracedecay-mcp` depend on `tracedecay-daemon-service`,
+nothing that names a `tracedecay-mcp` type can ever live in daemon-service. So `invocation_executor.rs`
+(801), `invocation_dispatch.rs` (931), `remote_deletion.rs` (341), `lsp_sessions.rs` (208),
+`github_credential_lifecycle.rs` (237), `project_delivery_mount.rs` (46), `http_application_router.rs`
+(125), `bootstrap_route.rs` (175), `database_owner_registry.rs` (370, `McpServer`) wait on
+`McpServer`/`StoreAdministration`; `wire_io.rs` (448), `core_client.rs` (642), `core_hooks.rs` (137)
+write/read MCP JSON-RPC frames and are the *client* seam with `core_handshake.rs` (49) — they stay in the
+root (or a client crate), never daemon-service. `core_doctor_schema.rs` is a `#[path]` child of
+`core_doctor.rs` (`McpServer`-bound). The plan's "(c) rows as `tracedecay-daemon-service::composition`"
+is therefore not reachable: the daemon composition that builds `McpServer` is the root's job (slice 3).
+
 ### Tip-side / environment reds observed (not this lane's)
 
 - `hooks_lsp_suite::hooks_test::test_codex_{workspace_status_distinguishes_generic_and_project_like_dirs,
@@ -326,6 +365,11 @@ itself goes with `handlers/mod.rs` in slice 3.
   `cargo clippy --workspace --all-targets -- -D warnings` shape is green.
 - `tracedecay-mcp::workflow::test_runner::tests::cargo_runner_*` ×3 fail when the nested cargo they
   spawn contends for the target-dir lock with other test binaries (#1251 saw the same); green alone.
+- Root lib `daemon::tests::ownership::unborn_git_project_open_retains_lsp_and_starts_hook_replay` fails
+  alone on any tree since #1252 (`initialize_test_project` opens through the production path, which now
+  refuses without registered runtime ports); in a full `--lib` run it passes only when another test
+  registered the process-global ports first. Untouched here (`git diff 14de498296 -- daemon/tests.rs
+  daemon/tests/ownership.rs tracedecay-project/src` is empty).
 
 ## P0-1/P0-2 collapse plan
 
@@ -495,7 +539,9 @@ their two `crate::mcp` uses are typed.
 3. ~~`src/mcp` (b) rows~~ and the `TraceDecay`-only handler families — done in slice 1 of
    fable/wave2-root-collapse (see above); the remaining (c) rows wait on `McpServer` /
    `ToolCallRegistryOptions` and move in slice 3.
-4. `src/daemon` (b) rows into daemon-service; then (c) as `tracedecay-daemon-service::composition`.
+4. ~~`src/daemon` (b) rows into daemon-service~~ — the `TraceDecay`/`config`-only rows landed in slice 2;
+   the rest names `McpServer`/`StoreAdministration`/`tracedecay-mcp` frames and cannot enter
+   daemon-service (see the daemon wall above), so the daemon composition stays in the root.
 5. Delete `src/mcp/` and `src/daemon/`; the root keeps `lib.rs` re-exports, `product_runtime`, `doctor`,
    `dashboard`, `version`, and the `test_support` fixture surface.
 
