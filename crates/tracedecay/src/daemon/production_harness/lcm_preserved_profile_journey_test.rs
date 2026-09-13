@@ -580,6 +580,7 @@ async fn wait_for_preserved_discovery(
     let mut last_status = json!(null);
     let mut last_sessions = json!(null);
     let mut last_grep = json!(null);
+    let mut last_search = json!(null);
     tokio::time::timeout(CONVERGENCE_WAIT, async {
         loop {
             let status = answered(
@@ -614,15 +615,30 @@ async fn wait_for_preserved_discovery(
                 }),
             )
             .await;
+            let search = answered(
+                harness,
+                project,
+                "tracedecay_message_search",
+                json!({
+                    "query": DIRECT_USER_QUERY,
+                    "message_type": "direct_user",
+                    "since": since,
+                    "limit": 5,
+                    "format": "json",
+                }),
+            )
+            .await;
             last_status = status.clone();
             last_sessions = sessions.clone();
             last_grep = grep.clone();
+            last_search = search.clone();
             if summary_generation_nonzero(&status)
                 && git_generation_nonzero(&sessions)
                 && session_ids(&sessions)
                     .iter()
                     .any(|id| id.starts_with("lcm-preserved-codex-"))
                 && !grep_hits(&grep).is_empty()
+                && !message_hit_session_ids(&search).is_empty()
             {
                 return;
             }
@@ -633,7 +649,8 @@ async fn wait_for_preserved_discovery(
     .unwrap_or_else(|_| {
         panic!(
             "ordinary background convergence never published summary, git-correlation, and 12-hour hits; \
-             status={last_status}; sessions_for={last_sessions}; lcm_grep={last_grep}"
+             status={last_status}; sessions_for={last_sessions}; lcm_grep={last_grep}; \
+             message_search={last_search}"
         )
     });
     (last_status, last_sessions, started.elapsed())
