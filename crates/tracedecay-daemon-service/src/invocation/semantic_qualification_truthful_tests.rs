@@ -6,14 +6,15 @@ fn stale_qualification_keeps_its_machine_reason_across_daemon_boundary() {
         "req-stale-qualification".to_owned(),
         Err(
             tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1::Coordination(
-                SemanticActivationCoordinationErrorV1::Qualification(
+                SemanticActivationCoordinationErrorV1::Qualification(Box::new(
                     tracedecay_contracts::SemanticQualificationFailureV1::StaleWorkload {
                         profile_id: "hybrid-conservative".to_owned(),
                         packaged_workload_digest: "sha256:old".to_owned(),
                         current_workload_digest: "sha256:current".to_owned(),
+                        evidence_digest: "sha256:evidence".to_owned(),
                         remedy: "run qualify-native".to_owned(),
                     },
-                ),
+                )),
             ),
         ),
     );

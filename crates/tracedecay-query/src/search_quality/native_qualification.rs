@@ -747,36 +747,42 @@ fn qualification_failure(
         qualification.map(|value| value.qualification_key.evaluated_profile_id.as_str());
     let observed_workload =
         qualification.map(|value| value.qualification_key.evaluator.workload_digest.as_str());
+    let evidence_digest = canonical.map(canonical_sha256).or_else(|| {
+        qualification.map(|value| value.qualification_key.evaluator.raw_output_digest.clone())
+    });
     if error == PackagedNativeQualificationErrorV1::StaleWorkload
         && qualification.is_some_and(|value| {
             value.portable_evidence.report.status == DirectEvaluationStatusV1::Pass
         })
+        && let Some(profile_id) = observed_profile
+        && let Some(packaged_workload_digest) = observed_workload
         && observed_workload.is_some_and(|digest| digest != expectations.workload_digest)
+        && let Some(evidence_digest) = evidence_digest.clone()
     {
         return SemanticQualificationFailureV1::StaleWorkload {
-            profile_id: observed_profile
-                .unwrap_or(&expectations.evaluated_profile_id)
-                .to_owned(),
-            packaged_workload_digest: observed_workload.unwrap_or_default().to_owned(),
+            profile_id: profile_id.to_owned(),
+            packaged_workload_digest: packaged_workload_digest.to_owned(),
             current_workload_digest: expectations.workload_digest.clone(),
+            evidence_digest,
             remedy: REQUALIFY_REMEDY.to_owned(),
         };
     }
-    if error == PackagedNativeQualificationErrorV1::FailedQualification {
+    if error == PackagedNativeQualificationErrorV1::FailedQualification
+        && let Some(profile_id) = observed_profile
+        && let Some(workload_digest) = observed_workload
+        && let Some(evidence_digest) = evidence_digest.clone()
+    {
         return SemanticQualificationFailureV1::FailedQualification {
-            profile_id: observed_profile
-                .unwrap_or(&expectations.evaluated_profile_id)
-                .to_owned(),
-            workload_digest: observed_workload
-                .unwrap_or(&expectations.workload_digest)
-                .to_owned(),
+            profile_id: profile_id.to_owned(),
+            workload_digest: workload_digest.to_owned(),
+            evidence_digest,
             remedy: REQUALIFY_REMEDY.to_owned(),
         };
     }
     SemanticQualificationFailureV1::NoQualificationEvidence {
         profile_id: expectations.evaluated_profile_id.clone(),
         current_workload_digest: expectations.workload_digest.clone(),
-        evidence_digest: canonical.map(canonical_sha256),
+        evidence_digest,
         detail: match observed_profile {
             Some(profile) if profile != expectations.evaluated_profile_id => format!(
                 "packaged profile {profile} does not match requested profile {}; {error}",
