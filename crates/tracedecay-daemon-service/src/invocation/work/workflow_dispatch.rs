@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use tracedecay_contracts::{
     CancellationContext, Deadline, TaskHandoffToken, WorkflowDefinitionLifecycleCommand,
-    WorkflowEffectPreparedV1, WorkflowLifecycleOperation, prepare_task_handoff_issue,
-    prepare_task_handoff_redeem, prepare_workflow_definition_registration,
+    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowLifecycleOperation,
+    prepare_task_handoff_issue, prepare_task_handoff_redeem,
+    prepare_workflow_definition_registration,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
@@ -22,8 +23,8 @@ use super::workflow_effect_journal::{
 };
 use super::workflow_fan_out::{reconcile_workflow_fan_out, synchronize_fan_out_run_controls};
 use super::workflow_run_control::{
-    apply_workflow_run_command, cancel_workflow_run, start_workflow_run,
-    workflow_coordination_application_problem, workflow_coordination_problem,
+    admit_workflow_environment_pins, apply_workflow_run_command, cancel_workflow_run,
+    start_workflow_run, workflow_coordination_application_problem, workflow_coordination_problem,
     workflow_run_storage_problem,
 };
 use super::{RegisteredWorkRuntime, work_request_context, workflow_census};
@@ -130,13 +131,25 @@ pub(crate) async fn execute_workflow_application(
         }
         WorkflowApplicationInvocation::ActivateDefinition(request) => {
             hotpath::measure_block!("daemon.service.workflow.activate_definition", {
-                // Catalog admission rejects before the lifecycle command is
-                // journaled; a denial is the same canonical problem effect every
-                // other refused mutation records.
-                let prepared = match services
+                // Catalog and environment-pin admission reject before the
+                // lifecycle command is journaled; a denial is the same canonical
+                // problem effect every other refused mutation records. Run
+                // admission compares the same environment pins, so activation
+                // must refuse here rather than publish an Active definition no
+                // run could ever start.
+                let admitted = services
                     .definitions()
                     .admit_activation(&request.definition_id, request.definition_version)
-                {
+                    .map_err(workflow_coordination_effect_problem)
+                    .and_then(|()| {
+                        let definition = services
+                            .definitions()
+                            .get(&request.definition_id, request.definition_version)
+                            .map_err(workflow_coordination_effect_problem)?;
+                        admit_workflow_environment_pins(&registered, &definition)
+                            .map_err(WorkflowEffectProblemV1::InvalidRequestDiagnostic)
+                    });
+                let prepared = match admitted {
                     Ok(()) => WorkflowEffectPreparedV1::activate_definition(
                         input_digest.clone(),
                         WorkflowDefinitionLifecycleCommand {
@@ -147,10 +160,9 @@ pub(crate) async fn execute_workflow_application(
                             transitioned_at: observed_at,
                         },
                     ),
-                    Err(error) => WorkflowEffectPreparedV1::problem(
-                        input_digest.clone(),
-                        workflow_coordination_effect_problem(error),
-                    ),
+                    Err(problem) => {
+                        WorkflowEffectPreparedV1::problem(input_digest.clone(), problem)
+                    }
                 };
                 execute_journaled_workflow_effect(
                     &registered,
@@ -228,6 +240,19 @@ pub(crate) async fn execute_workflow_application(
                     && let Some(problem) = workflow_coordination_application_problem(error)
                 {
                     return DaemonInvocationResponse::application_problem(request_id, problem);
+                }
+                if let Ok(validated) = &validation
+                    && let Err(diagnostic) =
+                        admit_workflow_environment_pins(&registered, &validated.definition)
+                {
+                    return DaemonInvocationResponse::application_problem(
+                        request_id,
+                        tracedecay_contracts::ApplicationProblem::InvalidRequest {
+                            diagnostic,
+                            retry: tracedecay_contracts::RetryDirective::Never,
+                            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+                        },
+                    );
                 }
                 complete_workflow_read(
                     &registered,

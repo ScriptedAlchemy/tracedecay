@@ -353,6 +353,42 @@ pub(super) fn workflow_coordination_problem(
     }
 }
 
+/// Admits one definition's environment pins against the live registered
+/// daemon environment.
+///
+/// Run admission compares the pinned policy and configuration digests against
+/// the registered environment, so a definition activated against different
+/// pins can never start. Validation and activation therefore admit the same
+/// pins and name the live digest, exactly as the catalog pin does: a typed
+/// denial is the only channel through which a caller can learn the digests
+/// the daemon derives from its own project-open snapshot.
+pub(super) fn admit_workflow_environment_pins(
+    registered: &RegisteredWorkRuntime,
+    definition: &tracedecay_domain::WorkflowDefinition,
+) -> Result<(), SafeDiagnostic> {
+    let mismatch = |pin: &str, expected: &ManifestDigest, observed: &ManifestDigest| SafeDiagnostic {
+        code: format!("workflow.{pin}.pin_mismatch"),
+        message: format!(
+            "pinned_{pin}_digest expected {expected}, observed {observed}; register a new immutable definition version with the live registered {pin} digest"
+        ),
+    };
+    if definition.pinned_policy_digest() != &registered.policy_digest {
+        return Err(mismatch(
+            "policy",
+            &registered.policy_digest,
+            definition.pinned_policy_digest(),
+        ));
+    }
+    if definition.pinned_configuration_digest() != &registered.configuration_digest {
+        return Err(mismatch(
+            "configuration",
+            &registered.configuration_digest,
+            definition.pinned_configuration_digest(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn workflow_coordination_application_problem(
     error: &WorkflowCoordinationError,
 ) -> Option<ApplicationProblem> {
