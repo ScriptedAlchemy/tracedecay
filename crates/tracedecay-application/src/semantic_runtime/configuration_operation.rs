@@ -29,8 +29,8 @@ use tracedecay_query::search_quality::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
     NativeQualificationExecutionResourceKeyV1, NativeQualificationExpectationsV1,
     NativeQualificationModelKeyV1, NativeQualificationPlatformV1, NativeQualificationRuntimeKeyV1,
-    PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1, SEMANTIC_PROFILE,
-    packaged_native_qualification_failure, qualified_default_activation_candidate,
+    PackagedNativeActivationCandidateV1, SEMANTIC_PROFILE, packaged_native_qualification_failure,
+    qualified_default_activation_candidate,
 };
 use tracedecay_semantic_contracts::SemanticProfileSelection;
 
@@ -435,7 +435,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             let expectations = native_qualification_expectations(&before, &candidate)?;
             let evidence = SemanticActivationPublicationEvidenceV1::Packaged(
                 qualified_default_activation_candidate(&expectations)
-                    .map_err(|error| map_packaged_qualification_error(error, &expectations))?,
+                    .map_err(|error| packaged_native_qualification_failure(error, &expectations))?,
             );
             (before, candidate, evidence)
         } else {
@@ -807,16 +807,6 @@ fn native_qualification_expectations(
             "cannot construct current native qualification authority: {error}"
         ))
     })
-}
-
-fn map_packaged_qualification_error(
-    error: PackagedNativeQualificationErrorV1,
-    expectations: &NativeQualificationExpectationsV1,
-) -> SemanticActivationCoordinationErrorV1 {
-    SemanticActivationCoordinationErrorV1::Qualification(packaged_native_qualification_failure(
-        error,
-        expectations,
-    ))
 }
 
 #[hotpath::measure(label = "usecases.semantic_config.prepare_activation")]

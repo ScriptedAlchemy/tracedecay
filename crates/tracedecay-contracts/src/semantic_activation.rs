@@ -21,21 +21,24 @@ use tracedecay_domain::{ManifestDigest, UtcMicros};
 pub enum SemanticQualificationFailureV1 {
     #[error(
         "packaged PASS for profile {profile_id} is stale: packaged workload \
-         {packaged_workload_digest}, current workload {current_workload_digest}; {remedy}"
+         {packaged_workload_digest}, current workload {current_workload_digest}, evidence \
+         {evidence_digest}; {remedy}"
     )]
     StaleWorkload {
         profile_id: String,
         packaged_workload_digest: String,
         current_workload_digest: String,
+        evidence_digest: String,
         remedy: String,
     },
     #[error(
-        "native qualification for profile {profile_id} and workload {workload_digest} did not \
-         pass; {remedy}"
+        "native qualification evidence {evidence_digest} for profile {profile_id} and workload \
+         {workload_digest} did not pass; {remedy}"
     )]
     FailedQualification {
         profile_id: String,
         workload_digest: String,
+        evidence_digest: String,
         remedy: String,
     },
     #[error(
@@ -78,11 +81,17 @@ pub enum SemanticActivationCoordinationErrorV1 {
     #[error("semantic activation input was rejected: {0}")]
     RejectedDetail(String),
     #[error("semantic activation qualification refused: {0}")]
-    Qualification(SemanticQualificationFailureV1),
+    Qualification(Box<SemanticQualificationFailureV1>),
     #[error("semantic activation compare-and-swap conflicted")]
     Conflict,
     #[error("semantic runtime activation failed: {0}")]
     Runtime(String),
+}
+
+impl From<SemanticQualificationFailureV1> for SemanticActivationCoordinationErrorV1 {
+    fn from(failure: SemanticQualificationFailureV1) -> Self {
+        Self::Qualification(Box::new(failure))
+    }
 }
 
 /// Coordination surface the configuration runtime actually calls.

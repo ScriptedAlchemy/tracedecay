@@ -547,17 +547,17 @@ fn semantic_evaluation_rejection_problem(
     error: &SemanticActivationCoordinationErrorV1,
 ) -> ApplicationProblem {
     let code = match error {
-        SemanticActivationCoordinationErrorV1::Qualification(
-            tracedecay_contracts::SemanticQualificationFailureV1::StaleWorkload { .. },
-        ) => "semantic_qualification.stale_workload",
-        SemanticActivationCoordinationErrorV1::Qualification(
-            tracedecay_contracts::SemanticQualificationFailureV1::FailedQualification { .. },
-        ) => "semantic_qualification.failed_qualification",
-        SemanticActivationCoordinationErrorV1::Qualification(
+        SemanticActivationCoordinationErrorV1::Qualification(failure) => match failure.as_ref() {
+            tracedecay_contracts::SemanticQualificationFailureV1::StaleWorkload { .. } => {
+                "semantic_qualification.stale_workload"
+            }
+            tracedecay_contracts::SemanticQualificationFailureV1::FailedQualification {
+                ..
+            } => "semantic_qualification.failed_qualification",
             tracedecay_contracts::SemanticQualificationFailureV1::NoQualificationEvidence {
                 ..
-            },
-        ) => "semantic_qualification.no_qualification_evidence",
+            } => "semantic_qualification.no_qualification_evidence",
+        },
         _ => "semantic_evaluation.rejected",
     };
     ApplicationProblem::InvalidRequest {
