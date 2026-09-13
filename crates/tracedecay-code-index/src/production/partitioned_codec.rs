@@ -867,7 +867,18 @@ struct PartitionedEvidencePageReaderV1<'a, R> {
     page_offset: usize,
     next_page: usize,
     segment_offset: u64,
-    segment_hasher: Sha256,
+    /// The aggregate segment identity, computed only for a pre-paging segment.
+    ///
+    /// A paged segment's manifest carries a digest per page, and the manifest
+    /// itself is authenticated before one page is requested. Every byte the
+    /// stream yields therefore arrives inside a page this reader already
+    /// verified against that manifest, the page table's sizes must sum to the
+    /// segment size, and [`Self::finish`] refuses unless every page was read
+    /// and drained — so re-hashing the concatenation attests nothing the page
+    /// digests have not already attested. A pre-paging segment has no page
+    /// table, so there the aggregate identity is the only attestation and is
+    /// still computed and compared.
+    segment_hasher: Option<Sha256>,
     read_error: Option<CodeIndexProductionErrorV1>,
 }
 
@@ -889,7 +900,7 @@ where
             page_offset: 0,
             next_page: 0,
             segment_offset: 0,
-            segment_hasher: Sha256::new(),
+            segment_hasher: descriptor.legacy_unpaged.then(Sha256::new),
             read_error: None,
         }
     }
@@ -933,6 +944,9 @@ where
             return Err(self.remember_error(error));
         }
         if u64::try_from(self.page.len()).is_ok_and(|read| read == length) {
+            if let Some(hasher) = self.segment_hasher.as_mut() {
+                hasher.update(&self.page);
+            }
             self.next_page += 1;
             self.segment_offset += length;
             return Ok(true);
@@ -1004,7 +1018,10 @@ where
                     .to_owned(),
             ));
         }
-        let segment_digest = ManifestDigest::from_sha256_bytes(&self.segment_hasher.finalize())
+        let Some(hasher) = self.segment_hasher else {
+            return Ok(());
+        };
+        let segment_digest = ManifestDigest::from_sha256_bytes(&hasher.finalize())
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         if segment_digest != self.descriptor.segment_digest {
             return Err(CodeIndexProductionErrorV1::Contract(
@@ -1039,7 +1056,6 @@ where
         let available = &self.page[self.page_offset..];
         let copied = available.len().min(out.len());
         out[..copied].copy_from_slice(&available[..copied]);
-        self.segment_hasher.update(&available[..copied]);
         self.page_offset += copied;
         Ok(copied)
     }
@@ -3919,6 +3935,108 @@ mod tests {
         assert!(
             error.to_string().contains("page byte size"),
             "unexpected missing-page error: {error}"
+        );
+
+        // The page table is the whole attestation of a paged segment, so a
+        // page past the first must be refused on its own digest rather than
+        // on an aggregate the reader no longer recomputes.
+        let mut tampered = expected.clone();
+        let second_page_byte =
+            usize::try_from(descriptor.pages[0].page_size_bytes).expect("first page size") + 1;
+        tampered[second_page_byte] ^= 1;
+        let mut read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+            let SealedGenerationSegmentReadV1::Range { offset, length, .. } = request else {
+                panic!("evidence reader must request a range")
+            };
+            let start = usize::try_from(offset).expect("range offset");
+            let end = start + usize::try_from(length).expect("range length");
+            buffer.clear();
+            buffer.extend_from_slice(&tampered[start..end]);
+            Ok(())
+        };
+        let mut reader = PartitionedEvidencePageReaderV1::new(&descriptor, &mut read);
+        let _: Result<FixtureEvidence, _> = serde_json::from_reader(&mut reader);
+        let error = reader
+            .take_read_error()
+            .expect("a tampered later page must fail its content address");
+        assert!(
+            error.to_string().contains("page digest"),
+            "unexpected later-page tamper error: {error}"
+        );
+    }
+
+    /// A pre-paging segment carries no page table, so its aggregate identity
+    /// is the only attestation of its bytes and stays computed and compared.
+    #[test]
+    fn pre_paging_evidence_is_refused_by_its_aggregate_identity() {
+        let evidence = FixtureEvidence {
+            lineage: Vec::new(),
+            projection_request: FixtureProjectionRequest {
+                generation_id: FIXTURE_GENERATION.to_owned(),
+                chunk_ids: Vec::new(),
+                parent_chunk_id: None,
+            },
+            padding: "p".repeat(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1 + 23),
+        };
+        let stream = serde_json::to_vec(&evidence).expect("reference evidence stream");
+        let descriptor: PartitionedGenerationEvidenceDescriptorV1 = serde_json::from_value(
+            serde_json::json!({
+                "segment_digest": ManifestDigest::from_sha256_bytes(&Sha256::digest(&stream))
+                    .expect("stream digest")
+                    .as_str(),
+                "segment_size_bytes": stream.len(),
+            }),
+        )
+        .expect("a manifest without a page table is the pre-paging format");
+        assert!(descriptor.legacy_unpaged);
+
+        fn read_range(
+            source: &[u8],
+            request: SealedGenerationSegmentReadV1<'_>,
+            buffer: &mut Vec<u8>,
+        ) -> Result<(), CodeIndexProductionErrorV1> {
+            let SealedGenerationSegmentReadV1::Range { offset, length, .. } = request else {
+                panic!("evidence reader must request a range")
+            };
+            let start = usize::try_from(offset).expect("range offset");
+            let end = start + usize::try_from(length).expect("range length");
+            buffer.clear();
+            buffer.extend_from_slice(&source[start..end]);
+            Ok(())
+        }
+
+        let mut read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+            read_range(&stream, request, buffer)
+        };
+        let mut reader = PartitionedEvidencePageReaderV1::new(&descriptor, &mut read);
+        let restored: FixtureEvidence =
+            serde_json::from_reader(&mut reader).expect("pre-paging evidence decode");
+        reader.finish().expect("aggregate identity verifies");
+        assert_eq!(restored, evidence);
+
+        // A padding byte, so the stream still decodes and only the aggregate
+        // identity can refuse it. It has to be past the first bounded range so
+        // the refusal cannot come from a short first read.
+        let mut tampered = stream.clone();
+        let padding_byte = stream
+            .windows(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1 + 1)
+            .position(|window| window.iter().all(|byte| *byte == b'p'))
+            .expect("the fixture padding must span more than one bounded range")
+            + GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1;
+        tampered[padding_byte] = b'q';
+        let mut read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+            read_range(&tampered, request, buffer)
+        };
+        let mut reader = PartitionedEvidencePageReaderV1::new(&descriptor, &mut read);
+        let restored: FixtureEvidence =
+            serde_json::from_reader(&mut reader).expect("tampered padding still decodes");
+        assert_ne!(restored, evidence);
+        let error = reader
+            .finish()
+            .expect_err("pre-paging bytes must fail their aggregate identity");
+        assert!(
+            error.to_string().contains("segment digest"),
+            "unexpected pre-paging tamper error: {error}"
         );
     }
 
