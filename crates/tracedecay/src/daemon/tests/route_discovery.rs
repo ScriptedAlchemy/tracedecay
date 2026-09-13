@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tracedecay_runtime_core::git_repository::{
     delay_repository_discovery_for_test, observe_repository_discovery_for_test,
-    repository_topology_resolution_count_for_test, reset_repository_discovery_for_test,
+    repository_discovery_count_for_test, repository_topology_resolution_count_for_test,
+    reset_repository_discovery_for_test,
 };
 
 use super::bootstrap::run_git;
@@ -26,7 +27,11 @@ use crate::daemon::{DaemonEngine, DaemonHandshake};
 
 /// A committed repository, because repository discovery reads HEAD as well as
 /// the ancestor walk.
+///
+/// Registers the runtime ports too, so each test here stands alone instead of
+/// inheriting another test's composition root.
 fn committed_repository(root: &Path) {
+    crate::register_runtime_ports().expect("runtime port registration");
     std::fs::create_dir_all(root).expect("create repository");
     run_git(root, &["init", "-b", "main", "--quiet"]);
     std::fs::write(root.join("README.md"), "route discovery fixture\n").expect("fixture content");
@@ -126,11 +131,18 @@ async fn concurrent_routes_resolve_one_repository_topology() {
         route.expect("route task");
     }
     let resolutions = repository_topology_resolution_count_for_test(&project);
+    let discoveries = repository_discovery_count_for_test(&project);
     reset_repository_discovery_for_test(&project);
 
     assert_eq!(
         resolutions, 1,
         "{CONNECTIONS} concurrent routes must share one repository identity resolution"
+    );
+    // HEAD is deliberately not retained, so one live branch read per route
+    // remains; the ancestor walk each of those reads used to repeat does not.
+    assert!(
+        discoveries <= CONNECTIONS as u64 + 1,
+        "{discoveries} live discoveries for {CONNECTIONS} routes: topology is being rediscovered"
     );
 }
 
