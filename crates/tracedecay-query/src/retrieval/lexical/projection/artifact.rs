@@ -28,8 +28,8 @@ pub use format::{
 };
 pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{
-    CloneExactArtifactMemberV1, CloneExactArtifactPageV1, CodeExactLexicalArtifactReaderV1,
-    CodeLexicalArtifactReaderV1,
+    CloneExactArtifactCursorV1, CloneExactArtifactMemberV1, CloneExactArtifactPageV1,
+    CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
 };
 pub use schema::CodeLexicalArtifactWriterRevisionV1;
 
@@ -108,8 +108,6 @@ pub enum CodeLexicalArtifactErrorV1 {
     Corrupt(String),
     #[error("lexical artifact is incompatible: {0}")]
     Incompatible(String),
-    #[error("lexical clone artifact reset is required: {0}")]
-    ResetRequired(String),
     #[error("lexical artifact I/O is unavailable: {0}")]
     Io(String),
     #[error("lexical artifact authority is missing: {0}")]

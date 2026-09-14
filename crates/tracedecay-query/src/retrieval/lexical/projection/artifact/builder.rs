@@ -2260,7 +2260,7 @@ fn private_staging_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
 /// charged on top of each entry's key/value payload.
 const BTREE_MAP_ENTRY_OVERHEAD_BYTES: usize = 16;
 const PERSISTED_CURSOR_DIGEST_FIELDS: usize = 4;
-const PERSISTED_CURSOR_U64_FIELDS: usize = 9;
+const PERSISTED_CURSOR_U64_FIELDS: usize = 12;
 const MAX_DECIMAL_U64_BYTES: usize = 20;
 const PERSISTED_CURSOR_JSON_DELIMITERS_BYTES: usize = 64;
 const PREPARED_PAGE_DIGEST_FIELDS: usize = 3;

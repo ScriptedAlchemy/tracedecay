@@ -230,6 +230,30 @@ fn published_memory_files_admit_the_same_pages_as_sealed_decode() {
 }
 
 #[test]
+fn published_clone_rows_refuse_foreign_generation_authority_before_paging() {
+    let fixture = fixture();
+    let mut generation = (*fixture.generation).clone();
+    let file = Arc::make_mut(&mut generation.files[0]);
+    let body = file
+        .artifacts
+        .clone_bodies
+        .first_mut()
+        .expect("fixture clone body");
+    body.occurrence.project_id = ProjectId::new("project.foreign").expect("foreign project");
+
+    let mut source = fixture.open();
+    source
+        .attach_published_files(&generation)
+        .expect("generation identity still attaches");
+    assert!(matches!(
+        source.next_page(&ActiveControl),
+        Err(CodeIndexProductionErrorV1::Chunk(
+            crate::chunks::ChunkingFailureV1::GenerationMismatch
+        ))
+    ));
+}
+
+#[test]
 fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
     let fixture =
         fixture_for_source_files(BATCH_FIXTURE_SOURCE, "src/batch_fixture.rs", "rust", 25);
@@ -413,9 +437,13 @@ fn foreign_memory_files_cannot_mint_an_import_cursor_for_a_sealed_source() {
     let maximum_page_bytes = [&target.generation, &foreign.generation]
         .into_iter()
         .map(|generation| {
-            let admitted =
-                admit_file_generation_artifacts(generation.files[0].as_ref(), 1, &ActiveControl)
-                    .expect("fixture file admits");
+            let admitted = admit_file_generation_artifacts(
+                generation.files[0].as_ref(),
+                &generation.manifest().snapshot_digest,
+                1,
+                &ActiveControl,
+            )
+            .expect("fixture file admits");
             admitted
                 .serialized_chunks
                 .iter()
