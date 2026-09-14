@@ -5,7 +5,6 @@ mod cursor;
 mod diversity_caps;
 mod evidence_lanes;
 mod request;
-mod rerank;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -109,7 +108,6 @@ fn profile() -> FusionProfile {
         .into_iter()
         .collect(),
         diversity_policy_id: id("diversity.fixture.v1"),
-        rerank_policy_id: None,
         retrieval_budget: budget(),
     }
 }

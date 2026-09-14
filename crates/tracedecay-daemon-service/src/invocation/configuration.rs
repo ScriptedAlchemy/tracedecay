@@ -1,17 +1,12 @@
-//! Configuration daemon invocation handlers: mutation, evidence, preview, and semantic-profile transitions.
+//! Configuration daemon invocation handlers: mutation, evidence, and preview.
 
 use super::*;
 
-use super::registrars::registry_registration_refusal;
-use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
-use tracedecay_semantic_contracts::{SemanticConfig, SemanticProfileSelection};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod settlement;
 
-use settlement::{
-    configuration_effect, reconcile_configuration_runtime, refresh_live_configuration_runtime,
-};
+use settlement::{configuration_effect, reconcile_configuration_runtime};
 
 #[hotpath::measure(label = "daemon.service.configuration.execute", future = true)]
 pub(super) async fn execute_configuration(
@@ -123,7 +118,7 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let receipt = Box::pin(apply_configuration_or_semantic_transition(
+                let receipt = Box::pin(apply_direct_configuration_mutation(
                     &registered,
                     mutation_authority,
                     mutation,
@@ -163,7 +158,7 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let receipt = Box::pin(apply_configuration_or_semantic_transition(
+                let receipt = Box::pin(apply_direct_configuration_mutation(
                     &registered,
                     mutation_authority,
                     mutation,
@@ -215,7 +210,7 @@ pub(super) async fn execute_configuration(
                     deadline.expires_at,
                     observed_at,
                 )?;
-                let receipt = Box::pin(apply_configuration_or_semantic_transition(
+                let receipt = Box::pin(apply_direct_configuration_mutation(
                     &registered,
                     mutation_authority,
                     mutation,
@@ -418,7 +413,7 @@ pub(super) async fn execute_configuration(
 }
 
 #[hotpath::measure(label = "daemon.service.configuration.apply", future = true)]
-pub(super) async fn apply_configuration_or_semantic_transition(
+pub(super) async fn apply_direct_configuration_mutation(
     registered: &RegisteredConfigurationRuntime,
     authority: ConfigurationMutationAuthority,
     mutation: DirectConfigurationMutation,
@@ -428,187 +423,14 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     tracedecay_global_db::configuration::contracts::types::ConfigurationMutationReceipt,
     ConfigurationError,
 > {
-    let requested_semantic_profile = semantic_profile_transition(&mutation)?;
-    let current = Box::pin(registered.runtime.client().current()).await?;
-    let semantic_profile = requested_semantic_profile.filter(|requested| {
-        requires_coordinated_semantic_profile_transition(
-            current.config().semantic.active_profile.is_some(),
-            requested.is_some(),
-        )
-    });
-    let coordinated_semantic_transition = semantic_profile.is_some();
-    let receipt =
-        if current.revision_id() != &expected_revision {
-            Box::pin(registered.runtime.client().mutate_direct(
-                authority,
-                mutation,
-                expected_revision,
-            ))
-            .await?
-        } else if let Some(semantic_profile) = semantic_profile {
-            let operation = registered
-                .semantic_operation
-                .get()
-                .cloned()
-                .ok_or(ConfigurationError::Unavailable)?;
-            match semantic_profile {
-                Some(selected_profile) => {
-                    Box::pin(operation.activate(SemanticProtectedActivationOperationV1 {
-                        authority,
-                        selected_profile,
-                        central_mutation: mutation,
-                        now,
-                    }))
-                    .await
-                    .map(|applied| applied.configuration_receipt)
-                    .map_err(map_semantic_configuration_error)?
-                }
-                None => Box::pin(operation.rollback(SemanticProtectedRollbackOperationV1 {
-                    authority,
-                    central_mutation: mutation,
-                    trigger: "configuration_semantic_profile_disabled".to_owned(),
-                    now,
-                }))
-                .await
-                .map(|applied| applied.configuration_receipt)
-                .map_err(map_semantic_configuration_error)?,
-            }
-        } else {
-            Box::pin(registered.runtime.client().mutate_direct(
-                authority,
-                mutation,
-                expected_revision,
-            ))
-            .await?
-        };
-    if !coordinated_semantic_transition {
-        Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
-    } else {
-        let refresh = match Box::pin(registered.runtime.client().current()).await {
-            Ok(current) => {
-                refresh_live_configuration_runtime(
-                    registered,
-                    tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1 {
-                        revision_id: current.revision_id().clone(),
-                        snapshot: current.snapshot().clone(),
-                    },
-                )
-                .await
-            }
-            Err(error) => Err(error.to_string()),
-        };
-        if let Err(error) = refresh {
-            tracing::warn!(
-                receipt_id = %receipt.receipt_id,
-                error,
-                "semantic configuration committed; live runtime refresh remains pending"
-            );
-            let _ = registered
-                .runtime
-                .record_runtime_activation(
-                    None,
-                    Some("runtime_configuration_activation_failed".to_owned()),
-                    now,
-                )
-                .await;
-        }
-        notify_committed_semantic_activation(&registered.semantic_activation_committed);
-    }
+    let receipt = Box::pin(registered.runtime.client().mutate_direct(
+        authority,
+        mutation,
+        expected_revision,
+    ))
+    .await?;
+    Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
     Ok(receipt)
-}
-
-pub(super) fn notify_committed_semantic_activation(committed_activation: &Notify) {
-    committed_activation.notify_one();
-}
-
-pub(super) fn requires_coordinated_semantic_profile_transition(
-    current_active: bool,
-    requested_active: bool,
-) -> bool {
-    current_active || requested_active
-}
-
-pub(super) fn semantic_profile_transition(
-    mutation: &DirectConfigurationMutation,
-) -> Result<Option<Option<SemanticProfileSelection>>, ConfigurationError> {
-    match mutation {
-        DirectConfigurationMutation::Set { key, value, .. }
-            if key.as_str() == SEMANTIC_RUNTIME_SETTING_KEY =>
-        {
-            let tracedecay_domain::configuration::ConfigurationValueV1::Text(value) =
-                value.as_ref()
-            else {
-                return Err(ConfigurationError::validation_message(
-                    "semantic runtime configuration must be canonical JSON text",
-                ));
-            };
-            let semantic: SemanticConfig = serde_json::from_str(value).map_err(|_| {
-                ConfigurationError::validation_message("semantic runtime configuration is invalid")
-            })?;
-            semantic.validate().map_err(|_| {
-                ConfigurationError::validation_message("semantic runtime configuration is invalid")
-            })?;
-            // Structural validation above is provider-free; catalog membership
-            // of the selected model is admitted here, at the write boundary,
-            // so an unknown id never reaches the durable configuration.
-            tracedecay_semantic::admit_production_model_selection(
-                semantic.selected_model.as_deref(),
-            )
-            .map_err(|error| {
-                ConfigurationError::validation_message(format!(
-                    "semantic runtime configuration is invalid: {error}"
-                ))
-            })?;
-            Ok(Some(semantic.active_profile))
-        }
-        DirectConfigurationMutation::Unset { key, .. }
-            if key.as_str() == SEMANTIC_RUNTIME_SETTING_KEY =>
-        {
-            Ok(Some(None))
-        }
-        DirectConfigurationMutation::Batch { mutations } => {
-            let mut semantic = None;
-            for mutation in mutations {
-                if let Some(next) = semantic_profile_transition(mutation)?
-                    && semantic.replace(next).is_some()
-                {
-                    return Err(ConfigurationError::validation_message(
-                        "semantic runtime configuration appears more than once",
-                    ));
-                }
-            }
-            Ok(semantic)
-        }
-        _ => Ok(None),
-    }
-}
-
-fn map_semantic_configuration_error(
-    error: SemanticActivationCoordinationErrorV1,
-) -> ConfigurationError {
-    match error {
-        SemanticActivationCoordinationErrorV1::Unavailable => ConfigurationError::Unavailable,
-        SemanticActivationCoordinationErrorV1::Conflict => ConfigurationError::RevisionConflict,
-        // The coordinator builds `RejectedDetail` by chaining the context of
-        // each refusing stage (see `SemanticActivationCoordinationErrorV1`
-        // context wrapping in `semantic_runtime::configuration_operation`).
-        // Collapsing every arm onto the bare sentence discarded that chain, so
-        // a refused transition told the operator only that something refused.
-        SemanticActivationCoordinationErrorV1::Rejected => {
-            ConfigurationError::validation_message("semantic configuration transition rejected")
-        }
-        SemanticActivationCoordinationErrorV1::RejectedDetail(detail)
-        | SemanticActivationCoordinationErrorV1::Runtime(detail) => {
-            ConfigurationError::validation_message(format!(
-                "semantic configuration transition rejected: {detail}"
-            ))
-        }
-        SemanticActivationCoordinationErrorV1::Qualification(failure) => {
-            ConfigurationError::validation_message(format!(
-                "semantic configuration transition qualification refused: {failure}"
-            ))
-        }
-    }
 }
 
 fn issue_configuration_mutation_authority(
@@ -1003,113 +825,9 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
     }
 }
 
-/// Mounts one project's semantic-runtime scheduling handle as daemon-private
-/// retained state. Semantic scheduling is never a wire operation: the daemon
-/// consults the retained handle for status/coverage and to hand work to the
-/// bounded background scheduler, and clients observe only the typed
-/// freshness/coverage that ordinary operations already report.
-#[derive(Debug, thiserror::Error)]
-pub enum DaemonSemanticRuntimeRegistrationError {
-    #[error("a semantic runtime scheduler is already mounted for this project")]
-    AlreadyRegistered,
-    #[error("the daemon project runtime registry is closed")]
-    RegistryClosed,
-    #[error("a concurrent semantic runtime build failed: {detail}")]
-    ConcurrentBuildFailed { detail: String },
-}
-
-impl From<ProjectRuntimeAlreadyRegistered> for DaemonSemanticRuntimeRegistrationError {
-    fn from(_: ProjectRuntimeAlreadyRegistered) -> Self {
-        Self::AlreadyRegistered
-    }
-}
-
-impl From<ProjectRuntimeRegistryError> for DaemonSemanticRuntimeRegistrationError {
-    fn from(error: ProjectRuntimeRegistryError) -> Self {
-        registry_registration_refusal(
-            error,
-            Self::AlreadyRegistered,
-            Self::RegistryClosed,
-            |detail| Self::ConcurrentBuildFailed { detail },
-        )
-    }
-}
-
-pub struct DaemonSemanticRuntimeRegistrar {
-    service: DaemonInvocationService,
-}
-
-impl DaemonSemanticRuntimeRegistrar {
-    pub fn new(service: &DaemonInvocationService) -> Self {
-        Self {
-            service: service.clone(),
-        }
-    }
-
-    #[hotpath::skip]
-    pub async fn register(
-        &self,
-        project_root: PathBuf,
-        handle: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
-    ) -> Result<(), DaemonSemanticRuntimeRegistrationError> {
-        let registry_handle = handle.clone();
-        self.service
-            .project_runtimes
-            .register_or_reconcile(
-                project_root.clone(),
-                |_: &mut tracedecay_semantic::DaemonSemanticRuntimeHandleV1| {
-                    Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered)
-                },
-                || async { Ok(registry_handle) },
-            )
-            .await?;
-        // This separate process-wide projection has no reservation rollback
-        // authority. Join it only after the owning project slot commits, in
-        // the same poll that observes commit success.
-        tracedecay_application::semantic_runtime::register_project_semantic_runtime(
-            project_root,
-            handle,
-        );
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod terminal_problem_tests {
     use super::*;
-
-    #[test]
-    fn refused_semantic_transitions_keep_the_stage_that_refused() {
-        let bare =
-            map_semantic_configuration_error(SemanticActivationCoordinationErrorV1::Rejected);
-        assert_eq!(
-            bare,
-            ConfigurationError::validation_message("semantic configuration transition rejected")
-        );
-
-        let detailed = map_semantic_configuration_error(
-            SemanticActivationCoordinationErrorV1::RejectedDetail(
-                "stage_and_rollback: no rollback profile is staged".to_owned(),
-            ),
-        );
-        assert_eq!(
-            detailed,
-            ConfigurationError::validation_message(
-                "semantic configuration transition rejected: stage_and_rollback: no rollback \
-                 profile is staged"
-            )
-        );
-
-        let runtime = map_semantic_configuration_error(
-            SemanticActivationCoordinationErrorV1::Runtime("artifact is not installed".to_owned()),
-        );
-        assert_eq!(
-            runtime,
-            ConfigurationError::validation_message(
-                "semantic configuration transition rejected: artifact is not installed"
-            )
-        );
-    }
 
     #[test]
     fn configuration_reset_preserves_its_terminal_category() {

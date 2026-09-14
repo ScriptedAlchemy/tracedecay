@@ -595,7 +595,6 @@ mod tests {
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");
@@ -901,7 +900,6 @@ mod tests {
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");
@@ -1025,7 +1023,6 @@ mod tests {
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");
@@ -1212,7 +1209,6 @@ mod tests {
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");
@@ -1332,7 +1328,6 @@ mod tests {
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");

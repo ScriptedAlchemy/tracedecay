@@ -48,14 +48,12 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 
 # glibc `malloc_trim` for allocator release, and `statfs(2)` for the store
 # locator resolver's macOS store-locality detection (Linux reads

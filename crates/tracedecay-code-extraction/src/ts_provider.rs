@@ -116,7 +116,7 @@ pub fn language(key: &str) -> Result<Language, String> {
 /// The tree-sitter parse itself is the existing `code_extraction.parse_file`
 /// span. Callers keep their grammar-key and error-label strings so failure
 /// text stays byte-identical.
-pub(crate) fn parse_extractor_source(
+pub fn parse_extractor_source(
     language_key: &str,
     grammar_label: &str,
     source: &str,

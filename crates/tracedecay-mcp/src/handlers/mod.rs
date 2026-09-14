@@ -25,7 +25,6 @@ pub mod health;
 pub mod hook_runtime;
 pub mod info;
 mod multi_root;
-pub mod redundancy;
 mod retained_response;
 mod session_authorities;
 pub mod skills;

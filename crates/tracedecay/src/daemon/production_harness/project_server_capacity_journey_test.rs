@@ -46,7 +46,6 @@ async fn open_project_composition(
                 &canonical_project_path,
                 &handshake,
                 ProductionProjectCompositionRuntime::Portable {
-                    semantic_auto_download: false,
                     startup_catch_up: false,
                 },
                 &CancellationToken::new(),

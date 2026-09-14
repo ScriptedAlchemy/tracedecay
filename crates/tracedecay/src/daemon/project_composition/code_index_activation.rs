@@ -6,30 +6,22 @@
 
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
-use tracedecay_domain::EmbeddingDocumentCompositionV1;
 use tracedecay_runtime_core::logging::log_daemon_event;
-use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
-/// Bundled so the builder keeps one argument list instead of thirteen
-/// positional parameters.
+/// Bundled so the builder keeps one argument list instead of ten positional
+/// parameters.
 pub(super) struct CodeIndexActivationMountInputs {
     pub(super) invocation: DaemonInvocationState,
     pub(super) project_id: tracedecay_domain::ProjectId,
     pub(super) project_root: PathBuf,
     pub(super) store_root: PathBuf,
-    pub(super) semantic_runtime: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
-    pub(super) semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-    pub(super) semantic_resources: SemanticResourceCeilings,
-    pub(super) semantic_document_composition: EmbeddingDocumentCompositionV1,
     pub(super) native_graph_activation: bool,
     pub(super) scope: tracedecay_contracts::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,
     pub(super) cancellation: CancellationToken,
     pub(super) graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     pub(super) graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
-    pub(super) semantic_runtime_ready: tokio::sync::watch::Sender<bool>,
-    pub(super) profile_id: tracedecay_domain::configuration::UserProfileId,
 }
 
 /// Build the deferred code-index mount for this route. The closure is fenced on
@@ -44,35 +36,24 @@ pub(super) fn code_index_activation_mount(
         project_id,
         project_root,
         store_root,
-        semantic_runtime,
-        semantic_lifecycle,
-        semantic_resources,
-        semantic_document_composition,
         native_graph_activation,
         scope,
         route_registered,
         cancellation,
         graph_runtime,
         graph_publication_database,
-        semantic_runtime_ready,
-        profile_id,
     } = inputs;
     let mount: code_index_scheduler::CodeIndexActivationMountV1 = Arc::new(move || {
         let invocation = invocation.clone();
         let project_id = project_id.clone();
         let project_root = project_root.clone();
         let store_root = store_root.clone();
-        let semantic_runtime = semantic_runtime.clone();
-        let semantic_lifecycle = semantic_lifecycle.clone();
-        let semantic_resources = semantic_resources;
         let native_graph_activation = native_graph_activation;
         let scope = scope.clone();
         let route_registered = Arc::clone(&route_registered);
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::clone(&graph_publication_database);
-        let semantic_runtime_ready = semantic_runtime_ready.clone();
-        let profile_id = profile_id.clone();
         Box::pin(hotpath::future!(
             async move {
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
@@ -89,10 +70,6 @@ pub(super) fn code_index_activation_mount(
                     project_id,
                     &project_root,
                     store_root,
-                    Some(&semantic_runtime),
-                    semantic_lifecycle,
-                    Some(semantic_resources),
-                    semantic_document_composition,
                     native_graph_activation,
                     graph_runtime,
                     graph_publication_database,
@@ -107,14 +84,6 @@ pub(super) fn code_index_activation_mount(
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked after code-index mount".to_owned());
                 }
-                if tracedecay_application::semantic_runtime::project_semantic_production_runtime(
-                    &project_root,
-                )
-                .is_some()
-                {
-                    semantic_runtime_ready.send_replace(true);
-                }
-
                 // Query authority depends on the first sealed generation, but
                 // hook hints must become deliverable as soon as the scheduler is
                 // mounted. Keep that wait in its own route-fenced task.
@@ -124,7 +93,6 @@ pub(super) fn code_index_activation_mount(
                     project_root: project_root.clone(),
                     project_id: query_project_id,
                     graph_runtime: query_graph_runtime,
-                    profile_id: profile_id.clone(),
                     scope: scope.clone(),
                     route_registered: Arc::clone(&route_registered),
                     cancellation: cancellation.clone(),
@@ -145,14 +113,13 @@ struct QueryAuthorityWaitInputs {
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
     graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
-    profile_id: tracedecay_domain::configuration::UserProfileId,
     scope: tracedecay_contracts::ResolvedScope,
     route_registered: Arc<AtomicBool>,
     cancellation: CancellationToken,
 }
 
-/// Wait for this project's first sealed generation, then mount its query
-/// authority. Route revocation (which cancels this route's own token) and a
+/// Wait for this project's first sealed generation, then mount the checked-in
+/// core query policy from the project's durable cursor-key authority. Route revocation (which cancels this route's own token) and a
 /// closed publication channel each end the wait without mounting.
 ///
 /// A publication is announced before its generation is seated, and a retained
@@ -161,10 +128,6 @@ struct QueryAuthorityWaitInputs {
 /// every slot write records a seat, and the loop re-reads the exact state
 /// (`latest_generation_id`) on each wake. Subscribing before the first read is
 /// what keeps a seat that lands during it observable.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Query authority spawn waits for one generation and installs its readers."
-)]
 fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs) {
     let QueryAuthorityWaitInputs {
         invocation: authority_invocation,
@@ -172,7 +135,6 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
         project_root: authority_project,
         project_id: authority_project_id,
         graph_runtime: authority_graph_runtime,
-        profile_id: authority_profile_id,
         scope: authority_scope,
         route_registered: authority_route_registered,
         cancellation: authority_cancellation,
@@ -213,49 +175,16 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
             }
             let mut awaiting_generation_logged = false;
             loop {
-                let configured = tokio::select! {
+                let outcome = tokio::select! {
                     biased;
                     () = authority_cancellation.cancelled() => return,
-                    outcome = authority_invocation.mount_query_authority_for_project(
+                    outcome = mount_core_query_authority_from_project_sessions(
+                        &authority_invocation,
+                        &authority_graph_runtime,
+                        &authority_project_id,
                         &authority_project,
-                        &authority_profile_id,
                         &authority_scope,
                     ) => outcome,
-                };
-                let outcome = match configured {
-                    Err(
-                        error @ (QueryRuntimeMountErrorV1::Provider(_)
-                        | QueryRuntimeMountErrorV1::AuthorityMissing
-                        | QueryRuntimeMountErrorV1::Authority(
-                            tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable,
-                        )),
-                    ) => {
-                        // A fresh profile has no evaluated optional authority. The
-                        // post-seat owner must therefore install the checked-in core
-                        // policy from this project's durable cursor-key authority;
-                        // otherwise a ready generation remains unqueryable forever.
-                        match authority_graph_runtime
-                            .mounted_project_sessions(&authority_project_id)
-                            .await
-                        {
-                            Some(session_db) => {
-                                match session_db.load_session_cursor_key_provider_result().await {
-                                    Ok(cursor_keys) => {
-                                        authority_invocation
-                                            .mount_core_query_authority_for_project(
-                                                &authority_project,
-                                                &authority_scope,
-                                                &cursor_keys,
-                                            )
-                                            .await
-                                    }
-                                    Err(_) => Err(QueryRuntimeMountErrorV1::KeyUnavailable),
-                                }
-                            }
-                            None => Err(error),
-                        }
-                    }
-                    outcome => outcome,
                 };
                 if authority_cancellation.is_cancelled()
                     || !authority_route_registered.load(Ordering::Acquire)
@@ -286,6 +215,29 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
         },
         label = "daemon.project.activate.query_authority"
     ));
+}
+
+/// Mounts the checked-in core query policy from the project's durable
+/// cursor-key authority, which lives in the mounted project session database.
+async fn mount_core_query_authority_from_project_sessions(
+    invocation: &DaemonInvocationState,
+    graph_runtime: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+    project_id: &tracedecay_domain::ProjectId,
+    project_root: &Path,
+    scope: &tracedecay_contracts::ResolvedScope,
+) -> std::result::Result<(), QueryRuntimeMountErrorV1> {
+    let Some(session_db) = graph_runtime.mounted_project_sessions(project_id).await else {
+        return Err(QueryRuntimeMountErrorV1::Mount(
+            "project session database is not mounted".to_owned(),
+        ));
+    };
+    let cursor_keys = session_db
+        .load_session_cursor_key_provider_result()
+        .await
+        .map_err(|error| QueryRuntimeMountErrorV1::FallbackKeyUnavailable(error.to_string()))?;
+    invocation
+        .mount_core_query_authority_for_project(project_root, scope, &cursor_keys)
+        .await
 }
 
 /// Classify and emit the post-wait query-authority mount result.

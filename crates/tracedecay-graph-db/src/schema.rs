@@ -7,12 +7,11 @@ use grafeo_core::graph::lpg::{Edge, Node};
 use crate::limits::{
     MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS, MAX_GRAPH_IDENTIFIER_BYTES,
     MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES, MAX_GRAPH_PROPERTY_VALUE_BYTES,
-    MAX_GRAPH_VECTOR_DIMENSION,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation,
-    GraphRelationId, GraphRelationKind, GraphVector, VectorMetric,
+    GraphRelationId, GraphRelationKind,
 };
 
 pub(crate) const FORMAT_LABEL: &str = "__tracedecay_graph_db_format";
@@ -58,7 +57,6 @@ const OWNER_DOMAIN_LABEL_PREFIX: &str = "__tracedecay_graph_db_owner_label_";
 const RELATION_OWNER_LABEL_PREFIX: &str = "__tracedecay_graph_db_relation_owner_";
 const RELATION_TYPE_PREFIX: &str = "__tracedecay_graph_db_relation_";
 const PROPERTY_PREFIX: &str = "__tracedecay_graph_db_property_";
-const VECTOR_PREFIX: &str = "__tracedecay_graph_db_vector_";
 
 /// The unique-key indexes every native lookup resolves through.
 ///
@@ -602,14 +600,6 @@ pub(crate) fn decode_graph_properties(
             continue;
         }
         let Some(encoded) = key.strip_prefix(PROPERTY_PREFIX) else {
-            if let Some((name, property)) = decode_vector_property(key, value.clone())? {
-                require_decoded_property_budget(&decoded, &mut decoded_bytes, &name, &property)?;
-                if decoded.insert(name, property).is_some() {
-                    return Err(GraphDbError::Corrupt {
-                        message: "entity repeats a native graph property".to_owned(),
-                    });
-                }
-            }
             continue;
         };
         let (tag, name) = encoded
@@ -673,63 +663,7 @@ fn encode_graph_property(name: &GraphPropertyName, property: &GraphProperty) -> 
             format!("{PROPERTY_PREFIX}bytes_{encoded}"),
             Value::Bytes(value.clone().into()),
         ),
-        GraphProperty::Vector(vector) => (
-            vector_property_key(name, vector.dimension, vector.metric),
-            Value::Vector(vector.values.clone().into()),
-        ),
     }
-}
-
-pub(crate) fn vector_property_key(
-    name: &GraphPropertyName,
-    dimension: usize,
-    metric: VectorMetric,
-) -> String {
-    format!(
-        "{VECTOR_PREFIX}{}_{}_{}",
-        hex::encode(name.as_str().as_bytes()),
-        dimension,
-        metric.storage_tag()
-    )
-}
-
-fn decode_vector_property(
-    key: &str,
-    value: Value,
-) -> Result<Option<(GraphPropertyName, GraphProperty)>, GraphDbError> {
-    let Some(encoded) = key.strip_prefix(VECTOR_PREFIX) else {
-        return Ok(None);
-    };
-    let mut parts = encoded.rsplitn(3, '_');
-    let metric = parts.next().and_then(|value| match value {
-        "cos" => Some(VectorMetric::Cosine),
-        "dot" => Some(VectorMetric::DotProduct),
-        "l2" => Some(VectorMetric::Euclidean),
-        _ => None,
-    });
-    let dimension = parts.next().and_then(|value| value.parse::<usize>().ok());
-    let name = parts.next();
-    let (Some(metric), Some(dimension), Some(name), Value::Vector(values)) =
-        (metric, dimension, name, value)
-    else {
-        return Err(GraphDbError::Corrupt {
-            message: format!("native vector property `{key}` is malformed"),
-        });
-    };
-    if dimension == 0
-        || dimension > MAX_GRAPH_VECTOR_DIMENSION
-        || values.len() != dimension
-        || name.len() > MAX_GRAPH_IDENTIFIER_BYTES.saturating_mul(2)
-    {
-        return Err(GraphDbError::Corrupt {
-            message: format!("native vector property `{key}` exceeds its product bound"),
-        });
-    }
-    let name = GraphPropertyName::new(decode_utf8(name, "vector property name")?)
-        .map_err(|error| persisted_validation_error("vector property name", error))?;
-    let vector = GraphVector::new(values.to_vec(), dimension, metric)
-        .map_err(|error| persisted_validation_error("vector", error))?;
-    Ok(Some((name, GraphProperty::Vector(vector))))
 }
 
 fn require_decoded_property_budget(
@@ -749,13 +683,6 @@ fn require_decoded_property_budget(
         GraphProperty::F64(_) => std::mem::size_of::<f64>(),
         GraphProperty::String(value) => value.len(),
         GraphProperty::Bytes(value) => value.len(),
-        GraphProperty::Vector(vector) => vector
-            .values
-            .len()
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "native graph vector byte length overflowed".to_owned(),
-            })?,
     };
     *decoded_bytes = decoded_bytes
         .checked_add(name.as_str().len())
@@ -890,29 +817,5 @@ fn decode_utf8(value: &str, description: &str) -> Result<String, GraphDbError> {
 fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description}: {error}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use grafeo_common::types::Value;
-
-    use super::decode_vector_property;
-    use crate::{GraphDbError, MAX_GRAPH_VECTOR_DIMENSION};
-
-    #[test]
-    fn persisted_vector_dimension_over_product_limit_is_corrupt() {
-        let key = format!(
-            "__tracedecay_graph_db_vector_{}_{dimension}_cos",
-            hex::encode("embedding"),
-            dimension = MAX_GRAPH_VECTOR_DIMENSION + 1,
-        );
-        let error = decode_vector_property(
-            &key,
-            Value::Vector(vec![0.0; MAX_GRAPH_VECTOR_DIMENSION + 1].into()),
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, GraphDbError::Corrupt { .. }));
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! This bottom layer defines request and result types, service contracts, and
 //! the traits implemented by storage and runtime crates, including
-//! [`WorkStoragePort`], [`WorkflowDefinitionAuthorityPort`],
-//! [`StoreSizeTelemetryPort`], and [`SemanticActivationCoordinationPort`].
+//! [`WorkStoragePort`], [`WorkflowDefinitionAuthorityPort`], and
+//! [`StoreSizeTelemetryPort`].
 //! `tracedecay-application` depends on these contracts to orchestrate product
 //! workflows; this crate never depends on that orchestration layer.
 //!
@@ -59,7 +59,6 @@ pub mod retained_receipts;
 pub mod retained_surfaces;
 pub mod retrieval;
 pub mod sdk_catalog;
-pub mod semantic_activation;
 pub mod session_sync;
 mod session_temporal_refresh;
 pub mod settings_preview;
@@ -399,10 +398,6 @@ pub use sdk_catalog::{
     application_http_executable_binding_registry, application_http_route_path,
     sdk_executable_binding_registry,
 };
-pub use semantic_activation::{
-    SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
-    SemanticQualificationFailureV1, SemanticQualificationStateV1,
-};
 pub use session_temporal_refresh::{
     SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort,
     UnavailableSessionTemporalRefreshWake,
@@ -429,11 +424,10 @@ pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,
     QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1, RelativeArtifactPathV1,
-    RetentionBacklogRecordV1, SemanticVectorRetentionRecordV1, StorageByteSizeV1,
-    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
-    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
-    incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
-    semantic_vector_retention_finding,
+    RetentionBacklogRecordV1, StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1,
+    StoreBudgetEvaluationV1, StoreKeyV1, StoreSizeBudgetV1, StoreSizeSampleV1,
+    StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1, incident_debris_finding,
+    orphan_store_finding, over_budget_finding, retention_backlog_finding,
 };
 pub use surface_contracts::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,

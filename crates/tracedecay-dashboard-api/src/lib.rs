@@ -137,16 +137,13 @@ mod doctor_findings_api;
 mod events_api;
 mod events_delivery;
 mod explorer_api;
-mod remote_status_api;
-pub use explorer_api::{
-    ExplorerSemanticReadFuture, ExplorerSemanticReadV1, ExplorerSemanticReader,
-};
 pub mod feedback_api;
 mod graph_api;
 mod graph_service;
 mod graph_structure_api;
 pub mod hooks;
 mod lcm_api;
+mod remote_status_api;
 pub use lcm_api::{
     DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
     DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1, DashboardLcmReadFutureV1,
@@ -347,10 +344,6 @@ pub struct DashboardStateCompositionV1 {
     /// it absent and `GET /api/remote/status` reports typed unavailable.
     pub remote_operational_status_reader: Option<RemoteOperationalStatusReader>,
     pub code_index_freshness_reader: Option<CodeIndexFreshnessReader>,
-    /// Daemon-owned read over the semantic activation gate and runtime
-    /// status for the Explorer semantic source. Standalone dashboards leave
-    /// it absent and the source reports typed `unsupported`.
-    pub explorer_semantic_reader: Option<ExplorerSemanticReader>,
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     /// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
     /// Selected projects reuse the resolver but resolve their own exact store
@@ -466,11 +459,6 @@ pub struct DashboardState {
     pub project_root: PathBuf,
     /// Live read port over the daemon-owned code-index scheduler registry.
     pub code_index_freshness_reader: Option<CodeIndexFreshnessReader>,
-    /// Root-addressed read over the daemon-owned semantic activation gate and
-    /// runtime status. Absent for standalone dashboards, whose Explorer
-    /// semantic source reports typed `unsupported` instead of guessing from
-    /// process-local state.
-    pub explorer_semantic_reader: Option<ExplorerSemanticReader>,
     /// Root-addressed read over the daemon-mounted canonical feedback
     /// observation owner. Selected projects reuse the resolver but resolve
     /// their own exact project root on every call.
@@ -798,7 +786,6 @@ async fn build_state_inner(
         doctor_report_reader,
         remote_operational_status_reader,
         code_index_freshness_reader,
-        explorer_semantic_reader,
         feedback_status_reader,
         pr_autotrack_reader,
         code_diagnostics_broker,
@@ -868,7 +855,6 @@ async fn build_state_inner(
         savings_db_path,
         project_root: cg.store_layout.project_root.clone(),
         code_index_freshness_reader,
-        explorer_semantic_reader,
         feedback_status_reader,
         pr_autotrack_reader,
         storage_mode,
@@ -952,9 +938,6 @@ pub async fn build_selected_project_state(
             // the same admitted reader.
             remote_operational_status_reader: active.remote_operational_status_reader.clone(),
             code_index_freshness_reader: active.code_index_freshness_reader.clone(),
-            // Like freshness, the semantic reader is root-addressed and
-            // resolves the selected state's exact root on every call.
-            explorer_semantic_reader: active.explorer_semantic_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
             pr_autotrack_reader: active.pr_autotrack_reader.clone(),
             code_diagnostics_broker: None,
@@ -1099,7 +1082,6 @@ where
             doctor_report_reader: None,
             remote_operational_status_reader: None,
             code_index_freshness_reader: None,
-            explorer_semantic_reader: None,
             feedback_status_reader: None,
             pr_autotrack_reader: test_authority
                 .and_then(|authority| authority.pr_autotrack_reader.clone()),
@@ -2395,7 +2377,6 @@ mod authority_tests {
                 savings_db_path: String::new(),
                 project_root: project_root.clone(),
                 code_index_freshness_reader: None,
-                explorer_semantic_reader: None,
                 feedback_status_reader: None,
                 pr_autotrack_reader: None,
                 storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),

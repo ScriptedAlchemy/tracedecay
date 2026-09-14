@@ -1,4 +1,4 @@
-//! Code-index scheduler, git watch, git transactions, and semantic evaluation.
+//! Code-index scheduler, git watch, and git transactions.
 //!
 //! This crate owns the daemon code-index runtime that used to live under
 //! `tracedecay::daemon`. The composition root constructs the scheduler and
@@ -46,20 +46,15 @@ pub mod git_watch;
 pub mod mcp_admission;
 pub(crate) mod ports;
 pub mod project_reads;
-pub mod semantic_activation_reconciler;
-pub(crate) mod semantic_code;
-pub mod semantic_evaluation;
 
 /// The process-wide worker plan this runtime installs and schedules against;
 /// composition roots read its status from here instead of depending on the
 /// index crate for that one call.
 pub use tracedecay_code_index::parallelism;
-pub mod semantic_evaluation_shutdown;
 
 /// Historical `crate::code_index` / `crate::query` paths from the root move.
 pub(crate) use tracedecay_code_index as code_index;
 pub(crate) use tracedecay_query as query;
-pub(crate) use tracedecay_search_eval as search_eval;
 
 /// Same abort authority re-exported by `tracedecay-daemon-service`.
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
@@ -71,11 +66,7 @@ pub use code_index_scheduler::CodeIndexSchedulerRegistryV1;
 pub use code_index_scheduler::identity::resolved_scope_for_project;
 pub use ports::{
     AdmissionParkLeaseV1, ApplicationCatalogSnapshotErrorV1, CONNECTION_ADMISSION,
-    GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1, PreparedQueryActivationViewV1, park_admission,
-};
-pub use semantic_evaluation_shutdown::{
-    SemanticEvaluationShutdownJoinV1, SemanticEvaluationShutdownReceiptV1,
-    collect_semantic_evaluation_shutdown,
+    GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1, park_admission,
 };
 
 /// Installs the registered global/session schema into the kernel's fail-closed

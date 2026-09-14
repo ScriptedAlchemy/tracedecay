@@ -12,7 +12,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
-use tracedecay_contracts::doctor::SemanticOwnerStateV1;
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::git;
@@ -23,8 +22,7 @@ use tracedecay_mcp::handlers::{
 };
 use tracedecay_mcp::{
     AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
-    McpRequestAuthoritiesV1, McpSemanticOwnerV1, McpToolBinding, McpToolContext, RequestControls,
-    ToolResult,
+    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls, ToolResult,
 };
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 
@@ -222,7 +220,7 @@ fn dispatch_info_tools_inner<'a>(
             ),
             "tracedecay_status" => {
                 let project = admitted_project_authorities(cg, &options)?;
-                let snapshots = admitted_status_snapshots(cg, &options).await;
+                let snapshots = admitted_status_snapshots(&options).await;
                 let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
                 portable_info::handle_status(&ctx, args, server_stats, scope_prefix).await
             }
@@ -495,14 +493,6 @@ fn admitted_project_authorities(
 }
 
 #[derive(Default)]
-enum SemanticOwnerSnapshotV1 {
-    #[default]
-    NotAttached,
-    AttachedAbsent,
-    Attached(SemanticOwnerStateV1),
-}
-
-#[derive(Default)]
 enum DoctorReportSnapshotV1 {
     #[default]
     NotAttached,
@@ -513,7 +503,6 @@ enum DoctorReportSnapshotV1 {
 #[derive(Default)]
 struct AdmittedRequestSnapshotsV1 {
     generation_census: Option<GenerationCensusSnapshot>,
-    semantic_owner: SemanticOwnerSnapshotV1,
     doctor_report: DoctorReportSnapshotV1,
 }
 
@@ -523,24 +512,6 @@ async fn admitted_generation_census(
     match options.generation_census_reader.as_ref() {
         Some(reader) => Some(reader().await),
         None => None,
-    }
-}
-
-async fn admitted_semantic_owner(
-    cg: &TraceDecay,
-    options: &ToolCallRegistryOptions<'_>,
-) -> SemanticOwnerSnapshotV1 {
-    match options.daemon_invocation_service {
-        Some(service) => {
-            match tracedecay_daemon_service::DaemonSemanticOwnerRuntimeRegistrar::new(service)
-                .state(cg.project_root())
-                .await
-            {
-                Some(state) => SemanticOwnerSnapshotV1::Attached(state),
-                None => SemanticOwnerSnapshotV1::AttachedAbsent,
-            }
-        }
-        None => SemanticOwnerSnapshotV1::NotAttached,
     }
 }
 
@@ -556,11 +527,10 @@ async fn admitted_doctor_report(options: &ToolCallRegistryOptions<'_>) -> Doctor
     }
 }
 
-/// Status needs census and the semantic-owner snapshot. Freshness is a
-/// lazy reader on the binding so the handler reads it when it renders.
-/// It does not run the doctor reader — that report is runtime-only.
+/// Status needs the census. Freshness is a lazy reader on the binding so
+/// the handler reads it when it renders. It does not run the doctor reader:
+/// that report is runtime-only.
 async fn admitted_status_snapshots(
-    cg: &TraceDecay,
     options: &ToolCallRegistryOptions<'_>,
 ) -> AdmittedRequestSnapshotsV1 {
     AdmittedRequestSnapshotsV1 {
@@ -569,7 +539,6 @@ async fn admitted_status_snapshots(
             label = "mcp.info.status.generation_census"
         )
         .await,
-        semantic_owner: admitted_semantic_owner(cg, options).await,
         ..AdmittedRequestSnapshotsV1::default()
     }
 }
@@ -591,7 +560,6 @@ async fn admitted_runtime_snapshots(
         } else {
             DoctorReportSnapshotV1::NotAttached
         },
-        ..AdmittedRequestSnapshotsV1::default()
     }
 }
 
@@ -669,11 +637,6 @@ fn admitted_tool_context<'a>(
         code_index,
         freshness,
         generation_census: snapshots.generation_census.as_ref(),
-        semantic_owner: match &snapshots.semantic_owner {
-            SemanticOwnerSnapshotV1::Attached(state) => McpSemanticOwnerV1::Attached(state),
-            SemanticOwnerSnapshotV1::AttachedAbsent => McpSemanticOwnerV1::AttachedAbsent,
-            SemanticOwnerSnapshotV1::NotAttached => McpSemanticOwnerV1::NotAttached,
-        },
         doctor_report: match &snapshots.doctor_report {
             DoctorReportSnapshotV1::Read(report) => McpDoctorReportV1::Read(report),
             DoctorReportSnapshotV1::ReadFailed => McpDoctorReportV1::ReadFailed,
@@ -1004,7 +967,6 @@ fn dispatch_session_workflow_tools_inner<'a>(
                     options.doctor_report_reader.clone(),
                     options.remote_operational_status.clone(),
                     options.code_index_freshness_reader.clone(),
-                    options.explorer_semantic_reader.clone(),
                     options.feedback_status_reader.clone(),
                     options.pr_autotrack_reader.clone(),
                     options.diagnostics_lsp.clone(),

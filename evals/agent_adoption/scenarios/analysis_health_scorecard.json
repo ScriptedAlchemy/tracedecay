@@ -15,7 +15,6 @@
       "tracedecay_context"
     ],
     "acceptable": [
-      "tracedecay_redundancy",
       "tracedecay_dead_code",
       "tracedecay_complexity"
     ]

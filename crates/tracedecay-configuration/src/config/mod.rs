@@ -11,7 +11,6 @@ pub mod scope_control;
 pub mod topology;
 pub mod work_executable_binding;
 
-pub use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
 pub use tracedecay_global_db::configuration::{registry, resolver};
 #[cfg(test)]
 pub use tracedecay_runtime_core::config::PinnedUserDataDir;
@@ -31,7 +30,6 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
-use tracedecay_semantic_contracts::SemanticConfig;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTraceDecayConfig {
@@ -43,7 +41,6 @@ pub struct RuntimeTraceDecayConfig {
     pub git_ignore: bool,
     pub diagnostics_prewarm: bool,
     pub native_graph_activation: bool,
-    pub semantic: SemanticConfig,
     pub sync: RuntimeSyncConfig,
     pub telemetry: RuntimeTelemetryConfig,
 }
@@ -59,7 +56,6 @@ impl Default for RuntimeTraceDecayConfig {
             git_ignore: true,
             diagnostics_prewarm: false,
             native_graph_activation: true,
-            semantic: SemanticConfig::default(),
             sync: RuntimeSyncConfig::default(),
             telemetry: RuntimeTelemetryConfig::default(),
         }
@@ -245,7 +241,6 @@ fn runtime_config_from_snapshot(
             snapshot,
             INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
         )?,
-        semantic: semantic_config_from_snapshot(snapshot)?,
         sync: RuntimeSyncConfig {
             auto_track_pr_branches: required_bool(
                 snapshot,
@@ -260,24 +255,6 @@ fn runtime_config_from_snapshot(
             timings: required_bool(snapshot, TELEMETRY_TIMINGS_SETTING_KEY)?,
         },
     })
-}
-
-fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<SemanticConfig> {
-    let semantic = match optional_text_setting(snapshot, SEMANTIC_RUNTIME_SETTING_KEY)? {
-        None => SemanticConfig::default(),
-        Some(value) => serde_json::from_str(value).map_err(|error| {
-            config_error(format!(
-                "resolved semantic runtime setting is invalid: {error}"
-            ))
-        })?,
-    };
-    // Structural only: this crate is catalog-free. Membership of
-    // `selected_model` is admitted at the configuration write boundary and
-    // again by the lifecycle owner on selection, so a persisted id the
-    // catalog no longer serves degrades semantics without blocking exact,
-    // lexical, or graph retrieval behind an unpublishable configuration.
-    semantic.validate()?;
-    Ok(semantic)
 }
 
 fn setting_key(key_name: &str) -> Result<SettingKey> {
@@ -376,7 +353,6 @@ mod tests {
         ConfigurationValueV1, INDEX_MAX_FILE_SIZE_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::errors::TraceDecayError;
-    use tracedecay_semantic_contracts::SemanticConfig;
 
     use super::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget, registry, resolver};
 
@@ -449,23 +425,6 @@ mod tests {
             message.contains("expected unsigned"),
             "type mismatches must be reported as such: {message}"
         );
-    }
-
-    #[test]
-    fn pin_materializes_the_semantic_selection_from_the_snapshot() {
-        let configured = SemanticConfig {
-            auto_download: false,
-            ..SemanticConfig::default()
-        };
-        let snapshot = resolved(BTreeMap::from([(
-            SettingKey::new(super::SEMANTIC_RUNTIME_SETTING_KEY).unwrap(),
-            ConfigurationValueV1::Text(serde_json::to_string(&configured).unwrap()),
-        )]));
-
-        let pinned = PinnedRuntimeConfiguration::new(target(), revision(), snapshot).unwrap();
-
-        assert_eq!(pinned.config().semantic, configured);
-        assert_ne!(pinned.config().semantic, SemanticConfig::default());
     }
 
     #[test]

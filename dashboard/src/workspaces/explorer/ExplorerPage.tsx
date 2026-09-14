@@ -17,9 +17,8 @@ import { Reveal } from './Reveal.tsx';
  *
  * TraceDecay remembers a repository several separate ways, and the honest
  * consequence is that a search is a *fan-out*, not a single ranked list: the
- * code graph, the transcript store, the fact store, and the semantic provider
- * each answer for themselves (the semantic lane reports its typed provider
- * state until retrieval is executable from this surface). This surface makes that structure the design. Each memory is a
+ * code graph, the transcript store, and the fact store each answer for
+ * themselves. This surface makes that structure the design. Each memory is a
  * lane with its own identity rail and its own live state; results stay
  * comparable through one row grammar; and because the daemon returns hits but
  * no relevance score, "why this is here" is told with things that are actually

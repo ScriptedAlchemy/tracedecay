@@ -233,7 +233,7 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorFindingV1,
         DoctorKernelInputsV1, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
         DoctorStorageFindingV1, OperationalAuditReadV1, ProfileAuthorityReadV1,
-        RemoteOperationalReadV1, SemanticOwnerReadV1, SemanticOwnerStateV1,
+        RemoteOperationalReadV1,
     };
     use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -319,10 +319,6 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         },
         code_index: CodeIndexMountReadV1::Observed {
             state: CodeIndexMountStateV1::Mounted,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        },
-        semantic_owner: SemanticOwnerReadV1::Observed {
-            state: SemanticOwnerStateV1::Ready,
             coverage: DoctorCoverageCompletenessV1::Complete,
         },
         observability: ObservabilityReadV1::Observed {

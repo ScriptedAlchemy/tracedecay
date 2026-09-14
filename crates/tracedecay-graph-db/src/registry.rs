@@ -37,25 +37,14 @@ mod path;
 mod publication;
 #[path = "registry/publication_support.rs"]
 mod publication_support;
-#[path = "registry/staging.rs"]
-mod staging;
 #[path = "registry/support.rs"]
 mod support;
-#[path = "registry/vector_retirement.rs"]
-mod vector_retirement;
 pub use code_graph_namespace::{
     CODE_GRAPH_SHARD_NAMESPACE_PREFIX, LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX,
     code_graph_shard_namespace, is_code_graph_shard_namespace,
     is_legacy_per_generation_code_graph_namespace,
 };
 pub use publication::{GraphPublicationPreparationV1, ProvenGraphPublicationV1};
-pub use staging::{
-    VerifiedGenerationBatchApply, VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
-};
-pub use vector_retirement::{
-    SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
-    SemanticVectorRetirementReservation,
-};
 
 const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
 

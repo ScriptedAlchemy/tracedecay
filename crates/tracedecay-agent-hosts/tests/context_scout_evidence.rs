@@ -345,15 +345,11 @@ fn evidence_claim_binds_exact_scope_generation_authority_redaction_and_anchor() 
 }
 
 #[test]
-fn query_lcm_semantic_code_and_git_sources_remain_canonical_references() {
+fn query_lcm_code_and_git_sources_remain_canonical_references() {
     let scope = resolved_scope();
     let sources = [
         (ContextScoutEvidenceSourceKindV1::Git, "anchor.git.1"),
         (ContextScoutEvidenceSourceKindV1::Code, "anchor.code.1"),
-        (
-            ContextScoutEvidenceSourceKindV1::Semantic,
-            "anchor.semantic.1",
-        ),
         (ContextScoutEvidenceSourceKindV1::Lcm, "anchor.lcm.1"),
         (ContextScoutEvidenceSourceKindV1::Query, "anchor.query.1"),
     ]
@@ -393,12 +389,11 @@ fn query_lcm_semantic_code_and_git_sources_remain_canonical_references() {
         vec![
             ContextScoutEvidenceSourceKindV1::Query,
             ContextScoutEvidenceSourceKindV1::Lcm,
-            ContextScoutEvidenceSourceKindV1::Semantic,
             ContextScoutEvidenceSourceKindV1::Code,
             ContextScoutEvidenceSourceKindV1::Git,
         ]
     );
-    assert_eq!(evidence.anchor_count(), 5);
+    assert_eq!(evidence.anchor_count(), 4);
     assert_eq!(
         evidence.availability,
         ContextScoutEvidenceAvailabilityV1::Complete

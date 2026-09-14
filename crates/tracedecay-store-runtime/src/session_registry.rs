@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracedecay_application::semantic_runtime::SemanticVectorOperationTaskOwnerV1;
 use tracedecay_automation_runtime::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_domain::BrainNodeId;
 use tracedecay_sessions::observation::ObservationCancellation;
@@ -23,6 +22,7 @@ use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
+use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
 use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
@@ -53,14 +53,12 @@ mod mounts;
 mod profile_memory;
 mod remote_recovery;
 mod retained_hook_tasks;
-mod semantic_lifecycle;
 mod terminal_tasks;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 #[cfg(any(test, feature = "test-helpers"))]
 use mounts::SessionGraphPublicationTestGateState;
 use retained_hook_tasks::RetainedHookTasks;
-use semantic_lifecycle::SemanticLifecycleOwnerCell;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub use mounts::SessionGraphPublicationTestGate;
@@ -522,14 +520,13 @@ impl ProjectRuntimeOwnerRegistryV1 {
         };
         entries.insert(
             project_id.clone(),
-            ProjectRuntimeOwnerStateV1::ReplacingSessions(owners.semantic_lifecycle.clone()),
+            ProjectRuntimeOwnerStateV1::ReplacingSessions,
         );
         Ok(Some(ProjectSessionReplacementReservationV1 {
             owners: self.clone(),
             project_id: project_id.clone(),
             sessions: Some(sessions),
             memory: owners.memory,
-            semantic_lifecycle: owners.semantic_lifecycle,
             recovery_proof: None,
             armed: true,
         }))
@@ -569,10 +566,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
                 ),
             ));
         };
-        entries.insert(
-            project_id.clone(),
-            ProjectRuntimeOwnerStateV1::Recovering(recovery.semantic_lifecycle.clone()),
-        );
+        entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Recovering);
         Ok(Some(ProjectSessionRecoveryReservationV1 {
             owners: self.clone(),
             project_id: project_id.clone(),
@@ -616,7 +610,6 @@ impl ProjectRuntimeOwnerRegistryV1 {
                 sessions: None,
                 candidate_sessions: None,
                 memory: None,
-                semantic_lifecycle: SemanticLifecycleOwnerCell::default(),
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(
                     ProjectSessionTerminalProofV1::Durable(Box::new(proof)),
                 ),
@@ -927,16 +920,15 @@ impl Drop for RemoteNodeOwnerOpeningReservationV1<'_> {
 struct ProjectRuntimeOwnersV1 {
     sessions: Option<RegisteredSessionOwnerV1>,
     memory: Option<MemoryStoreOwnerV1>,
-    semantic_lifecycle: SemanticLifecycleOwnerCell,
 }
 
 enum ProjectRuntimeOwnerStateV1 {
-    Opening(SemanticLifecycleOwnerCell),
+    Opening,
     Ready(ProjectRuntimeOwnersV1),
-    ReplacingSessions(SemanticLifecycleOwnerCell),
-    Recovering(SemanticLifecycleOwnerCell),
+    ReplacingSessions,
+    Recovering,
     RecoveryRequired(ProjectSessionRecoveryRequiredV1),
-    Retiring(SemanticLifecycleOwnerCell),
+    Retiring,
     Faulted(ProjectRuntimeFaultedOwnersV1),
 }
 
@@ -948,7 +940,6 @@ struct ProjectSessionRecoveryRequiredV1 {
     sessions: Option<ProjectSessionRetirementOwnerV1>,
     candidate_sessions: Option<RegisteredSessionOwnerV1>,
     memory: Option<MemoryStoreOwnerV1>,
-    semantic_lifecycle: SemanticLifecycleOwnerCell,
     phase: ProjectSessionRecoveryPhaseV1,
 }
 
@@ -1217,7 +1208,6 @@ struct ProjectRuntimeOwnerOpeningReservationV1 {
     owners: ProjectRuntimeOwnerRegistryV1,
     project_id: ProjectId,
     previous: Option<ProjectRuntimeOwnersV1>,
-    semantic_lifecycle: SemanticLifecycleOwnerCell,
     armed: bool,
 }
 
@@ -1235,7 +1225,7 @@ impl ProjectRuntimeOwnerOpeningReservationV1 {
                 "project runtime opening reservation disappeared".to_owned(),
             ));
         };
-        if !matches!(state, ProjectRuntimeOwnerStateV1::Opening(_)) {
+        if !matches!(state, ProjectRuntimeOwnerStateV1::Opening) {
             return Err(session_registry_error(
                 "publish project session runtime owner",
                 "project runtime opening reservation no longer owns the map entry".to_owned(),
@@ -1245,7 +1235,6 @@ impl ProjectRuntimeOwnerOpeningReservationV1 {
         *state = ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
             sessions: Some(sessions),
             memory: previous.memory,
-            semantic_lifecycle: self.semantic_lifecycle.clone(),
         });
         self.armed = false;
         Ok(())
@@ -1264,7 +1253,7 @@ impl ProjectRuntimeOwnerOpeningReservationV1 {
                 "project runtime opening reservation disappeared".to_owned(),
             ));
         };
-        if !matches!(state, ProjectRuntimeOwnerStateV1::Opening(_)) {
+        if !matches!(state, ProjectRuntimeOwnerStateV1::Opening) {
             return Err(session_registry_error(
                 "publish project memory runtime owner",
                 "project runtime opening reservation no longer owns the map entry".to_owned(),
@@ -1274,7 +1263,6 @@ impl ProjectRuntimeOwnerOpeningReservationV1 {
         *state = ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
             sessions: previous.sessions,
             memory: Some(memory),
-            semantic_lifecycle: self.semantic_lifecycle.clone(),
         });
         self.armed = false;
         Ok(())
@@ -1292,7 +1280,7 @@ impl Drop for ProjectRuntimeOwnerOpeningReservationV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Opening(_))
+            Some(ProjectRuntimeOwnerStateV1::Opening)
         ) {
             if let Some(previous) = self.previous.take() {
                 entries.insert(
@@ -1339,21 +1327,6 @@ impl ProjectRuntimeOwnerRetirementReservationV1 {
     }
 
     fn commit_ready_or_remove(&mut self) -> Result<()> {
-        if let Some(retained) = &self.retained
-            && retained.sessions.is_none()
-            && retained.memory.is_none()
-            && self.sessions.is_none()
-            && let Some(lifecycle) = retained.semantic_lifecycle.get()
-        {
-            lifecycle
-                .cancel_and_join_background_acquisition()
-                .map_err(|error| {
-                    session_registry_error(
-                        "retire project semantic acquisition",
-                        format!("{error:?}"),
-                    )
-                })?;
-        }
         let mut retained = self.retained.take().ok_or_else(|| {
             session_registry_error(
                 "commit project runtime retirement",
@@ -1371,7 +1344,7 @@ impl ProjectRuntimeOwnerRetirementReservationV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Retiring(_))
+            Some(ProjectRuntimeOwnerStateV1::Retiring)
         ) {
             return Err(session_registry_error(
                 "commit project runtime retirement",
@@ -1405,7 +1378,7 @@ impl ProjectRuntimeOwnerRetirementReservationV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Retiring(_))
+            Some(ProjectRuntimeOwnerStateV1::Retiring)
         ) {
             return Err(session_registry_error(
                 "commit project runtime retirement fault",
@@ -1444,7 +1417,7 @@ impl Drop for ProjectRuntimeOwnerRetirementReservationV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if matches!(
                 entries.get(&self.project_id),
-                Some(ProjectRuntimeOwnerStateV1::Retiring(_))
+                Some(ProjectRuntimeOwnerStateV1::Retiring)
             ) {
                 entries.insert(
                     self.project_id.clone(),
@@ -1473,7 +1446,7 @@ impl Drop for ProjectRuntimeOwnerRetirementReservationV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Retiring(_))
+            Some(ProjectRuntimeOwnerStateV1::Retiring)
         ) {
             entries.insert(
                 self.project_id.clone(),
@@ -1496,7 +1469,6 @@ struct ProjectSessionReplacementReservationV1 {
     project_id: ProjectId,
     sessions: Option<ProjectSessionRetirementOwnerV1>,
     memory: Option<MemoryStoreOwnerV1>,
-    semantic_lifecycle: SemanticLifecycleOwnerCell,
     /// A candidate is only retried after the previous owner has exact paired
     /// terminal proofs. Reversible retirement must keep both this proof and
     /// the candidate in `RecoveryRequired`; it must never reopen the candidate.
@@ -1542,7 +1514,7 @@ impl ProjectSessionReplacementReservationV1 {
             })?;
             if !matches!(
                 entries.get(&self.project_id),
-                Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+                Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
             ) {
                 return Err(session_registry_error(
                     "issue replacing project session lease",
@@ -1678,7 +1650,7 @@ impl ProjectSessionReplacementReservationV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             return Err(session_registry_error(
                 "restore replacing project session owner",
@@ -1690,7 +1662,6 @@ impl ProjectSessionReplacementReservationV1 {
             ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
                 sessions: Some(sessions),
                 memory: self.memory.take(),
-                semantic_lifecycle: self.semantic_lifecycle.clone(),
             }),
         );
         self.armed = false;
@@ -1706,7 +1677,7 @@ impl ProjectSessionReplacementReservationV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             return Err(session_registry_error(
                 "commit project session recovery required",
@@ -1719,7 +1690,6 @@ impl ProjectSessionReplacementReservationV1 {
                 sessions: self.sessions.take(),
                 candidate_sessions: None,
                 memory: self.memory.take(),
-                semantic_lifecycle: self.semantic_lifecycle.clone(),
                 phase,
             }),
         );
@@ -1739,7 +1709,7 @@ impl ProjectSessionReplacementReservationV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             return Err(session_registry_error(
                 "retain recovered project session candidate",
@@ -1801,7 +1771,6 @@ impl ProjectSessionReplacementReservationV1 {
                     graph_open_task_key,
                 )),
                 memory: self.memory.take(),
-                semantic_lifecycle: self.semantic_lifecycle.clone(),
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
             }),
         );
@@ -1843,7 +1812,7 @@ impl ProjectSessionReplacementReservationV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             return Err(session_registry_error(
                 "vacate replacing project session owner",
@@ -1860,7 +1829,6 @@ impl ProjectSessionReplacementReservationV1 {
             owners: self.owners.clone(),
             project_id: self.project_id.clone(),
             memory: self.memory.take(),
-            semantic_lifecycle: self.semantic_lifecycle.clone(),
             proof: Some(ProjectSessionTerminalProofV1::Live(Box::new(proof))),
             armed: true,
         })
@@ -1881,7 +1849,7 @@ impl Drop for ProjectSessionReplacementReservationV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             let phase = match self.recovery_proof.take() {
                 Some(proof) => ProjectSessionRecoveryPhaseV1::Terminal(proof),
@@ -1893,7 +1861,6 @@ impl Drop for ProjectSessionReplacementReservationV1 {
                     sessions: self.sessions.take(),
                     candidate_sessions: None,
                     memory: self.memory.take(),
-                    semantic_lifecycle: self.semantic_lifecycle.clone(),
                     phase,
                 }),
             );
@@ -1908,7 +1875,6 @@ struct ProjectSessionReplacementVacancyV1 {
     owners: ProjectRuntimeOwnerRegistryV1,
     project_id: ProjectId,
     memory: Option<MemoryStoreOwnerV1>,
-    semantic_lifecycle: SemanticLifecycleOwnerCell,
     proof: Option<ProjectSessionTerminalProofV1>,
     armed: bool,
 }
@@ -1961,7 +1927,7 @@ impl ProjectSessionReplacementVacancyV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             return Err(session_registry_error(
                 "begin recovered project session activation",
@@ -1980,7 +1946,6 @@ impl ProjectSessionReplacementVacancyV1 {
                 sessions: None,
                 candidate_sessions: Some(sessions),
                 memory: self.memory.take(),
-                semantic_lifecycle: self.semantic_lifecycle.clone(),
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
             }),
         );
@@ -1993,18 +1958,6 @@ impl ProjectSessionReplacementVacancyV1 {
 
     fn commit_without_sessions(mut self) -> Result<()> {
         self.require_verified_proof()?;
-        if self.memory.is_none()
-            && let Some(owner) = self.semantic_lifecycle.get()
-        {
-            owner
-                .cancel_and_join_background_acquisition()
-                .map_err(|error| {
-                    session_registry_error(
-                        "retire project semantic acquisition",
-                        format!("{error:?}"),
-                    )
-                })?;
-        }
         let mut entries = self.owners.lock().map_err(|_| {
             session_registry_error(
                 "complete project session retirement",
@@ -2013,7 +1966,7 @@ impl ProjectSessionReplacementVacancyV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             return Err(session_registry_error(
                 "complete project session retirement",
@@ -2025,7 +1978,6 @@ impl ProjectSessionReplacementVacancyV1 {
             ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
                 sessions: None,
                 memory: self.memory.take(),
-                semantic_lifecycle: self.semantic_lifecycle.clone(),
             }),
         );
         self.proof.take();
@@ -2043,7 +1995,7 @@ impl ProjectSessionReplacementVacancyV1 {
         })?;
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             return Err(session_registry_error(
                 "retain recovered project session owner candidate",
@@ -2062,7 +2014,6 @@ impl ProjectSessionReplacementVacancyV1 {
                 sessions: None,
                 candidate_sessions: Some(sessions),
                 memory: self.memory.take(),
-                semantic_lifecycle: self.semantic_lifecycle.clone(),
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
             }),
         );
@@ -2194,7 +2145,6 @@ impl ProjectSessionCandidateActivationV1 {
             ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
                 sessions: Some(candidate),
                 memory: recovery.memory,
-                semantic_lifecycle: recovery.semantic_lifecycle,
             }),
         );
         Ok(())
@@ -2220,7 +2170,7 @@ impl Drop for ProjectSessionReplacementVacancyV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions(_))
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
         ) {
             let phase = match self.proof.take() {
                 Some(proof) => ProjectSessionRecoveryPhaseV1::Terminal(proof),
@@ -2232,7 +2182,6 @@ impl Drop for ProjectSessionReplacementVacancyV1 {
                     sessions: None,
                     candidate_sessions: None,
                     memory: self.memory.take(),
-                    semantic_lifecycle: self.semantic_lifecycle.clone(),
                     phase,
                 }),
             );
@@ -2269,7 +2218,6 @@ impl ProjectSessionRecoveryReservationV1 {
             sessions,
             candidate_sessions,
             memory,
-            semantic_lifecycle,
             phase,
         } = recovery;
         let candidate = match candidate_sessions {
@@ -2279,7 +2227,6 @@ impl ProjectSessionRecoveryReservationV1 {
                     sessions,
                     candidate_sessions: None,
                     memory,
-                    semantic_lifecycle,
                     phase,
                 });
                 return Err(session_registry_error(
@@ -2293,7 +2240,6 @@ impl ProjectSessionRecoveryReservationV1 {
                 sessions,
                 candidate_sessions: Some(candidate),
                 memory,
-                semantic_lifecycle,
                 phase,
             });
             return Err(session_registry_error(
@@ -2309,7 +2255,6 @@ impl ProjectSessionRecoveryReservationV1 {
                     sessions,
                     candidate_sessions: Some(candidate),
                     memory,
-                    semantic_lifecycle,
                     phase,
                 });
                 return Err(session_registry_error(
@@ -2328,7 +2273,6 @@ impl ProjectSessionRecoveryReservationV1 {
                     sessions,
                     candidate_sessions: Some(candidate),
                     memory,
-                    semantic_lifecycle,
                     phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
                 });
                 return Err(session_registry_error(
@@ -2339,14 +2283,13 @@ impl ProjectSessionRecoveryReservationV1 {
         };
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering(_))
+            Some(ProjectRuntimeOwnerStateV1::Recovering)
         ) {
             drop(entries);
             self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
                 sessions,
                 candidate_sessions: Some(candidate),
                 memory,
-                semantic_lifecycle,
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
             });
             return Err(session_registry_error(
@@ -2359,14 +2302,13 @@ impl ProjectSessionRecoveryReservationV1 {
             Err(candidate) => {
                 entries.insert(
                     self.project_id.clone(),
-                    ProjectRuntimeOwnerStateV1::Recovering(semantic_lifecycle.clone()),
+                    ProjectRuntimeOwnerStateV1::Recovering,
                 );
                 drop(entries);
                 self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
                     sessions,
                     candidate_sessions: Some(candidate),
                     memory,
-                    semantic_lifecycle,
                     phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
                 });
                 return Err(session_registry_error(
@@ -2377,7 +2319,7 @@ impl ProjectSessionRecoveryReservationV1 {
         };
         entries.insert(
             self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::ReplacingSessions(semantic_lifecycle.clone()),
+            ProjectRuntimeOwnerStateV1::ReplacingSessions,
         );
         drop(entries);
         self.armed = false;
@@ -2386,7 +2328,6 @@ impl ProjectSessionRecoveryReservationV1 {
             project_id: self.project_id.clone(),
             sessions: Some(candidate),
             memory,
-            semantic_lifecycle,
             recovery_proof: Some(proof),
             armed: true,
         })
@@ -2408,7 +2349,6 @@ impl ProjectSessionRecoveryReservationV1 {
             sessions,
             candidate_sessions,
             memory,
-            semantic_lifecycle,
             phase,
         } = recovery;
         if sessions.is_some() {
@@ -2416,7 +2356,6 @@ impl ProjectSessionRecoveryReservationV1 {
                 sessions,
                 candidate_sessions,
                 memory,
-                semantic_lifecycle,
                 phase,
             });
             return Err(session_registry_error(
@@ -2432,7 +2371,6 @@ impl ProjectSessionRecoveryReservationV1 {
                     sessions,
                     candidate_sessions,
                     memory,
-                    semantic_lifecycle,
                     phase,
                 });
                 return Err(session_registry_error(
@@ -2449,7 +2387,6 @@ impl ProjectSessionRecoveryReservationV1 {
                 sessions,
                 candidate_sessions,
                 memory,
-                semantic_lifecycle,
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
             });
             return Err(session_registry_error(
@@ -2464,7 +2401,6 @@ impl ProjectSessionRecoveryReservationV1 {
                     sessions,
                     candidate_sessions,
                     memory,
-                    semantic_lifecycle,
                     phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
                 });
                 return Err(session_registry_error(
@@ -2475,14 +2411,13 @@ impl ProjectSessionRecoveryReservationV1 {
         };
         if !matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering(_))
+            Some(ProjectRuntimeOwnerStateV1::Recovering)
         ) {
             drop(entries);
             self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
                 sessions,
                 candidate_sessions,
                 memory,
-                semantic_lifecycle,
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
             });
             return Err(session_registry_error(
@@ -2492,7 +2427,7 @@ impl ProjectSessionRecoveryReservationV1 {
         }
         entries.insert(
             self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::ReplacingSessions(semantic_lifecycle.clone()),
+            ProjectRuntimeOwnerStateV1::ReplacingSessions,
         );
         drop(entries);
         self.armed = false;
@@ -2501,7 +2436,6 @@ impl ProjectSessionRecoveryReservationV1 {
                 owners: self.owners.clone(),
                 project_id: self.project_id.clone(),
                 memory,
-                semantic_lifecycle,
                 proof: Some(proof),
                 armed: true,
             },
@@ -2524,7 +2458,7 @@ impl Drop for ProjectSessionRecoveryReservationV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(
             entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering(_))
+            Some(ProjectRuntimeOwnerStateV1::Recovering)
         ) {
             entries.insert(
                 self.project_id.clone(),
@@ -2897,14 +2831,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             Some(ProjectRuntimeOwnerStateV1::Ready(_)) => {
                 return Ok(ProjectRuntimeOwnerAdmissionV1::Existing);
             }
-            Some(ProjectRuntimeOwnerStateV1::Opening(_)) => {
+            Some(ProjectRuntimeOwnerStateV1::Opening) => {
                 return Err(TraceDecayError::project_route(
                     "project_runtime_opening",
                     true,
                     "Project runtime is already opening",
                 ));
             }
-            Some(ProjectRuntimeOwnerStateV1::Retiring(_)) => {
+            Some(ProjectRuntimeOwnerStateV1::Retiring) => {
                 return Err(TraceDecayError::project_route(
                     "project_runtime_retiring",
                     true,
@@ -2912,8 +2846,8 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ));
             }
             Some(
-                ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
-                | ProjectRuntimeOwnerStateV1::Recovering(_)
+                ProjectRuntimeOwnerStateV1::ReplacingSessions
+                | ProjectRuntimeOwnerStateV1::Recovering
                 | ProjectRuntimeOwnerStateV1::RecoveryRequired(_),
             ) => {
                 return Err(TraceDecayError::project_route(
@@ -2940,17 +2874,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ),
             ));
         }
-        let semantic_lifecycle = SemanticLifecycleOwnerCell::default();
-        entries.insert(
-            project_id.clone(),
-            ProjectRuntimeOwnerStateV1::Opening(semantic_lifecycle.clone()),
-        );
+        entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Opening);
         Ok(ProjectRuntimeOwnerAdmissionV1::Opening(Box::new(
             ProjectRuntimeOwnerOpeningReservationV1 {
                 owners: self.project_owners.clone(),
                 project_id: project_id.clone(),
                 previous: None,
-                semantic_lifecycle,
                 armed: true,
             },
         )))
@@ -2977,17 +2906,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                     ),
                 ));
             }
-            let semantic_lifecycle = SemanticLifecycleOwnerCell::default();
-            entries.insert(
-                project_id.clone(),
-                ProjectRuntimeOwnerStateV1::Opening(semantic_lifecycle.clone()),
-            );
+            entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Opening);
             return Ok(ProjectRuntimeOwnerAdmissionV1::Opening(Box::new(
                 ProjectRuntimeOwnerOpeningReservationV1 {
                     owners: self.project_owners.clone(),
                     project_id: project_id.clone(),
                     previous: None,
-                    semantic_lifecycle,
                     armed: true,
                 },
             )));
@@ -3000,17 +2924,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                 "Project runtime is already opening",
             ));
         };
-        let semantic_lifecycle = previous.semantic_lifecycle.clone();
-        entries.insert(
-            project_id.clone(),
-            ProjectRuntimeOwnerStateV1::Opening(semantic_lifecycle.clone()),
-        );
+        entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Opening);
         Ok(ProjectRuntimeOwnerAdmissionV1::Opening(Box::new(
             ProjectRuntimeOwnerOpeningReservationV1 {
                 owners: self.project_owners.clone(),
                 project_id: project_id.clone(),
                 previous: Some(previous),
-                semantic_lifecycle,
                 armed: true,
             },
         )))
@@ -3048,10 +2967,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             },
             None => None,
         };
-        entries.insert(
-            project_id.clone(),
-            ProjectRuntimeOwnerStateV1::Retiring(owners.semantic_lifecycle.clone()),
-        );
+        entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Retiring);
         Ok(Some(ProjectRuntimeOwnerRetirementReservationV1 {
             owners: self.project_owners.clone(),
             project_id: project_id.clone(),
@@ -3097,7 +3013,10 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     graph_manifest_provider: Arc<code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
-    semantic_vector_operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
+    /// Process-wide admission for blocking graph and store settlement (sealed
+    /// staging releases, registered database attach, remote recovery). Closed
+    /// first at terminal shutdown so no new sweep can outlive the join.
+    operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
     profile_pin: Mutex<Option<ProfileAuthorityPin>>,
     profile_database_mount: Mutex<()>,
     profile_database: StdMutex<Option<RegisteredGlobalDbOwnerV1>>,
@@ -3115,8 +3034,6 @@ pub struct DaemonSessionRuntimeRegistryV1 {
         >,
     >,
     project_owners: ProjectRuntimeOwnerRegistryV1,
-    profile_semantic_lifecycle: SemanticLifecycleOwnerCell,
-    semantic_lifecycle_closed: Arc<AtomicBool>,
     /// One set of graph-publication locks per project publication shard.
     /// Every worktree/branch scope of a project stages into the one shared
     /// staging store, so corpus-sized builds must serialize on the project
@@ -3145,10 +3062,6 @@ pub struct DaemonSessionRuntimeRegistryV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
-    pub fn semantic_vector_operation_task_owner(&self) -> Arc<SemanticVectorOperationTaskOwnerV1> {
-        Arc::clone(&self.semantic_vector_operation_task_owner)
-    }
-
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn lookup_store_runtime(
         &self,
@@ -3682,6 +3595,3 @@ mod graph_shutdown_contract_tests;
 
 #[cfg(test)]
 mod project_memory_relation_graph_contract_tests;
-
-#[cfg(test)]
-mod semantic_vector_restart_tests;

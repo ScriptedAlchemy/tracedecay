@@ -33,10 +33,10 @@ fn validate_reports_the_direct_checked_in_workload() {
     let payload = stdout_json(&output);
     assert_eq!(payload["command"], "validate");
     assert_eq!(payload["status"], "pass");
-    assert_eq!(payload["query_count"], 32);
-    assert_eq!(payload["partition_counts"]["train"], 16);
-    assert_eq!(payload["partition_counts"]["validation"], 16);
-    assert_eq!(payload["profile_count"], 3);
+    assert_eq!(payload["query_count"], 65);
+    assert_eq!(payload["partition_counts"]["train"], 33);
+    assert_eq!(payload["partition_counts"]["validation"], 32);
+    assert_eq!(payload["profile_count"], 1);
     assert!(
         payload["workload_digest"]
             .as_str()
@@ -45,8 +45,8 @@ fn validate_reports_the_direct_checked_in_workload() {
 }
 
 #[test]
-fn compare_reports_conceptual_misses_before_pending_optional_stages() {
-    let output = run(&["compare", "--profiles", "hybrid-reranked"]);
+fn compare_reports_the_lexical_baselines_conceptual_misses() {
+    let output = run(&["compare", "--profiles", "query-fallback"]);
     assert_eq!(
         output.status.code(),
         Some(1),
@@ -60,16 +60,24 @@ fn compare_reports_conceptual_misses_before_pending_optional_stages() {
         "comparison did not retain the measured conceptual misses: {payload}"
     );
     let profiles = payload["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles[0]["failed_queries"], 2, "{payload}");
-    assert_eq!(profiles[1]["failed_queries"], 1, "{payload}");
+    let failed_queries: u64 = profiles
+        .iter()
+        .map(|profile| {
+            profile["failed_queries"]
+                .as_u64()
+                .expect("failed query count")
+        })
+        .sum();
+    assert_eq!(
+        failed_queries, 19,
+        "the lexical baseline misses the nineteen conceptual needs the evaluator pins: {payload}"
+    );
     for profile in profiles {
         assert_eq!(profile["status"], "fail");
         assert!(matches!(
             profile["resource_status"].as_str(),
             Some("pass" | "pending")
         ));
-        assert_eq!(profile["optional_stages"]["semantic"], "pending");
-        assert_eq!(profile["optional_stages"]["rerank"], "pending");
         assert_eq!(
             profile["quality"]["protected_recall_at_10"]["numerator"],
             profile["quality"]["protected_recall_at_10"]["denominator"]

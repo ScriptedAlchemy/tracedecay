@@ -57,7 +57,8 @@ impl OrphanStoreRecordV1 {
 
 /// Exact code-generation retention census. `superseded_*` reports every sealed
 /// generation except the active pointer target; `collectable_*` is the subset
-/// outside the vector-readable live set.
+/// outside the protected live set (the serving generation and every live
+/// native-preview candidate binding).
 ///
 /// `stranded_scope_*` counts a disjoint storage class one level up: whole
 /// `code-index-v1/<scope>/` directories whose canonical project root no longer
@@ -171,47 +172,6 @@ impl CodeGenerationRetentionRecordV1 {
         self.deferred_native_retirement_count > 0
             && self.sealed_head_generation_bytes.get() > 0
             && self.live_graph_container_bytes.get() > 2 * self.sealed_head_generation_bytes.get()
-    }
-}
-
-/// Bounded semantic-vector lifecycle census retained by daemon maintenance.
-///
-/// `observed_non_configured_published_generation_count` excludes the
-/// configuration-selected active/rollback roots. It is not a collectability
-/// claim: verified heads, bases, inbound dependencies, and reader leases may
-/// truthfully retain a non-configured generation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticVectorRetentionRecordV1 {
-    pub store: StoreKeyV1,
-    pub pending_generation_count: u64,
-    pub ready_generation_count: u64,
-    pub observed_non_configured_published_generation_count: u64,
-    pub cancelled_generation_count: u64,
-}
-
-impl SemanticVectorRetentionRecordV1 {
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        self.pending_generation_count
-            .checked_add(self.ready_generation_count)
-            .and_then(|total| {
-                total.checked_add(self.observed_non_configured_published_generation_count)
-            })
-            .and_then(|total| total.checked_add(self.cancelled_generation_count))
-            .ok_or(ApplicationContractError::InvalidRange {
-                field: "semantic vector retention totals",
-            })?;
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn has_backlog(&self) -> bool {
-        self.cancelled_generation_count > 0
-    }
-
-    #[must_use]
-    pub fn has_in_flight_generations(&self) -> bool {
-        self.pending_generation_count > 0 || self.ready_generation_count > 0
     }
 }
 

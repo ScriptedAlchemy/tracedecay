@@ -627,10 +627,10 @@ impl GraphDb {
             let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
             let (entities, relations) = manifest.row_counts();
             crate::hotpath_observe::record_counts(entities, relations, 0, generation_bytes);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Staged,
-            );
         }
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Staged,
+        );
         let plan = GenerationStagePlan {
             identity: &identity,
             expected,
@@ -1223,7 +1223,6 @@ impl GraphDb {
                             )),
                         },
                         endpoint_namespaces,
-                        ensure_page_vector_indexes: true,
                     },
                     (),
                 ))
@@ -1348,7 +1347,6 @@ impl GraphDb {
                             )),
                         },
                         endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
-                        ensure_page_vector_indexes: false,
                     },
                     (),
                 ))
@@ -2071,7 +2069,6 @@ impl GraphDb {
                         batch,
                         metadata: mutation::CommitMetadata::for_digest(digest),
                         endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
-                        ensure_page_vector_indexes: false,
                     },
                     true,
                 ))
@@ -2878,9 +2875,8 @@ mod tests {
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
         GraphEntity, GraphEntityId, GraphFormatVersion, GraphGenerationDependency,
         GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
-        GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphVector,
-        GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
-        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration, VectorMetric,
+        GraphProjectionId, GraphProjectionIdentity, GraphWatermark,
+        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration,
     };
 
     use super::{
@@ -4169,74 +4165,6 @@ mod tests {
             batch_canonicalizations(),
             2,
             "an exact cleanup retry after every row is gone must be a no-op"
-        );
-        owner.close().unwrap();
-    }
-
-    #[test]
-    fn later_generation_page_creates_its_first_native_vector_index() {
-        let vector_property = GraphPropertyName::new("embedding").unwrap();
-        let mut entities = (0..MAX_NATIVE_GENERATION_STAGE_MUTATIONS)
-            .map(|index| {
-                GraphEntity::new(
-                    GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
-                    BTreeSet::new(),
-                    BTreeMap::new(),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        entities.push(
-            GraphEntity::new(
-                GraphEntityId::new("z-vector").unwrap(),
-                BTreeSet::new(),
-                BTreeMap::from([(
-                    vector_property.clone(),
-                    GraphProperty::Vector(
-                        GraphVector::new(vec![1.0, 0.0], 2, VectorMetric::Cosine).unwrap(),
-                    ),
-                )]),
-            )
-            .unwrap(),
-        );
-        let manifest = GraphGenerationManifest::new(
-            GraphProjectionIdentity::new(
-                GraphNamespace::new("later-page-vector").unwrap(),
-                GraphProjectionId::new("mixed").unwrap(),
-            ),
-            GraphGenerationId::new("generation-mixed").unwrap(),
-            SourceGeneration::new("source-mixed").unwrap(),
-            GraphWatermark::new("watermark-mixed").unwrap(),
-            vec![],
-            entities,
-            vec![],
-        )
-        .unwrap();
-        let owner = GraphDbOwner::open(GraphDbOpenOptions {
-            location: GraphDbLocation::Memory,
-            expected_format: GraphFormatVersion::current(),
-            durability: GraphDurability::Memory,
-            cancellation: Arc::new(NeverCancelled),
-        })
-        .unwrap();
-        let database = owner.issue_lease().unwrap();
-        database
-            .apply_generation_unverified(arc_manifest(&manifest), &|| Ok(()))
-            .unwrap();
-
-        assert_eq!(
-            database
-                .vector_index_status(GraphVectorIndexRequest {
-                    namespace: manifest.identity().physical_namespace().unwrap(),
-                    projection: manifest.projection.projection.clone(),
-                    property: vector_property,
-                    dimension: 2,
-                    metric: VectorMetric::Cosine,
-                    cancellation: Arc::new(NeverCancelled),
-                })
-                .unwrap(),
-            GraphVectorIndexStatus::Available { vectors: 1 },
-            "a vector shape first seen after page one must create its native index"
         );
         owner.close().unwrap();
     }

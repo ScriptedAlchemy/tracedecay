@@ -167,6 +167,7 @@ async fn wait_for_refreshing_old_generation(
                 assert_project_identity(socket, handshake, project, identity).await;
                 return last.clone();
             }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     })
     .await

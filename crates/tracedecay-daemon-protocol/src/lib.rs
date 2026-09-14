@@ -69,11 +69,9 @@ pub use client::{
     DaemonInvocationError, DaemonInvocationExecutor, DaemonInvocationExecutorFuture,
     DaemonInvocationResult, DaemonLspSessionClient, DispatchError, DispatchInput,
     DispatchedInvocation, InvocationCancellationPolicy, InvocationControls, ResolvedBinding,
-    SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
-    SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS, ScopeSelector,
-    SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
-    application_delivery_route, application_response, deadline_remaining, handshake_refusal_error,
-    invocation_now_micros, map_invocation_error, resolve_dispatch, wait_for_cancellation,
+    ScopeSelector, application_delivery_route, application_response, deadline_remaining,
+    handshake_refusal_error, invocation_now_micros, map_invocation_error, resolve_dispatch,
+    wait_for_cancellation,
 };
 pub use client_identity::DaemonClientIdentity;
 pub use connection::{
@@ -86,17 +84,17 @@ pub use connection::{
     tool_request_deadline, write_daemon_preamble,
 };
 pub use contract::{
-    CanonicalQualificationBlob, CanonicalQualificationBlobError, DAEMON_INVOCATION_PROTOCOL,
-    DAEMON_INVOCATION_REVISION, DAEMON_SHUTDOWN_METHOD, DaemonFeedbackResult,
-    DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationCancellationRequest,
-    DaemonInvocationDeliveryAckRejectReason, DaemonInvocationDeliveryAckRequest,
-    DaemonInvocationDeliveryAckResponse, DaemonInvocationDeliveryAckResponseOutcome,
-    DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,
-    DaemonInvocationProblem, DaemonInvocationRequest, DaemonInvocationResponse,
-    DaemonLspSessionAccess, HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1,
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkflowApplicationInvocation,
-    WorkflowApplicationOutcome, parse_daemon_invocation_cancellation_request,
-    parse_daemon_invocation_delivery_ack_request, parse_daemon_invocation_request,
+    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DAEMON_SHUTDOWN_METHOD,
+    DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult,
+    DaemonInvocationCancellationRequest, DaemonInvocationDeliveryAckRejectReason,
+    DaemonInvocationDeliveryAckRequest, DaemonInvocationDeliveryAckResponse,
+    DaemonInvocationDeliveryAckResponseOutcome, DaemonInvocationOperation, DaemonInvocationOutcome,
+    DaemonInvocationPayload, DaemonInvocationProblem, DaemonInvocationRequest,
+    DaemonInvocationResponse, DaemonLspSessionAccess, HandoffApplicationInvocationV1,
+    HandoffApplicationOutcomeV1, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
+    WorkflowApplicationInvocation, WorkflowApplicationOutcome,
+    parse_daemon_invocation_cancellation_request, parse_daemon_invocation_delivery_ack_request,
+    parse_daemon_invocation_request,
 };
 pub use handshake::{
     DAEMON_HANDSHAKE_REFUSAL_PROTOCOL, DaemonHandshake, DaemonHandshakeRefusal,

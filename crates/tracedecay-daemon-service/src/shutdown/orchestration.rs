@@ -473,7 +473,7 @@ async fn run_daemon_shutdown(
         hotpath::gauge!("daemon.shutdown.client_drain.forced_total").inc(1_u64);
     }
     // Background-task drain: resolve the non-terminal ShutdownOwner phases
-    // (semantic artifact GC, maintenance, session sync, invocation, ...).
+    // (maintenance, session sync, invocation, ...).
     // Often already resolved inside the client-drain select loop above; this
     // span only measures the residual wait when it was not.
     let background_drain_started = tokio::time::Instant::now();

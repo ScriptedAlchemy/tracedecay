@@ -30,7 +30,6 @@ use tracedecay_runtime_core::config::{
     GENERATED_DIR_SEGMENTS, active_data_dir_name, discover_project_root, get_tracedecay_dir,
     is_generated_dir_segment,
 };
-use tracedecay_semantic_contracts::SemanticConfig;
 
 use super::{
     PinnedRuntimeConfiguration, optional_text_setting, required_bool, required_unsigned,
@@ -143,10 +142,6 @@ pub struct TraceDecayConfig {
     /// graph capability as unavailable.
     #[serde(default = "default_native_graph_activation")]
     pub native_graph_activation: bool,
-    /// Optional installed local semantic profile selection. Missing or
-    /// unavailable semantics never disables exact, lexical, or graph search.
-    #[serde(default)]
-    pub semantic: SemanticConfig,
     /// Index-freshness auto-sync settings (git-metadata watcher, serve-stale,
     /// branch lifecycle). Absent in older `config.json` files, so defaulted.
     #[serde(default)]
@@ -571,7 +566,6 @@ impl Default for TraceDecayConfig {
             git_ignore: default_git_ignore(),
             diagnostics_prewarm: false,
             native_graph_activation: default_native_graph_activation(),
-            semantic: SemanticConfig::default(),
             sync: SyncConfig::default(),
             telemetry: TelemetryConfig::default(),
         }
@@ -600,7 +594,6 @@ impl TraceDecayConfig {
             git_ignore: shared.git_ignore,
             diagnostics_prewarm: shared.diagnostics_prewarm,
             native_graph_activation: shared.native_graph_activation,
-            semantic: shared.semantic.clone(),
             sync: SyncConfig {
                 auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
                 watch_linked_worktrees: required_bool(

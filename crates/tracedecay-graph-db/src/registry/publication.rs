@@ -37,18 +37,6 @@ use crate::{
     SupersededReplayRetirement, VerifiedGraphCommit,
 };
 
-/// The publication mode choices `publish_verified_inner` varies on.
-///
-/// Grouped because passing them positionally put the function at 8 arguments,
-/// and adjacent bools at a call site read as noise: `false, true` says
-/// nothing about which knob is which.
-struct GraphPublishModeV1 {
-    /// A manifest supplied by the caller instead of one derived from replay.
-    supplied_manifest: Option<Arc<GraphGenerationManifest>>,
-    /// Reopen metadata rather than treating the existing handle as current.
-    reopen_metadata: bool,
-}
-
 /// Exact persisted identity emitted by the shipped per-generation code-graph
 /// layout. This predicate gates destructive cleanup, so the broader reporting
 /// classifier is deliberately insufficient here.
@@ -104,7 +92,7 @@ mod legacy_cleanup_identity_tests {
         )));
         assert!(!is_shipped_legacy_code_graph_projection(&projection(
             format!("{prefix}{}", "b".repeat(64)),
-            "semantic-vector",
+            "other-projection",
         )));
     }
 }
@@ -1366,8 +1354,8 @@ impl GraphDbRegistry {
     /// nothing is served until the recovered digest matches.
     ///
     /// A supplied manifest carries the native rows already in the caller's
-    /// hands (a sealed code generation's projection, or a semantic-vector
-    /// manifest whose canonical source is metadata-only) so first publication
+    /// hands (a sealed code generation's projection, or a manifest whose
+    /// canonical source is metadata-only) so first publication
     /// does not re-read and re-project the canonical replay source. It is
     /// validated against the journaled replay binding before any row is
     /// applied; a foreign manifest for the same journaled replay conflicts.
@@ -1387,10 +1375,7 @@ impl GraphDbRegistry {
             authority,
             context,
             publication_key,
-            GraphPublishModeV1 {
-                supplied_manifest,
-                reopen_metadata: false,
-            },
+            supplied_manifest,
         )
     }
 
@@ -1418,10 +1403,7 @@ impl GraphDbRegistry {
             authority,
             context,
             publication_key,
-            GraphPublishModeV1 {
-                supplied_manifest,
-                reopen_metadata: false,
-            },
+            supplied_manifest,
         )
     }
 
@@ -1455,36 +1437,7 @@ impl GraphDbRegistry {
         publication_key: &GraphPublicationKeyV1,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         let operation = self.registered_operation_with_lease(database)?;
-        self.publish_verified_inner(
-            &operation,
-            authority,
-            context,
-            publication_key,
-            GraphPublishModeV1 {
-                supplied_manifest: None,
-                reopen_metadata: false,
-            },
-        )
-    }
-
-    pub(super) fn publish_ready_staged_generation(
-        &self,
-        registration: GraphDbRegistration,
-        authority: &mut dyn GraphPublicationStoreV1,
-        context: &GraphPublicationOperationContextV1<'_>,
-        publication_key: &GraphPublicationKeyV1,
-    ) -> Result<VerifiedGraphCommit, GraphDbError> {
-        let operation = self.registered_operation(registration)?;
-        self.publish_verified_inner(
-            &operation,
-            authority,
-            context,
-            publication_key,
-            GraphPublishModeV1 {
-                supplied_manifest: None,
-                reopen_metadata: true,
-            },
-        )
+        self.publish_verified_inner(&operation, authority, context, publication_key, None)
     }
 
     #[hotpath::measure(label = "graph_db.generation.publish", impl_type = "GraphDbRegistry")]
@@ -1494,14 +1447,14 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        mode: GraphPublishModeV1,
+        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         match self.prepare_verified_publication_inner(
             operation,
             authority,
             context,
             publication_key,
-            mode,
+            supplied_manifest,
         )? {
             GraphPublicationPreparationV1::Settled(commit) => Ok(*commit),
             GraphPublicationPreparationV1::Proven(proven) => {
@@ -1526,12 +1479,8 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        mode: GraphPublishModeV1,
+        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
     ) -> Result<GraphPublicationPreparationV1, GraphDbError> {
-        let GraphPublishModeV1 {
-            supplied_manifest,
-            reopen_metadata,
-        } = mode;
         operation.check(self, context)?;
         operation.require_publication_binding(publication_key)?;
         let database = operation.database().clone();
@@ -1872,16 +1821,6 @@ impl GraphDbRegistry {
                                 &check,
                             )?
                         }
-                        (false, false) if reopen_metadata => {
-                            drop(manifest);
-                            database.verify_generation_for_publication(
-                                &identity,
-                                sealed_digest,
-                                row_counts,
-                                true,
-                                &check,
-                            )?
-                        }
                         (false, false) => {
                             drop(manifest);
                             database.verify_generation_for_publication(
@@ -1956,8 +1895,8 @@ impl GraphDbRegistry {
         let row_counts = (entity_rows, relation_rows);
         let verified = match (apply_native, has_supplied_manifest) {
             // A supplied manifest for a metadata-only replay carries the
-            // native rows (vectors) the canonical source omits; a first
-            // commit must install them natively before verification.
+            // native rows the canonical source omits; a first commit must
+            // install them natively before verification.
             //
             // Staging consumes the manifest and releases its bulk rows at the
             // last durable page commit, so the artifact proof below runs
@@ -1997,16 +1936,6 @@ impl GraphDbRegistry {
                     }
                     Err(error) => Err(error),
                 }
-            }
-            (false, false) if reopen_metadata => {
-                drop(manifest);
-                database.verify_generation_for_publication(
-                    &identity,
-                    sealed_digest,
-                    row_counts,
-                    true,
-                    &check,
-                )
             }
             (false, false) => {
                 drop(manifest);

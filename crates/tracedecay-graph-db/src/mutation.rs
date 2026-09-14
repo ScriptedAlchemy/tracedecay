@@ -347,17 +347,6 @@ fn replace_entity(
         batch,
         check,
     )?;
-    // Grafeo 0.5.42's GQL SET path tracks the node write but does not persist
-    // a vector parameter on an existing node. Replay vector scalars inside the
-    // same tracked transaction so commit/rollback remains authoritative. HNSW
-    // maintenance still happens only after commit in `GraphDb::apply_locked`.
-    for (name, value) in &properties {
-        if matches!(value, Value::Vector(_)) {
-            session
-                .set_node_property(previous.node, name, value.clone())
-                .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        }
-    }
     tracked_replace_labels(
         session,
         ENTITY_LABEL,

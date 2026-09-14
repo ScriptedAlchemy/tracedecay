@@ -4,22 +4,9 @@ use super::{graph_symbol_end_line, required_graph_file_path, required_graph_meta
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
-    PrimitiveSearchCoverageV1, PrimitiveSemanticModeV1, PrimitiveSymbolLocationV1,
+    PrimitiveSearchCoverageV1, PrimitiveSymbolLocationV1,
 };
 use tracedecay_domain::errors::Result;
-
-pub(super) fn semantic_search_mode(
-    mode: Option<PrimitiveSemanticModeV1>,
-) -> tracedecay_query::code_search::CodeIndexSearchModeV1 {
-    match mode.unwrap_or(PrimitiveSemanticModeV1::FallbackAllowed) {
-        PrimitiveSemanticModeV1::FallbackAllowed => {
-            tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed
-        }
-        PrimitiveSemanticModeV1::StrictSemantic => {
-            tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic
-        }
-    }
-}
 
 fn lane_status(
     status: &tracedecay_query::code_search::CodeIndexLaneStatusV1,
@@ -59,7 +46,6 @@ pub(super) fn search_coverage(
         exact: lane_status(&coverage.exact),
         lexical: lane_status(&coverage.lexical),
         graph: lane_status(&coverage.graph),
-        semantic: lane_status(&coverage.semantic),
         recall: if coverage.is_degraded() {
             PrimitiveRecallV1::Partial
         } else {

@@ -13,7 +13,6 @@ use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
-use tracedecay_store_runtime::spawn_semantic_artifact_gc_maintenance;
 
 use super::*;
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -163,10 +162,6 @@ async fn run_foreground_loopback(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance(
-        store_administration.session_runtime_registry().await?,
-    );
-
     let lifecycle = DaemonLifecycle::default();
     let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
     let profile_database = store_administration.registered_profile_database().await?;
@@ -252,8 +247,6 @@ async fn run_foreground_loopback(
     let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
         - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    let semantic_artifact_gc_cancel = semantic_artifact_gc.clone();
-    let semantic_artifact_gc_join = semantic_artifact_gc;
     let maintenance_join = maintenance.clone();
     let project_open = project_open_tasks(project_open_gates.as_ref()).await;
     let session_refresh = Arc::clone(store_administration.session_temporal_refresh_schedulers());
@@ -265,11 +258,6 @@ async fn run_foreground_loopback(
     let native_integration_join = Arc::clone(store_administration.native_integration_services());
     let owner_phases = vec![
         vec![
-            tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
-                "semantic_artifact_gc",
-                move || semantic_artifact_gc_cancel.cancel(),
-                move |_| async move { semantic_artifact_gc_join.shutdown().await },
-            ),
             tracedecay_daemon_service::shutdown::ShutdownOwner::new(
                 "maintenance",
                 {
@@ -645,12 +633,6 @@ async fn run_foreground_unix(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance(
-        engine
-            .store_administration
-            .session_runtime_registry()
-            .await?,
-    );
     let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
     let profile_database = engine
         .store_administration
@@ -776,8 +758,6 @@ async fn run_foreground_unix(
     );
     let shutdown_lifecycle = engine.lifecycle.clone();
     let shutdown_engine = engine.clone();
-    let semantic_artifact_gc_cancel = semantic_artifact_gc.clone();
-    let semantic_artifact_gc_join = semantic_artifact_gc;
     let shutdown = tracedecay_daemon_service::shutdown::coordinate_daemon_shutdown(
         &shutdown_lifecycle,
         shutdown_deadline,
@@ -785,12 +765,6 @@ async fn run_foreground_unix(
             let mut owner_phases = shutdown_engine.shutdown_owner_phases().await;
             let memory_graph_reconciliation =
                 shutdown_engine.memory_graph_reconciliation_shutdown_owner();
-            let semantic_artifact_gc_owner =
-                tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
-                    "semantic_artifact_gc",
-                    move || semantic_artifact_gc_cancel.cancel(),
-                    move |_| async move { semantic_artifact_gc_join.shutdown().await },
-                );
             let http_application_owner =
                 tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
                     "http_application",
@@ -800,15 +774,10 @@ async fn run_foreground_unix(
             let hosted_dashboard_owner = hosted_dashboard_shutdown_owner();
             match owner_phases.first_mut() {
                 Some(producers) => {
-                    producers.push(semantic_artifact_gc_owner);
                     producers.push(http_application_owner);
                     producers.push(hosted_dashboard_owner);
                 }
-                None => owner_phases.push(vec![
-                    semantic_artifact_gc_owner,
-                    http_application_owner,
-                    hosted_dashboard_owner,
-                ]),
+                None => owner_phases.push(vec![http_application_owner, hosted_dashboard_owner]),
             }
             let server_engine = shutdown_engine.clone();
             tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(

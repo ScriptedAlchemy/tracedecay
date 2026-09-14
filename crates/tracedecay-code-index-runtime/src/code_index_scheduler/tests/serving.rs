@@ -38,16 +38,14 @@ use tracedecay_query::retrieval::{
         CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, LexicalLaneRequest,
         LexicalRouteKindV1, LexicalRoutingV1,
     },
-    semantic::{SemanticAbstentionV1, SemanticQueryModeV1},
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
     sampled_process_resident_bytes_v1,
 };
-use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
 use super::{
-    CALLER_PAGE, GitFixture, ReadySemanticControlV1, active_text_artifact_path,
+    CALLER_PAGE, GitFixture, ReadyRetrievalControlV1, active_text_artifact_path,
     application_context, build_progress_snapshot, caller_star_sources, callers_page_meta,
     core_search_request, decode_hex, git, install_verified_graph_store,
     install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
@@ -84,59 +82,6 @@ fn text_artifact_source_batches_scale_with_build_memory() {
         ),
         (512, 512 * 1024 * 1024, 1024)
     );
-}
-#[test]
-fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
-    let latest =
-        tracedecay_domain::CodeGenerationId::new("generation.latest").expect("latest generation");
-    let stale =
-        tracedecay_domain::CodeGenerationId::new("generation.stale").expect("stale generation");
-    let _vector = tracedecay_domain::VectorGenerationIdV1::new(
-        tracedecay_domain::canonical_sha256(&"semantic-mcp-vector").expect("vector digest"),
-    );
-
-    assert_eq!(
-        super::super::queries::semantic_mcp_reason(None, &latest, None),
-        "semantic_runtime_unavailable"
-    );
-    assert_eq!(
-        super::super::queries::semantic_mcp_reason(Some(&stale), &latest, None),
-        "semantic_generation_stale"
-    );
-    assert_eq!(
-        super::super::queries::semantic_mcp_reason(Some(&latest), &latest, None),
-        "calibration_unavailable"
-    );
-    for (state, reason) in [
-        (
-            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
-                completed_units: 1,
-                total_units: 2,
-            },
-            "semantic_indexing",
-        ),
-        (
-            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Degraded {
-                active_generation: None,
-                reason: SemanticFallbackReasonV1::RuntimeFailure,
-            },
-            "semantic_degraded",
-        ),
-        (
-            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Failed {
-                model_id: "model.fixture".to_owned(),
-                artifact_digest: format!("sha256:{}", "a".repeat(64)),
-                detail: "fixture failure".to_owned(),
-                retryable: true,
-            },
-            "semantic_failed",
-        ),
-    ] {
-        assert_eq!(
-            super::super::queries::semantic_mcp_reason(None, &latest, Some(&state)),
-            reason
-        );
-    }
 }
 
 /// Foreground query admission never performs the O(store) text projection.
@@ -425,7 +370,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
             .expect("lexical score domain"),
             budget: base.budget,
             base,
-            control: &ReadySemanticControlV1,
+            control: &ReadyRetrievalControlV1,
         })
         .expect("lexical retrieval over the reopened artifact");
     let RetrieverOutcome::Complete(lexical_batch) = lexical else {
@@ -2497,7 +2442,6 @@ async fn core_query_profile_composes_live_code_index_lanes() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -2749,7 +2693,7 @@ async fn query_authority_lookup_preserves_real_mount_identity_isolation() {
     let registry = CodeIndexSchedulerRegistryV1::new(2);
     for root in [primary.path(), linked.as_path()] {
         registry
-            .mount_worktree(test_project_id(), root, store.path().to_path_buf(), None)
+            .mount_worktree(test_project_id(), root, store.path().to_path_buf())
             .await
             .expect("mount real sibling worktree");
     }
@@ -2915,10 +2859,8 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
     );
 
     // The coverage marker the executor derives from this flag.
-    let coverage = tracedecay_query::code_search::CodeIndexSearchCoverageV1::fused_stale(
-        stale.generation.as_str(),
-        &tracedecay_query::code_search::CodeIndexSemanticStatusV1::Complete,
-    );
+    let coverage =
+        tracedecay_query::code_search::CodeIndexSearchCoverageV1::stale(stale.generation.as_str());
     assert!(coverage.any_servable(), "a stale answer is still servable");
     assert!(
         coverage.is_degraded(),
@@ -3201,7 +3143,6 @@ async fn search_fails_fast_when_no_complete_generation_exists() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -3502,7 +3443,6 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -4367,7 +4307,6 @@ async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slic
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -4532,17 +4471,11 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
             ProjectId::new("project.unpinned.first").expect("valid project"),
             first.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount first worktree");
     registry
-        .mount_worktree(
-            test_project_id(),
-            target.path(),
-            store.path().to_path_buf(),
-            None,
-        )
+        .mount_worktree(test_project_id(), target.path(), store.path().to_path_buf())
         .await
         .expect("mount target worktree");
     // Unpinned exact queries resolve through the text owner, so the target
@@ -4606,7 +4539,6 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -4769,7 +4701,6 @@ async fn pinned_generation_from_another_worktree_is_unavailable() {
             ProjectId::new("project.pinned.owner").expect("valid project"),
             owner.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount owner worktree");
@@ -4778,7 +4709,6 @@ async fn pinned_generation_from_another_worktree_is_unavailable() {
             test_project_id(),
             requester.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount requester worktree");
@@ -4830,7 +4760,6 @@ async fn symbol_search_is_generation_bound_and_uses_mounted_authority() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -4903,7 +4832,6 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -4999,7 +4927,6 @@ async fn pinned_query_bypasses_freshness_resolution() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -5075,7 +5002,6 @@ async fn generation_read_callers_install_exact_affected_test_attribution() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount fixture");
@@ -5219,7 +5145,6 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
         )
         .await
@@ -5488,49 +5413,13 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         !current.served_stale,
         "a reconciled graph-off text owner must report current exact and lexical coverage"
     );
-    let semantic = registry
-        .execute_query_with_semantic(
-            fixture.path(),
-            &scope,
-            core_search_request("alpha_0000"),
-            Arc::new(ReadySemanticControlV1),
-            SemanticQueryModeV1::FallbackAllowed,
-        )
-        .await
-        .expect("graph-off fallback semantic query");
-    assert_eq!(semantic.query.generation, current.generation);
-    assert!(matches!(
-        semantic.semantic,
-        super::super::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
-            abstention: SemanticAbstentionV1::CalibrationUnavailable,
-            ..
-        }
-    ));
-    let strict = registry
-        .execute_query_with_semantic(
-            fixture.path(),
-            &scope,
-            core_search_request("alpha_0000"),
-            Arc::new(ReadySemanticControlV1),
-            SemanticQueryModeV1::StrictSemantic,
-        )
-        .await;
-    assert!(matches!(
-        strict,
-        Err(
-            super::super::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
-                generation,
-                abstention: SemanticAbstentionV1::CalibrationUnavailable,
-            }
-        ) if generation == current.generation
-    ));
     assert_eq!(
         scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .sealed_decode_count(),
         0,
-        "semantic fallback without an activated profile must not decode the sealed generation"
+        "a graph-off text query must not decode the sealed generation"
     );
     let text = registry
         .latest_text_serving_for_scope(&scope)

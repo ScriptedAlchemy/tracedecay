@@ -3814,10 +3814,6 @@ async fn production_composition_harness_dispatches_application_invocations_in_pr
     let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
         .await
         .expect("production composition");
-    assert!(
-        !harness.semantic_auto_download_enabled(),
-        "the effective semantic startup policy used by production composition must disable auto-download"
-    );
     let response = harness
         .call_tool(
             &project,

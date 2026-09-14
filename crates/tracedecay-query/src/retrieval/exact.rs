@@ -4,8 +4,8 @@
 //! terms plus a central `ExactAdmissionProof`.
 //!
 //! The exact lane is a true independent lane, separate from the fielded
-//! lexical/BM25 lane. An approximate, graph-only, or later semantic candidate
-//! cannot precede an eligible exact result.
+//! lexical/BM25 lane. An approximate or graph-only candidate cannot precede an
+//! eligible exact result.
 
 use std::collections::{BTreeMap, BTreeSet};
 

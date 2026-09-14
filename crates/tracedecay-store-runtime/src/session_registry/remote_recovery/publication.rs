@@ -906,7 +906,7 @@ mod tests {
             registry.registry.clone(),
             registry.graph_registry.clone(),
             Arc::clone(&registry.graph_lifecycle_cancelled),
-            Arc::clone(&registry.semantic_vector_operation_task_owner),
+            Arc::clone(&registry.operation_task_owner),
             profile_pin,
             registry.project_owners.clone(),
             Arc::clone(&registry.remote_replay_transaction),

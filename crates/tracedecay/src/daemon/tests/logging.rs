@@ -89,14 +89,14 @@ fn daemon_log_line_escapes_control_characters() {
 #[test]
 fn retention_degraded_log_formats_the_pass_and_failure() {
     let fields = [
-        ("pass", "semantic_vector_generations".to_string()),
+        ("pass", "code_generations".to_string()),
         (
             "failure",
-            "unavailable:semantic retrieval is not calibrated".to_string(),
+            "graph_replay_pool_busy: writer lease held".to_string(),
         ),
     ];
     assert_eq!(
         format_daemon_log_line("retention_degraded", &fields),
-        "[tracedecay] event=retention_degraded pass=semantic_vector_generations failure=\"unavailable:semantic retrieval is not calibrated\""
+        "[tracedecay] event=retention_degraded pass=code_generations failure=\"graph_replay_pool_busy: writer lease held\""
     );
 }

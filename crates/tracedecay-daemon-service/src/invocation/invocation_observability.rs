@@ -78,9 +78,6 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::WorkApplication
         | DaemonInvocationOperation::WorkflowApplication
         | DaemonInvocationOperation::HandoffApplication
-        | DaemonInvocationOperation::SemanticQualify
-        | DaemonInvocationOperation::SemanticEvaluateAndPublish
-        | DaemonInvocationOperation::SemanticActivate
         | DaemonInvocationOperation::GitStatus
         | DaemonInvocationOperation::GitDiff
         | DaemonInvocationOperation::GitHistory
@@ -134,9 +131,6 @@ pub(super) fn invocation_response_outcome(
         | DaemonInvocationOutcome::WorkApplication { .. }
         | DaemonInvocationOutcome::WorkflowApplication { .. }
         | DaemonInvocationOutcome::HandoffApplication { .. }
-        | DaemonInvocationOutcome::SemanticEvaluatedProfileQualified { .. }
-        | DaemonInvocationOutcome::SemanticEvaluatedProfilePublished { .. }
-        | DaemonInvocationOutcome::SemanticProfileActivated { .. }
         | DaemonInvocationOutcome::ObservationAccepted
         | DaemonInvocationOutcome::LspOpened { .. }
         | DaemonInvocationOutcome::LspAcknowledged { .. }

@@ -37,7 +37,6 @@
         "test:hermes_suite",
         "test:hooks_lsp_suite",
         "test:product_surface_suite",
-        "test:search_quality_suite",
         "test:cursor_observation_identity_fallback",
         "test:claude_observation_benchmark",
         "bins",
@@ -107,7 +106,6 @@
         "tracedecay-lsp",
         "tracedecay-query",
         "tracedecay-runtime-core",
-        "tracedecay-semantic",
         "tracedecay-session-temporal-store",
         "tracedecay-sessions"
       ],
@@ -120,7 +118,6 @@
         "tracedecay-query/test-helpers",
         "tracedecay-runtime-core/test-helpers",
         "tracedecay-runtime-core/test-transport",
-        "tracedecay-semantic/test-helpers",
         "tracedecay-session-temporal-store/test-helpers",
         "tracedecay-sessions/test-helpers"
       ]
@@ -149,7 +146,6 @@
         "tracedecay-private-fs",
         "tracedecay-rusqlite-runtime",
         "tracedecay-sdk",
-        "tracedecay-semantic-contracts",
         "tracedecay-store",
         "tracedecay-temporal-query",
         "tracedecay-tool-catalog"

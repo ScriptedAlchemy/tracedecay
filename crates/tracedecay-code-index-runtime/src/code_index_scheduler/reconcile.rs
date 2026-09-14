@@ -3,7 +3,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
-    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, PoisonError, RwLock,
@@ -17,11 +16,8 @@ use gix::{
     object::tree::diff::{Action as TreeDiffAction, Change as TreeDiffChange},
 };
 use thiserror::Error;
-use tracedecay_application::{
-    code_index::{
-        DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
-    },
-    semantic_runtime::SavedGenerationScheduleOutcomeV1,
+use tracedecay_application::code_index::{
+    DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
@@ -258,8 +254,6 @@ pub enum CodeIndexSchedulerErrorV1 {
     GraphActivation(String),
     #[error("code-index graph activation refused: {0}")]
     GraphActivationRefused(&'static str),
-    #[error("code-index semantic scheduling failed: {0}")]
-    SemanticSchedule(String),
     #[error("code-index publication changed before serving activation: {0}")]
     PublicationConflict(String),
     #[error("code-index ignored dependency admission refused: {0}")]
@@ -310,7 +304,6 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::ProductionOpen(_)
             | Self::Privacy(_)
             | Self::GraphActivationRefused(_)
-            | Self::SemanticSchedule(_)
             | Self::PublicationConflict(_)
             | Self::IgnoredDependency(_)
             | Self::WorkerMemoryAdmission(_)
@@ -700,9 +693,6 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// Registry-minted scheduler-owner token. A same-daemon retire/remount gets
     /// a strictly newer token so delayed progress cannot outrank the new owner.
     progress_producer_incarnation: u64,
-    /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
-    pub(super) semantic_schedule:
-        Option<tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
 }
 
 /// Immutable authority for historical-generation reads and their detached
@@ -992,7 +982,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             build_progress: Arc::new(RwLock::new(CodeIndexBuildProgressSlotStateV1::default())),
             progress_daemon_incarnation: 1,
             progress_producer_incarnation: 1,
-            semantic_schedule: None,
         };
         Ok(scheduler)
     }
@@ -1193,63 +1182,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
         }
-    }
-
-    /// Replace the semantic `schedule_generation` hook on mount/remount. The hook
-    /// must return immediately; `FastEmbed` download/indexing never blocks
-    /// exact/lexical/graph search. `None` retires a stale runtime.
-    pub fn replace_semantic_schedule_hook(
-        &mut self,
-        hook: Option<tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
-    ) {
-        self.semantic_schedule = hook;
-    }
-
-    /// Schedule semantics only after the registry has activated and published
-    /// this exact generation as serving state.
-    ///
-    /// Every outcome is typed and recorded. This is the one boundary a sealed
-    /// generation crosses on its way to projection, and a bare `false` here
-    /// left an operator with a runtime parked at `installed` and no evidence
-    /// of why later generations never re-triggered projection (#753).
-    pub fn schedule_semantic_generation(
-        &self,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> SavedGenerationScheduleOutcomeV1 {
-        let generation_id = generation.manifest().generation_id.clone();
-        let Some(schedule) = self.semantic_schedule.as_ref() else {
-            return Self::record_semantic_schedule_outcome(
-                &generation_id,
-                SavedGenerationScheduleOutcomeV1::RuntimeNotMounted,
-            );
-        };
-        let outcome = match catch_unwind(AssertUnwindSafe(|| {
-            hotpath::measure_block!(
-                "code_index.semantic_generation_handoff",
-                schedule(generation)
-            )
-        })) {
-            Ok(outcome) => outcome,
-            Err(_) => SavedGenerationScheduleOutcomeV1::HookPanicked,
-        };
-        Self::record_semantic_schedule_outcome(&generation_id, outcome)
-    }
-
-    /// Name every non-scheduled handoff so silence never stands in for a
-    /// reason. A scheduled handoff is reported by the runtime itself.
-    fn record_semantic_schedule_outcome(
-        generation_id: &CodeGenerationId,
-        outcome: SavedGenerationScheduleOutcomeV1,
-    ) -> SavedGenerationScheduleOutcomeV1 {
-        if !outcome.is_scheduled() {
-            tracing::warn!(
-                event = "code_index_semantic_schedule_declined",
-                outcome = outcome.as_str(),
-                generation = %generation_id,
-                "code-index did not hand this generation to semantic projection"
-            );
-        }
-        outcome
     }
 
     #[cfg(test)]
@@ -2173,8 +2105,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Bind exact/lexical serving directly from the canonical active pointer.
     ///
     /// This authenticates the complete sealed content address and only decodes
-    /// its bounded manifest/snapshot header. Graph, record-index, attribution,
-    /// and semantic owners retain the full-generation decode path.
+    /// its bounded manifest/snapshot header. Graph, record-index, and
+    /// attribution owners retain the full-generation decode path.
     pub(super) fn restore_retained_text_generation(
         &mut self,
     ) -> Option<RetainedTextGenerationRestoreV1> {

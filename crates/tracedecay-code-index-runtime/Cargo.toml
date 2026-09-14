@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "Daemon code-index scheduler, git watch, git transactions, and semantic evaluation runtime"
+description = "Daemon code-index scheduler, git watch, and git transactions runtime"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [lib]
@@ -21,20 +21,8 @@ doctest = false
 # its graph must select this feature too.
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
-lite = [
-    "tracedecay-code-extraction/lite",
-    "tracedecay-code-index/lite",
-    "tracedecay-search-eval/lite",
-]
+lite = ["tracedecay-code-extraction/lite", "tracedecay-code-index/lite"]
 full = ["tracedecay-code-extraction/full", "tracedecay-code-index/full"]
-semantic-fastembed = [
-    "tracedecay-semantic/semantic-fastembed",
-    "tracedecay-application/semantic-fastembed",
-]
-semantic-model2vec = [
-    "tracedecay-semantic/semantic-model2vec",
-    "tracedecay-application/semantic-model2vec",
-]
 # Forwards the kernel test-transport seam so this crate's unit tests can
 # reach `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test`.
 test-transport = ["tracedecay-runtime-core/test-transport"]
@@ -43,7 +31,6 @@ test-helpers = [
     "tracedecay-global-db/test-helpers",
     "tracedecay-graph-db/test-helpers",
     "tracedecay-runtime-core/test-helpers",
-    "tracedecay-semantic/test-helpers",
     "tracedecay-application/test-helpers",
 ]
 
@@ -86,9 +73,6 @@ tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
-tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
-tracedecay-semantic-contracts.workspace = true
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
@@ -115,9 +99,6 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", feat
     "test-helpers",
 ] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = [
-    "test-helpers",
-] }
-tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = [
     "test-helpers",
 ] }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = [

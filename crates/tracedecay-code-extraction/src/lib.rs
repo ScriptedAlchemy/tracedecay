@@ -33,7 +33,6 @@ mod extraction_artifact;
 pub(crate) mod hotpath_observe;
 pub mod incremental;
 pub mod parsed_extraction;
-pub mod redundancy;
 pub mod source_mask;
 pub(crate) mod traversal;
 pub mod ts_provider;

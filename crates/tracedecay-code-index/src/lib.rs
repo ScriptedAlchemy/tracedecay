@@ -18,7 +18,6 @@ pub mod ast_grep_search;
 pub mod capabilities;
 pub mod chunks;
 pub mod diagnostics;
-pub mod embedding_document;
 pub mod extract;
 pub mod generations;
 pub mod git_join;

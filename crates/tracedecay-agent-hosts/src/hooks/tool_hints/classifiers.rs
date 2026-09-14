@@ -267,8 +267,8 @@ pub(in crate::hooks) fn is_harness_memory_path(path: &str) -> bool {
 }
 
 /// Minimum number of added lines for an edit to count as a "meaningful" new
-/// body worth a redundancy nudge. Matches the redundancy tool's default
-/// `min_lines`, so a one-line rename or a tiny tweak never trips the hint.
+/// body worth a duplicate-logic nudge, so a one-line rename or a tiny tweak
+/// never trips the hint.
 const REDUNDANCY_EDIT_MIN_LINES: usize = 8;
 
 /// True when a Write/Edit/MultiEdit event adds a new function-shaped body of

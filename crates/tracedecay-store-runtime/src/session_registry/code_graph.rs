@@ -9,11 +9,10 @@ use std::time::{Duration, Instant};
 use tracedecay_domain::{CodeGenerationId, RefId, RepositoryId, WorktreeId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1,
-    GraphDbRegistration, GraphGenerationDependency, GraphGenerationManifest,
-    GraphGenerationReplaySource, GraphIdempotencyKey, GraphProjectionIdentity,
-    GraphProjectorRevision, GraphPublicationPreparationV1, GraphReplayCollectionOutcome,
-    GraphWriteBatch, SealedCodeGenerationReplay, VerifiedGenerationBatchCommit,
-    VerifiedGraphCommit, VerifiedGraphSnapshot,
+    GraphDbRegistration, GraphGenerationManifest, GraphGenerationReplaySource, GraphIdempotencyKey,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphPublicationPreparationV1,
+    GraphReplayCollectionOutcome, SealedCodeGenerationReplay, VerifiedGraphCommit,
+    VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::operation_task_owner::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::shard_runtime::registry::{
@@ -27,18 +26,10 @@ use tracedecay_store::{
     GraphPublicationReplayRecordV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
     GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
     RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeRequestControlV1, RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt,
-    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
-    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
-    SemanticVectorStagePublishSettlement, SemanticVectorStageResumeOutcome,
-    SemanticVectorStagingStore, StoreShardIdV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
-use tracedecay_application::semantic_runtime::{
-    SemanticVectorGraphScopeV1, VerifiedSemanticVectorGraphRuntimeV1,
-};
-use tracedecay_application::store::vector_generations::GRAPH_BACKGROUND_OPERATION_BUDGET;
 use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
@@ -51,17 +42,18 @@ pub(super) mod graph_attachment;
 #[cfg(test)]
 mod sealed_publication_tests;
 mod seals;
-mod semantic_vector;
-mod semantic_vector_runtime;
 use seals::{
     finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
     prove_stable_sealed_source, revalidate_stable_sealed_source,
     sealed_digest_from_generation_file, stage_project_graph_replay_unlink,
 };
-use semantic_vector_runtime::DaemonVerifiedSemanticVectorGraphRuntimeV1;
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
+/// Finite authority for daemon-owned, corpus-scaled background graph work
+/// (sealed projection publish and staging release). Lifecycle cancellation
+/// remains the earlier reclamation path.
+const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_secs(15 * 60);
 /// How many orphaned pending predecessors one publication attempt will
 /// complete before reporting Conflict. Each completion advances the verified
 /// head by one, so even a journal wedged across many interrupted boots drains
@@ -631,20 +623,7 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     _manifest_route: super::code_graph_manifest::CodeGraphManifestRouteV1,
     authority: Arc<CanonicalCodeGraphStoreLeaseV1>,
     project_database: Arc<tracedecay_runtime_core::db::Database>,
-    project_id: ProjectId,
     repository_id: RepositoryId,
-    worktree_id: WorktreeId,
-    /// Checkout-stable source identity for semantic vector staging.
-    ///
-    /// The physical code graph shard this lease retains discriminates by
-    /// branch label, so it changes the moment HEAD detaches or switches
-    /// branches under a fixed worktree. The semantic source-scope binding is bijective with the
-    /// code-scope hash, which is derived from the checkout alone, so a
-    /// branch-labelled source scope makes an ordinary `git checkout --detach`
-    /// look like a conflicting durable binding. Branch attribution stays in the
-    /// physical shard and in the plan's own source generation and dependency
-    /// records; the semantic binding names the checkout.
-    semantic_source_scope: StoreShardIdV1,
     generation_id: CodeGenerationId,
     generations_root: std::path::PathBuf,
     replay_root: std::path::PathBuf,
@@ -1150,8 +1129,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };
         // A projection that has never published a verified head is a typed
-        // empty start, not an unavailability error (same pre-check as
-        // `recover_semantic_vector_projection`).
+        // empty start, not an unavailability error.
         if storage
             .verified_head(&relational_projection, &context)
             .map_err(GraphDbError::from)?
@@ -1249,50 +1227,6 @@ impl RetainedCodeGraphRuntimeV1 {
             &self.generations_root,
             &self.sealed_state_digest,
         )
-    }
-
-    pub fn semantic_vector_identity(
-        &self,
-    ) -> std::result::Result<
-        (
-            ProjectId,
-            RepositoryId,
-            WorktreeId,
-            CodeGenerationId,
-            GraphGenerationDependency,
-        ),
-        GraphDbError,
-    > {
-        let revision = GraphProjectorRevision::try_from(
-            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
-        )?;
-        let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
-            self.authority.namespace().clone(),
-        )
-        .map_err(map_code_graph_error)?;
-        let generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
-            &self.generation_id,
-            &revision,
-        )
-        .map_err(map_code_graph_error)?;
-        let idempotency = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
-            &self.generation_id,
-            &revision,
-        )
-        .map_err(map_code_graph_error)?;
-        Ok((
-            self.project_id.clone(),
-            self.repository_id.clone(),
-            self.worktree_id.clone(),
-            self.generation_id.clone(),
-            GraphGenerationDependency::new(projection, generation, idempotency),
-        ))
-    }
-
-    pub fn semantic_vector_staging_binding(
-        &self,
-    ) -> (&StoreShardIdV1, &tracedecay_store::StoreRuntimeBindingV1) {
-        (&self.semantic_source_scope, self.authority.binding())
     }
 
     #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
@@ -1568,13 +1502,7 @@ impl RetainedCodeGraphRuntimeV1 {
             &projector_revision,
         )
         .map_err(map_code_graph_error)?;
-        let relational_projection = GraphProjectionIdentityV1 {
-            shard_id: self.authority.binding().shard_id.clone(),
-            namespace: tracedecay_store::GraphNamespaceV1::new(projection.namespace.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            projection: GraphProjectionIdV1::new(projection.projection.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-        };
+        let relational_projection = self.relational_projection(&projection)?;
         let expected_key = GraphPublicationKeyV1::new(
             relational_projection.clone(),
             GraphGenerationIdV1::new(graph_generation.as_str())
@@ -2519,68 +2447,6 @@ impl RetainedCodeGraphRuntimeV1 {
         }
     }
 
-    pub fn recover_semantic_vector_projection(
-        &self,
-        projection: &GraphProjectionIdentity,
-        cancellation: Arc<dyn GraphCancellation>,
-        deadline: Instant,
-    ) -> std::result::Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
-        let relational_projection = self.relational_projection(projection)?;
-        let mut storage = self
-            .project_database
-            .graph_publication_storage()
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        self.semantic_graph_operation(
-            &mut storage,
-            cancellation,
-            deadline,
-            "recover",
-            |registration, storage, context| {
-                if storage
-                    .verified_head(&relational_projection, context)
-                    .map_err(GraphDbError::from)?
-                    .is_none()
-                {
-                    return Ok(None);
-                }
-                self.graph_registry
-                    .recover_verified_snapshot(
-                        registration,
-                        storage,
-                        context,
-                        &relational_projection,
-                    )
-                    .map(Some)
-            },
-        )
-    }
-
-    pub fn recover_semantic_vector_generation(
-        &self,
-        publication: &GraphPublicationKeyV1,
-        cancellation: Arc<dyn GraphCancellation>,
-        deadline: Instant,
-    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
-        let mut storage = self
-            .project_database
-            .graph_publication_storage()
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        self.semantic_graph_operation(
-            &mut storage,
-            cancellation,
-            deadline,
-            "recover-generation",
-            |registration, storage, context| {
-                self.graph_registry.verified_generation_snapshot(
-                    registration,
-                    storage,
-                    context,
-                    publication,
-                )
-            },
-        )
-    }
-
     fn relational_projection(
         &self,
         projection: &GraphProjectionIdentity,
@@ -2592,96 +2458,6 @@ impl RetainedCodeGraphRuntimeV1 {
             projection: GraphProjectionIdV1::new(projection.projection.as_str())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         })
-    }
-
-    fn semantic_graph_operation<T>(
-        &self,
-        storage: &mut dyn GraphPublicationStoreV1,
-        cancellation: Arc<dyn GraphCancellation>,
-        deadline: Instant,
-        operation: &str,
-        execute: impl FnOnce(
-            GraphDbRegistration,
-            &mut dyn GraphPublicationStoreV1,
-            &GraphPublicationOperationContextV1<'_>,
-        ) -> std::result::Result<T, GraphDbError>,
-    ) -> std::result::Result<T, GraphDbError> {
-        self.semantic_operation(
-            cancellation,
-            deadline,
-            operation,
-            |registration, context| execute(registration, storage, context),
-        )
-    }
-
-    fn semantic_operation<T>(
-        &self,
-        cancellation: Arc<dyn GraphCancellation>,
-        deadline: Instant,
-        operation: &str,
-        execute: impl FnOnce(
-            GraphDbRegistration,
-            &GraphPublicationOperationContextV1<'_>,
-        ) -> std::result::Result<T, GraphDbError>,
-    ) -> std::result::Result<T, GraphDbError> {
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        if Instant::now() >= deadline {
-            return Err(GraphDbError::DeadlineExceeded);
-        }
-        let identity = canonical_sha256(&(
-            "tracedecay.semantic-vector.graph-operation.v1",
-            &self.project_id,
-            &self.repository_id,
-            &self.worktree_id,
-            &self.generation_id,
-            operation,
-        ))
-        .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let cancellation_identity = RuntimeCancellationIdentityV1 {
-            cancellation_id: RuntimeCancellationIdV1::new(format!(
-                "semantic-vector:{}",
-                identity.as_str()
-            ))
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            generation: 1,
-        };
-        let deadline_identity = RuntimeDeadlineV1 {
-            deadline_id: RuntimeDeadlineIdV1::new(format!(
-                "semantic-vector-deadline:{}",
-                identity.as_str()
-            ))
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-        };
-        let probe = GraphPublicationProbeV1 {
-            request_cancellation: Arc::clone(&cancellation),
-            lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
-            deadline_at: deadline,
-            cancellation: cancellation_identity.clone(),
-            deadline: deadline_identity.clone(),
-            commit_started: AtomicBool::new(false),
-            deadline_warned: AtomicBool::new(false),
-        };
-        let control = RuntimeRequestControlV1 {
-            requested_at: tracedecay_contracts::clock::now_micros(),
-            deadline: deadline_identity,
-            cancellation: cancellation_identity,
-        };
-        let context = GraphPublicationOperationContextV1::new(&control, &probe)
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
-        execute(
-            GraphDbRegistration {
-                authority_lease,
-                cancellation,
-                lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                    &self.lifecycle_cancelled,
-                ))),
-                deadline,
-            },
-            &context,
-        )
     }
 }
 
@@ -2809,12 +2585,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.ensure_code_graph_shard_attached(&project_shard).await;
         let code_scope = match reference {
             Some(ref_id) => CodeShardScopeV1::Branch {
-                worktree_id: worktree_id.clone(),
+                worktree_id,
                 ref_id,
             },
-            None => CodeShardScopeV1::Worktree {
-                worktree_id: worktree_id.clone(),
-            },
+            None => CodeShardScopeV1::Worktree { worktree_id },
         };
         let code_shard = StoreShardIdV1::code(
             self.identity.brain_id().clone(),
@@ -2822,15 +2596,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             project_id.clone(),
             repository_id.clone(),
             code_scope,
-        );
-        let semantic_source_scope = StoreShardIdV1::code(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id.clone(),
-            repository_id.clone(),
-            CodeShardScopeV1::Worktree {
-                worktree_id: worktree_id.clone(),
-            },
         );
         let authority = self
             .registry
@@ -2864,13 +2629,12 @@ impl DaemonSessionRuntimeRegistryV1 {
             .database_path()
             .with_extension("graph-replay");
         // Bind the sealed replay route at seat time, not when a sealed
-        // publication classifies. Every replay-hydrating path -- verified-head
-        // recovery, and the staging release the semantic-vector retirement
-        // drives -- resolves its source through this binding, so a daemon that
-        // restarts and serves an existing generation without publishing a new
-        // one otherwise answers every one of them with "sealed code generation
-        // replay source is not mounted for this projection", leaving the
-        // vector census permanently incomplete and code-generation retention
+        // publication classifies. Every replay-hydrating path (verified-head
+        // recovery and the maintenance staging release) resolves its source
+        // through this binding, so a daemon that restarts and serves an
+        // existing generation without publishing a new one otherwise answers
+        // every one of them with "sealed code generation replay source is not
+        // mounted for this projection", leaving code-generation retention
         // failing closed for the rest of the process lifetime. The returned
         // route handle is retained by the runtime below, so the provider's
         // route registry stays bounded: the route retires with its last exact
@@ -2879,7 +2643,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .graph_manifest_provider
             .bind(
                 authority.binding().shard_id.clone(),
-                project_id.clone(),
+                project_id,
                 repository_id.clone(),
                 replay_binding.generations_root.clone(),
                 replay_root.clone(),
@@ -2917,16 +2681,13 @@ impl DaemonSessionRuntimeRegistryV1 {
             _manifest_route: manifest_route,
             authority,
             project_database,
-            project_id,
             repository_id,
-            worktree_id,
-            semantic_source_scope,
             generation_id,
             generations_root: replay_binding.generations_root,
             replay_root,
             sealed_state_digest: replay_binding.sealed_state_digest,
             lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
-            operation_task_owner: Arc::clone(&self.semantic_vector_operation_task_owner),
+            operation_task_owner: Arc::clone(&self.operation_task_owner),
             operation_runtime,
             publication_locks,
         })
@@ -2963,10 +2724,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         // is absent, and that recovery hydrates through the manifest provider.
         // This lease-only path bound no replay route, so every such recovery
         // answered "sealed code generation replay source is not mounted for
-        // this projection": the rows stayed retained, the vector census stayed
-        // incomplete, and code-generation retention degraded on every tick for
-        // as long as no code-graph runtime happened to be seated (issue
-        // #1244). Bind the same route `retain_code_graph_runtime` binds, for
+        // this projection": the rows stayed retained and code-generation
+        // retention degraded on every tick for as long as no code-graph
+        // runtime happened to be seated (issue #1244). Bind the same route
+        // `retain_code_graph_runtime` binds, for
         // the duration of this sweep; equal routes share one reference, so a
         // concurrently seated runtime keeps its own.
         let replay_root = project_database
@@ -3347,48 +3108,6 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
     > {
         Self::load_sealed_read_bundle_catalog(self, request_cancelled)
     }
-
-    fn semantic_vector_identity(
-        &self,
-    ) -> std::result::Result<
-        (
-            tracedecay_domain::ProjectId,
-            RepositoryId,
-            WorktreeId,
-            CodeGenerationId,
-            GraphGenerationDependency,
-        ),
-        tracedecay_graph_db::GraphDbError,
-    > {
-        Self::semantic_vector_identity(self)
-    }
-
-    fn semantic_vector_staging_binding(
-        &self,
-    ) -> (
-        tracedecay_store::StoreShardIdV1,
-        tracedecay_store::StoreRuntimeBindingV1,
-    ) {
-        let (scope, binding) = Self::semantic_vector_staging_binding(self);
-        (scope.clone(), binding.clone())
-    }
-
-    fn into_semantic_vector_runtime(
-        self: Box<Self>,
-        scope: SemanticVectorGraphScopeV1,
-    ) -> Arc<dyn VerifiedSemanticVectorGraphRuntimeV1> {
-        let (source_scope, binding) = {
-            let (scope, binding) =
-                RetainedCodeGraphRuntimeV1::semantic_vector_staging_binding(self.as_ref());
-            (scope.clone(), binding.clone())
-        };
-        Arc::new(DaemonVerifiedSemanticVectorGraphRuntimeV1::new(
-            Arc::from(self),
-            scope,
-            source_scope,
-            binding,
-        ))
-    }
 }
 
 impl CodeGraphSeatRuntimePortV1 for DaemonSessionRuntimeRegistryV1 {
@@ -3489,7 +3208,7 @@ fn map_code_graph_error(
 
 impl Drop for DaemonSessionRuntimeRegistryV1 {
     fn drop(&mut self) {
-        self.semantic_vector_operation_task_owner.begin_shutdown();
+        self.operation_task_owner.begin_shutdown();
         self.graph_lifecycle_cancelled
             .store(true, Ordering::Release);
         self.cancel_memory_graph_reconciliation_tasks();

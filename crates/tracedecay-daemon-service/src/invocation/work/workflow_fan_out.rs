@@ -663,23 +663,30 @@ pub(crate) fn admit_workflow_child(
         .item(&child.task_id)
         .ok_or(DaemonInvocationProblem::Unavailable)?;
     match item.accepted_proposal() {
-        None => apply_workflow_child_product_mutation(
-            registered,
-            &product,
-            context,
-            &binding,
-            selection.clone(),
-            tracedecay_contracts::WorkProductChangeDraftV1::DecideProposal {
-                proposal: child.proposal.clone(),
-                disposition: tracedecay_domain::WorkProposalDispositionV1::Accepted,
-            },
-            child.proposal_command_id.clone(),
-            occurred_at,
-        )?,
+        None => {
+            let proposal = if child.proposal.based_on_version() == graph.version() {
+                child.proposal.clone()
+            } else {
+                child.proposal.clone().rebased_onto(graph.version())
+            };
+            apply_workflow_child_product_mutation(
+                registered,
+                &product,
+                context,
+                &binding,
+                selection.clone(),
+                tracedecay_contracts::WorkProductChangeDraftV1::DecideProposal {
+                    proposal,
+                    disposition: tracedecay_domain::WorkProposalDispositionV1::Accepted,
+                },
+                child.proposal_command_id.clone(),
+                occurred_at,
+            )?;
+        }
         Some(proposal_id)
             if proposal_id == child.proposal.proposal_id()
                 && graph.proposal_decisions().iter().any(|decision| {
-                    decision.proposal() == &child.proposal
+                    decision.proposal().proposal_id() == child.proposal.proposal_id()
                         && decision.disposition()
                             == &tracedecay_domain::WorkProposalDispositionV1::Accepted
                 }) => {}
@@ -792,12 +799,26 @@ fn apply_workflow_child_product_mutation(
             occurred_at,
             revisions.clone(),
         )
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+        .map_err(|error| {
+            tracing::warn!(
+                ?error,
+                stage = "prepare_mutation",
+                "workflow child product mutation prepare failed"
+            );
+            DaemonInvocationProblem::Unavailable
+        })?;
     product
         .mutations()
         .mutate(context, binding, mutation, &revisions)
         .map(|_| ())
-        .map_err(|_| DaemonInvocationProblem::Unavailable)
+        .map_err(|error| {
+            tracing::warn!(
+                ?error,
+                stage = "mutate",
+                "workflow child product mutation apply failed"
+            );
+            DaemonInvocationProblem::Unavailable
+        })
 }
 
 pub(crate) fn reconcile_workflow_fan_out_after_attempt(

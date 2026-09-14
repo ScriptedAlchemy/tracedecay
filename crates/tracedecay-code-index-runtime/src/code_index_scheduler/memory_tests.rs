@@ -333,7 +333,6 @@ async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
             ProjectId::new("project.code-index-memory").expect("valid project"),
             project.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");

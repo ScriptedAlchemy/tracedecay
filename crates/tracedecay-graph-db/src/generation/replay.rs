@@ -26,20 +26,11 @@ pub struct SealedCodeGenerationReplay {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticVectorGenerationReplay {
-    pub metadata: GraphGenerationReplayMetadata,
-    pub semantic_generation_id: tracedecay_domain::VectorGenerationIdV1,
-    pub base_generation: Option<tracedecay_domain::VectorGenerationIdV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GraphGenerationReplaySource {
     InlineManifest(Box<GraphGenerationManifest>),
     MetadataOnlyManifest(GraphGenerationReplayMetadata),
     SealedCodeGeneration(SealedCodeGenerationReplay),
-    SemanticVectorGeneration(SemanticVectorGenerationReplay),
 }
 
 impl GraphGenerationManifest {
@@ -71,44 +62,6 @@ impl GraphGenerationManifest {
             check,
         )
     }
-
-    pub(crate) fn relational_semantic_vector_replay_with_recovered_digest(
-        &self,
-        plan: &tracedecay_store::SemanticVectorStagePlan,
-        idempotency_key: GraphIdempotencyKey,
-        input_digest: GraphPublicationInputDigestV1,
-        expected_recovered_digest: tracedecay_store::GraphRecoveredGenerationDigestV1,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphPublicationReplayV1, GraphDbError> {
-        self.validate_checked(check)?;
-        let payload = self.replay_source_payload(
-            GraphGenerationReplaySource::SemanticVectorGeneration(SemanticVectorGenerationReplay {
-                metadata: GraphGenerationReplayMetadata {
-                    projection: self.projection.clone(),
-                    generation: self.generation.clone(),
-                    source_generation: self.source_generation.clone(),
-                    watermark: self.watermark.clone(),
-                    dependencies: self.dependencies.clone(),
-                },
-                semantic_generation_id: plan.semantic_generation_id.clone(),
-                base_generation: plan.base_generation.clone(),
-            }),
-            check,
-        )?;
-        let mut replay = self.relational_replay_with_payload(
-            plan.key.projection.shard_id.clone(),
-            idempotency_key,
-            input_digest,
-            plan.expected_prior_verified_head.clone(),
-            payload,
-            check,
-        )?;
-        replay.expected_recovered_digest = expected_recovered_digest;
-        replay
-            .validate()
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        Ok(replay)
-    }
 }
 
 /// Hydrates the metadata-only manifest a replay `source` describes, or
@@ -123,7 +76,6 @@ pub(crate) fn metadata_manifest_from_source(
 ) -> Result<Option<GraphGenerationManifest>, GraphDbError> {
     let metadata = match source {
         GraphGenerationReplaySource::MetadataOnlyManifest(metadata) => metadata,
-        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => &vector.metadata,
         GraphGenerationReplaySource::InlineManifest(_)
         | GraphGenerationReplaySource::SealedCodeGeneration(_) => return Ok(None),
     };
@@ -144,32 +96,6 @@ pub(crate) fn metadata_manifest_from_source(
     validate_metadata_publication(publication)?;
     validate_decoded_metadata_binding(publication, &manifest, metadata, false, check)?;
     Ok(Some(manifest))
-}
-
-pub(crate) fn validate_metadata_binding(
-    publication: &GraphPublicationReplayV1,
-    manifest: &GraphGenerationManifest,
-    validate_expected_digest: bool,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(), GraphDbError> {
-    validate_metadata_publication(publication)?;
-    manifest.validate_checked(check)?;
-    let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
-    let metadata = match source {
-        GraphGenerationReplaySource::MetadataOnlyManifest(metadata) => metadata,
-        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => vector.metadata,
-        GraphGenerationReplaySource::InlineManifest(_)
-        | GraphGenerationReplaySource::SealedCodeGeneration(_) => {
-            return Err(GraphDbError::conflict("replay.validate_metadata_binding"));
-        }
-    };
-    validate_decoded_metadata_binding(
-        publication,
-        manifest,
-        &metadata,
-        validate_expected_digest,
-        check,
-    )
 }
 
 fn validate_metadata_publication(
@@ -232,15 +158,6 @@ pub(crate) fn validate_supplied_manifest_binding(
                 publication,
                 manifest,
                 &metadata,
-                validate_expected_digest,
-                check,
-            )
-        }
-        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => {
-            validate_decoded_metadata_binding(
-                publication,
-                manifest,
-                &vector.metadata,
                 validate_expected_digest,
                 check,
             )
@@ -437,9 +354,6 @@ fn hydration_source(
         }
         GraphGenerationReplaySource::SealedCodeGeneration(_) => {
             crate::hotpath_observe::HydrationSource::Sealed
-        }
-        GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
-            crate::hotpath_observe::HydrationSource::SemanticVector
         }
     }
 }

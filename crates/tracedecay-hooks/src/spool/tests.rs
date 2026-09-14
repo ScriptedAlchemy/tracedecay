@@ -183,20 +183,21 @@ fn checksum_is_real_sha256() {
     );
 }
 
-/// A pre-existing spool root that another local account could write into
-/// must be refused outright: per-file modes cannot protect members inside a
-/// writable directory.
+/// An owned but group-writable spool root is healed to owner-private on open.
+/// Foreign-owned permissive directories still fail closed inside
+/// `make_private_directory`; per-file modes cannot protect members while the
+/// directory itself stays group-writable.
 #[cfg(unix)]
 #[test]
-fn open_refuses_a_group_writable_existing_root() {
+fn open_heals_an_owned_group_writable_existing_root() {
     use std::os::unix::fs::PermissionsExt;
     let root = TestDir::new("permissive-root");
     fs::set_permissions(&root.0, fs::Permissions::from_mode(0o770)).unwrap();
 
-    assert!(matches!(
-        HookSpoolV1::open(&root.0, config(), UtcMicros(10)),
-        Err(HookSpoolError::UnsafePath)
-    ));
+    let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).expect("heal and open");
+    drop(spool);
+    let mode = fs::metadata(&root.0).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "owned permissive roots must be tightened");
 }
 
 #[test]

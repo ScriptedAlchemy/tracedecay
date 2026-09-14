@@ -4,20 +4,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
-use tracedecay_contracts::CancellationSignal;
-use tracedecay_daemon_identity::invocation_client_for_current;
-use tracedecay_daemon_protocol::{
-    DaemonClientIdentity, DaemonHandshake, MovedStoreAdoption,
-    SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-};
-use tracedecay_domain::errors::{Result as RuntimeResult, TraceDecayError};
-use tracedecay_query::search_quality::{
-    DirectEvaluationStatusV1, SearchEvalError, write_daemon_native_qualification,
-};
+use tracedecay_query::search_quality::{DirectEvaluationStatusV1, SearchEvalError};
 use tracedecay_search_eval::{
     DirectWorkloadSummaryV1, GenerateCandidateOutputsOptions, compare_default_direct,
     compare_direct, generate_candidate_outputs, root_admitted_corpus_scope,
-    validate_default_activation_workload, validate_direct_workload, write_generate_outputs,
+    validate_default_workload, validate_direct_workload, write_generate_outputs,
 };
 
 #[cfg(feature = "hotpath")]
@@ -30,7 +21,7 @@ const HOTPATH_FOCUS_ENV: &str = "HOTPATH_FOCUS";
 #[derive(Debug, Parser)]
 #[command(
     name = "tracedecay-search-eval",
-    about = "Run direct query/semantic search-quality evaluation"
+    about = "Run direct exact/lexical/graph search-quality evaluation"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -39,7 +30,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Validate the checked-in labeled workload.
+    /// Validate the checked-in labeled workload. Without `--workload` the
+    /// packaged workload is validated from its own materialized root.
     Validate {
         #[arg(long, default_value = ".")]
         repo_root: PathBuf,
@@ -47,6 +39,8 @@ enum Command {
         workload: Option<PathBuf>,
     },
     /// Run production retrieval and evaluate checked-in labels directly.
+    /// Without `--workload` the packaged workload and corpus are evaluated
+    /// from their own materialized root.
     Compare {
         #[arg(long, default_value = ".")]
         repo_root: PathBuf,
@@ -68,24 +62,6 @@ enum Command {
         output_root: PathBuf,
         #[arg(long, value_delimiter = ',')]
         profiles: Option<Vec<String>>,
-    },
-    /// Run the real direct evaluator in the owning daemon and publish only a
-    /// passing profile bound to the daemon's current scope and generations.
-    EvaluateAndPublish {
-        #[arg(long, default_value = ".")]
-        project_root: PathBuf,
-        #[arg(long)]
-        profile: String,
-    },
-    /// Run the native evaluator in the owning daemon and write only its
-    /// independently validated qualification evidence.
-    QualifyNative {
-        #[arg(long, default_value = ".")]
-        project_root: PathBuf,
-        #[arg(long)]
-        profile: String,
-        #[arg(long)]
-        output: PathBuf,
     },
 }
 
@@ -109,7 +85,7 @@ fn main() -> ExitCode {
             workload,
             profiles,
         } => match workload.as_deref().map_or_else(
-            || compare_default_direct(&repo_root, profiles.as_deref()),
+            || compare_default_direct(profiles.as_deref()),
             |workload| {
                 compare_direct(
                     &repo_root,
@@ -155,15 +131,6 @@ fn main() -> ExitCode {
             },
             Err(error) => invalid("generate_candidates", error),
         },
-        Command::EvaluateAndPublish {
-            project_root,
-            profile,
-        } => evaluate_and_publish(project_root, profile),
-        Command::QualifyNative {
-            project_root,
-            profile,
-            output,
-        } => qualify_native(project_root, profile, output),
     }
 }
 
@@ -229,96 +196,8 @@ fn validate_requested_workload(
     repo_root: &std::path::Path,
     workload: Option<&std::path::Path>,
 ) -> Result<DirectWorkloadSummaryV1, SearchEvalError> {
-    workload.map_or_else(
-        || validate_default_activation_workload(repo_root),
-        |path| validate_direct_workload(repo_root, Some(path)),
-    )
-}
-
-fn evaluate_and_publish(project_root: PathBuf, evaluated_profile_id: String) -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => return invalid("evaluate_and_publish", error),
-    };
-    #[cfg(feature = "hotpath")]
-    hotpath::tokio_runtime!(runtime.handle());
-    runtime.block_on(async move {
-        let handshake = match handshake_for_eval_client(project_root) {
-            Ok(handshake) => handshake,
-            Err(error) => return invalid("evaluate_and_publish", error),
-        };
-        let client = match invocation_client_for_current(handshake) {
-            Ok(client) => client,
-            Err(error) => return invalid("evaluate_and_publish", error),
-        };
-        match client
-            .evaluate_and_publish_semantic_profile_until(
-                &evaluated_profile_id,
-                SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-            )
-            .await
-        {
-            Ok(result) => emit(&result, ExitCode::SUCCESS),
-            Err(error) => invalid("evaluate_and_publish", error),
-        }
-    })
-}
-
-fn qualify_native(
-    project_root: PathBuf,
-    evaluated_profile_id: String,
-    output: PathBuf,
-) -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => return invalid("qualify_native", error),
-    };
-    #[cfg(feature = "hotpath")]
-    hotpath::tokio_runtime!(runtime.handle());
-    runtime.block_on(async move {
-        let handshake = match handshake_for_eval_client(project_root) {
-            Ok(handshake) => handshake,
-            Err(error) => return invalid("qualify_native", error),
-        };
-        let client = match invocation_client_for_current(handshake) {
-            Ok(client) => client,
-            Err(error) => return invalid("qualify_native", error),
-        };
-        let cancellation =
-            match CancellationSignal::active("cancellation.semantic-qualification.cli") {
-                Ok(cancellation) => cancellation,
-                Err(error) => return invalid("qualify_native", error),
-            };
-        match client
-            .qualify_semantic_profile_until(
-                &evaluated_profile_id,
-                SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-                cancellation,
-            )
-            .await
-        {
-            Ok(result) => {
-                match write_daemon_native_qualification(&output, &result.qualification_bytes) {
-                    Ok(()) => emit(
-                        &json!({
-                            "command": "qualify_native",
-                            "status": "qualified",
-                            "evaluated_profile_id": evaluated_profile_id,
-                            "output": output,
-                        }),
-                        ExitCode::SUCCESS,
-                    ),
-                    Err(error) => invalid("qualify_native", error),
-                }
-            }
-            Err(error) => invalid("qualify_native", error),
-        }
+    workload.map_or_else(validate_default_workload, |path| {
+        validate_direct_workload(repo_root, Some(path))
     })
 }
 
@@ -344,36 +223,6 @@ fn emit(value: &impl Serialize, exit: ExitCode) -> ExitCode {
     exit
 }
 
-fn eval_daemon_client_identity() -> RuntimeResult<DaemonClientIdentity> {
-    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
-        TraceDecayError::Config {
-            message: "could not determine TraceDecay user data directory".to_string(),
-        }
-    })?;
-    let global_db_path = tracedecay_runtime_core::config::global_db_path().ok_or_else(|| {
-        TraceDecayError::Config {
-            message: "could not determine TraceDecay global database path".to_string(),
-        }
-    })?;
-    Ok(DaemonClientIdentity::new(profile_root, global_db_path))
-}
-
-fn handshake_for_eval_client(project_root: PathBuf) -> RuntimeResult<DaemonHandshake> {
-    Ok(DaemonHandshake {
-        project_path: Some(project_root),
-        scope_prefix: None,
-        timings: false,
-        allow_init: false,
-        allow_initialize_root_routing: false,
-        client_identity: eval_daemon_client_identity()?,
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
-        client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
-        tool_list_changed_capable: false,
-        catalog_version: String::new(),
-        moved_store_adoption: MovedStoreAdoption::Never,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -390,73 +239,40 @@ mod tests {
     }
 
     #[test]
-    fn default_validation_uses_byte_pinned_activation_workload() {
-        let summary = validate_requested_workload(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(std::path::Path::parent)
-                .expect("workspace root above crates/tracedecay-search-eval"),
-            None,
-        )
-        .expect("checked-in activation workload validates");
+    fn default_validation_uses_the_byte_pinned_packaged_workload() {
+        let summary = validate_requested_workload(std::path::Path::new("."), None)
+            .expect("packaged workload validates");
 
         assert_eq!(summary.status, DirectEvaluationStatusV1::Pass);
         assert_eq!(
             summary.workload_digest,
-            "sha256:7451aba33bc104384a55e715e7518537a7afdfae1eeca45565f5a60258b2619b"
+            "sha256:a149418ad0601a18cb6273c2d39581f2a836513f25c8260139575db87ac45ead"
         );
-        assert_eq!(summary.profile_count, 3);
+        assert_eq!(summary.profile_count, 1);
+        assert_eq!(summary.query_count, 65);
     }
 
     #[test]
-    fn evaluate_and_publish_accepts_only_a_daemon_owned_profile_selection() {
+    fn compare_parses_a_comma_separated_profile_selection() {
         let cli = Cli::try_parse_from([
             "tracedecay-search-eval",
-            "evaluate-and-publish",
-            "--project-root",
-            "project",
-            "--profile",
-            "hybrid-conservative",
+            "compare",
+            "--profiles",
+            "query-fallback",
         ])
-        .expect("evaluate-and-publish profile arguments parse");
+        .expect("compare profile arguments parse");
 
         assert!(matches!(
             cli.command,
-            Command::EvaluateAndPublish {
-                project_root,
-                profile,
-            } if project_root == *"project" && profile == "hybrid-conservative"
+            Command::Compare {
+                repo_root,
+                workload: None,
+                profiles: Some(profiles),
+            } if repo_root == *"." && profiles == ["query-fallback"]
         ));
         assert!(
-            Cli::try_parse_from([
-                "tracedecay-search-eval",
-                "evaluate-and-publish",
-                "--candidate",
-                "caller-authored.json",
-            ])
-            .is_err(),
-            "the publishing route must not accept caller-authored candidate JSON"
-        );
-    }
-
-    #[test]
-    fn corrupt_native_qualification_bytes_are_rejected_without_writing() {
-        let output = tempfile::tempdir()
-            .expect("qualification output directory")
-            .path()
-            .join("qualification.json");
-        let error =
-            write_daemon_native_qualification(&output, b"not a native qualification document")
-                .expect_err("corrupt daemon bytes must never be written");
-
-        assert!(
-            error
-                .to_string()
-                .contains("native qualification bytes are corrupt")
-        );
-        assert!(
-            !output.exists(),
-            "corrupt bytes must not create an artifact"
+            Cli::try_parse_from(["tracedecay-search-eval", "evaluate-and-publish"]).is_err(),
+            "the daemon publishing route no longer exists"
         );
     }
 }

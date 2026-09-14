@@ -40,7 +40,7 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
     let mut publications = schedulers.subscribe_generation_publications();
     let sealed_store = dir.path().join("sealed-code-index");
     schedulers
-        .mount_worktree(project_id.clone(), &project, sealed_store, None)
+        .mount_worktree(project_id.clone(), &project, sealed_store)
         .await
         .expect("mount sealed code-index generation");
     let scope =

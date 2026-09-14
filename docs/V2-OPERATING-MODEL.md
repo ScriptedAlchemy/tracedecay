@@ -17,15 +17,17 @@ Runtime status remains the truth for capabilities not yet delivered.
 - Grafeo is in-process and embedded. It has no graph server, sidecar, network
   transport, or separately managed process. `petgraph` and other graph/vector
   stores are not product authorities.
-- Grafeo is the sole persisted/query graph and vector projection: code symbol,
-  file, and chunk nodes; relation and traversal indexes; admitted vectors;
-  Git/evidence, session, memory, work, and workflow relation topology.
-  Canonical events, facts, source content, and reconstruction manifests remain
-  in their domain stores and are sufficient to rebuild every projection.
+- Grafeo is the sole persisted/query graph projection: code symbol, file, and
+  chunk nodes; relation and traversal indexes; Git/evidence, session, memory,
+  work, and workflow relation topology. It holds no vector index: dense code
+  retrieval is retired (plan-set index, rejected decision 11), and shared-code
+  facts live in the sealed code generation, not in Grafeo. Canonical events,
+  facts, source content, and reconstruction manifests remain in their domain
+  stores and are sufficient to rebuild every projection.
 - SQLite is relational only: registry/configuration, source cursors, admission,
   idempotency, inbox/outbox, journals, leases, receipts, redaction, retention,
   raw content and exact evidence spans, manifests, and accounting. It neither
-  shadows graph/vector data nor gains a graph-shaped compatibility table.
+  shadows graph data nor gains a graph-shaped compatibility table.
 - Every datum has one canonical authority. A rebuildable projection records its
   source generation and watermark; it never becomes a second canonical copy.
   A canonical event plus complete replay input is durable before graph

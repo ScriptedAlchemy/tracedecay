@@ -10,11 +10,6 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_application::code_index::open_production_code_index_owner_v1;
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use tracedecay_application::semantic_runtime::{
-    RetainedSemanticVectorGraphV1, SemanticRuntimeFuture, SemanticVectorGraphErrorV1,
-    SemanticVectorGraphProviderV1,
-};
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, OpaqueCursor,
@@ -25,21 +20,12 @@ use tracedecay_domain::{
     ActorId, AuthorizationRevision, CalibrationProfileId, ChunkerRevision, CodeGenerationId,
     ComponentRevision, DiversityPolicy, ExactAdmissionRuleRevision, FusionProfile, ManifestDigest,
     PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, QueryNormalizationRevision, RefId,
-    RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
-    RetrievalCursorKeyId, RetrieverKind, SanitizerRevision, ScoreDomainCalibrationV1,
-    ScoreDomainId, UtcMicros, WorktreeId,
+    RelationEdgeKindV1, RepositoryId, RetrievalBudget, RetrievalCursorKeyId, RetrieverKind,
+    SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, UtcMicros, WorktreeId,
 };
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use tracedecay_graph_db::NeverCancelled;
 use tracedecay_query::retrieval::{
-    QueryAuthorityV1,
-    fusion::RetrievalCursorKeyringV1,
-    lexical::LexicalRoutingV1,
+    QueryAuthorityV1, fusion::RetrievalCursorKeyringV1, lexical::LexicalRoutingV1,
     ports::RetrievalExecutionControl,
-    rerank::{
-        AdmittedNativeRerankExecutorV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
-        LocalRerankInputV1, LocalRerankPermitV1,
-    },
 };
 
 use crate::code_index_scheduler::{
@@ -57,7 +43,6 @@ mod publication_store;
 mod reconcile;
 mod retained_configuration_tests;
 mod search_permit_release;
-mod semantic_schedule_order_tests;
 mod serving;
 
 /// Base directory for fixture temporary roots, resolved through every symlink.
@@ -619,66 +604,9 @@ fn execute_scope_retention_with_test_binding_cleanup(
     Ok(report)
 }
 
-struct MixedAnchorReverseRerankExecutorV1;
+struct ReadyRetrievalControlV1;
 
-impl AdmittedNativeRerankExecutorV1 for MixedAnchorReverseRerankExecutorV1 {
-    fn artifact_manifest_digest(&self) -> &ManifestDigest {
-        static DIGEST: OnceLock<ManifestDigest> = OnceLock::new();
-        DIGEST.get_or_init(|| {
-            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("artifact digest")
-        })
-    }
-}
-
-impl DeterministicLocalRerankExecutorV1 for MixedAnchorReverseRerankExecutorV1 {
-    fn planned_model_invocations(
-        &self,
-        _candidate_count: u32,
-    ) -> Result<u32, LocalRerankFailureV1> {
-        Ok(1)
-    }
-
-    fn rerank(
-        &self,
-        _policy: &RerankPolicy,
-        inputs: &[LocalRerankInputV1<'_>],
-        _permit: LocalRerankPermitV1,
-    ) -> Result<Vec<RetrievalAnchorId>, LocalRerankFailureV1> {
-        Ok(inputs
-            .iter()
-            .rev()
-            .map(|input| input.candidate.candidate.anchor_id.clone())
-            .collect())
-    }
-}
-
-struct ReadyRerankControlV1;
-
-impl RetrievalExecutionControl for ReadyRerankControlV1 {
-    fn elapsed_micros(&self) -> u64 {
-        0
-    }
-
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}
-
-struct CancelledRerankControlV1;
-
-impl RetrievalExecutionControl for CancelledRerankControlV1 {
-    fn elapsed_micros(&self) -> u64 {
-        0
-    }
-
-    fn is_cancelled(&self) -> bool {
-        true
-    }
-}
-
-struct ReadySemanticControlV1;
-
-impl RetrievalExecutionControl for ReadySemanticControlV1 {
+impl RetrievalExecutionControl for ReadyRetrievalControlV1 {
     fn is_cancelled(&self) -> bool {
         false
     }
@@ -858,7 +786,6 @@ fn query_authority_with_candidate_cap(
         diversity_policy_id: id("diversity.code-index.fixture")
             .try_into()
             .expect("diversity id"),
-        rerank_policy_id: None,
         retrieval_budget: RetrievalBudget {
             max_candidates_per_lane,
             max_fused_candidates: 32,
@@ -1116,7 +1043,6 @@ async fn mounted_core_query_worktree_in(
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -1255,7 +1181,7 @@ fn served_lexical_texts(scheduler: &CodeIndexWorktreeSchedulerV1, needle: &str) 
 ///
 /// A serving seat is published from inside a pass, so every seat wait returns
 /// while the worker still owns `reconcile_in_progress` and has post-seat work
-/// left — semantic scheduling, receipts, graph steps. A test that samples one
+/// left — receipts, graph steps. A test that samples one
 /// of those effects immediately after a seat wait races the pass that produces
 /// it. This is the barrier for "the pass that seated is finished", and it is a
 /// failure bound only: a worker that never finishes panics with a diagnostic.
@@ -1295,70 +1221,6 @@ async fn quiesced_background_reconcile_admission(
         .expect("hold background worker at its dequeue point");
     wait_for_quiescent_owner_pass(registry, project_root).await;
     admission
-}
-
-/// In-process semantic-vector graph fixture: the canonical isolated semantic
-/// evaluation graph stands in for the daemon-retained code-graph runtime, so
-/// publish/restore flows exercise the same verified staging/publication
-/// machinery the production provider resolves.
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-struct IsolatedSemanticVectorGraphProviderV1 {
-    graph:
-        Arc<tracedecay_application::store::vector_generations::IsolatedSemanticEvaluationGraphV1>,
-    current: tracedecay_domain::CodeGenerationId,
-    generation_reads: std::sync::atomic::AtomicUsize,
-}
-
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-impl IsolatedSemanticVectorGraphProviderV1 {
-    fn new(
-        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-    ) -> Arc<Self> {
-        let graph =
-            tracedecay_application::store::vector_generations::isolated_semantic_evaluation_graph(
-                &[generation],
-                Arc::new(NeverCancelled),
-            )
-            .expect("open isolated semantic evaluation graph");
-        Arc::new(Self {
-            graph,
-            current: generation.manifest().generation_id.clone(),
-            generation_reads: std::sync::atomic::AtomicUsize::new(0),
-        })
-    }
-
-    fn generation_reads(&self) -> usize {
-        self.generation_reads
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-}
-
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-impl SemanticVectorGraphProviderV1 for IsolatedSemanticVectorGraphProviderV1 {
-    fn graph_for_generation<'a>(
-        &'a self,
-        generation: &'a tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-    ) -> SemanticRuntimeFuture<'a, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
-    {
-        self.generation_reads
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        Box::pin(async move {
-            self.graph
-                .retained(&generation.manifest().generation_id)
-                .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))
-        })
-    }
-
-    fn graph_for_current(
-        &self,
-    ) -> SemanticRuntimeFuture<'_, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
-    {
-        Box::pin(async move {
-            self.graph
-                .retained(&self.current)
-                .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))
-        })
-    }
 }
 
 const CALLER_STAR: usize = 2_000;

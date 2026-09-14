@@ -852,22 +852,7 @@ pub struct RegisteredConfigurationRuntime {
     pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub(super) actor: ActorId,
     pub(super) grants: DaemonConfigurationGrantAuthority,
-    pub(super) semantic_operation: Arc<OnceLock<Arc<ProductionSemanticConfigurationOperationV1>>>,
-    pub(super) semantic_activation_committed: Arc<Notify>,
-    pub(super) semantic_evaluation_workers: Arc<
-        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
-    >,
     pub(super) feedback_refresh: Arc<RwLock<Option<Arc<dyn ConfigurationRuntimeRefreshPort>>>>,
-}
-
-impl RegisteredConfigurationRuntime {
-    pub fn semantic_evaluation_workers(
-        &self,
-    ) -> &Arc<
-        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
-    > {
-        &self.semantic_evaluation_workers
-    }
 }
 
 pub struct RuntimeLspSession {

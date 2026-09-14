@@ -132,12 +132,7 @@ async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_
     let mount_started = std::time::Instant::now();
     assert!(
         registry
-            .mount_worktree(
-                project_id(),
-                project.path(),
-                store.path().to_path_buf(),
-                None,
-            )
+            .mount_worktree(project_id(), project.path(), store.path().to_path_buf())
             .await
             .expect("mount the exact worktree"),
         "the cold route is newly mounted"

@@ -384,7 +384,6 @@ async fn begin_portable_project_open(
                 &open_project_path,
                 &handshake,
                 ProductionProjectCompositionRuntime::Portable {
-                    semantic_auto_download: true,
                     startup_catch_up: true,
                 },
                 &cancellation,

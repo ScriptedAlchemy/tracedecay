@@ -61,7 +61,7 @@ def main() -> int:
     features = manifest.get("features", {})
     if features.get("default") != ["production"]:
         raise SystemExit("default feature must delegate only to production")
-    required_production = {"token-counting", "lite", "full", "semantic-fastembed"}
+    required_production = {"token-counting", "lite", "full"}
     if not required_production.issubset(set(features.get("production", []))):
         raise SystemExit("production feature set lost a required member")
     if "test-transport" in features["production"]:

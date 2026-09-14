@@ -15,9 +15,6 @@
 //! `tracedecay-global-db` the registered schema, and `tracedecay-graph-db`
 //! the graph store.
 //!
-//! The `tracedecay-application` dependency remains for implementing
-//! [`tracedecay_code_index_runtime::CodeGraphSeatLeaseV1`] and verified
-//! semantic-vector adapters whose signatures name application runtime types.
 //! Observation cancellation comes from
 //! `tracedecay_sessions::observation`.
 //!
@@ -30,7 +27,6 @@ pub mod remote_frame_transfer;
 pub mod remote_query;
 pub mod remote_replay_transaction;
 pub mod retained_memory;
-pub mod semantic_artifact_gc;
 pub mod session_registry;
 pub mod standalone_session;
 pub mod store_locator_resolver;
@@ -45,9 +41,6 @@ pub use remote_credentials::{
 pub use remote_frame_transfer::DaemonRemoteFrameTransferProtocolPortV1;
 pub use remote_query::DaemonRemoteExactObservationQueryPortV1;
 pub use remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
-pub use semantic_artifact_gc::{
-    SemanticArtifactGcMaintenanceTask, spawn_semantic_artifact_gc_maintenance,
-};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use session_registry::maintenance::RegisteredSchemaConvergenceTestGate;
 pub use session_registry::maintenance::{

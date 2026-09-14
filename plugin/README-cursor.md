@@ -230,7 +230,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_rank",
     "tracedecay:tracedecay_read",
     "tracedecay:tracedecay_recursion",
-    "tracedecay:tracedecay_redundancy",
     "tracedecay:tracedecay_remote_status",
     "tracedecay:tracedecay_rename_preview",
     "tracedecay:tracedecay_retrieve",

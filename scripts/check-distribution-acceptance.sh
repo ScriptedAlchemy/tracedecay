@@ -83,97 +83,6 @@ assert_binary_source_sha() {
     die "$build_kind tracedecay binary reported $reported_version; expected $expected_version"
 }
 
-assert_fastembed_fixture() {
-  local fixture_root=$1
-  local validator=$2
-  local required
-  local -a missing=()
-  for required in \
-    fixture.json \
-    model.onnx \
-    tokenizer.json \
-    config.json \
-    special_tokens_map.json \
-    tokenizer_config.json; do
-    if [[ ! -f "$fixture_root/$required" || -L "$fixture_root/$required" ]]; then
-      missing+=("$required")
-    fi
-  done
-  if ((${#missing[@]})); then
-    die "FastEmbed acceptance requires prepared real fixture bytes under $fixture_root; missing regular files: ${missing[*]}"
-  fi
-  [[ -f $validator ]] ||
-    die "FastEmbed fixture validator is missing: $validator"
-  python3 "$validator" "$fixture_root"
-}
-
-# The FastEmbed distribution-acquisition regression suite is doubly conditional:
-# its module is `#[cfg(all(test, feature = "semantic-fastembed", not(windows)))]` and its
-# tests are `#[ignore]`d because they need this gate's isolated profile and
-# verified Jina fixture. That means it runs in exactly one place — the semantic
-# leg below, under `--features semantic-fastembed --run-ignored all`. If either
-# side of that pairing is dropped the suite stops running *silently*: the lib
-# test binary still has hundreds of other tests, so `--no-tests=fail` would not
-# notice. Assert the pairing statically, before the expensive packaging work.
-assert_gated_acquisition_suite() {
-  local source_repo=$1
-  local gate_script=$2
-  python3 - "$source_repo" "$gate_script" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-repo = Path(sys.argv[1])
-gate = Path(sys.argv[2])
-
-declaration = repo / "crates/tracedecay-semantic/src/model_lifecycle.rs"
-suite = repo / "crates/tracedecay-semantic/src/model_lifecycle/distribution_acquisition_acceptance.rs"
-
-if not suite.is_file():
-    raise SystemExit(
-        "distribution acceptance: the FastEmbed distribution-acquisition regression "
-        f"suite is missing: {suite}"
-    )
-
-declaration_text = declaration.read_text(encoding="utf-8")
-if not re.search(
-    r'#\[cfg\(all\(test,\s*feature\s*=\s*"semantic-fastembed",\s*not\(windows\)\)\)\]\s*\n'
-    r'#\[path = "model_lifecycle/distribution_acquisition_acceptance\.rs"\]\s*\n'
-    r"mod distribution_acquisition_acceptance;",
-    declaration_text,
-):
-    raise SystemExit(
-        "distribution acceptance: the acquisition suite is no longer declared under "
-        f'#[cfg(all(test, feature = "semantic-fastembed", not(windows)))] in {declaration}'
-    )
-
-suite_text = suite.read_text(encoding="utf-8")
-ignored = len(re.findall(r"#\[ignore", suite_text))
-tests = len(re.findall(r"#\[test\]", suite_text))
-if tests == 0 or ignored != tests:
-    raise SystemExit(
-        "distribution acceptance: the acquisition suite must be entirely #[ignore]d "
-        f"so only this gate runs it (found {tests} tests, {ignored} ignored)"
-    )
-
-gate_text = gate.read_text(encoding="utf-8")
-for required in ("--features semantic-fastembed", "--run-ignored all"):
-    # Match the flag as a real continued command-line argument, not as any
-    # mention of the string — otherwise this very check, which names both flags
-    # in its own diagnostics, would keep satisfying itself after the invocation
-    # below lost them.
-    if not re.search(rf"^\s+{re.escape(required)} \\$", gate_text, re.MULTILINE):
-        raise SystemExit(
-            "distribution acceptance: this gate no longer passes "
-            f"{required!r}, so the FastEmbed acquisition suite would never run"
-        )
-print(
-    f"distribution acceptance: FastEmbed acquisition suite gated and reachable "
-    f"({tests} tests)"
-)
-PY
-}
-
 assert_required_assets() {
   local root_package=$1
   local cli_package=$2
@@ -204,7 +113,6 @@ assert_required_assets() {
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
     "tests/fixtures/analytics/codex_skill_prose.txt"
     "benchmark_data/claude-observation/workload-v1.json"
-    "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
     "benchmark_data/search-quality/query-fallback-report-v1.json"
   )
 
@@ -246,11 +154,9 @@ verify_feature_wiring() {
   local code_index_packaged_manifest=$4
   local extraction_source_manifest=$5
   local extraction_packaged_manifest=$6
-  local semantic_source_manifest=$7
-  local semantic_packaged_manifest=$8
-  local cli_source_manifest=$9
-  local cli_packaged_manifest=${10}
-  local cargo_config=${11}
+  local cli_source_manifest=$7
+  local cli_packaged_manifest=$8
+  local cargo_config=$9
   python3 "$repo/scripts/check-distribution-feature-wiring.py" \
     --root-source "$source_manifest" \
     --root-packaged "$packaged_manifest" \
@@ -258,8 +164,6 @@ verify_feature_wiring() {
     --code-index-packaged "$code_index_packaged_manifest" \
     --extraction-source "$extraction_source_manifest" \
     --extraction-packaged "$extraction_packaged_manifest" \
-    --semantic-source "$semantic_source_manifest" \
-    --semantic-packaged "$semantic_packaged_manifest" \
     --cli-source "$cli_source_manifest" \
     --cli-packaged "$cli_packaged_manifest" \
     --check-extraction-manifest "$extraction_packaged_manifest" \
@@ -291,7 +195,6 @@ done
 
 require_command cargo
 require_command cmp
-require_command curl
 require_command git
 require_command python3
 require_command rustc
@@ -318,8 +221,6 @@ for fixture in \
     "$repo/tests/fixtures/packaged_host_events/$fixture" ||
     die "packaged host-event fixture copy differs from its authority: $fixture"
 done
-
-assert_gated_acquisition_suite "$repo" "$script_path"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-distribution.XXXXXX")
 cleanup() {
@@ -360,24 +261,6 @@ release_cli_cargo_args=(
   --no-default-features
   --features "$release_cargo_features"
 )
-
-fastembed_fixture_source="$repo/tests/distribution/fastembed"
-fastembed_fixture="$work/fastembed"
-fastembed_supported=true
-if [[ $host_target == *-windows-* ]]; then
-  fastembed_supported=false
-fi
-if $fastembed_supported; then
-echo "distribution acceptance: acquiring immutable Jina FastEmbed fixture"
-python3 \
-  "$fastembed_fixture_source/prepare_fixture.py" \
-  "$fastembed_fixture_source" \
-  "$fastembed_fixture"
-fixture_metadata=$(assert_fastembed_fixture \
-  "$fastembed_fixture" \
-  "$fastembed_fixture_source/validate_fixture.py")
-IFS=$'\t' read -r fastembed_dimensions fastembed_max_length <<<"$fixture_metadata"
-fi
 
 echo "distribution acceptance: release-building the production feature set"
 cargo build \
@@ -647,8 +530,7 @@ for required_package in \
   tracedecay-code-index \
   tracedecay-code-index-runtime \
   tracedecay-code-extraction \
-  tracedecay-query \
-  tracedecay-semantic; do
+  tracedecay-query; do
   [[ -n ${package_dirs[$required_package]:-} ]] ||
     die "workspace package required by the distribution gate was not produced: $required_package"
 done
@@ -659,7 +541,6 @@ lsp_package=${package_dirs[tracedecay-lsp]}
 code_index_package=${package_dirs[tracedecay-code-index]}
 code_extraction_package=${package_dirs[tracedecay-code-extraction]}
 query_package=${package_dirs[tracedecay-query]}
-semantic_package=${package_dirs[tracedecay-semantic]}
 catalog_package=${package_dirs[tracedecay-tool-catalog]}
 contracts_package=${package_dirs[tracedecay-contracts]}
 
@@ -707,8 +588,6 @@ verify_feature_wiring \
   "$code_index_package/Cargo.toml" \
   "$repo/crates/tracedecay-code-extraction/Cargo.toml" \
   "$code_extraction_package/Cargo.toml" \
-  "$repo/crates/tracedecay-semantic/Cargo.toml" \
-  "$semantic_package/Cargo.toml" \
   "$repo/crates/tracedecay-cli/Cargo.toml" \
   "$cli_package/Cargo.toml" \
   "$patch_config"
@@ -751,31 +630,7 @@ cargo check \
   --lib \
   --config "$patch_config"
 
-if $fastembed_supported; then
-ort_lib_path=${ORT_LIB_PATH:-$(python3 - <<'PY'
-import os
-from pathlib import Path
-
-cache_root = Path(
-    os.environ.get("ORT_CACHE_DIR", Path.home() / ".cache" / "ort.pyke.io")
-)
-names = {"libonnxruntime.a", "libonnxruntime.dylib", "onnxruntime.lib"}
-candidates = [
-    path
-    for path in cache_root.glob("dfbin/**/*")
-    if path.is_file()
-    and (path.name in names or path.name.startswith("libonnxruntime.so"))
-]
-if candidates:
-    print(max(candidates, key=lambda path: path.stat().st_mtime).parent)
-PY
-)}
-[[ -n $ort_lib_path ]] ||
-  die "cached ONNX Runtime library is unavailable for the offline semantic tests"
-export ORT_LIB_PATH="$ort_lib_path"
-fi
-
-echo "distribution acceptance: checking extracted query semantic fallback behavior"
+echo "distribution acceptance: checking extracted query library behavior"
 CARGO_NET_OFFLINE=true cargo nextest run \
   --manifest-path "$query_package/Cargo.toml" \
   --release \
@@ -784,7 +639,7 @@ CARGO_NET_OFFLINE=true cargo nextest run \
   --config "$patch_config" \
   --no-tests=fail
 
-echo "distribution acceptance: checking extracted root strict semantic unavailability"
+echo "distribution acceptance: checking extracted root library behavior with production features"
 CARGO_NET_OFFLINE=true cargo nextest run \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
@@ -813,52 +668,6 @@ TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   --test mcp_suite \
   --config "$patch_config" \
   --no-tests=fail
-
-if $fastembed_supported; then
-echo "distribution acceptance: checking packaged semantic lifecycle and Jina acquisition"
-TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
-  TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT="$work/semantic-model-profile" \
-  CARGO_NET_OFFLINE=true \
-  HF_HUB_OFFLINE=1 \
-  cargo nextest run \
-  --manifest-path "$semantic_package/Cargo.toml" \
-  --release \
-  --features semantic-fastembed \
-  --lib \
-  --run-ignored all \
-  --config "$patch_config" \
-  --no-tests=fail
-
-echo "distribution acceptance: exercising packaged semantic activation and recovery"
-TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
-  TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT="$work/semantic-activation-profile" \
-  CARGO_NET_OFFLINE=true \
-  HF_HUB_OFFLINE=1 \
-  cargo nextest run \
-  --manifest-path "$root_package/Cargo.toml" \
-  --release \
-  --no-default-features \
-  --features production \
-  --lib \
-  --config "$patch_config" \
-  -E 'test(~semantic_activation_journey_test::public_semantic_activation_rollback_and_exact_retry_preserve_graph_authority)' \
-  --no-tests=fail
-
-echo "distribution acceptance: exercising shipped CLI semantic activation"
-TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
-  TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
-  CARGO_NET_OFFLINE=true \
-  HF_HUB_OFFLINE=1 \
-  cargo nextest run \
-  --manifest-path "$cli_package/Cargo.toml" \
-  --release \
-  "${release_cli_cargo_args[@]}" \
-  --test core_cli_suite \
-  --config "$patch_config" \
-  --run-ignored all \
-  -E 'test(=semantic_activation_test::shipped_cli_activates_a_published_profile_for_strict_semantic_search)' \
-  --no-tests=fail
-fi
 
 install_root="$work/install"
 echo "distribution acceptance: installing packaged CLI with release facilities"
@@ -1013,59 +822,6 @@ fi
 grep -Eq "no function or associated item named .*has_project_session_retrieval_service_for_test" \
   "$test_api_stderr" ||
   die "test API probe failed for an unexpected reason"
-
-if $fastembed_supported; then
-mkdir -p -- "$root_package/examples"
-cp -- \
-  "$repo/tests/distribution/fastembed/acceptance.rs" \
-  "$root_package/examples/fastembed_distribution_acceptance.rs"
-cat >>"$root_package/Cargo.toml" <<'TOML'
-
-[[example]]
-name = "fastembed_distribution_acceptance"
-path = "examples/fastembed_distribution_acceptance.rs"
-TOML
-echo "distribution acceptance: building packaged FastEmbed and bundled ORT smoke"
-fastembed_build_messages="$work/fastembed-build.jsonl"
-cargo build \
-  --manifest-path "$root_package/Cargo.toml" \
-  --release \
-  --no-default-features \
-  --features production \
-  --example fastembed_distribution_acceptance \
-  --config "$patch_config" \
-  --message-format=json-render-diagnostics >"$fastembed_build_messages"
-fastembed_binary=$(python3 - "$fastembed_build_messages" <<'PY'
-import json
-import sys
-
-executable = None
-with open(sys.argv[1], encoding="utf-8") as handle:
-    for line in handle:
-        message = json.loads(line)
-        target = message.get("target", {})
-        if (
-            message.get("reason") == "compiler-artifact"
-            and target.get("name") == "fastembed_distribution_acceptance"
-            and "example" in target.get("kind", [])
-            and message.get("executable")
-        ):
-            executable = message["executable"]
-if executable is None:
-    raise SystemExit(
-        "distribution acceptance: Cargo did not report the FastEmbed example executable"
-    )
-print(executable)
-PY
-)
-[[ -x $fastembed_binary ]] ||
-  die "FastEmbed acceptance executable is missing: $fastembed_binary"
-echo "distribution acceptance: calling FastEmbed and bundled ORT with verified local bytes"
-CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 "$fastembed_binary" \
-  "$fastembed_fixture" \
-  "$fastembed_dimensions" \
-  "$fastembed_max_length"
-fi
 
 binary=$(python3 "$repo/scripts/resolve-installed-binary.py" \
   "$install_root" \

@@ -54,7 +54,7 @@ impl Fixture {
         let store = TempDir::new().expect("store root");
         let registry = CodeIndexSchedulerRegistryV1::new(1);
         registry
-            .mount_worktree(project_id(), root.path(), store.path().to_path_buf(), None)
+            .mount_worktree(project_id(), root.path(), store.path().to_path_buf())
             .await
             .expect("mount code-index scheduler");
         wait_for_initial_generation(&registry, root.path()).await;

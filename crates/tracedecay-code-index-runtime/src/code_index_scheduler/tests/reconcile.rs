@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fmt::Write as _,
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -8,43 +8,22 @@ use std::{
 };
 
 use tempfile::TempDir;
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use tracedecay_application::semantic_runtime::{
-    ProductionSemanticRuntimeV1, SemanticVectorGraphProviderV1,
-};
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, Deadline,
     ExactOccurrenceRequest, ResolvedScope, RetrievalPortContext, RetrievalPortOutcome,
     callable_code_operation,
 };
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, CommitId, ComponentRevision,
-    EphemeralSanitizedQueryViewV1, ExactClass, FreshnessVectorDigest, FusedCandidate,
-    LogicalEvidenceId, ManifestDigest, OptionalStagePublicStatus, PrincipalId, ProjectId,
-    PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate, RefId, RerankPolicy,
-    RetrievalAnchorId, RetrievalBudget, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, SanitizerRevision, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1,
-    UtcMicros, VectorWatermark, WorktreeId,
+    CodeGenerationId, CommitId, ProjectId, PublicRetrieverStatus, RefId, RetrieverKind,
+    SensitivityLevelV1, UtcMicros, WorktreeId,
 };
-use tracedecay_query::retrieval::{
-    rerank::{AdmittedNativeRerankExecutorV1, BoundedRerankRuntimeV1},
-    semantic::apply_bounded_rerank_outcome,
-};
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
     sampled_process_resident_bytes_v1,
 };
-use tracedecay_semantic_contracts::RerankCompatibilityPinsV1;
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use tracedecay_semantic_contracts::{DEFAULT_FASTEMBED_MODEL_ID, SemanticResourceCeilings};
 
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use super::IsolatedSemanticVectorGraphProviderV1;
 use super::{
-    ALPHA_LIB_V1, CancelledRerankControlV1, GitFixture, MixedAnchorReverseRerankExecutorV1,
-    RETAINED_REVISION_0, ReadyRerankControlV1, SERVING_SEAT_FAILURE_CEILING,
+    ALPHA_LIB_V1, GitFixture, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
     advance_pointer_to_unseated_successor, application_context, committed_capture_corpus_files,
     core_search_request, git, git_stdout, mounted_core_query_worktree,
     mounted_core_query_worktree_with_one_permit, published, query_authority, query_meta,
@@ -56,12 +35,6 @@ use super::{
     wait_for_live_complete_generation_by_polling, wait_for_queryable_text_generation,
     wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
     wait_for_quiescent_owner_pass, wait_until_serving_seat, write,
-};
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-use crate::semantic_code::{
-    CatalogedFastEmbedModelV1, DaemonSemanticRuntimeHandleV1, FastEmbedModelCatalogV1,
-    ModelLifecycleErrorV1, ModelMemberSourceV1, SemanticModelLifecycleOwnerV1,
-    production_fastembed_catalog,
 };
 use crate::{
     code_index::{
@@ -83,9 +56,6 @@ use crate::{
             ColdMountOpenEventV1, ServingGenerationInstallationOutcomeV1,
             ServingGenerationRollbackOutcomeV1, dashboard_code_graph_serving,
         },
-    },
-    semantic_code::rerank_adapter::{
-        GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
     },
 };
 
@@ -654,7 +624,6 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -712,7 +681,6 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -729,7 +697,6 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("remount worktree over the retained store");
@@ -808,10 +775,22 @@ fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v5() {
     );
 }
 
-/// A restart over a dirty checkout must seat the retained complete generation
-/// before the successor rebuild finishes. Waiting for that rebuild left remount
-/// serving empty (`last_reconcile_micros` unset, no seated publication) while
-/// a sealed artifact was already on disk.
+/// A restart over a dirty checkout must serve the retained generation before
+/// the successor rebuild finishes. Waiting for that rebuild left remount
+/// warming with no seated publication while a sealed artifact was already on
+/// disk.
+///
+/// Revision-7 partitioned remounts deliberately leave the complete
+/// `serving_generation` slot empty and answer through the lightweight text
+/// owner (and verified graph head) instead of replaying partition bytes.
+/// [`CodeIndexSchedulerRegistryV1::latest_generation_id`] is the product
+/// authority for that contract: it prefers the complete slot when seated and
+/// falls back to the text owner when the complete slot is intentionally empty.
+///
+/// The retained-graph recovery successor gate is required for observation: a
+/// tiny dirty fixture can publish its successor in well under one poll tick,
+/// so an ungated wait sees only the rebuild even when the retained text owner
+/// was installed first.
 #[tokio::test]
 async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -822,7 +801,6 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -833,42 +811,43 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
 
     let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    let remount_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical remount root");
+    let (recovery_entered, release_successor) = restarted
+        .pause_next_retained_graph_recovery_before_successor(remount_root.clone())
+        .await;
     restarted
         .mount_worktree(
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("remount worktree over a dirty checkout");
-    let seated = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(latest) = restarted
-                .latest_complete_serving_for_test(fixture.path())
-                .await
-            {
-                break latest;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("dirty remount must seat the retained generation before the successor rebuild");
+    tokio::time::timeout(Duration::from_secs(5), recovery_entered)
+        .await
+        .expect("dirty remount must recover the retained graph before the successor rebuild")
+        .expect("retained graph recovery gate stays open until this test releases it");
+    let seated = restarted
+        .latest_generation_id(&remount_root)
+        .await
+        .expect("retained text owner must serve while the successor is held");
     assert_eq!(
-        seated.generation().manifest().generation_id,
-        sealed_id,
-        "the empty serving slot takes the retained generation, not the in-flight rebuild"
+        seated, sealed_id,
+        "the remount serves the retained generation, not the in-flight rebuild"
     );
+    release_successor
+        .send(())
+        .expect("release the dirty successor rebuild");
 
     let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(latest) = restarted
-                .latest_complete_serving_for_test(fixture.path())
-                .await
-                && latest.generation().manifest().generation_id != sealed_id
+            if let Some(generation_id) = restarted.latest_generation_id(&remount_root).await
+                && generation_id != sealed_id
             {
-                break latest.generation().manifest().generation_id.clone();
+                break generation_id;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -892,7 +871,6 @@ async fn dirty_retained_seat_does_not_join_the_publication_decode_cache() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -945,7 +923,6 @@ async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -1459,180 +1436,6 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
 }
 
 #[test]
-fn generation_bound_rerank_authorizes_mixed_symbol_and_chunk_anchors() {
-    let fixture = GitFixture::new(&[(
-        "src/lib.rs",
-        "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { alpha() }\n",
-    )]);
-    let store = TempDir::new().expect("store root");
-    let mut scheduler = scheduler(
-        &fixture,
-        store.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    );
-    published(scheduler.reconcile_now().expect("initial publish"));
-    let latest = scheduler.latest_complete().expect("latest generation");
-    let symbol_chunk = latest
-        .generation
-        .chunks()
-        .chunks()
-        .iter()
-        .find(|chunk| chunk.anchor.symbol_occurrence_id.is_some())
-        .expect("symbol chunk");
-    let symbol = symbol_chunk
-        .anchor
-        .symbol_occurrence_id
-        .as_ref()
-        .expect("symbol occurrence");
-    let chunk = latest
-        .generation
-        .chunks()
-        .chunks()
-        .iter()
-        .find(|chunk| chunk.id != symbol_chunk.id)
-        .unwrap_or(symbol_chunk);
-    let anchors = [
-        RetrievalAnchorId::new(format!("code-symbol:{}", symbol.as_str())).expect("symbol anchor"),
-        RetrievalAnchorId::new(format!("code-chunk:{}", chunk.id.as_str())).expect("chunk anchor"),
-    ];
-    let candidates = anchors
-        .iter()
-        .enumerate()
-        .map(|(ordinal, anchor)| RankedCandidate {
-            candidate: FusedCandidate {
-                anchor_id: anchor.clone(),
-                logical_evidence_id: LogicalEvidenceId::new(anchor.as_str().to_owned())
-                    .expect("logical evidence"),
-                occurrences: Vec::new(),
-                exact_class: ExactClass::Approximate,
-                utility_micros: 2 - ordinal as u64,
-                contributions: Vec::new(),
-                freshness: Vec::new(),
-                decisions: Vec::new(),
-            },
-            final_ordinal: ordinal as u32,
-        })
-        .collect::<Vec<_>>();
-    let request = RetrievalRequest {
-        principal: PrincipalId::new("principal.rerank-mixed").expect("principal"),
-        scope: RetrievalScope {
-            privacy_domain: latest.generation.manifest().privacy_domain.clone(),
-            root: SingleRootScopeV1 {
-                repository: latest.generation.snapshot().repository.clone(),
-                worktree: latest.generation.snapshot().worktree.clone(),
-                reference: latest.generation.snapshot().reference.clone(),
-            },
-        },
-        temporal_mode: TemporalModeV1::Current,
-        snapshot: RetrievalSnapshot {
-            watermarks: VectorWatermark::default(),
-            freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "f".repeat(64)))
-                .expect("freshness digest"),
-            authorization_revision: AuthorizationRevision::new("authorization.rerank-mixed.v1")
-                .expect("authorization revision"),
-            captured_at: UtcMicros(1),
-        },
-        profile_id: "profile.rerank-mixed.v1"
-            .to_owned()
-            .try_into()
-            .expect("profile"),
-        budget: RetrievalBudget {
-            max_candidates_per_lane: 8,
-            max_fused_candidates: 8,
-            max_hydrated_results: 8,
-            max_hydration_bytes: 65_536,
-            deadline_micros: None,
-        },
-    };
-    let query = EphemeralSanitizedQueryViewV1::sanitize(
-        "alpha",
-        SanitizerRevision::new("sanitizer.rerank-mixed.v1").expect("sanitizer"),
-        QueryNormalizationRevision::new("normalization.rerank-mixed.v1").expect("normalization"),
-    )
-    .expect("query");
-    let policy = RerankPolicy {
-        policy_id: "rerank.mixed.v1".to_owned().try_into().expect("policy"),
-        evaluation_result_anchor: RetrievalAnchorId::new("evaluation.rerank-mixed.v1")
-            .expect("evaluation"),
-        max_candidates: 2,
-        max_input_bytes: u64::MAX,
-        max_input_tokens: u64::MAX,
-        max_work_units: 2,
-        max_model_invocations: 1,
-        deadline_micros: None,
-    };
-    let mut views = GenerationBoundCodeRerankViewsV1::new(&latest.generation, &query);
-    let runtime_outcome = BoundedRerankRuntimeV1::new(
-        &mut views,
-        &MixedAnchorReverseRerankExecutorV1,
-    )
-    .rerank(&request, &policy, &candidates, &ReadyRerankControlV1);
-    let pins = RerankCompatibilityPinsV1 {
-        implementation_revision: ComponentRevision::new("rerank.fastembed.production.v1")
-            .expect("implementation revision"),
-        artifact_manifest_digest: MixedAnchorReverseRerankExecutorV1
-            .artifact_manifest_digest()
-            .clone(),
-        runtime_compatibility_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
-            .expect("runtime digest"),
-    };
-    let authority = ProductionCodeRerankAuthorityV1::from_executor_for_test(
-        pins,
-        Arc::new(MixedAnchorReverseRerankExecutorV1),
-    );
-    let execute_outcome = authority.execute(
-        &latest.generation,
-        &query,
-        &request,
-        &policy,
-        &candidates,
-        &ReadyRerankControlV1,
-    );
-
-    assert_eq!(execute_outcome, runtime_outcome);
-    assert_eq!(
-        execute_outcome.public_status,
-        OptionalStagePublicStatus::Complete
-    );
-    assert_eq!(
-        execute_outcome
-            .ordered_candidates
-            .iter()
-            .map(|candidate| candidate.candidate.anchor_id.clone())
-            .collect::<Vec<_>>(),
-        anchors.into_iter().rev().collect::<Vec<_>>()
-    );
-
-    let cancelled = authority.execute(
-        &latest.generation,
-        &query,
-        &request,
-        &policy,
-        &candidates,
-        &CancelledRerankControlV1,
-    );
-    assert_eq!(
-        cancelled.public_status,
-        OptionalStagePublicStatus::Cancelled
-    );
-    assert_eq!(cancelled.ordered_candidates, candidates);
-    let mut composition = tracedecay_query::retrieval::fusion::CompositionOutputV1 {
-        profile_id: request.profile_id.clone(),
-        ranked_candidates: candidates.clone(),
-        comparator_records: Vec::new(),
-        internal_lane_outcomes: BTreeMap::new(),
-        public_lane_statuses: BTreeMap::new(),
-        freshness: Vec::new(),
-        lane_checkpoints: Vec::new(),
-        dedupe_decisions: Vec::new(),
-        diversity_decisions: Vec::new(),
-    };
-    let status = apply_bounded_rerank_outcome(&mut composition, cancelled);
-    assert_eq!(status, OptionalStagePublicStatus::Cancelled);
-    assert_eq!(composition.ranked_candidates, candidates);
-}
-
-#[test]
 fn cross_worktree_byte_reuse_without_identity_alias() {
     let first = GitFixture::new(&[("src/lib.rs", "pub fn shared() -> u32 { 7 }\n")]);
     let linked_root = TempDir::new().expect("linked worktree root");
@@ -1749,7 +1552,6 @@ async fn existing_path_remount_rejects_foreign_project_identity() {
             ProjectId::new("project.remount.owner").expect("valid owner project"),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount owning project");
@@ -1759,7 +1561,6 @@ async fn existing_path_remount_rejects_foreign_project_identity() {
             ProjectId::new("project.remount.foreign").expect("valid foreign project"),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect_err("same path must reject a foreign project");
@@ -1787,7 +1588,7 @@ async fn concurrent_same_root_mounts_keep_one_canonical_owner() {
         tasks.push(tokio::spawn(async move {
             barrier.wait().await;
             registry
-                .mount_worktree(test_project_id(), &root, store_root, None)
+                .mount_worktree(test_project_id(), &root, store_root)
                 .await
         }));
     }
@@ -1830,7 +1631,7 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
     let cold_store = store.path().to_path_buf();
     let cold_mount = tokio::spawn(async move {
         cold_registry
-            .mount_worktree(test_project_id(), &cold_root, cold_store, None)
+            .mount_worktree(test_project_id(), &cold_root, cold_store)
             .await
     });
 
@@ -1879,110 +1680,6 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
     );
 
     registry.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn retirement_parks_the_incumbent_while_a_same_root_remount_waits_on_its_scheduler() {
-    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(2);
-    let root = fixture.path().canonicalize().expect("canonical root");
-    assert!(
-        registry
-            .mount_worktree(
-                test_project_id(),
-                fixture.path(),
-                store.path().to_path_buf(),
-                None,
-            )
-            .await
-            .expect("incumbent mount succeeds")
-    );
-    let scheduler = registry
-        .scheduler_handle(&root)
-        .await
-        .expect("incumbent scheduler");
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_scheduler_tx, release_scheduler_rx) = std::sync::mpsc::channel();
-    let held_scheduler = Arc::clone(&scheduler);
-    let lock_thread = std::thread::spawn(move || {
-        let scheduler = held_scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let wake = Arc::clone(&scheduler.wake);
-        held_tx.send(wake).expect("signal held scheduler");
-        release_scheduler_rx.recv().expect("release held scheduler");
-    });
-    let wake = held_rx.recv().expect("scheduler lock must be held");
-    wake.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let reconciling = registry.reconcile_in_progress_for_test(&root).await;
-            if reconciling {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("incumbent worker blocks in its reconcile pass");
-
-    let replacement_entered = registry
-        .observe_next_existing_semantic_schedule_replacement(root.clone())
-        .await;
-    let remount_registry = registry.clone();
-    let remount_root = fixture.path().to_path_buf();
-    let remount_store = store.path().to_path_buf();
-    let remount = tokio::spawn(async move {
-        remount_registry
-            .mount_worktree(test_project_id(), &remount_root, remount_store, None)
-            .await
-    });
-    replacement_entered
-        .await
-        .expect("same-root remount reaches its semantic replacement");
-
-    let roots = BTreeSet::from([root.clone()]);
-    let _retirement = registry
-        .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
-        .await;
-    let _parked_before_retry = {
-        let retiring = registry.retiring.lock().await;
-        let mounted = registry.mounted.lock().await;
-        (retiring.contains_key(&root), mounted.contains_key(&root))
-    };
-
-    release_scheduler_tx
-        .send(())
-        .expect("release incumbent scheduler");
-    lock_thread.join().expect("held scheduler thread joins");
-    let remount = remount.await.expect("same-root remount joins");
-    let drained = registry
-        .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
-        .await;
-    let no_owner_remains = {
-        let retiring = registry.retiring.lock().await;
-        let mounted = registry.mounted.lock().await;
-        !retiring.contains_key(&root) && !mounted.contains_key(&root)
-    };
-    registry.shutdown().await;
-
-    // 24b3c81c4d superseded lock-park: the worker polls try_lock and cancels
-    // when `shutting_down` is set, so the 25ms deadline may complete. Remount
-    // must still observe retirement (not "owner changed") and must not install.
-    assert!(matches!(
-        remount,
-        Err(super::super::CodeIndexSchedulerErrorV1::Identity(message))
-            if message.contains("retired while semantic schedule update waited")
-    ));
-    assert!(
-        drained,
-        "the incumbent must drain after its scheduler releases"
-    );
-    assert!(
-        no_owner_remains,
-        "the refused remount must not leave a mounted or retiring orphan"
-    );
 }
 
 #[test]
@@ -2379,7 +2076,6 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
         )
         .await
@@ -2800,7 +2496,6 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -2939,7 +2634,6 @@ async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -3003,7 +2697,6 @@ async fn background_worker_waits_for_global_admission_before_publication_gate() 
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -3013,7 +2706,7 @@ async fn background_worker_waits_for_global_admission_before_publication_gate() 
             &mounted
                 .get(&fixture.path().canonicalize().expect("canonical root"))
                 .expect("mounted worktree")
-                .semantic_evaluation_publication_gate,
+                .build_publication_lock,
         )
     };
 
@@ -3080,7 +2773,7 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
             &mounted
                 .get(&fixture.path().canonicalize().expect("canonical root"))
                 .expect("mounted worktree")
-                .semantic_evaluation_publication_gate,
+                .build_publication_lock,
         )
     };
     let global_admission = registry.background_reconcile_admission();
@@ -3551,7 +3244,6 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount retained generation");
@@ -3859,7 +3551,6 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -3933,7 +3624,6 @@ async fn replay_binding_does_not_wait_for_the_scheduler_mutex() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -3999,15 +3689,15 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
-    // The seat is published mid-pass, so the mount's own reconcile receipt can
-    // still be outstanding. Sample the baseline only once that pass is done,
-    // or its receipt is charged to the probe below.
+    // The seat is published mid-pass and the receipt lands after the pass
+    // releases its in-progress guard, so sample the baseline only once the
+    // mount's own receipt exists, or it is charged to the probe below.
     wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
+    wait_for_event_to_ready(&registry).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
     {
         let mounted = registry.mounted.lock().await;
@@ -4161,7 +3851,6 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -4199,7 +3888,6 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -4283,7 +3971,6 @@ async fn dashboard_freshness_does_not_reconcile_an_out_of_band_change() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -4628,7 +4315,6 @@ async fn restart_over_same_length_preserved_mtime_rewrite_rebuilds_the_retained_
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -4644,7 +4330,6 @@ async fn restart_over_same_length_preserved_mtime_rewrite_rebuilds_the_retained_
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("remount worktree over the retained store");
@@ -4949,7 +4634,6 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
                     test_project_id(),
                     fixture.path(),
                     store.path().to_path_buf(),
-                    None,
                 )
                 .await
                 .expect("mount worktree")
@@ -5022,7 +4706,6 @@ async fn busy_worktree_serves_last_complete_generation_without_waiting() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -5094,7 +4777,6 @@ async fn shutdown_releases_indexed_generation_and_scheduler_owners() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -5136,7 +4818,6 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -5181,7 +4862,6 @@ async fn shutdown_timeout_retains_blocked_worker_owner_until_retry_joins_it() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -5240,7 +4920,6 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -5315,7 +4994,7 @@ async fn simultaneous_cold_mounts_admit_exactly_one_worktree_owner() {
             tokio::spawn(async move {
                 start.wait().await;
                 registry
-                    .mount_worktree(test_project_id(), &project_root, store_root, None)
+                    .mount_worktree(test_project_id(), &project_root, store_root)
                     .await
                     .expect("cold mount")
             })
@@ -5428,7 +5107,7 @@ async fn cancelled_cold_mount_holds_its_reservation_until_blocking_open_finishes
         let store_root = store.path().to_path_buf();
         tokio::spawn(async move {
             registry
-                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .mount_worktree(test_project_id(), &project_root, store_root)
                 .await
         })
     };
@@ -5442,7 +5121,7 @@ async fn cancelled_cold_mount_holds_its_reservation_until_blocking_open_finishes
         let store_root = store.path().to_path_buf();
         tokio::spawn(async move {
             registry
-                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .mount_worktree(test_project_id(), &project_root, store_root)
                 .await
         })
     };
@@ -5492,7 +5171,7 @@ async fn failed_cold_mount_releases_its_reservation_for_retry() {
 
     assert!(
         registry
-            .mount_worktree(test_project_id(), fixture.path(), bad_store, None)
+            .mount_worktree(test_project_id(), fixture.path(), bad_store)
             .await
             .is_err(),
         "the first cold open fails through the typed scheduler error"
@@ -5504,7 +5183,6 @@ async fn failed_cold_mount_releases_its_reservation_for_retry() {
                 test_project_id(),
                 fixture.path(),
                 retry_store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("failed cold mount must release its exact reservation"),
@@ -5531,7 +5209,7 @@ async fn distinct_cold_mounts_respect_capacity_before_opening() {
         let store_root = store.path().to_path_buf();
         tokio::spawn(async move {
             registry
-                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .mount_worktree(test_project_id(), &project_root, store_root)
                 .await
         })
     };
@@ -5544,7 +5222,7 @@ async fn distinct_cold_mounts_respect_capacity_before_opening() {
         let store_root = store.path().to_path_buf();
         tokio::spawn(async move {
             registry
-                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .mount_worktree(test_project_id(), &project_root, store_root)
                 .await
         })
     };
@@ -5553,12 +5231,7 @@ async fn distinct_cold_mounts_respect_capacity_before_opening() {
         .await;
 
     let capacity = registry
-        .mount_worktree(
-            test_project_id(),
-            third.path(),
-            store.path().to_path_buf(),
-            None,
-        )
+        .mount_worktree(test_project_id(), third.path(), store.path().to_path_buf())
         .await
         .expect_err("the N+1 distinct root must be refused before opening");
     registry.release_cold_mount_open_gate(first.path());
@@ -5696,7 +5369,7 @@ async fn shutdown_after_outer_mount_check_refuses_reservation_before_open() {
         let store_root = store.path().to_path_buf();
         tokio::spawn(async move {
             registry
-                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .mount_worktree(test_project_id(), &project_root, store_root)
                 .await
         })
     };
@@ -5734,7 +5407,7 @@ async fn shutdown_waits_for_and_fences_a_cold_mount_open() {
         let store_root = store.path().to_path_buf();
         tokio::spawn(async move {
             registry
-                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .mount_worktree(test_project_id(), &project_root, store_root)
                 .await
         })
     };
@@ -5780,7 +5453,7 @@ async fn retirement_waits_for_and_fences_an_exact_cold_mount_open() {
         let store_root = store.path().to_path_buf();
         tokio::spawn(async move {
             registry
-                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .mount_worktree(test_project_id(), &project_root, store_root)
                 .await
         })
     };
@@ -5816,7 +5489,6 @@ async fn retirement_waits_for_and_fences_an_exact_cold_mount_open() {
                 test_project_id(),
                 fixture.path(),
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("retired reservation is released after its open joins"),
@@ -5845,7 +5517,6 @@ async fn background_reconciles_respect_a_single_admission_permit() {
                 test_project_id(),
                 fixture.path(),
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount worktree");
@@ -5925,7 +5596,6 @@ async fn build_publication_lock_serializes_source_reconcile() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -5975,7 +5645,6 @@ async fn distinct_stores_reconcile_in_parallel_under_bounded_admission() {
                 test_project_id(),
                 fixture.path(),
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount worktree");
@@ -6052,7 +5721,6 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -6079,172 +5747,6 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
     // The worker survived the poison when the edit becomes text-current.
     let _ = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
     registry.shutdown().await;
-}
-
-#[cfg(all(feature = "semantic-fastembed", not(windows)))]
-#[tokio::test(flavor = "multi_thread")]
-async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() {
-    struct PreparedJinaFixture {
-        root: PathBuf,
-    }
-
-    impl ModelMemberSourceV1 for PreparedJinaFixture {
-        fn fetch_member(
-            &self,
-            model: &CatalogedFastEmbedModelV1,
-            upstream_path: &str,
-            destination: &Path,
-        ) -> Result<(), ModelLifecycleErrorV1> {
-            let member = model
-                .members
-                .values()
-                .find(|member| member.upstream_path == upstream_path)
-                .ok_or(ModelLifecycleErrorV1::DownloadFailed)?;
-            std::fs::copy(self.root.join(&member.path), destination)
-                .map(|_| ())
-                .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)
-        }
-    }
-
-    let Some(fixture_root) = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-    else {
-        eprintln!(
-            "skipping configured Jina integration; prepare fixture and set \
-             TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE"
-        );
-        return;
-    };
-
-    let lifecycle_root = TempDir::new().expect("lifecycle root");
-    let catalog: FastEmbedModelCatalogV1 = production_fastembed_catalog();
-    let lifecycle = Arc::new(
-        SemanticModelLifecycleOwnerV1::open(
-            lifecycle_root.path(),
-            catalog,
-            Arc::new(PreparedJinaFixture { root: fixture_root }),
-        )
-        .expect("Jina lifecycle"),
-    );
-    lifecycle
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select configured Jina model");
-    lifecycle
-        .acquire_blocking_for_tests()
-        .expect("install configured Jina fixture");
-
-    let project = GitFixture::new(&[(
-        "src/lib.rs",
-        "pub fn semantic_bridge() -> &'static str { \"ready\" }\n",
-    )]);
-    let code_store = TempDir::new().expect("code store");
-    let mut scheduler = scheduler(
-        &project,
-        code_store.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    );
-    published(scheduler.reconcile_now().expect("publish code generation"));
-    let latest = scheduler.latest_complete().expect("latest code generation");
-
-    let database_root = TempDir::new().expect("database root");
-    let database_path = database_root.path().join("project.db");
-    let authority =
-        DatabaseAuthority::acquire_test(&database_path, "Jina semantic bridge integration")
-            .expect("database authority");
-    let database = Arc::new(
-        Database::publish_test_runtime(
-            &database_path,
-            &authority,
-            TestDatabaseRuntimeMode::Initialize,
-        )
-        .await
-        .expect("project database")
-        .0,
-    );
-    let handle = DaemonSemanticRuntimeHandleV1::new(1, 64, 2 << 30).expect("semantic handle");
-    let vector_graph = IsolatedSemanticVectorGraphProviderV1::new(&latest.generation);
-    let runtime = ProductionSemanticRuntimeV1::new(
-        handle.clone(),
-        Arc::clone(&database),
-        Arc::clone(&vector_graph) as Arc<dyn SemanticVectorGraphProviderV1>,
-        Arc::clone(&lifecycle),
-        SemanticResourceCeilings {
-            max_model_bytes: 1024 * 1024 * 1024,
-            max_tokenizer_bytes: 64 * 1024 * 1024,
-            max_resident_bytes: Some(2 * 1024 * 1024 * 1024),
-            max_threads: 1,
-            max_concurrent_sessions: 1,
-            max_batch_size: 4,
-            max_sequence_length: 4096,
-            load_deadline_ms: 180_000,
-        },
-        tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
-    );
-
-    assert!(runtime.schedule_saved_generation(Arc::clone(&latest.generation)));
-    latest
-        .production_query_owners()
-        .expect("ordinary lanes remain callable during Jina startup");
-    tokio::time::timeout(Duration::from_mins(3), async {
-        while handle.current().is_none() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("Jina projection became atomically current");
-    let current = handle.current().expect("current semantic pointer");
-    assert!(
-        handle
-            .query_factory(
-                &current.source_generation,
-                &current.generation,
-                &current.projection_key,
-            )
-            .is_some()
-    );
-
-    let restarted_handle =
-        DaemonSemanticRuntimeHandleV1::new(1, 64, 2 << 30).expect("restarted handle");
-    let restarted = ProductionSemanticRuntimeV1::new(
-        restarted_handle.clone(),
-        database,
-        Arc::clone(&vector_graph) as Arc<dyn SemanticVectorGraphProviderV1>,
-        lifecycle,
-        SemanticResourceCeilings {
-            max_model_bytes: 1024 * 1024 * 1024,
-            max_tokenizer_bytes: 64 * 1024 * 1024,
-            max_resident_bytes: Some(2 * 1024 * 1024 * 1024),
-            max_threads: 1,
-            max_concurrent_sessions: 1,
-            max_batch_size: 4,
-            max_sequence_length: 4096,
-            load_deadline_ms: 180_000,
-        },
-        tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
-    );
-    let generation_reads_before_restore = vector_graph.generation_reads();
-    assert!(
-        restarted
-            .restore_current(latest.metadata().manifest(), &current.generation)
-            .await
-            .expect("restore current generation")
-    );
-    assert_eq!(
-        vector_graph.generation_reads(),
-        generation_reads_before_restore,
-        "restart restore must read vector provenance through current metadata identity, not a decoded generation"
-    );
-    assert_eq!(restarted_handle.current(), Some(current.clone()));
-    assert!(
-        restarted_handle
-            .query_factory(
-                &current.source_generation,
-                &current.generation,
-                &current.projection_key,
-            )
-            .is_some()
-    );
 }
 
 /// gix status classification keeps committed/staged/unstaged/untracked/deleted
@@ -6772,7 +6274,6 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount scheduler");
@@ -6820,7 +6321,6 @@ async fn serving_seat_signal_observes_a_seat_that_misses_the_poll_deadline() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount scheduler");
@@ -6863,67 +6363,6 @@ async fn serving_seat_signal_fails_when_a_seat_never_arrives() {
 }
 
 #[tokio::test]
-async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    registry
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-            None,
-        )
-        .await
-        .expect("mount scheduler");
-    let initial = wait_for_live_complete_generation(&registry, fixture.path())
-        .await
-        .generation
-        .manifest()
-        .generation_id
-        .clone();
-
-    let first = registry.semantic_mcp_abstention(fixture.path()).await;
-    assert_eq!(first.code_generation.as_deref(), Some(initial.as_str()));
-    assert_eq!(first.reason, "semantic_runtime_unavailable");
-
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    git(fixture.path(), &["commit", "-qam", "external"]);
-    // Query admission schedules the reconcile instead of running it inline, so
-    // the out-of-band commit lands on the background worker. The abstention
-    // still reports the freshest *sealed* generation; it just no longer forces
-    // the rebuild that seals it onto whichever request arrived first.
-    let _ = registry.semantic_mcp_abstention(fixture.path()).await;
-    wait_for_generation_change(&registry, fixture.path(), &initial).await;
-    // Publication is not the sealed serving seat. Abstention reports the
-    // seated generation, so wait for that seat to advance.
-    wait_until_serving_seat(
-        &registry,
-        fixture.path(),
-        SERVING_SEAT_FAILURE_CEILING,
-        || async {
-            registry
-                .latest_complete_serving_for_test(fixture.path())
-                .await
-                .filter(|latest| latest.generation.manifest().generation_id != initial)
-        },
-    )
-    .await;
-    let refreshed = registry.semantic_mcp_abstention(fixture.path()).await;
-    assert_ne!(refreshed.code_generation.as_deref(), Some(initial.as_str()));
-    assert_eq!(
-        refreshed.code_generation.as_deref(),
-        registry
-            .latest_generation_id(fixture.path())
-            .await
-            .as_ref()
-            .map(tracedecay_domain::CodeGenerationId::as_str)
-    );
-    assert_eq!(refreshed.reason, "semantic_runtime_unavailable");
-    registry.shutdown().await;
-}
-
-#[tokio::test]
 async fn freshness_failure_does_not_serve_a_stale_complete_generation() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
@@ -6933,7 +6372,6 @@ async fn freshness_failure_does_not_serve_a_stale_complete_generation() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount scheduler");
@@ -6966,7 +6404,6 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount scheduler");
@@ -7093,7 +6530,6 @@ async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
         )
         .await
@@ -7263,7 +6699,6 @@ async fn text_freshness_query_during_owner_work_is_current_when_source_is_unchan
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
         )
         .await
@@ -7413,7 +6848,6 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 test_project_id(),
                 fixture.path(),
                 store_root.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount daemon-owned scheduler")
@@ -7908,7 +7342,6 @@ async fn mount_with_retained_generation_verifies_cadence_promptly() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount with retained generation");
@@ -7977,7 +7410,6 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount retained");
@@ -8054,7 +7486,6 @@ async fn witness_verified_mount_activates_without_rebuild() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount retained");
@@ -8109,7 +7540,6 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
         )
         .await
@@ -8216,7 +7646,6 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount retained generation");
@@ -8367,7 +7796,6 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount retained generation");
@@ -8792,7 +8220,6 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
         )
         .await
@@ -9212,7 +8639,6 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::from_enabled(
                 config.config().native_graph_activation,
             ),
@@ -9354,7 +8780,6 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
                 test_project_id(),
                 fixture.path(),
                 store.path().to_path_buf(),
-                None,
                 super::super::CodeGraphActivationPolicyV1::Enabled,
             )
             .await
@@ -9366,7 +8791,6 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
                 test_project_id(),
                 fixture.path(),
                 store.path().to_path_buf(),
-                None,
                 super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
             )
             .await
@@ -9444,7 +8868,6 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
         )
         .await
@@ -9484,7 +8907,6 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
                 test_project_id(),
                 fixture.path(),
                 store.path().to_path_buf(),
-                None,
                 super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
             )
             .await
@@ -9585,7 +9007,6 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount retained generation");
@@ -9865,7 +9286,6 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount retained generation");
@@ -9960,7 +9380,6 @@ async fn graph_decode_does_not_block_text_freshness() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
         )
         .await
@@ -9994,7 +9413,6 @@ async fn graph_decode_does_not_block_text_freshness() {
                 test_project_id(),
                 fixture.path(),
                 store.path().to_path_buf(),
-                None,
                 super::super::CodeGraphActivationPolicyV1::Enabled,
             )
             .await
@@ -10049,7 +9467,6 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount");
@@ -10059,7 +9476,16 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
         .manifest()
         .generation_id
         .clone();
+    // The mount pass records its receipt after it releases its in-progress
+    // guard, so wait for the receipt itself before taking the baseline.
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
+    wait_for_event_to_ready(&registry).await;
     let before_receipts = registry.event_to_ready_receipts().len();
+    // A new branch ref moves Git metadata past the seated proof without
+    // changing HEAD or any source, so the follow-up pass is an unchanged
+    // reconcile. A busy read must leave that one follow-up wake rather than
+    // trust the expired proof.
+    git(fixture.path(), &["branch", "proof-moved"]);
 
     let scheduler = registry
         .scheduler_handle(fixture.path())
@@ -10088,16 +9514,15 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
     release_tx.send(()).expect("release");
     lock_thread.join().expect("join");
 
-    // Follow-up wake must produce another cadence receipt after the lock frees.
+    // The follow-up wake must produce its own cadence receipt after the lock
+    // frees.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let receipts = registry.event_to_ready_receipts();
-        if receipts.len() > before_receipts
-            && receipts.iter().any(|receipt| {
-                receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp
-                    || receipt.trigger == CodeIndexCadenceTriggerV1::Mount
-                    || receipt.trigger == CodeIndexCadenceTriggerV1::QueryAdmission
-            })
+        if receipts
+            .iter()
+            .skip(before_receipts)
+            .any(|receipt| receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp)
         {
             break;
         }
@@ -10205,7 +9630,6 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount daemon-owned scheduler");
@@ -10395,7 +9819,6 @@ async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount retained generation");
@@ -10645,7 +10068,7 @@ fn serving_swap_seats_a_generation_whose_publication_moved_while_it_activated() 
     assert_eq!(
         ServingSwapOutcomeV1::decide(true, true, false),
         ServingSwapOutcomeV1::Offered,
-        "an unchanged pass over the serving generation only re-offers semantic admission"
+        "an unchanged pass over the serving generation only re-proves its seat"
     );
     assert!(
         ServingSwapOutcomeV1::decide(false, false, true).installs()

@@ -396,21 +396,29 @@ pub async fn wait_for_terminal_generation(
                 && prior_generation.is_none_or(|prior| generation.as_deref() != Some(prior));
             last_status = observed;
             if !terminal {
+                // Yield so the daemon worker (and other Tokio tasks on this
+                // runtime) can make progress. A tight status poll starved
+                // reconcile under load and turned a slow seat into a
+                // RECEIPT_TIMEOUT with incomplete lanes forever empty.
+                tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             }
             let observed_search = search(socket, handshake, query).await;
             last_search = observed_search;
             if last_search["code_generation"].as_str() != generation.as_deref() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             }
             let paths = result_paths(&last_search);
             let query_matches = expected_path
                 .map_or_else(|| paths.is_empty(), |expected| paths.contains(&expected));
             if !query_matches {
+                tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             }
             let incomplete = crate::common::incomplete_code_index_query_lanes(&last_search);
             if !incomplete.is_empty() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             }
             assert_exact_identity(

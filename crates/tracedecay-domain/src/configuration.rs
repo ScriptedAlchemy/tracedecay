@@ -55,7 +55,6 @@ pub const INDEX_TRACK_CALL_SITES_SETTING_KEY: &str = "index.track_call_sites.v1"
 pub const INDEX_GIT_IGNORE_SETTING_KEY: &str = "index.git_ignore.v1";
 pub const INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY: &str = "index.native_graph_activation.v1";
 pub const DIAGNOSTICS_PREWARM_SETTING_KEY: &str = "diagnostics.prewarm.v1";
-pub const SEMANTIC_RUNTIME_SETTING_KEY: &str = "semantic.runtime.v1";
 pub const SYNC_AUTO_WATCH_SETTING_KEY: &str = "sync.auto_watch.v1";
 pub const SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY: &str = "sync.watch_linked_worktrees.v1";
 pub const SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY: &str = "sync.watch_debounce_ms.v1";
@@ -101,7 +100,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     INDEX_GIT_IGNORE_SETTING_KEY,
     INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     DIAGNOSTICS_PREWARM_SETTING_KEY,
-    SEMANTIC_RUNTIME_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,

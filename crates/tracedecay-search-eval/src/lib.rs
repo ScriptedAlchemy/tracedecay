@@ -1,19 +1,19 @@
-//! Search-quality evaluator for the production retrieval kernel.
+//! Search-quality evaluator for the production exact/lexical/graph retrieval
+//! kernel.
 //!
-//! Candidate generation and live comparison over packaged authoritative
-//! workload and corpus. Production candidate types, packaged-profile inputs,
-//! native qualification, and direct-report scoring live in
-//! `tracedecay_query::search_quality`; callers import that kernel directly.
+//! Candidate generation and live comparison over the packaged authoritative
+//! workload and corpus. Production candidate types, packaged workload inputs,
+//! and direct-report scoring live in `tracedecay_query::search_quality`;
+//! callers import that kernel directly.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tracedecay_query::search_quality::candidate_output::WORKLOAD_RELATIVE;
 use tracedecay_query::search_quality::{
-    DirectActivationEvaluationV1, DirectEvaluationReportV1, DirectEvaluationStatusV1,
-    GenerateCandidateOutputsResultV1, ProductionCandidateNativeExecutionAuthorityV1,
-    SearchEvalError, activation_profile_chain, compute_corpus_digest, compute_workload_digest,
-    direct_evaluated_profile_material, evaluate_generated_outputs, load_candidate_workload,
+    DirectEvaluationReportV1, DirectEvaluationStatusV1, SearchEvalError, compute_corpus_digest,
+    compute_workload_digest, evaluate_generated_outputs, load_candidate_workload,
 };
 
 mod admitted_corpus;
@@ -27,8 +27,7 @@ mod report_tests;
 pub use admitted_corpus::root_admitted_corpus_scope;
 pub use candidate_output::{
     AdmittedCorpusScopeFn, GenerateCandidateOutputsOptions, generate_candidate_outputs,
-    generate_candidate_outputs_with_native, no_admitted_corpus_scope,
-    retrieve_partition_query_bytes, write_generate_outputs,
+    no_admitted_corpus_scope, retrieve_partition_query_bytes, write_generate_outputs,
 };
 pub use controlled_workloads::{
     CURSOR_PARSE_REPORT_FILE, CURSOR_PARSE_WORKLOAD, ControlledOperationDeltaV1,
@@ -37,22 +36,6 @@ pub use controlled_workloads::{
     compare_controlled_workloads, run_cursor_parse_batch_workload,
     run_framed_log_durability_workload, write_controlled_workload_reports,
 };
-
-/// The workspace root that hosts the checked-in evaluator fixtures.
-///
-/// Fixture paths are workspace-relative because the evaluator measures the
-/// product repository, not this crate's directory.
-#[cfg(test)]
-pub(crate) fn checked_in_fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root above crates/<crate>")
-        .to_path_buf()
-}
-
-const DEFAULT_WORKLOAD: &str =
-    "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct DirectWorkloadSummaryV1 {
@@ -68,28 +51,15 @@ pub struct DirectWorkloadSummaryV1 {
 }
 
 pub fn default_workload_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(DEFAULT_WORKLOAD)
+    repo_root.join(WORKLOAD_RELATIVE)
 }
 
-fn load_authoritative_default_workload()
--> Result<packaged_assets::PackagedEvaluatorAssets, SearchEvalError> {
-    let assets = packaged_assets::materialize()?;
-    hotpath::measure_block!("search_eval.package.activation_verify", {
-        tracedecay_query::search_quality::evaluate::validate_activation_profile_matrix(
-            assets.workload(),
-        )
-    })?;
-    Ok(assets)
-}
-
-/// Validate the exact checked-in workload used by configuration activation.
+/// Validate the byte-pinned packaged workload.
 ///
-/// Ordinary developer comparisons may use an explicit workload, but only this
-/// byte-pinned default fixture can mint an activation-eligible evaluation.
-pub fn validate_default_activation_workload(
-    _repo_root: &Path,
-) -> Result<DirectWorkloadSummaryV1, SearchEvalError> {
-    let assets = load_authoritative_default_workload()?;
+/// Ordinary developer comparisons may use an explicit workload; this default
+/// fixture is the one whose digest the package pins.
+pub fn validate_default_workload() -> Result<DirectWorkloadSummaryV1, SearchEvalError> {
+    let assets = packaged_assets::materialize()?;
     validate_direct_workload(assets.root(), Some(&assets.workload_path()))
 }
 
@@ -139,11 +109,12 @@ pub fn compare_direct(
     })
 }
 
+/// Run the packaged workload and corpus through production retrieval and
+/// evaluate the checked-in labels, independent of the caller's checkout.
 pub fn compare_default_direct(
-    _project_root: &Path,
     profile_ids: Option<&[String]>,
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
-    let assets = load_authoritative_default_workload()?;
+    let assets = packaged_assets::materialize()?;
     let generated = hotpath::measure_block!("search_eval.compare.generate", {
         generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: assets.root(),
@@ -155,68 +126,4 @@ pub fn compare_default_direct(
     hotpath::measure_block!("search_eval.compare", {
         evaluate_generated_outputs(assets.root(), assets.workload(), &generated)
     })
-}
-
-/// Run the exact checked-in activation matrix through genuine native
-/// semantic/rerank authorities.
-///
-/// The selected profile determines the required comparison chain:
-/// query baseline; semantic with semantic-disabled query ablations; and, for the
-/// reranked profile, the same semantic profile with rerank disabled.
-#[hotpath::measure(label = "search_eval.activation.evaluate")]
-pub fn evaluate_default_activation_candidate(
-    evaluated_profile_id: &str,
-    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
-) -> Result<DirectActivationEvaluationV1, SearchEvalError> {
-    let assets = load_authoritative_default_workload()?;
-    let workload = assets.workload();
-    let profile_ids = activation_profile_chain(workload, evaluated_profile_id)?;
-    let generated = generate_candidate_outputs_with_native(
-        &GenerateCandidateOutputsOptions {
-            repo_root: assets.root(),
-            workload_path: Some(&assets.workload_path()),
-            profile_ids: Some(&profile_ids),
-            admitted_scope: packaged_assets::admitted_scope,
-        },
-        authority,
-    )?;
-    validate_activation_native_matrix(&profile_ids, &generated)?;
-    let report = evaluate_generated_outputs(assets.root(), workload, &generated)?;
-    report.validate_for_activation(assets.root(), workload)?;
-    let evaluated_material = direct_evaluated_profile_material(workload, evaluated_profile_id)?;
-    Ok(DirectActivationEvaluationV1::from_parts(
-        report,
-        evaluated_material,
-    ))
-}
-
-fn validate_activation_native_matrix(
-    required_profiles: &[String],
-    generated: &GenerateCandidateOutputsResultV1,
-) -> Result<(), SearchEvalError> {
-    let observed_profiles = generated
-        .outputs
-        .iter()
-        .map(|output| output.profile_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let expected_profiles = required_profiles
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    if observed_profiles != expected_profiles {
-        return Err(SearchEvalError::Contract(
-            "activation evaluation did not execute the required profile matrix".to_owned(),
-        ));
-    }
-    for output in &generated.outputs {
-        if output.native_resources.is_none()
-            || output.queries.iter().any(|query| query.native.is_none())
-        {
-            return Err(SearchEvalError::Contract(format!(
-                "{}:{} is missing genuine native evaluation evidence",
-                output.profile_id, output.partition
-            )));
-        }
-    }
-    Ok(())
 }

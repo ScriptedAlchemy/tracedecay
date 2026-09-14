@@ -67,8 +67,6 @@ tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
-tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
@@ -85,7 +83,6 @@ libc = "0.2"
 [dev-dependencies]
 fs2 = "0.4"
 tempfile = "3"
-tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }

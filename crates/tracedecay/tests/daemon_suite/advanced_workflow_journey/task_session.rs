@@ -2,12 +2,11 @@
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tracedecay_application::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
@@ -17,26 +16,11 @@ use tracedecay_contracts::{
     WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkProductSelectionScopeV1,
     WorkTaskSessionEvidenceV1, WorkTaskSessionHydrationStateV1,
 };
-use tracedecay_daemon_identity::profile_identity;
-use tracedecay_domain::configuration::{
-    ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationValueV1,
-    SEMANTIC_RUNTIME_SETTING_KEY, SettingKey,
-};
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, RetrieverKind, TaskId, TemporalModeV1, UtcMicros,
-    VectorGenerationIdV1, WorkAttemptIdentityV1,
+    ProjectId, RetrieverKind, TaskId, TemporalModeV1, UtcMicros, WorkAttemptIdentityV1,
 };
 use tracedecay_sdk::client::Client;
-use tracedecay_sdk::operations::{
-    ApplicationConfigurationGet, ApplicationConfigurationObservedState,
-    ApplicationConfigurationSet, WorkRetrieveEvidence,
-};
-use tracedecay_semantic::SemanticModelLifecycleOwnerV1;
-use tracedecay_semantic_contracts::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticFallbackReasonV1,
-    SemanticModelLifecycleStateV1, SemanticProfileSelection, SemanticResourceCeilings,
-};
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
+use tracedecay_sdk::operations::WorkRetrieveEvidence;
 
 use super::{
     PROVIDER_SESSION_ID, advance_provider_transcript_participant_generation, common,
@@ -45,14 +29,6 @@ use super::{
     },
     now, seeded_provider_transcript_contents,
 };
-
-const EVALUATED_PROFILE_ID: &str = "hybrid-conservative";
-const JOURNEY_MODEL_LOAD_DEADLINE_MS: u64 = 180_000;
-
-pub(super) struct InstalledSemanticFixture {
-    artifact_digest: String,
-    artifact_path: PathBuf,
-}
 
 /// A daemon-hosted dashboard mounted against the journey's real project.
 ///
@@ -196,104 +172,16 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
     panic!("dashboard never announced a listen URL\nstdout:\n{seen}\nstderr:\n{stderr}");
 }
 
-pub(super) fn seed_semantic_source(project: &Path) {
+pub(super) fn seed_probe_source(project: &Path) {
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
     std::fs::write(
         project.join("src/lib.rs"),
-        "pub fn advanced_workflow_semantic_probe() -> &'static str { \"provider session\" }\n",
+        "pub fn advanced_workflow_probe() -> &'static str { \"provider session\" }\n",
     )
-    .expect("semantic fixture source");
+    .expect("probe fixture source");
 }
 
-/// Installs the byte-pinned FastEmbed package this journey needs, or `None`
-/// when the lane never prepared one.
-///
-/// The package comes from distribution acceptance and cannot be synthesized, so
-/// the ordinary test lane has no way to supply it. Callers skip on `None`
-/// rather than fail, the same contract `semantic_availability_journey_test`
-/// uses.
-pub(super) fn install_semantic_fixture(home: &Path) -> Option<InstalledSemanticFixture> {
-    let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())?;
-    common::create_runtime().block_on(async {
-        let profile = home.join(".tracedecay");
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
-            .expect("private semantic fixture profile");
-        let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(&profile);
-        let identity = profile_identity::load_or_create(&profile)
-            .expect("canonical isolated profile identity");
-        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-            .await
-            .expect("isolated profile runtime registry");
-        let owner = registry
-            .profile_semantic_lifecycle()
-            .await
-            .expect("canonical profile artifact owner");
-        seed_distribution_fixture(&lifecycle_root, &fixture_root, &owner);
-        owner
-            .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-            .expect("select production semantic model");
-        owner
-            .acquire_blocking_for_tests()
-            .expect("install verified distribution fixture");
-        let installed = match owner.status().state.expect("installed model state") {
-            SemanticModelLifecycleStateV1::Installed {
-                artifact_digest,
-                install_path,
-                ..
-            }
-            | SemanticModelLifecycleStateV1::Ready {
-                artifact_digest,
-                install_path,
-                ..
-            } => Some(InstalledSemanticFixture {
-                artifact_digest,
-                artifact_path: install_path,
-            }),
-            state => panic!("expected installed production model, got {state:?}"),
-        };
-        drop(owner);
-        registry
-            .shutdown_terminal_tasks()
-            .await
-            .expect("join profile import workers");
-        registry
-            .close_retained_graph_runtimes_for_shutdown()
-            .await
-            .expect("close profile import runtime");
-        installed
-    })
-}
-
-fn seed_distribution_fixture(
-    lifecycle_root: &Path,
-    fixture_root: &Path,
-    owner: &SemanticModelLifecycleOwnerV1,
-) {
-    let model = owner
-        .catalog()
-        .get(DEFAULT_FASTEMBED_MODEL_ID)
-        .expect("production catalog contains default model");
-    let repository = format!("models--{}", model.model_code.replace('/', "--"));
-    let repository_root = lifecycle_root.join("hf-hub-cache").join(repository);
-    let snapshot = repository_root
-        .join("snapshots")
-        .join(&model.source.revision);
-    for member in model.members.values() {
-        let destination = snapshot.join(&member.upstream_path);
-        std::fs::create_dir_all(destination.parent().expect("member parent"))
-            .expect("create cached member parent");
-        std::fs::copy(fixture_root.join(&member.path), &destination)
-            .expect("copy byte-exact distribution fixture member");
-    }
-    let reference = repository_root.join("refs").join(&model.source.revision);
-    std::fs::create_dir_all(reference.parent().expect("revision reference parent"))
-        .expect("create revision reference parent");
-    std::fs::write(reference, &model.source.revision).expect("write revision reference");
-}
-
-pub(super) fn assert_restored_provider_session_unavailable(
+pub(super) fn assert_restored_provider_session_receipt(
     client: &Client,
     selection: &WorkProductSelectionScopeV1,
     task_id: &tracedecay_domain::TaskId,
@@ -320,15 +208,13 @@ pub(super) fn assert_restored_provider_session_unavailable(
             panic!("typed SDK omitted attempt receipt in {temporal:?}: omissions={omissions:?}")
         });
         assert!(
-            evidence.is_none(),
-            "a missing evaluated query authority cannot hydrate TaskSession in {temporal:?}"
-        );
-        assert!(
-            omissions.iter().any(|omission| {
-                omission.relation == "task_session"
-                    && omission.reason == WorkEvidenceOmissionReasonV1::Unavailable
-            }),
-            "TaskSession unavailability must remain typed in {temporal:?}: {omissions:?}"
+            evidence.is_some()
+                || omissions.iter().any(|omission| {
+                    omission.relation == "task_session"
+                        && omission.reason == WorkEvidenceOmissionReasonV1::Unavailable
+                }),
+            "TaskSession is either hydrated through the mounted query authority or a typed \
+             unavailable omission in {temporal:?}: {omissions:?}"
         );
         let provider_session = receipt
             .evidence
@@ -350,299 +236,87 @@ pub(super) fn assert_restored_provider_session_unavailable(
     restored_receipt.expect("restored provider receipt")
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn configure_restart_and_activate_semantic_profile(
+/// Physically restarts the daemon and proves the accepted-attempt receipt
+/// survives byte-exactly, then waits until the restored code generation and
+/// the mounted exact/lexical/graph query authority serve TaskSession evidence.
+pub(super) fn restart_and_wait_for_task_session(
     home: &Path,
     project: &Path,
     client: &Client,
     project_id: &ProjectId,
     mut daemon: common::DaemonProcess,
-    selection: &WorkProductSelectionScopeV1,
-    task_id: &TaskId,
-    verified_version: &VerifiedWorkGraphVersionV1,
-    identity: &WorkAttemptIdentityV1,
+    scope: &TaskSessionEvidenceScope<'_>,
     expected_receipt: &WorkAttemptReceiptV1,
-    installed: &InstalledSemanticFixture,
-) -> common::DaemonProcess {
-    let receipt = assert_restored_provider_session_unavailable(
+) -> (common::DaemonProcess, Client) {
+    let receipt = assert_restored_provider_session_receipt(
         client,
-        selection,
-        task_id,
-        verified_version,
-        identity,
+        scope.selection,
+        scope.task_id,
+        scope.verified_version,
+        scope.identity,
     );
     assert_eq!(
         receipt, *expected_receipt,
         "the accepted-attempt receipt must survive restart exactly"
     );
-    set_semantic_runtime_configuration(
-        client,
-        project_id,
-        None,
-        "configuration.advanced-workflow-semantic-preactivation",
-        "configure the selected semantic model through typed SDK",
-    );
 
     daemon
         .kill_and_wait()
-        .expect("physically restart daemon after semantic model configuration");
+        .expect("physically restart daemon before the TaskSession availability sweep");
     let restarted_daemon = spawn_project_daemon(home, project);
     let restarted_client = sdk_client(home, project_id.as_str());
     let _ = wait_for_application_mount(&restarted_client);
     wait_for_work_mount(&restarted_client);
-    let configured_receipt = assert_restored_provider_session_unavailable(
+    let restarted_receipt = assert_restored_provider_session_receipt(
         &restarted_client,
-        selection,
-        task_id,
-        verified_version,
-        identity,
+        scope.selection,
+        scope.task_id,
+        scope.verified_version,
+        scope.identity,
     );
     assert_eq!(
-        configured_receipt, *expected_receipt,
-        "model selection without an evaluated profile must preserve the receipt exactly"
+        restarted_receipt, *expected_receipt,
+        "a second physical restart must preserve the receipt exactly"
     );
-    activate_evaluated_semantic_profile(home, project, &restarted_client, project_id, installed);
-    restarted_daemon
+    wait_for_code_generation(home, project);
+    wait_for_task_session_available(&restarted_client, scope);
+    (restarted_daemon, restarted_client)
 }
 
-fn activate_evaluated_semantic_profile(
-    home: &Path,
-    project: &Path,
-    client: &Client,
-    project_id: &ProjectId,
-    installed: &InstalledSemanticFixture,
-) -> ManifestDigest {
-    let _ = wait_for_semantic_generation(home, project);
-    let mut evaluator =
-        std::process::Command::new(common::search_eval_bin("tracedecay-search-eval-direct"));
-    common::apply_tracedecay_home_env(&mut evaluator, home);
-    eprintln!("semantic evaluate-and-publish starting");
-    let evaluation_started = Instant::now();
-    let output = evaluator
-        .args(["evaluate-and-publish", "--project-root"])
-        .arg(project)
-        .arg("--profile")
-        .arg(EVALUATED_PROFILE_ID)
-        .current_dir(project)
-        .output()
-        .expect("start direct semantic evaluator");
-    eprintln!(
-        "semantic evaluate-and-publish finished wall_ms={} status={:?}",
-        evaluation_started.elapsed().as_millis(),
-        output.status
-    );
-    assert!(
-        output.status.success(),
-        "direct semantic evaluator failed: {}\nstdout={}\nstderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let publication: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "direct semantic evaluator returned invalid JSON: {error}; stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    assert_eq!(
-        publication["report"]["status"], "pass",
-        "only a native evaluator PASS may enter activation: {publication}"
-    );
-    let profile_digest = ManifestDigest::new(
-        publication["profile_digest"]
-            .as_str()
-            .expect("published evaluated profile digest"),
-    )
-    .expect("valid evaluated profile digest");
-
-    set_semantic_runtime_configuration(
-        client,
-        project_id,
-        Some(SemanticProfileSelection {
-            profile_id: EVALUATED_PROFILE_ID.to_owned(),
-            accepted_profile_digest: profile_digest.clone(),
-            artifact_digest: installed.artifact_digest.clone(),
-            artifact_path: installed.artifact_path.clone(),
-        }),
-        "configuration.advanced-workflow-semantic-activation",
-        "activate evaluated semantic profile through typed SDK",
-    );
-    profile_digest
-}
-
-fn journey_semantic_resources() -> SemanticResourceCeilings {
-    SemanticResourceCeilings {
-        load_deadline_ms: JOURNEY_MODEL_LOAD_DEADLINE_MS,
-        ..SemanticResourceCeilings::default()
+fn wait_for_code_generation(home: &Path, project: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while read_active_code_generation(home, project).is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the restored code generation"
+        );
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
-fn set_semantic_runtime_configuration(
-    client: &Client,
-    project_id: &ProjectId,
-    active_profile: Option<SemanticProfileSelection>,
-    idempotency_key: &str,
-    operation: &str,
-) {
-    let observed = client
-        .execute::<ApplicationConfigurationObservedState>(
-            &tracedecay_contracts::configuration::ConfigurationObservedStateRequestV1 {},
-        )
-        .expect("semantic configuration observed state")
-        .result;
-    let expected_revision = observed
-        .first()
-        .expect("configuration component")
-        .desired_revision_id
-        .clone();
-    client
-        .execute::<ApplicationConfigurationSet>(
-            &tracedecay_contracts::configuration::ConfigurationSetRequestV1 {
-                layer: ConfigurationLayerIdV1::Project {
-                    project_id: project_id.clone(),
-                },
-                key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY)
-                    .expect("semantic runtime setting key"),
-                value: ConfigurationValueV1::Text(
-                    serde_json::to_string(&SemanticConfig {
-                        selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
-                        auto_download: false,
-                        active_profile,
-                        rollback_profile: None,
-                        resources: journey_semantic_resources(),
-                        document_composition:
-                            tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
-                    })
-                    .expect("semantic runtime configuration JSON"),
-                ),
-                expected_revision,
-                idempotency_key: ConfigurationIdempotencyKey::new(idempotency_key.to_owned())
-                    .expect("semantic configuration idempotency key"),
-            },
-        )
-        .unwrap_or_else(|error| panic!("{operation}: {error}"));
-}
-
-/// Proves the evaluated profile is both selected through the public configuration
-/// authority and ready through the mounted runtime authority before TaskSession
-/// selection. TaskSession anchors deliberately retain only TaskSession provenance.
-pub(super) fn wait_for_evaluated_semantic_profile_current(
-    home: &Path,
-    project: &Path,
-    client: &Client,
-) {
-    let configured = client
-        .execute::<ApplicationConfigurationGet>(
-            &tracedecay_contracts::configuration::ConfigurationGetRequestV1 {
-                key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY)
-                    .expect("semantic runtime setting key"),
-            },
-        )
-        .expect("read activated semantic runtime configuration through typed SDK")
-        .result;
-    let ConfigurationValueV1::Text(value) = &configured.effective_value else {
-        panic!(
-            "activated semantic runtime must retain its typed configuration text: {configured:?}"
-        );
-    };
-    let semantic_config: SemanticConfig = serde_json::from_str(value)
-        .unwrap_or_else(|error| panic!("decode activated semantic runtime configuration: {error}"));
-    let active_profile = semantic_config
-        .active_profile
-        .as_ref()
-        .expect("evaluated semantic profile must remain active through the typed SDK");
-    assert_eq!(
-        active_profile.profile_id, EVALUATED_PROFILE_ID,
-        "the evaluated semantic profile selected through the typed SDK must remain active"
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(120);
+/// The core query authority mounts after the first sealed generation is
+/// seated, on a deferred owner. Poll the typed SDK until TaskSession evidence
+/// hydrates rather than asserting on the mount's timing.
+fn wait_for_task_session_available(client: &Client, scope: &TaskSessionEvidenceScope<'_>) {
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
-        let status = semantic_runtime_status(home, project)
-            .unwrap_or_else(|| panic!("runtime returned an invalid semantic status"));
-        if let SemanticRuntimeStateV1::Current { receipt } = &status.state {
-            let runtime_configuration = status
-                .configuration
-                .as_ref()
-                .expect("ready semantic runtime must report its activation configuration");
-            assert_eq!(
-                runtime_configuration.effective_behavior_digest,
-                configured.effective_behavior_digest,
-                "the runtime readiness receipt must authorize the exact evaluated configuration selected through the SDK"
-            );
-            assert_eq!(
-                receipt.configuration, *runtime_configuration,
-                "the ready semantic receipt must retain the runtime's exact activation configuration"
-            );
+        let (_, evidence, omissions) = retrieve(
+            client,
+            scope.selection,
+            scope.task_id,
+            scope.verified_version,
+            scope.identity,
+            TemporalModeV1::Current,
+        )
+        .unwrap_or_else(|error| panic!("typed SDK retrieval failed while waiting: {error}"));
+        if evidence.is_some() {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for activated semantic runtime: {status:?}"
+            "timed out waiting for the mounted query authority to serve TaskSession: {omissions:?}"
         );
         std::thread::sleep(Duration::from_millis(250));
-    }
-}
-
-fn wait_for_semantic_generation(
-    home: &Path,
-    project: &Path,
-) -> (
-    tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-    VectorGenerationIdV1,
-) {
-    let deadline = Instant::now() + Duration::from_secs(180);
-    loop {
-        let code = read_active_code_generation(home, project);
-        let status = semantic_runtime_status(home, project);
-        let vector = status.as_ref().and_then(|status| match &status.state {
-            SemanticRuntimeStateV1::Degraded {
-                active_generation: Some(generation),
-                ..
-            } => Some(generation.clone()),
-            SemanticRuntimeStateV1::Current { receipt } => {
-                Some(receipt.activated_generation.clone())
-            }
-            _ => None,
-        });
-        if let (Some(code), Some(vector)) = (code, vector) {
-            return (code, vector);
-        }
-        assert_semantic_lifecycle_not_failed(home, status.as_ref());
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for the real semantic vector generation: {status:?}"
-        );
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
-
-fn assert_semantic_lifecycle_not_failed(home: &Path, status: Option<&SemanticRuntimeStatusV1>) {
-    let Some(status) = status else {
-        return;
-    };
-    if let SemanticRuntimeStateV1::Failed { detail, .. } = &status.state {
-        panic!("semantic runtime failed while building the real vector generation: {detail}");
-    }
-    if !matches!(
-        &status.state,
-        SemanticRuntimeStateV1::Degraded {
-            active_generation: None,
-            reason: SemanticFallbackReasonV1::RuntimeFailure,
-        }
-    ) {
-        return;
-    }
-    let lifecycle = SemanticModelLifecycleOwnerV1::open_default(
-        tracedecay_semantic::default_lifecycle_root_in(&home.join(".tracedecay")),
-    )
-    .expect("reopen semantic lifecycle after runtime failure");
-    if let Some(SemanticModelLifecycleStateV1::Failed { detail, .. }) = lifecycle.status().state {
-        panic!(
-            "semantic model lifecycle failed while building the real vector generation: {detail}; \
-             runtime={status:?}"
-        );
     }
 }
 
@@ -667,21 +341,6 @@ fn read_active_code_generation(
         .ok()?,
     )
     .ok()
-}
-
-fn semantic_runtime_status(home: &Path, project: &Path) -> Option<SemanticRuntimeStatusV1> {
-    let value = serve_tool_call(
-        home,
-        project,
-        "tracedecay_runtime",
-        json!({
-            "format": "json",
-            "authority_audit": true,
-            "session_ingest_health": true,
-            "doctor_report": false
-        }),
-    );
-    serde_json::from_value(value["semantic_runtime"].clone()).ok()
 }
 
 /// The exact Work evidence scope one TaskSession availability sweep reads:
@@ -781,7 +440,7 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
                 .contributions
                 .iter()
                 .any(|contribution| contribution.retriever == RetrieverKind::TaskSession),
-            "{temporal:?} page one must retain canonical TaskSession provenance; the evaluated semantic profile is proven ready separately before selection: {first_ranked:?}"
+            "{temporal:?} page one must retain canonical TaskSession provenance: {first_ranked:?}"
         );
         assert_eq!(first_evidence.source.provider().as_str(), "claude");
         assert_eq!(
@@ -838,7 +497,7 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
                 .contributions
                 .iter()
                 .any(|contribution| contribution.retriever == RetrieverKind::TaskSession),
-            "{temporal:?} continuation must retain canonical TaskSession provenance; the evaluated semantic profile is proven ready separately before selection: {second_ranked:?}"
+            "{temporal:?} continuation must retain canonical TaskSession provenance: {second_ranked:?}"
         );
         assert_ne!(
             second_hydrated.anchor_id, first_hydrated.anchor_id,
@@ -976,8 +635,7 @@ fn assert_available(
         !omissions
             .iter()
             .any(|omission| { omission.relation == "task_session" }),
-        "an activated evaluated query authority must not omit TaskSession in {temporal:?}: \
-         {omissions:?}"
+        "the mounted query authority must not omit TaskSession in {temporal:?}: {omissions:?}"
     );
 }
 

@@ -686,7 +686,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     let code_index_store = data_root.join("code-index-v1");
     let seeder = CodeIndexSchedulerRegistryV1::new(1);
     seeder
-        .mount_worktree(project_id.clone(), &linked, code_index_store.clone(), None)
+        .mount_worktree(project_id.clone(), &linked, code_index_store.clone())
         .await
         .expect("mount retained-generation seeder");
     tokio::time::timeout(Duration::from_secs(5), async {

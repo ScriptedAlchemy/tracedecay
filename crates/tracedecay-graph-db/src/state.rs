@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use grafeo_common::types::{ArcStr, EdgeId, NodeId, PropertyKey, Value};
-use grafeo_common::utils::hash::FxHashMap;
+use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
 use grafeo_core::graph::lpg::Node;
 use grafeo_core::graph::{Direction, GraphStore};
 use grafeo_engine::GrafeoDB;
@@ -321,60 +320,6 @@ fn verify_indexed_entity_owner(
         });
     }
     Ok((stored_namespace, projection))
-}
-
-/// The owner columns every indexed entity node carries, keyed once so a
-/// projected batch read and the per-row verification of its rows share the
-/// same interned keys.
-pub(crate) struct EntityOwnerColumns {
-    namespace: PropertyKey,
-    projection: PropertyKey,
-    identity: PropertyKey,
-}
-
-impl Default for EntityOwnerColumns {
-    fn default() -> Self {
-        Self {
-            namespace: PropertyKey::new(NAMESPACE_PROPERTY),
-            projection: PropertyKey::new(PROJECTION_PROPERTY),
-            identity: PropertyKey::new(ENTITY_ID_PROPERTY),
-        }
-    }
-}
-
-impl EntityOwnerColumns {
-    pub(crate) fn keys(&self) -> [PropertyKey; 3] {
-        [
-            self.namespace.clone(),
-            self.projection.clone(),
-            self.identity.clone(),
-        ]
-    }
-
-    /// The projection of the indexed entity node `row` was read from, after
-    /// the same owner check a full node load performs. An empty row is a node
-    /// with no readable column at all — the store no longer has the node the
-    /// index pointed at — which is the corruption a failed `get_node` reports.
-    pub(crate) fn projection_of(
-        &self,
-        row: &FxHashMap<PropertyKey, Value>,
-        namespace: &GraphNamespace,
-        identity: &GraphEntityId,
-    ) -> Result<GraphProjectionId, GraphDbError> {
-        if row.is_empty() {
-            return Err(GraphDbError::Corrupt {
-                message: "indexed entity node is unreadable".to_owned(),
-            });
-        }
-        verify_indexed_entity_owner(
-            row.get(&self.namespace),
-            row.get(&self.projection),
-            row.get(&self.identity),
-            namespace,
-            identity,
-        )
-        .map(|(_, projection)| projection)
-    }
 }
 
 pub(crate) fn load_entity_locator(

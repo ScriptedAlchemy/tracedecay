@@ -241,7 +241,7 @@ pub fn context_description(node_count: u64, budget: u8) -> String {
     format!(
         "Build an AI-ready context for a task description. Returns relevant symbols, \
          relationships, up to three untracked project memory matches when available, \
-         and optionally code snippets. Use it for broad semantic questions that need \
+         and optionally code snippets. Use it for broad questions that need \
          relationship synthesis across the code graph. This project ({node_count} nodes) \
          allows {budget} broad context calls."
     )
@@ -314,7 +314,7 @@ pub fn context_warming_description(budget: u8) -> String {
     format!(
         "Build an AI-ready context for a task description. Returns relevant symbols, \
          relationships, up to three untracked project memory matches when available, \
-         and optionally code snippets. Use it for broad semantic questions that need \
+         and optionally code snippets. Use it for broad questions that need \
          relationship synthesis across the code graph. The graph is still warming, and \
          {budget} broad context calls are available."
     )
@@ -441,7 +441,6 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_gini(),
         def_dependency_depth(),
         def_health(),
-        def_redundancy(request_schema("redundancy")?),
         def_runtime(),
         def_dsm(),
         def_test_risk(),
@@ -687,8 +686,6 @@ const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
     "tracedecay_health",
     "tracedecay_runtime",
     "tracedecay_test_risk",
-    // redundancy
-    "tracedecay_redundancy",
     // memory
     "tracedecay_memory_status",
     "tracedecay_fact_store_add",

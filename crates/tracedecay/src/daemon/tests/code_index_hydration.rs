@@ -14,7 +14,7 @@ use tracedecay_domain::{
     VectorWatermark, WorktreeId,
 };
 
-use super::super::{code_index_search_display_binding, code_index_search_hydration_budget};
+use super::super::code_index_search_display_binding;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
 };
@@ -267,27 +267,6 @@ fn hydration_budget_rejects_payload_read_after_preflight() {
     ));
 }
 
-#[test]
-fn accepted_semantic_budget_replaces_distinct_query_hydration_budget() {
-    let query_budget = request(1).budget;
-    let semantic_budget = RetrievalBudget {
-        max_candidates_per_lane: 7,
-        max_fused_candidates: 6,
-        max_hydrated_results: 5,
-        max_hydration_bytes: 4_096,
-        deadline_micros: Some(3),
-    };
-
-    assert_eq!(
-        code_index_search_hydration_budget(Some(&semantic_budget), &query_budget),
-        semantic_budget
-    );
-    assert_eq!(
-        code_index_search_hydration_budget(None, &query_budget),
-        query_budget
-    );
-}
-
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
@@ -298,7 +277,7 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 #[test]
-fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
+fn production_chunk_candidate_hydrates_from_frozen_generation() {
     let project = TempDir::new().expect("project");
     git(project.path(), &["init", "-q", "-b", "main"]);
     git(project.path(), &["config", "user.name", "TraceDecay Test"]);
@@ -309,7 +288,7 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
     std::fs::create_dir_all(project.path().join("src")).expect("source directory");
     std::fs::write(
         project.path().join("src/lib.rs"),
-        "pub fn semantic_target() -> u32 { 7 }\n",
+        "pub fn chunk_target() -> u32 { 7 }\n",
     )
     .expect("source");
     git(project.path(), &["add", "."]);
@@ -333,13 +312,13 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
         .find(|chunk| chunk.anchor.symbol_occurrence_id.is_some())
         .expect("symbol-backed production chunk");
     let chunk_id = CodeSearchChunkId::new(chunk.id.as_str().to_owned()).expect("chunk id");
-    let anchor = RetrievalAnchorId::new(format!("code-chunk:{}", chunk_id.as_str()))
-        .expect("semantic chunk anchor");
+    let anchor =
+        RetrievalAnchorId::new(format!("code-chunk:{}", chunk_id.as_str())).expect("chunk anchor");
     let source_occurrence = SourceOccurrenceId::new(format!("code-chunk:{}", chunk_id.as_str()))
-        .expect("semantic source occurrence");
+        .expect("chunk source occurrence");
     let freshness = tracedecay_query::retrieval::graph::production_code_index_freshness(
         generation.manifest().seal.sealed_at,
-        ComponentRevision::new("policy.semantic.daemon.v1").expect("policy revision"),
+        ComponentRevision::new("policy.code-index.daemon.v1").expect("policy revision"),
     )
     .expect("freshness");
     let candidate = RankedCandidate {
@@ -351,10 +330,10 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
                 source_occurrence_id: source_occurrence.clone(),
                 file_occurrence_id: Some(chunk.anchor.file_occurrence_id.clone()),
                 retriever_evidence_anchor: RetrievalAnchorId::new(format!(
-                    "code-semantic:{}",
+                    "code-chunk:{}",
                     chunk_id.as_str()
                 ))
-                .expect("semantic evidence"),
+                .expect("chunk evidence"),
                 source_namespace: freshness.source_namespace.clone(),
                 repository_id: Some(generation.snapshot().repository.clone()),
                 session_or_thread_id: None,
@@ -372,7 +351,7 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
         final_ordinal: 0,
     };
     let request = RetrievalRequest {
-        principal: PrincipalId::new("principal.semantic-hydration").expect("principal"),
+        principal: PrincipalId::new("principal.chunk-hydration").expect("principal"),
         scope: RetrievalScope {
             privacy_domain: generation.manifest().privacy_domain.clone(),
             root: SingleRootScopeV1 {
@@ -388,11 +367,11 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
                 generation.manifest().snapshot_digest.as_str(),
             )
             .expect("snapshot freshness"),
-            authorization_revision: AuthorizationRevision::new("authorization.semantic-hydration")
+            authorization_revision: AuthorizationRevision::new("authorization.chunk-hydration")
                 .expect("authorization revision"),
             captured_at: generation.manifest().seal.sealed_at,
         },
-        profile_id: FusionProfileId::new("profile.semantic-hydration").expect("profile"),
+        profile_id: FusionProfileId::new("profile.chunk-hydration").expect("profile"),
         budget: RetrievalBudget {
             max_candidates_per_lane: 1,
             max_fused_candidates: 1,
@@ -407,7 +386,7 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
             .expect("display path index for the sealed generation");
     let (display, provenance) =
         code_index_search_display_binding(generation, &display_paths, &request, &candidate)
-            .expect("frozen semantic chunk hydration");
+            .expect("frozen chunk hydration");
     let symbol_occurrence = chunk
         .anchor
         .symbol_occurrence_id
@@ -440,17 +419,4 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
         candidate.candidate.occurrences[0].source_namespace,
         provenance.source_namespace
     );
-    let rerank_symbol = tracedecay_semantic::rerank_adapter::resolve_generation_chunk(
-        generation,
-        &format!("code-symbol:{}", symbol_occurrence.as_str()),
-    )
-    .expect("symbol rerank payload");
-    let rerank_chunk = tracedecay_semantic::rerank_adapter::resolve_generation_chunk(
-        generation,
-        &format!("code-chunk:{}", chunk_id.as_str()),
-    )
-    .expect("chunk rerank payload");
-    assert_eq!(rerank_symbol.id, chunk.id);
-    assert_eq!(rerank_chunk.id, chunk.id);
-    assert_eq!(rerank_symbol.sanitized_text, rerank_chunk.sanitized_text);
 }

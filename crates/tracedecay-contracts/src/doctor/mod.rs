@@ -31,12 +31,10 @@ pub use sources::{
     LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort,
     ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
     ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
-    RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, SemanticOwnerDegradedReasonV1,
-    SemanticOwnerDoctorPort, SemanticOwnerPrerequisiteV1, SemanticOwnerReadV1,
-    SemanticOwnerStateV1, StorageDoctorPort, advisory_feedback_findings, code_index_finding,
-    configuration_finding, host_integration_finding, ingest_refusal_finding,
-    language_server_finding, observability_finding, operational_audit_findings,
-    runtime_health_finding, semantic_owner_finding,
+    RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort,
+    advisory_feedback_findings, code_index_finding, configuration_finding,
+    host_integration_finding, ingest_refusal_finding, language_server_finding,
+    observability_finding, operational_audit_findings, runtime_health_finding,
 };
 pub use types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,

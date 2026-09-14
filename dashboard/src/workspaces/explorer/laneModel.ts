@@ -30,7 +30,6 @@ import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import {
   codeHits,
   knowledgeHits,
-  semanticHits,
   sessionHits,
   type Hit,
   type LaneId,
@@ -41,7 +40,6 @@ export const LANE_SOURCE_ID: Record<LaneId, ExplorerSourceIdV1> = {
   code: 'code_graph',
   sessions: 'sessions',
   knowledge: 'knowledge',
-  semantic: 'semantic',
 };
 
 /**
@@ -89,17 +87,6 @@ export type ExplorerLaneReadModel =
       readonly errorCode: string | null;
       readonly detail: string | null;
     }
-  /** The provider is building itself — acquiring its model or projecting its
-   * index — and will be able to answer once that work completes. */
-  | {
-      readonly state: 'indexing';
-      readonly lane: LaneId;
-      readonly errorCode: string | null;
-      readonly detail: string | null;
-      /** The provider's own progress accounting, when it reported one. */
-      readonly completedUnits: number | null;
-      readonly totalUnits: number | null;
-    }
   /** The source's store exists but does not match the current generation. */
   | {
       readonly state: 'stale';
@@ -110,22 +97,6 @@ export type ExplorerLaneReadModel =
   /** The source's own read exceeded the admitted deadline. */
   | {
       readonly state: 'timed_out';
-      readonly lane: LaneId;
-      readonly errorCode: string | null;
-      readonly detail: string | null;
-    }
-  /** This surface cannot consult the source at all — a statement about the
-   * surface, not a failure of the source. */
-  | {
-      readonly state: 'unsupported';
-      readonly lane: LaneId;
-      readonly errorCode: string | null;
-      readonly detail: string | null;
-    }
-  /** The source's store does not exist for this project: a typed absence
-   * (semantic search not activated), not a failure to answer. */
-  | {
-      readonly state: 'absent';
       readonly lane: LaneId;
       readonly errorCode: string | null;
       readonly detail: string | null;
@@ -214,8 +185,6 @@ function hitsForLane(
       return sessionHits(rows, terms);
     case 'knowledge':
       return knowledgeHits(rows, terms);
-    case 'semantic':
-      return semanticHits(rows, terms);
     default: {
       const exhaustive: never = lane;
       return exhaustive;
@@ -290,23 +259,10 @@ export function laneFromSourceProgress(
         detail: source.message,
       };
     }
-    case 'indexing':
-      return {
-        state: 'indexing',
-        lane,
-        errorCode: source.error_code,
-        detail: source.message,
-        completedUnits: source.completed_units,
-        totalUnits: source.total_units,
-      };
     case 'stale':
       return { state: 'stale', lane, errorCode: source.error_code, detail: source.message };
     case 'timed_out':
       return { state: 'timed_out', lane, errorCode: source.error_code, detail: source.message };
-    case 'unsupported':
-      return { state: 'unsupported', lane, errorCode: source.error_code, detail: source.message };
-    case 'absent':
-      return { state: 'absent', lane, errorCode: source.error_code, detail: source.message };
     case 'unavailable':
       return { state: 'unavailable', lane, errorCode: source.error_code, detail: source.message };
     case 'cancelled':
@@ -442,14 +398,6 @@ export function lanePending(read: ExplorerLaneReadModel): boolean {
   return read.state === 'pending';
 }
 
-/** Whether the lane reached a truthful conclusion: it answered with rows it
- * stands behind, or it is a typed absence — a store that does not exist has
- * nothing left to say, which is different from a source that failed to say
- * it. Only lanes that are neither concluded nor pending count as unanswered. */
-export function laneConcluded(read: ExplorerLaneReadModel): boolean {
-  return laneAnswered(read) || read.state === 'absent';
-}
-
 /**
  * The chip for a lane condition.
  *
@@ -467,20 +415,10 @@ export function laneStateKind(read: ExplorerLaneReadModel): DomainStateKind {
       return 'ready';
     case 'partial':
       return 'partial';
-    // Indexing is work in progress, not a refusal: the spinning chip keeps it
-    // apart from `unavailable`, and the detail names the exact stage.
-    case 'indexing':
-      return 'loading';
     case 'stale':
       return 'stale';
     case 'timed_out':
       return 'timed_out';
-    case 'unsupported':
-      return 'unsupported';
-    // A typed absence is a complete answer that nothing exists — the
-    // complete-zero chip, never the unavailable one.
-    case 'absent':
-      return 'complete_zero_findings';
     case 'unavailable':
       return 'unavailable';
     case 'offline':
@@ -537,16 +475,10 @@ export function sourceOutcomeStateKind(outcome: ExplorerSourceOutcomeV1): Domain
       return 'ready';
     case 'partial':
       return 'partial';
-    case 'indexing':
-      return 'loading';
     case 'stale':
       return 'stale';
     case 'timed_out':
       return 'timed_out';
-    case 'unsupported':
-      return 'unsupported';
-    case 'absent':
-      return 'complete_zero_findings';
     case 'unavailable':
       return 'unavailable';
     case 'error':
@@ -577,18 +509,8 @@ export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined
       return undefined;
     case 'partial':
       return read.errorCode ?? read.detail ?? undefined;
-    case 'indexing': {
-      const stage = read.errorCode ?? read.detail ?? 'indexing';
-      // The provider's own progress accounting, when it reported one.
-      return read.completedUnits != null && read.totalUnits != null
-        ? `${stage} · ${read.completedUnits.toLocaleString()}/${read.totalUnits.toLocaleString()}`
-        : stage;
-    }
     case 'stale':
     case 'timed_out':
-    case 'unsupported':
-    case 'absent':
-      return read.errorCode ?? read.detail ?? undefined;
     case 'unavailable':
       return read.errorCode ?? read.detail ?? undefined;
     case 'offline':
@@ -632,11 +554,8 @@ export function laneEvidence(read: ExplorerLaneReadModel | undefined): EvidenceQ
     case 'partial':
       return read.hits.length > 0 ? 'associated' : 'unknown';
     case 'pending':
-    case 'indexing':
     case 'stale':
     case 'timed_out':
-    case 'unsupported':
-    case 'absent':
     case 'unavailable':
     case 'offline':
     case 'cancelled':

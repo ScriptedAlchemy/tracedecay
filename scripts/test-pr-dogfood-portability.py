@@ -110,7 +110,7 @@ elif [[ "${1:-} ${2:-}" == "tool context" ]]; then
     echo "Error: config error: daemon tool call failed: tool project route failed: reason_code=tool_dispatch_deadline_exceeded retryable=true: tool 'tracedecay_context' exceeded its absolute deadline before commit; worker settlement is Settling" >&2
     exit 1
   fi
-  echo '{"coverage":{"exact":"complete","lexical":"complete","graph":"complete","semantic":{"status":"unavailable","reason":"disabled"},"recall":"partial"},"search_matches":[{"file":"src/main.rs"}],"symbols":[{"node_id":"symbol:main"}]}'
+  echo '{"coverage":{"exact":"complete","lexical":"complete","graph":"complete","recall":"partial"},"search_matches":[{"file":"src/main.rs"}],"symbols":[{"node_id":"symbol:main"}]}'
 elif [[ "${1:-} ${2:-}" == "tool pr_context" ]]; then
   project=""
   base=""

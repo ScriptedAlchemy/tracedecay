@@ -63,10 +63,6 @@ impl<'a> GraphPublicationOperationContextV1<'a> {
         self.try_begin_commit()
     }
 
-    pub fn try_begin_semantic_vector_stage_commit(&self) -> bool {
-        self.try_begin_commit()
-    }
-
     pub fn try_begin_replay_retirement_commit(&self) -> bool {
         self.try_begin_commit()
     }

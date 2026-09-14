@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
-use tracedecay_query::search_quality::{CandidateWorkloadV1, SearchEvalError, packaged};
+use tracedecay_query::search_quality::candidate_output::WORKLOAD_RELATIVE;
+use tracedecay_query::search_quality::{
+    CandidateWorkloadV1, SearchEvalError, load_candidate_workload, packaged,
+};
 
 const SOURCE_COMMIT: &str = "8312618fee8109b16be09e65f45118b4e550fa14";
 const PACK_ID: &str = "184f6ca1eafd40e7889d15a20b7a5c861e80a47b";
@@ -22,8 +25,7 @@ impl PackagedEvaluatorAssets {
     }
 
     pub(crate) fn workload_path(&self) -> PathBuf {
-        self.root
-            .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json")
+        self.root.join(WORKLOAD_RELATIVE)
     }
 
     pub(crate) fn workload(&self) -> &CandidateWorkloadV1 {
@@ -60,11 +62,8 @@ pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> 
     }
     materialize_git_authority(directory.path())?;
     hotpath::measure_block!("search_eval.package.verify", {
-        let materialized_workload = tracedecay_query::search_quality::load_candidate_workload(
-            &directory
-                .path()
-                .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
-        )?;
+        let materialized_workload =
+            load_candidate_workload(&directory.path().join(WORKLOAD_RELATIVE))?;
         if materialized_workload != workload {
             return Err(SearchEvalError::Contract(
                 "materialized evaluator workload differs from packaged bytes".to_owned(),
@@ -96,7 +95,7 @@ pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> 
 /// but a wire-protocol clone — which is what CI checks out — transfers only
 /// ref-reachable objects and drops it. Materializing the checked-in pack keeps
 /// the pinned history resolvable in both.
-pub(crate) fn write_checked_in_object_pack(git: &Path) -> Result<(), SearchEvalError> {
+fn write_checked_in_object_pack(git: &Path) -> Result<(), SearchEvalError> {
     let pack_root = git.join("objects/pack");
     fs::create_dir_all(&pack_root).map_err(|error| {
         SearchEvalError::Contract(format!("create packaged evaluator Git authority: {error}"))
@@ -154,9 +153,9 @@ fn materialize_git_authority(root: &Path) -> Result<(), SearchEvalError> {
 
 pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
     ResolvedScope::new(
-        ProjectId::new("project.semantic-evaluator-assets").ok()?,
-        RepositoryId::new("repository.semantic-evaluator-assets").ok()?,
-        WorktreeId::new("worktree.semantic-evaluator-assets").ok()?,
+        ProjectId::new("project.packaged-evaluator-assets").ok()?,
+        RepositoryId::new("repository.packaged-evaluator-assets").ok()?,
+        WorktreeId::new("worktree.packaged-evaluator-assets").ok()?,
         None,
     )
     .ok()
@@ -164,19 +163,25 @@ pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
 
 #[cfg(test)]
 mod tests {
+    /// The packaged evaluator carries its own workload, corpus, and Git
+    /// authority, so `compare` needs nothing from the checkout it runs in.
     #[test]
-    fn packaged_evaluator_runs_against_an_unrelated_project() {
-        let unrelated = tempfile::tempdir().expect("unrelated project");
-        std::fs::write(
-            unrelated.path().join("Cargo.toml"),
-            "[package]\nname = \"unrelated\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("unrelated project content");
+    fn packaged_evaluator_compares_the_fallback_profile_from_its_own_root() {
         let profiles = vec!["query-fallback".to_owned()];
 
-        let report = crate::compare_default_direct(unrelated.path(), Some(&profiles))
-            .expect("packaged evaluator execution");
+        let report =
+            crate::compare_default_direct(Some(&profiles)).expect("packaged evaluator execution");
         assert_eq!(report.command, "compare");
-        assert!(!report.profiles.is_empty());
+        assert_eq!(
+            report
+                .profiles
+                .iter()
+                .map(|profile| (profile.profile_id.as_str(), profile.partition.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("query-fallback", "train"),
+                ("query-fallback", "validation")
+            ]
+        );
     }
 }

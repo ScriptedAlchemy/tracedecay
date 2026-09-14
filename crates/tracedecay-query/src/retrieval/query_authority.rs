@@ -28,16 +28,16 @@ pub const QUERY_RANKING_REVISION_V1: &str = "ranking.candidate.v1";
 /// Versioned request-local cursor lifetime for the canonical query authority.
 pub const QUERY_CURSOR_TTL_MICROS_V1: u64 = 15 * 60 * 1_000_000;
 
-/// Complete authenticated query composition retained for semantic augmentation
-/// and server-side audit. The fallback payload is independently canonical and
-/// cannot be changed by later optional lanes.
+/// Complete authenticated query composition retained for server-side audit.
+/// The fallback payload is the canonical exact/lexical/graph result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedQueryFallbackV1 {
     pub query_digest: QueryDigest,
     pub fallback: Arc<QueryFallbackSubpayload>,
     pub composition: CompositionOutputV1,
-    /// Exact compact lane inputs retained for one optional-stage recomposition.
-    /// Already-ranked fallback candidates must never be treated as a lane.
+    /// Exact compact lane inputs the composition consumed, retained for
+    /// observation. Already-ranked fallback candidates must never be treated
+    /// as a lane.
     pub fallback_lanes: Vec<CompositionLaneInput>,
     pub page_size: usize,
     /// Authenticated client continuation supplied for this page. It remains
@@ -166,7 +166,6 @@ impl QueryAuthorityV1 {
         if calibration_lanes != expected_lanes
             || weight_lanes != expected_lanes
             || !thresholds_are_valid
-            || profile.rerank_policy_id.is_some()
         {
             return Err(QueryAuthorityErrorV1::InvalidAuthority(
                 "profile lane set does not match the mounted query authority".to_owned(),
@@ -276,16 +275,6 @@ impl QueryAuthorityV1 {
         )?;
         TaskSessionCandidateSelectionV1::new(page.ranked_candidates, page.cursor)
             .map_err(|error| QueryAuthorityErrorV1::InvalidAuthority(error.to_string()))
-    }
-
-    /// Authenticate one ephemeral sanitized query with the daemon-owned key.
-    pub fn authenticate_query(
-        &self,
-        request: &RetrievalRequest,
-        query_view: &EphemeralSanitizedQueryViewV1,
-    ) -> Result<QueryDigest, QueryAuthorityErrorV1> {
-        self.validate_request(request)?;
-        Ok(self.keyring.digest_active_query(request, query_view)?)
     }
 
     /// Authenticate one prepared-query cursor payload with the daemon-owned key.
@@ -431,33 +420,6 @@ impl QueryAuthorityV1 {
             page_size,
             request_cursor: cursor.cloned(),
         })
-    }
-
-    pub fn continuation_cursor_at(
-        &self,
-        request: &RetrievalRequest,
-        query_view: &EphemeralSanitizedQueryViewV1,
-        composition: &CompositionOutputV1,
-        next_ordinal: usize,
-    ) -> Result<RetrievalCursor, QueryAuthorityErrorV1> {
-        self.validate_request(request)?;
-        Ok(self.kernel.cursor(
-            request,
-            query_view,
-            &self.keyring,
-            composition,
-            next_ordinal,
-        )?)
-    }
-
-    pub fn bind_semantic_continuation(
-        &self,
-        cursor: &mut RetrievalCursor,
-        semantic: tracedecay_domain::SemanticRetrievalContinuationV1,
-    ) -> Result<(), QueryAuthorityErrorV1> {
-        cursor.semantic = Some(semantic);
-        self.keyring.resign_cursor(cursor)?;
-        Ok(())
     }
 
     pub fn bind_code_source_cursor(

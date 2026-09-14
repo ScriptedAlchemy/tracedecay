@@ -11,9 +11,7 @@ use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
 
 use crate::tools::render::Md;
-use crate::{
-    McpSemanticOwnerV1, McpToolContext, ToolResult, generic_tool_result, rendered_tool_result,
-};
+use crate::{McpToolContext, ToolResult, generic_tool_result, rendered_tool_result};
 
 fn display_path(path: &Path) -> String {
     path.display().to_string()
@@ -258,17 +256,6 @@ pub async fn handle_status(
         &ctx.store_runtime()
             .registered_schema_convergence_observations(),
     );
-    output["semantic_owner"] = match ctx.semantic_owner() {
-        McpSemanticOwnerV1::Attached(state) => serde_json::to_value(state)?,
-        McpSemanticOwnerV1::AttachedAbsent => json!({
-            "status": "unavailable",
-            "reason": "owner_task_unregistered",
-        }),
-        McpSemanticOwnerV1::NotAttached => json!({
-            "status": "unavailable",
-            "reason": "authority_unattached",
-        }),
-    };
     let freshness_payload = hotpath::future!(
         ctx.freshness(),
         label = "mcp.info.status.code_index_freshness"

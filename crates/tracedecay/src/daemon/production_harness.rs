@@ -69,7 +69,6 @@ struct ProductionProjectHarnessResourcesV1 {
 pub struct ProductionProjectCompositionHarnessV1 {
     isolation_root: PathBuf,
     profile_root: PathBuf,
-    semantic_auto_download_enabled: bool,
     resources: Option<ProductionProjectHarnessResourcesV1>,
 }
 
@@ -423,28 +422,25 @@ async fn mount_production_composition_projects(
     profile_root: &Path,
     scope_prefix: Option<String>,
     wait_for_code_index: bool,
-) -> Result<(HashMap<PathBuf, Arc<crate::mcp::McpServer>>, bool)> {
+) -> Result<HashMap<PathBuf, Arc<crate::mcp::McpServer>>> {
     let client_identity = DaemonClientIdentity {
         profile_root: profile_root.to_path_buf(),
         global_db_path: profile_root.join("global.db"),
     };
     let mut servers = HashMap::new();
-    let mut semantic_auto_download_enabled = false;
     for (index, project_root) in project_roots.into_iter().enumerate() {
-        let (canonical_project_path, server, project_semantic) =
-            Box::pin(mount_one_production_composition_project(
-                stores,
-                project_root,
-                &client_identity,
-                scope_prefix.as_deref(),
-                index,
-                wait_for_code_index,
-            ))
-            .await?;
-        semantic_auto_download_enabled |= project_semantic;
+        let (canonical_project_path, server) = Box::pin(mount_one_production_composition_project(
+            stores,
+            project_root,
+            &client_identity,
+            scope_prefix.as_deref(),
+            index,
+            wait_for_code_index,
+        ))
+        .await?;
         servers.insert(canonical_project_path, server);
     }
-    Ok((servers, semantic_auto_download_enabled))
+    Ok(servers)
 }
 
 async fn mount_one_production_composition_project(
@@ -454,7 +450,7 @@ async fn mount_one_production_composition_project(
     scope_prefix: Option<&str>,
     index: usize,
     wait_for_code_index: bool,
-) -> Result<(PathBuf, Arc<crate::mcp::McpServer>, bool)> {
+) -> Result<(PathBuf, Arc<crate::mcp::McpServer>)> {
     let handshake = DaemonHandshake {
         client_version: binary_version()?.to_owned(),
         client_instance_id: format!("production-composition-harness-{index}"),
@@ -488,7 +484,6 @@ async fn mount_one_production_composition_project(
                     canonical_project_path,
                     handshake,
                     ProductionProjectCompositionRuntime::Portable {
-                        semantic_auto_download: false,
                         startup_catch_up: false,
                     },
                     &cancellation,
@@ -518,18 +513,7 @@ async fn mount_one_production_composition_project(
         ))
         .await?;
     }
-    let semantic_auto_download_enabled =
-        composition
-            .semantic_auto_download_enabled
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "production-composition harness reused an unobserved semantic runtime"
-                    .to_owned(),
-            })?;
-    Ok((
-        composition.canonical_project_path,
-        composition.server,
-        semantic_auto_download_enabled,
-    ))
+    Ok((composition.canonical_project_path, composition.server))
 }
 
 impl ProductionProjectCompositionHarnessV1 {
@@ -626,19 +610,17 @@ impl ProductionProjectCompositionHarnessV1 {
                 long_lived_session_maintenance_for_test,
             ))
             .await?;
-            let (servers, semantic_auto_download_enabled) =
-                Box::pin(mount_production_composition_projects(
-                    &stores,
-                    isolated.project_roots,
-                    &isolated.profile_root,
-                    scope_prefix,
-                    wait_for_code_index,
-                ))
-                .await?;
+            let servers = Box::pin(mount_production_composition_projects(
+                &stores,
+                isolated.project_roots,
+                &isolated.profile_root,
+                scope_prefix,
+                wait_for_code_index,
+            ))
+            .await?;
             Ok(Self {
                 isolation_root: isolated.isolation_root,
                 profile_root: isolated.profile_root,
-                semantic_auto_download_enabled,
                 resources: Some(ProductionProjectHarnessResourcesV1 {
                     store_administration: stores.store_administration,
                     invocation: stores.invocation,
@@ -689,10 +671,6 @@ impl ProductionProjectCompositionHarnessV1 {
 
     pub fn profile_root(&self) -> &Path {
         &self.profile_root
-    }
-
-    pub fn semantic_auto_download_enabled(&self) -> bool {
-        self.semantic_auto_download_enabled
     }
 
     #[hotpath::measure(label = "daemon.harness.read_profile_analytics", future = true)]
@@ -1559,21 +1537,6 @@ mod configuration_idempotency_journey_test;
 
 #[cfg(test)]
 mod read_only_project_open_journey_test;
-
-#[cfg(test)]
-mod semantic_activation_journey_test;
-
-#[cfg(test)]
-mod semantic_availability_fallback_digest;
-
-#[cfg(test)]
-mod semantic_availability_journey_test;
-
-#[cfg(test)]
-mod semantic_restart_journey_test;
-
-#[cfg(test)]
-mod semantic_index_fixture_check_test;
 
 #[cfg(test)]
 mod lcm_preserved_profile_journey_test;

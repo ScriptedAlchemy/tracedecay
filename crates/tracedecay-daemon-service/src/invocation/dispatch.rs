@@ -881,59 +881,6 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
-            DaemonInvocationPayload::SemanticEvaluateAndPublish {
-                evaluated_profile_id,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                self.execute_semantic_evaluation(
-                    project_root,
-                    request_id,
-                    evaluated_profile_id,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                    request_cancellation.clone(),
-                )
-                .await
-            }
-            DaemonInvocationPayload::SemanticActivate {
-                evaluated_profile_id,
-                set_rollback,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                self.execute_semantic_activation(
-                    project_root,
-                    request_id,
-                    evaluated_profile_id,
-                    set_rollback,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                    request_cancellation.clone(),
-                )
-                .await
-            }
-            DaemonInvocationPayload::SemanticQualify {
-                evaluated_profile_id,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                self.execute_semantic_qualification(
-                    project_root,
-                    request_id,
-                    evaluated_profile_id,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                    request_cancellation.clone(),
-                )
-                .await
-            }
             DaemonInvocationPayload::LspOpen {
                 client_revision,
                 requested_root_uri,

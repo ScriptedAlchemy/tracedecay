@@ -2166,25 +2166,17 @@ export const ExplorerSessionSizeV1Schema = z.object({
 });
 export type ExplorerSessionSizeV1 = z.infer<typeof ExplorerSessionSizeV1Schema>;
 
-export const ExplorerSourceIdV1Schema = z.enum(["code_graph", "knowledge", "semantic", "sessions"]);
+export const ExplorerSourceIdV1Schema = z.enum(["code_graph", "knowledge", "sessions"]);
 export type ExplorerSourceIdV1 = z.infer<typeof ExplorerSourceIdV1Schema>;
 
 /** What one source truthfully concluded for this run. Every member has a real
 producer; none is speculative:
 - `Partial`: the source answered with rows but its own read reported
   omitted records (LCM temporal reads).
-- `Indexing`: the provider is acquiring its model or projecting vectors
-  (semantic runtime acquisition/indexing states).
 - `Stale`: the source's store exists but does not match the current
-  generation (verified graph stale reads, LCM stale projections, semantic
-  generation staleness).
-- `TimedOut`: the source's own read exceeded the admitted deadline.
-- `Unsupported`: this dashboard surface cannot consult the source at all
-  (no daemon authority attached, or the provider state cannot be consumed
-  on this surface yet).
-- `Absent`: the source's store does not exist for this project — a typed
-  absence, not a failure (semantic search not activated). */
-export const ExplorerSourceOutcomeV1Schema = z.enum(["absent", "cancelled", "error", "indexing", "partial", "pending", "ready", "stale", "timed_out", "unavailable", "unsupported"]);
+  generation (verified graph stale reads, LCM stale projections).
+- `TimedOut`: the source's own read exceeded the admitted deadline. */
+export const ExplorerSourceOutcomeV1Schema = z.enum(["cancelled", "error", "partial", "pending", "ready", "stale", "timed_out", "unavailable"]);
 export type ExplorerSourceOutcomeV1 = z.infer<typeof ExplorerSourceOutcomeV1Schema>;
 
 export const ExplorerSourcePhaseV1Schema = z.enum(["cancelled", "completed", "queued", "reading"]);

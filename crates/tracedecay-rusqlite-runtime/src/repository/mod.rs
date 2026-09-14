@@ -41,7 +41,6 @@ mod remote;
 mod retained_exact_sql;
 mod retrieval_anchor;
 mod scope_set;
-mod semantic_vector_staging;
 mod support;
 
 use rusqlite::{Savepoint, Transaction};
@@ -77,9 +76,6 @@ pub use retrieval_anchor::RetrievalAnchorExecutor;
 pub use scope_set::{
     AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,
     AuthorizedScopeSetStoreError,
-};
-pub use semantic_vector_staging::{
-    SEMANTIC_VECTOR_STAGING_SCHEMA, SemanticVectorStagingExactSqlStorage,
 };
 
 pub use tracedecay_store::{

@@ -95,6 +95,8 @@ fn routing_rejects_empty_multi_term_control_and_duplicate_anchors() {
     assert!(accepted.prefer_symbol);
     assert!(!accepted.is_query_only());
     assert!(LexicalRoutingV1::query_only().is_query_only());
+    assert!(!LexicalRoutingV1::prefer_symbol().is_query_only());
+    assert!(LexicalRoutingV1::prefer_symbol().prefer_symbol);
 }
 
 #[test]

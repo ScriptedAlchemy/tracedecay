@@ -23,8 +23,7 @@ use crate::{
     GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
     GraphProjectionPage, GraphProjectionReadRequest, GraphProjectionTelemetry,
     GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationRef,
-    GraphVectorIndexRequest, GraphVectorIndexStatus, TraversalRequest, VectorSearchRequest,
-    VectorSearchResult,
+    TraversalRequest,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -408,44 +407,6 @@ impl VerifiedGraphSnapshot {
                 return sealed.database().traverse_generation(self, request);
             }
             self.database.traverse_generation(self, request)
-        })
-    }
-
-    #[hotpath::measure(
-        label = "graph_db.lease.vector_search",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
-    pub fn vector_search(
-        &self,
-        mut request: VectorSearchRequest,
-    ) -> Result<VectorSearchResult, GraphDbError> {
-        self.require_head_projection(&request.namespace, &request.projection)?;
-        request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| {
-            if self.head.dependency_identities.is_empty()
-                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
-            {
-                return sealed.database().vector_search(request);
-            }
-            self.database.vector_search(request)
-        })
-    }
-
-    /// Typed coverage of the vector index serving this snapshot's head
-    /// generation. Callers that require the index to cover a complete row
-    /// set compare the reported vector count before trusting searches.
-    #[hotpath::measure(
-        label = "graph_db.lease.vector_index_status",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
-    pub fn vector_index_status(
-        &self,
-        mut request: GraphVectorIndexRequest,
-    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
-        self.require_head_projection(&request.namespace, &request.projection)?;
-        request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| {
-            self.with_head_database(|database| database.vector_index_status(request))
         })
     }
 
