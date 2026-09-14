@@ -27,10 +27,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracedecay_contracts::{ApplicationContractError, now_micros};
 use tracedecay_domain::{
     AdoptionEligibilityObservedV1, AdoptionOutcomeLinkedV1, CoverageStateV1,
-    IndexObservationKindV1, IndexObservedV1, IndexOutcomeV1, LatencyObservedV1, LatencyStageV1,
-    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
-    ObservabilityTerminalResultV1, OperationResourceObservedV1, RetrievalQueryObservedV1,
+    IndexObservationKindV1, IndexObservedV1, IndexOutcomeV1, ObservabilityEnvelopeV1,
+    ObservabilityPayloadV1, ObservabilityRetentionClassV1, ObservabilityTerminalResultV1,
     StorageObservationKindV1, StorageObservedV1, canonical_sha256,
+};
+#[cfg(test)]
+use tracedecay_domain::{
+    LatencyObservedV1, LatencyStageV1, OperationResourceObservedV1, RetrievalQueryObservedV1,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 
@@ -79,6 +82,7 @@ const fn weaker_coverage(left: CoverageStateV1, right: CoverageStateV1) -> Cover
 /// Fixed, payload-safe operation label for one latency stage. The closed enum
 /// bounds label cardinality; an added stage is a compile error here rather than
 /// an unbounded metric dimension.
+#[cfg(test)]
 const fn latency_stage_label(stage: LatencyStageV1) -> &'static str {
     match stage {
         LatencyStageV1::Queue => "queue",
@@ -311,6 +315,7 @@ fn bound_project_id(db: &RegisteredGlobalDb) -> Result<String, ApplicationContra
         })
 }
 
+#[cfg(test)]
 fn retrieval_query_envelope(
     project_id: &str,
     observed_at_micros: i64,
@@ -407,6 +412,7 @@ fn adoption_outcome_envelope(
     })
 }
 
+#[cfg(test)]
 fn latency_envelope(
     project_id: &str,
     observed_at_micros: i64,
@@ -432,6 +438,7 @@ fn latency_envelope(
     })
 }
 
+#[cfg(test)]
 fn operation_resource_envelope(
     project_id: &str,
     observed_at_micros: i64,
@@ -522,20 +529,6 @@ fn index_envelope(
     })
 }
 
-/// Records one completed retrieval query through the project-bound observation
-/// authority. `answered == false` is retained as an abstention, never as a
-/// failed or absent query.
-#[hotpath::measure(label = "usecases.observability.record_query", future = true)]
-pub async fn record_retrieval_query(
-    db: &RegisteredGlobalDb,
-    observation: RetrievalQueryObservedV1,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let envelope = retrieval_query_envelope(&project_id, now_micros().0, observation)
-        .map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
 /// Records one adoption-eligibility census. `coverage` is required because only
 /// the caller knows whether it enumerated the whole eligible population; an
 /// incomplete census must not reach the rollup as `Known`.
@@ -574,43 +567,6 @@ pub async fn record_adoption_outcome(
     record_observability(db, envelope).await
 }
 
-/// Records one per-stage latency observation at an operation boundary.
-#[hotpath::measure(label = "usecases.observability.record_latency", future = true)]
-pub async fn record_latency(
-    db: &RegisteredGlobalDb,
-    observation: LatencyObservedV1,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let envelope =
-        latency_envelope(&project_id, now_micros().0, observation).map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
-/// Records one per-operation resource receipt. `terminal_result` is `None` when
-/// the operation's terminal state is genuinely unknown; the rollup projects that
-/// as an unknown rather than a completion.
-#[hotpath::measure(
-    label = "usecases.observability.record_operation_resource",
-    future = true
-)]
-pub async fn record_operation_resource(
-    db: &RegisteredGlobalDb,
-    coverage: CoverageStateV1,
-    terminal_result: Option<ObservabilityTerminalResultV1>,
-    observation: OperationResourceObservedV1,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let envelope = operation_resource_envelope(
-        &project_id,
-        now_micros().0,
-        coverage,
-        terminal_result,
-        observation,
-    )
-    .map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
 /// Records one storage size, budget, or latency observation.
 #[hotpath::measure(label = "usecases.observability.record_storage", future = true)]
 pub async fn record_storage(
@@ -620,18 +576,6 @@ pub async fn record_storage(
     let project_id = bound_project_id(db)?;
     let envelope =
         storage_envelope(&project_id, now_micros().0, observation).map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
-/// Records one code-index generation lifecycle observation.
-#[hotpath::measure(label = "usecases.observability.record_index", future = true)]
-pub async fn record_index(
-    db: &RegisteredGlobalDb,
-    observation: IndexObservedV1,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let envelope =
-        index_envelope(&project_id, now_micros().0, observation).map_err(contract_error)?;
     record_observability(db, envelope).await
 }
 

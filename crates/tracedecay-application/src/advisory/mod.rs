@@ -31,8 +31,8 @@ pub use ci_runtime::{
     CiRetainedProviderRecordV1, CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1,
     ConcreteCiFailureLocalizationOwnerV1, DaemonCiReadOnlyEvidenceSourceV1,
     GitHubCiAnnotationLevelV1, GitHubCiCheckAnnotationV1, GitHubCiCheckRunV1,
-    GitHubCiCheckSuiteRefV1, GitHubCiOfficialResponseDecoderV1, GitHubCiProviderRecordV1,
-    GitHubCiPullRequestRefV1, GitHubCiWorkflowRunV1, MAX_CI_RETAINED_ANNOTATIONS_V1,
+    GitHubCiOfficialResponseDecoderV1, GitHubCiProviderRecordV1, GitHubCiWorkflowRunV1,
+    MAX_CI_RETAINED_ANNOTATIONS_V1,
     MAX_CI_RETAINED_CHECKS_V1, MAX_CI_RETAINED_FAILURES_V1,
     MAX_CI_RETAINED_OBSERVATION_MANIFEST_ENTRIES_V1, ProductionCiArchiveHandleV1,
     ProductionCiExactEvidenceHandleV1, ProductionCiFailureDiscoveryOutcomeV1,
@@ -44,11 +44,6 @@ pub use ci_runtime::{
 };
 #[cfg(any(test, feature = "test-transport"))]
 pub use fixtures::{
-    ADVISORY_CHECK_ANNOTATIONS_FIXTURE_V1, ADVISORY_CHECK_RUN_FIXTURE_V1, ADVISORY_FIXTURE_ROOT_V1,
-    ADVISORY_PROXIMITY_SESSIONS_FIXTURE_V1, ADVISORY_PULL_REQUEST_FIXTURE_V1,
-    ADVISORY_REVIEW_COMMENT_FIXTURE_V1, ADVISORY_REVIEW_FIXTURE_V1,
-    ADVISORY_REVIEW_THREAD_FIXTURE_V1, ADVISORY_SCENARIO_FIXTURE_V1,
-    ADVISORY_WORKFLOW_JOB_FIXTURE_V1, ADVISORY_WORKFLOW_RUN_FIXTURE_V1,
     AdvisoryCiFixtureEvidenceV1, AdvisoryCiFixtureV1, AdvisoryGitHubFixtureAnchorsV1,
     AdvisoryGitHubReviewFixtureV1, AdvisoryProximityFixtureEvidenceV1, AdvisoryProximityFixtureV1,
 };
@@ -82,8 +77,8 @@ pub use github_runtime::{
     ProjectGitHubReleasePageV1, ProjectGitHubReleaseReadAuthorityV1,
     ProjectGitHubReleaseReadOutcomeV1, ProjectGitHubReleaseReadRequestV1,
     ProjectGitHubReviewStoreV1, build_github_review_runtime_owner_v1,
-    github_anchor_authorities_arc_v1, github_anchor_authorities_v1,
-    open_project_github_release_read_authority_v1, public_repository_read_credential_v1,
+    github_anchor_authorities_arc_v1, open_project_github_release_read_authority_v1,
+    public_repository_read_credential_v1,
     register_github_read_only_credential_authority_v1,
     register_profile_github_read_only_credential_authority_v1,
     unregister_github_read_only_credential_authority_v1,

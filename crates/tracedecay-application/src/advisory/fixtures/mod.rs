@@ -31,25 +31,6 @@ use super::github_runtime::{
 };
 use super::proximity_runtime::CanonicalProximityEvidenceV1;
 
-pub const ADVISORY_FIXTURE_ROOT_V1: &str =
-    "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review";
-pub const ADVISORY_SCENARIO_FIXTURE_V1: &str =
-    "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/scenario.json";
-pub const ADVISORY_PULL_REQUEST_FIXTURE_V1: &str =
-    "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/pull_request.json";
-pub const ADVISORY_REVIEW_FIXTURE_V1: &str =
-    "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review.json";
-pub const ADVISORY_REVIEW_COMMENT_FIXTURE_V1: &str = "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review_comment.json";
-pub const ADVISORY_REVIEW_THREAD_FIXTURE_V1: &str = "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json";
-pub const ADVISORY_WORKFLOW_RUN_FIXTURE_V1: &str =
-    "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/workflow_run.json";
-pub const ADVISORY_WORKFLOW_JOB_FIXTURE_V1: &str =
-    "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/workflow_job.json";
-pub const ADVISORY_CHECK_RUN_FIXTURE_V1: &str =
-    "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/check_run.json";
-pub const ADVISORY_CHECK_ANNOTATIONS_FIXTURE_V1: &str = "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/check_annotations.json";
-pub const ADVISORY_PROXIMITY_SESSIONS_FIXTURE_V1: &str = "crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/proximity_sessions.json";
-
 const SCENARIO_JSON: &str = include_str!("provider_branch_review/scenario.json");
 const PULL_REQUEST_JSON: &str = include_str!("provider_branch_review/pull_request.json");
 const REVIEW_JSON: &str = include_str!("provider_branch_review/review.json");

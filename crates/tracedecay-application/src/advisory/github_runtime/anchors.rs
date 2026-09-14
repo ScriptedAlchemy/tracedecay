@@ -698,19 +698,6 @@ impl GitHubCurrentBranchRemapper for Arc<ProjectGitHubAnchorAuthorityV1> {
     }
 }
 
-pub fn github_anchor_authorities_v1(
-    database: Database,
-    project_root: impl Into<PathBuf>,
-    scope: FeedbackScopeV1,
-    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
-) -> Option<ProjectGitHubRegistrarAuthoritiesV1<ProjectGitHubAnchorAuthorityV1>> {
-    let authority = ProjectGitHubAnchorAuthorityV1::new(database, project_root, scope, code_graph)?;
-    Some(ProjectGitHubRegistrarAuthoritiesV1 {
-        github_remapper: authority.clone(),
-        github_anchors: authority,
-    })
-}
-
 pub fn github_anchor_authorities_arc_v1(
     database: Database,
     project_root: impl Into<PathBuf>,

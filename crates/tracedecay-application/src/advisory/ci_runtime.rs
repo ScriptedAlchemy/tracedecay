@@ -36,10 +36,9 @@ use tracedecay_domain::feedback::{
 };
 
 use super::github_runtime::{
-    GitHubActionsCheckRunV1, GitHubActionsCheckSuiteRefV1, GitHubActionsConclusionV1,
-    GitHubActionsPullRequestRefV1, GitHubActionsStatusV1, GitHubActionsWorkflowJobV1,
-    GitHubActionsWorkflowRunV1, GitHubActionsWorkflowStepV1, GitHubCheckAnnotationLevelV1,
-    GitHubCheckAnnotationV1, GitHubRetainedResponseV1,
+    GitHubActionsCheckRunV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
+    GitHubActionsWorkflowJobV1, GitHubActionsWorkflowRunV1, GitHubActionsWorkflowStepV1,
+    GitHubCheckAnnotationLevelV1, GitHubCheckAnnotationV1, GitHubRetainedResponseV1,
 };
 use super::{
     CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource, context_allows_feedback_operation,
@@ -141,8 +140,6 @@ const fn state_matches_coverage(
 
 pub type GitHubCiWorkflowRunV1 = GitHubActionsWorkflowRunV1;
 pub type GitHubCiCheckRunV1 = GitHubActionsCheckRunV1;
-pub type GitHubCiCheckSuiteRefV1 = GitHubActionsCheckSuiteRefV1;
-pub type GitHubCiPullRequestRefV1 = GitHubActionsPullRequestRefV1;
 pub type GitHubCiCheckAnnotationV1 = GitHubCheckAnnotationV1;
 pub type GitHubCiAnnotationLevelV1 = GitHubCheckAnnotationLevelV1;
 

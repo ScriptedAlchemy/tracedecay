@@ -37,8 +37,7 @@ pub use delivery_recorder::{
 };
 pub use delivery_settlement::{DeliverySettlementAuthorityV1, DeliverySettlementEmissionV1};
 pub use emit::{
-    emit_index, record_adoption_eligibility, record_adoption_outcome, record_index, record_latency,
-    record_operation_resource, record_retrieval_query, record_storage,
+    emit_index, record_adoption_eligibility, record_adoption_outcome, record_storage,
 };
 pub use execution_emit::{
     ExecutionOwnerFactInputV1, ExecutionTopologyObservationUnavailableV1,
@@ -65,9 +64,7 @@ pub use product_view_emit::{
 };
 pub use read::{observatory_read_model, observatory_unavailable_read_model};
 pub use retrieval_emit::{
-    RetrievalEmissionSummaryV1, emit_retrieval_pipeline, record_analytics_consent,
-    record_context_outcome, record_retrieval_planner, record_retrieval_source,
-    record_retrieval_synthesis, record_retriever,
+    RetrievalEmissionSummaryV1, emit_retrieval_pipeline,
 };
 pub use tracedecay_global_db::{
     DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,

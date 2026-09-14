@@ -47,7 +47,7 @@ pub use access::ConfiguredGitHubSourceAccessAuthorityV1;
 pub use anchors::{
     GitHubReviewBodyEvidenceAuthorityV1, GitHubReviewBodyEvidenceV1, GitHubReviewBodyReadOutcomeV1,
     ProjectGitHubAnchorAuthorityV1, ProjectGitHubRegistrarAuthoritiesV1,
-    github_anchor_authorities_arc_v1, github_anchor_authorities_v1,
+    github_anchor_authorities_arc_v1,
 };
 pub use credential_lifecycle::{
     GitHubReadOnlyCredentialLifecycleV1, GitHubReadOnlyCredentialPermissionVerifierV1,
