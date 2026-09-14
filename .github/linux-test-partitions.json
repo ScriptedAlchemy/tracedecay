@@ -37,7 +37,6 @@
         "test:hermes_suite",
         "test:hooks_lsp_suite",
         "test:product_surface_suite",
-        "test:search_quality_suite",
         "test:cursor_observation_identity_fallback",
         "test:claude_observation_benchmark",
         "bins",

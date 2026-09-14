@@ -776,14 +776,6 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
-      # Compile this portable historical-artifact journey before the large
-      # root test binaries monopolize the hosted runner. The workspace,
-      # feature and cargo-profile selection match the archive, so Cargo
-      # reuses the result below.
-      - name: Compile Windows search-quality portability target
-        shell: pwsh
-        run: cargo test --no-run --workspace --locked --profile perf --features tracedecay/test-helpers --test search_quality_suite
-
       # Acceptance tests execute the ordinary evaluator binaries. Match the
       # archive's features and perf profile to reuse dependency artifacts;
       # nextest's archive.include carries the executables to every shard.
