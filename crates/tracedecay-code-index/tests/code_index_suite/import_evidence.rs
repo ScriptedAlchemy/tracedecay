@@ -512,8 +512,8 @@ fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
 }
 
 #[test]
-fn sealed_revision_six_import_generation_round_trips_to_identical_bytes() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 8);
+fn sealed_revision_nine_import_generation_round_trips_to_identical_bytes() {
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 10);
     let first = published_import_generation();
     let first_sealed = first.encode_sealed().expect("first generation seals");
     let second_sealed = published_import_generation()
@@ -522,9 +522,9 @@ fn sealed_revision_six_import_generation_round_trips_to_identical_bytes() {
     assert_eq!(first_sealed, second_sealed);
 
     let envelope: Value = serde_json::from_slice(&first_sealed).expect("sealed generation JSON");
-    assert_eq!(envelope["generation"]["format_revision"], 6);
+    assert_eq!(envelope["generation"]["format_revision"], 9);
     let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&first_sealed).expect("rev6 restores");
+        CodeIndexPublishedGenerationV1::decode_sealed(&first_sealed).expect("rev9 restores");
     assert_eq!(restored.imports(), first.imports());
     assert_eq!(
         restored.encode_sealed().expect("restored generation seals"),

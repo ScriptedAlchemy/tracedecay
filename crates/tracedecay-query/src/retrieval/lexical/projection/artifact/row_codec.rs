@@ -252,7 +252,9 @@ pub(super) fn encode_artifact_row(
         LexicalArtifactLayoutV1::V11
         | LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13 => encode_compact_v11(row),
-        LexicalArtifactLayoutV1::V14 => encode_binary_v14(row, dictionary),
+        LexicalArtifactLayoutV1::V14 | LexicalArtifactLayoutV1::V15 => {
+            encode_binary_v14(row, dictionary)
+        }
     }
 }
 
@@ -293,7 +295,9 @@ pub(super) fn decode_artifact_row(
         LexicalArtifactLayoutV1::V11
         | LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13 => decode_compact_v11(generation, chunk_id, bytes),
-        LexicalArtifactLayoutV1::V14 => decode_binary_v14(generation, chunk_id, bytes, dictionary),
+        LexicalArtifactLayoutV1::V14 | LexicalArtifactLayoutV1::V15 => {
+            decode_binary_v14(generation, chunk_id, bytes, dictionary)
+        }
     }
 }
 

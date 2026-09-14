@@ -1721,15 +1721,23 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
         .iter()
         .map(|chunk| chunk.chunk().clone())
         .collect::<Vec<_>>();
+    let mut observed_clone_bodies = first.clone_bodies().len();
     let mut final_page_digest = first.cumulative_digest().clone();
     let receipt = loop {
         match source.next_page(&control).expect("resumed page read") {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
-                assert_eq!(page.chunk_count(), 1);
-                assert_eq!(page.chunks().len(), 1);
+                assert!(
+                    page.chunks()
+                        .len()
+                        .saturating_add(page.imports().len())
+                        .saturating_add(page.clone_bodies().len())
+                        <= 1
+                );
                 assert!(page.payload_bytes() <= 1024 * 1024);
                 final_page_digest = page.cumulative_digest().clone();
                 observed.extend(page.chunks().iter().map(|chunk| chunk.chunk().clone()));
+                observed_clone_bodies =
+                    observed_clone_bodies.saturating_add(page.clone_bodies().len());
             }
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
         }
@@ -1745,10 +1753,12 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     expected.sort_by(|left, right| left.id.cmp(&right.id));
     assert_eq!(observed, expected);
     assert_eq!(receipt.total_chunks(), expected.len() as u64);
-    assert_eq!(receipt.page_count(), expected.len() as u64);
+    assert!(receipt.page_count() >= expected.len() as u64);
+    assert_eq!(receipt.total_clone_bodies(), observed_clone_bodies as u64);
+    assert_eq!(observed_clone_bodies, 3);
     assert_eq!(receipt.cumulative_digest(), &final_page_digest);
     assert_eq!(receipt.source_state_digest(), &expected_state_digest);
-    assert_eq!(receipt.format_revision(), 6);
+    assert_eq!(receipt.format_revision(), 9);
 }
 
 #[test]
@@ -3216,19 +3226,19 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:345be1faf6f3df37ee9e0a5be0c8dca0ab23b1d5f1172b53b58f74db5ce636c7";
+    "sha256:08d98f8b5ab9a10e9ce05f5b99e58bee44dc5e107047b308afcf63840a674a85";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:4db0d378108aa77b64bc33ab958b3e7167c9dcdfa1f7485803c9ba46dc4bcbf0",
-        7_958,
+        "sha256:0a8f5f5c66ac3bc2bf830d1316f1bcdf2568344c0dffb8e408f89dc36e7d66d9",
+        11_070,
     ),
     (
-        "sha256:c4188be2888d3542e61f96abb84106df795cdd646f7358dbd23ed2344391838a",
-        3_543,
+        "sha256:e9aa563571cb4ab6f23ad85ce7ddf19eff6c0ca931bfb48856af2241ffe1dd47",
+        5_170,
     ),
     (
-        "sha256:da48ed86c30e06f7eae795e983a1b943972e971604ff6e2093683b8857d7ceca",
-        3_651,
+        "sha256:9a3119d36b8f35abbcbef245643a01644a31adb77442e1d5bc250d5a792e99f8",
+        6_278,
     ),
     (
         "sha256:9aacc4645ff8e7c898401e5ded39b158fef6770ff90987f9471518f661a8f281",
@@ -3378,9 +3388,29 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             && evidence_buffer_capacity.get() <= largest_evidence_page.get().next_power_of_two(),
         "the evidence allocation must be bounded by the largest evidence page"
     );
+    let restored_seal = restored.encode_sealed().expect("restored generation seals");
+    let expected_seal = expected.encode_sealed().expect("expected generation seals");
+    let restored_json: serde_json::Value =
+        serde_json::from_slice(&restored_seal).expect("restored sealed JSON");
+    let expected_json: serde_json::Value =
+        serde_json::from_slice(&expected_seal).expect("expected sealed JSON");
     assert_eq!(
-        restored.encode_sealed().expect("restored generation seals"),
-        expected.encode_sealed().expect("expected generation seals"),
+        restored_json["generation"]["files"]
+            .as_array()
+            .expect("restored files")
+            .iter()
+            .map(|file| &file["artifacts"]["clone_bodies"])
+            .collect::<Vec<_>>(),
+        expected_json["generation"]["files"]
+            .as_array()
+            .expect("expected files")
+            .iter()
+            .map(|file| &file["artifacts"]["clone_bodies"])
+            .collect::<Vec<_>>(),
+        "partitioned restore must preserve clone rows"
+    );
+    assert_eq!(
+        restored_seal, expected_seal,
         "decode must restore the same typed generation"
     );
 

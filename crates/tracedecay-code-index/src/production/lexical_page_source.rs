@@ -8,7 +8,10 @@ use std::{
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{CodeGenerationSourceCommitmentsV1, ExactTechnicalTermV1};
 
-use crate::{capabilities::expected_seal_digest, intake::INTAKE_DIGEST_SEPARATOR};
+use crate::{
+    capabilities::expected_seal_digest, clones::CodeIndexCloneBodyV1,
+    intake::INTAKE_DIGEST_SEPARATOR,
+};
 
 use super::partitioned_codec::PartitionedLexicalFileSourceV1;
 use super::sealed_codec::{
@@ -21,6 +24,7 @@ const PAGE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-page.v1\0";
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source.v1\0";
 const IMPORT_DICTIONARY_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-import-dictionary.v1\0";
 const IMPORT_RECORD_DOMAIN: &[u8] = b"import\0";
+const CLONE_BODY_RECORD_DOMAIN: &[u8] = b"clone-body\0";
 const SOURCE_CHAIN_RECORD_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source-chain.v1\0";
 const SYMBOL_DISPLAY_RECORD_DOMAIN: &[u8] = b"symbol-display\0";
 const SOURCE_SYMBOL_DISPLAY_CHAIN_RECORD_DOMAIN: &[u8] =
@@ -52,6 +56,9 @@ type PersistedSealedLexicalCursorFields = (
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
     String,
     String,
     String,
@@ -65,11 +72,14 @@ pub struct VerifiedSealedLexicalCursorV1 {
     next_file_offset: u64,
     next_chunk_ordinal: u64,
     next_import_ordinal: u64,
+    next_clone_body_ordinal: u64,
     next_page_ordinal: u64,
     emitted_chunks: u64,
     emitted_payload_bytes: u64,
     emitted_imports: u64,
     emitted_import_payload_bytes: u64,
+    emitted_clone_bodies: u64,
+    emitted_clone_body_payload_bytes: u64,
     import_dictionary_digest: ManifestDigest,
     cumulative_digest: ManifestDigest,
 }
@@ -114,11 +124,14 @@ impl VerifiedSealedLexicalCursorV1 {
             next_file_offset,
             next_chunk_ordinal: 0,
             next_import_ordinal: 0,
+            next_clone_body_ordinal: 0,
             next_page_ordinal: 0,
             emitted_chunks: 0,
             emitted_payload_bytes: 0,
             emitted_imports: 0,
             emitted_import_payload_bytes: 0,
+            emitted_clone_bodies: 0,
+            emitted_clone_body_payload_bytes: 0,
             import_dictionary_digest: initial_digest(IMPORT_DICTIONARY_DIGEST_DOMAIN)?,
             cumulative_digest: initial_digest(SOURCE_DIGEST_DOMAIN)?,
         })
@@ -130,12 +143,15 @@ impl VerifiedSealedLexicalCursorV1 {
             self.next_file_ordinal,
             self.next_file_offset,
             self.next_chunk_ordinal,
+            self.next_clone_body_ordinal,
             self.next_page_ordinal,
             self.emitted_chunks,
             self.emitted_payload_bytes,
             self.next_import_ordinal,
             self.emitted_imports,
             self.emitted_import_payload_bytes,
+            self.emitted_clone_bodies,
+            self.emitted_clone_body_payload_bytes,
             self.import_dictionary_digest.as_str(),
             self.cumulative_digest.as_str(),
             self.integrity_digest()?.as_str(),
@@ -149,12 +165,15 @@ impl VerifiedSealedLexicalCursorV1 {
             next_file_ordinal,
             next_file_offset,
             next_chunk_ordinal,
+            next_clone_body_ordinal,
             next_page_ordinal,
             emitted_chunks,
             emitted_payload_bytes,
             next_import_ordinal,
             emitted_imports,
             emitted_import_payload_bytes,
+            emitted_clone_bodies,
+            emitted_clone_body_payload_bytes,
             import_dictionary_digest,
             cumulative_digest,
             integrity_digest,
@@ -170,11 +189,14 @@ impl VerifiedSealedLexicalCursorV1 {
             next_file_offset,
             next_chunk_ordinal,
             next_import_ordinal,
+            next_clone_body_ordinal,
             next_page_ordinal,
             emitted_chunks,
             emitted_payload_bytes,
             emitted_imports,
             emitted_import_payload_bytes,
+            emitted_clone_bodies,
+            emitted_clone_body_payload_bytes,
             import_dictionary_digest: ManifestDigest::new(import_dictionary_digest)
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
             cumulative_digest: ManifestDigest::new(cumulative_digest)
@@ -194,11 +216,14 @@ impl VerifiedSealedLexicalCursorV1 {
         Ok(self.next_file_ordinal == 0
             && self.next_chunk_ordinal == 0
             && self.next_import_ordinal == 0
+            && self.next_clone_body_ordinal == 0
             && self.next_page_ordinal == 0
             && self.emitted_chunks == 0
             && self.emitted_payload_bytes == 0
             && self.emitted_imports == 0
             && self.emitted_import_payload_bytes == 0
+            && self.emitted_clone_bodies == 0
+            && self.emitted_clone_body_payload_bytes == 0
             && self.import_dictionary_digest == initial_digest(IMPORT_DICTIONARY_DIGEST_DOMAIN)?
             && self.cumulative_digest == initial_digest(SOURCE_DIGEST_DOMAIN)?)
     }
@@ -211,11 +236,14 @@ impl VerifiedSealedLexicalCursorV1 {
         hasher.update(self.next_file_offset.to_le_bytes());
         hasher.update(self.next_chunk_ordinal.to_le_bytes());
         hasher.update(self.next_import_ordinal.to_le_bytes());
+        hasher.update(self.next_clone_body_ordinal.to_le_bytes());
         hasher.update(self.next_page_ordinal.to_le_bytes());
         hasher.update(self.emitted_chunks.to_le_bytes());
         hasher.update(self.emitted_payload_bytes.to_le_bytes());
         hasher.update(self.emitted_imports.to_le_bytes());
         hasher.update(self.emitted_import_payload_bytes.to_le_bytes());
+        hasher.update(self.emitted_clone_bodies.to_le_bytes());
+        hasher.update(self.emitted_clone_body_payload_bytes.to_le_bytes());
         hash_record(
             &mut hasher,
             self.import_dictionary_digest.as_str().as_bytes(),
@@ -313,7 +341,7 @@ impl VerifiedSealedLexicalSymbolDisplayV1 {
     }
 }
 
-/// One bounded page of parser-backed, sanitized search chunks.
+/// One bounded page of parser-backed lexical and clone rows.
 #[derive(Debug)]
 pub struct VerifiedSealedLexicalPageV1 {
     page_ordinal: u64,
@@ -321,12 +349,15 @@ pub struct VerifiedSealedLexicalPageV1 {
     payload_bytes: u64,
     import_count: u64,
     import_payload_bytes: u64,
+    clone_body_count: u64,
+    clone_body_payload_bytes: u64,
     page_digest: ManifestDigest,
     cumulative_digest: ManifestDigest,
     next_cursor: VerifiedSealedLexicalCursorV1,
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
     symbol_displays: Vec<Option<VerifiedSealedLexicalSymbolDisplayV1>>,
     imports: Vec<CodeIndexImportEvidenceV1>,
+    clone_bodies: Vec<CodeIndexCloneBodyV1>,
     previous_cursor: VerifiedSealedLexicalCursorV1,
 }
 
@@ -381,6 +412,10 @@ impl VerifiedSealedLexicalPageV1 {
 
     pub fn imports(&self) -> &[CodeIndexImportEvidenceV1] {
         &self.imports
+    }
+
+    pub fn clone_bodies(&self) -> &[CodeIndexCloneBodyV1] {
+        &self.clone_bodies
     }
 
     pub fn import_capacity(&self) -> usize {
@@ -489,6 +524,11 @@ impl VerifiedSealedLexicalPageV1 {
                     )
                 })?;
         }
+        let clone_body_payload_bytes = Self::verify_clone_body_records(
+            &self.clone_bodies,
+            &mut page_hasher,
+            &mut cumulative_digest,
+        )?;
         let chunk_count = u64::try_from(self.chunks.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed lexical page chunk count exceeds u64".to_owned(),
@@ -497,6 +537,11 @@ impl VerifiedSealedLexicalPageV1 {
         let import_count = u64::try_from(self.imports.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed lexical page import count exceeds u64".to_owned(),
+            )
+        })?;
+        let clone_body_count = u64::try_from(self.clone_bodies.len()).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page clone-body count exceeds u64".to_owned(),
             )
         })?;
         let expected_cumulative = cumulative_digest;
@@ -515,6 +560,8 @@ impl VerifiedSealedLexicalPageV1 {
             || self.payload_bytes != payload_bytes
             || self.import_count != import_count
             || self.import_payload_bytes != import_payload_bytes
+            || self.clone_body_count != clone_body_count
+            || self.clone_body_payload_bytes != clone_body_payload_bytes
             || self.cumulative_digest != expected_cumulative
             || self.next_cursor.next_page_ordinal != expected_next_page
             || self.next_cursor.emitted_chunks
@@ -525,6 +572,26 @@ impl VerifiedSealedLexicalPageV1 {
                     .ok_or_else(|| {
                         CodeIndexProductionErrorV1::Contract(
                             "sealed lexical source chunk count overflowed".to_owned(),
+                        )
+                    })?
+            || self.next_cursor.emitted_clone_bodies
+                != self
+                    .previous_cursor
+                    .emitted_clone_bodies
+                    .checked_add(clone_body_count)
+                    .ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed lexical source clone-body count overflowed".to_owned(),
+                        )
+                    })?
+            || self.next_cursor.emitted_clone_body_payload_bytes
+                != self
+                    .previous_cursor
+                    .emitted_clone_body_payload_bytes
+                    .checked_add(clone_body_payload_bytes)
+                    .ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed lexical source clone-body payload overflowed".to_owned(),
                         )
                     })?
             || self.next_cursor.emitted_payload_bytes
@@ -574,7 +641,37 @@ impl VerifiedSealedLexicalPageV1 {
         Ok(())
     }
 
-    /// Heap bytes retained by this page's chunk and import vectors plus its
+    fn verify_clone_body_records(
+        bodies: &[CodeIndexCloneBodyV1],
+        page_hasher: &mut Sha256,
+        cumulative_digest: &mut ManifestDigest,
+    ) -> Result<u64, CodeIndexProductionErrorV1> {
+        let mut payload_bytes = 0u64;
+        for body in bodies {
+            let serialized = serde_json::to_vec(body).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed lexical clone-body serialization failed: {error}"
+                ))
+            })?;
+            hash_clone_body_record(page_hasher, &serialized)?;
+            *cumulative_digest =
+                advance_digest(cumulative_digest, CLONE_BODY_RECORD_DOMAIN, &serialized)?;
+            payload_bytes = payload_bytes
+                .checked_add(u64::try_from(serialized.len()).map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical clone-body payload exceeds u64".to_owned(),
+                    )
+                })?)
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical clone-body payload overflowed".to_owned(),
+                    )
+                })?;
+        }
+        Ok(payload_bytes)
+    }
+
+    /// Heap bytes retained by this page's chunk, import, and clone vectors plus its
     /// digest identities.
     ///
     /// Vector and `String` storage uses actual capacities. Immutable typed-ID,
@@ -664,7 +761,7 @@ impl VerifiedSealedLexicalPageV1 {
                 ))
             },
         );
-        self.imports.iter().fold(
+        let import_bytes = self.imports.iter().fold(
             chunk_bytes
                 .saturating_add(symbol_display_bytes)
                 .saturating_add(digest_bytes)
@@ -681,6 +778,14 @@ impl VerifiedSealedLexicalPageV1 {
                     .saturating_add(evidence.imported_name.as_ref().map_or(0, String::capacity))
                     .saturating_add(evidence.local_name.as_ref().map_or(0, String::capacity))
             },
+        );
+        self.clone_bodies.iter().fold(
+            import_bytes.saturating_add(
+                self.clone_bodies
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<CodeIndexCloneBodyV1>()),
+            ),
+            |bytes, body| bytes.saturating_add(body.retained_owned_bytes()),
         )
     }
 }
@@ -695,6 +800,8 @@ pub struct VerifiedSealedLexicalSourceReceiptV1 {
     total_payload_bytes: u64,
     total_imports: u64,
     import_payload_bytes: u64,
+    total_clone_bodies: u64,
+    clone_body_payload_bytes: u64,
     import_dictionary_digest: ManifestDigest,
     cumulative_digest: ManifestDigest,
 }
@@ -728,6 +835,10 @@ impl VerifiedSealedLexicalSourceReceiptV1 {
         self.import_payload_bytes
     }
 
+    pub fn total_clone_bodies(&self) -> u64 {
+        self.total_clone_bodies
+    }
+
     pub fn import_dictionary_digest(&self) -> &ManifestDigest {
         &self.import_dictionary_digest
     }
@@ -746,6 +857,8 @@ impl VerifiedSealedLexicalSourceReceiptV1 {
                 && self.total_payload_bytes == 0
                 && self.total_imports == 0
                 && self.import_payload_bytes == 0
+                && self.total_clone_bodies == 0
+                && self.clone_body_payload_bytes == 0
                 && self.import_dictionary_digest == initial_digest(IMPORT_DICTIONARY_DIGEST_DOMAIN)?
                 && self.cumulative_digest == initial_digest(SOURCE_DIGEST_DOMAIN)?
             {
@@ -761,6 +874,8 @@ impl VerifiedSealedLexicalSourceReceiptV1 {
             || self.total_payload_bytes != cursor.emitted_payload_bytes
             || self.total_imports != cursor.emitted_imports
             || self.import_payload_bytes != cursor.emitted_import_payload_bytes
+            || self.total_clone_bodies != cursor.emitted_clone_bodies
+            || self.clone_body_payload_bytes != cursor.emitted_clone_body_payload_bytes
             || self.import_dictionary_digest != cursor.import_dictionary_digest
             || self.cumulative_digest != cursor.cumulative_digest
         {
@@ -855,8 +970,84 @@ struct PendingSealedLexicalPageV1 {
     symbol_displays: Vec<Option<VerifiedSealedLexicalSymbolDisplayV1>>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     import_bytes: usize,
+    clone_bodies: Vec<CodeIndexCloneBodyV1>,
+    clone_body_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
     page_hasher: Sha256,
+}
+
+struct CloneBodyPageStageV1<'a> {
+    existing_records: usize,
+    existing_bytes: usize,
+    clone_bodies: &'a mut Vec<CodeIndexCloneBodyV1>,
+    clone_body_bytes: &'a mut usize,
+    cursor: &'a mut VerifiedSealedLexicalCursorV1,
+    page_hasher: &'a mut Sha256,
+}
+
+impl CloneBodyPageStageV1<'_> {
+    fn append(
+        &mut self,
+        admitted: &AdmittedSealedLexicalFileV1,
+        maximum_page_records: usize,
+        maximum_page_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, CodeIndexProductionErrorV1> {
+        let mut ordinal = usize::try_from(self.cursor.next_clone_body_ordinal).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical clone-body cursor exceeds the platform limit".to_owned(),
+            )
+        })?;
+        if ordinal > admitted.clone_bodies.len() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical cursor exceeds its file clone-body count".to_owned(),
+            ));
+        }
+        while ordinal < admitted.clone_bodies.len() {
+            checkpoint(control)?;
+            let serialized = &admitted.serialized_clone_bodies[ordinal];
+            if serialized.len() > maximum_page_bytes {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "one admitted clone body exceeds the page byte bound".to_owned(),
+                ));
+            }
+            if self
+                .existing_records
+                .saturating_add(self.clone_bodies.len())
+                >= maximum_page_records
+                || self
+                    .existing_bytes
+                    .saturating_add(*self.clone_body_bytes)
+                    .saturating_add(serialized.len())
+                    > maximum_page_bytes
+            {
+                return Ok(true);
+            }
+            hash_clone_body_record(self.page_hasher, serialized)?;
+            self.cursor.cumulative_digest = advance_digest(
+                &self.cursor.cumulative_digest,
+                CLONE_BODY_RECORD_DOMAIN,
+                serialized,
+            )?;
+            *self.clone_body_bytes = self
+                .clone_body_bytes
+                .checked_add(serialized.len())
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical clone-body page byte count overflowed".to_owned(),
+                    )
+                })?;
+            self.clone_bodies
+                .push(admitted.clone_bodies[ordinal].clone());
+            ordinal += 1;
+            self.cursor.next_clone_body_ordinal = u64::try_from(ordinal).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical clone-body ordinal exceeds u64".to_owned(),
+                )
+            })?;
+        }
+        Ok(false)
+    }
 }
 
 struct StagedSealedLexicalPageV1 {
@@ -1320,6 +1511,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         if cursor.next_file_ordinal == self.file_count {
             if cursor.next_chunk_ordinal != 0
                 || cursor.next_import_ordinal != 0
+                || cursor.next_clone_body_ordinal != 0
                 || cursor.next_file_offset != self.files_end_offset
             {
                 return Err(VerifiedSealedLexicalCursorRestoreErrorV1::Production(
@@ -1358,9 +1550,20 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     ),
                 )
             })?;
+            let clone_body_count = u64::try_from(admitted.clone_bodies.len()).map_err(|_| {
+                VerifiedSealedLexicalCursorRestoreErrorV1::Production(
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical file clone-body count exceeds u64".to_owned(),
+                    ),
+                )
+            })?;
             if cursor.next_chunk_ordinal > chunk_count
                 || cursor.next_import_ordinal > import_count
-                || (cursor.next_chunk_ordinal < chunk_count && cursor.next_import_ordinal != 0)
+                || cursor.next_clone_body_ordinal > clone_body_count
+                || (cursor.next_chunk_ordinal < chunk_count
+                    && (cursor.next_import_ordinal != 0 || cursor.next_clone_body_ordinal != 0))
+                || (cursor.next_import_ordinal < import_count
+                    && cursor.next_clone_body_ordinal != 0)
             {
                 self.admitted_window.clear();
                 return Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition);
@@ -1652,6 +1855,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let mut symbol_display_bytes = 0usize;
         let mut imports = Vec::new();
         let mut import_bytes = 0usize;
+        let mut clone_bodies = Vec::new();
+        let mut clone_body_bytes = 0usize;
 
         while cursor.next_file_ordinal < self.file_count {
             checkpoint(control)?;
@@ -1698,11 +1903,12 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         "one admitted lexical chunk exceeds the page byte bound".to_owned(),
                     ));
                 }
-                if (!chunks.is_empty() || !imports.is_empty())
+                if (!chunks.is_empty() || !imports.is_empty() || !clone_bodies.is_empty())
                     && (chunks.len() == self.maximum_page_chunks
                         || page_bytes
                             .saturating_add(next_symbol_display_bytes)
                             .saturating_add(import_bytes)
+                            .saturating_add(clone_body_bytes)
                             .saturating_add(serialized.len())
                             > self.maximum_page_bytes)
                 {
@@ -1714,6 +1920,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                             symbol_displays,
                             imports,
                             import_bytes,
+                            clone_bodies,
+                            clone_body_bytes,
                             cursor,
                             page_hasher,
                         },
@@ -1756,6 +1964,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                             symbol_displays,
                             imports,
                             import_bytes,
+                            clone_bodies,
+                            clone_body_bytes,
                             cursor,
                             page_hasher,
                         },
@@ -1781,11 +1991,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         "one admitted lexical import exceeds the page byte bound".to_owned(),
                     ));
                 }
-                if (!chunks.is_empty() || !imports.is_empty())
-                    && (chunks.len().saturating_add(imports.len()) >= self.maximum_page_chunks
+                if (!chunks.is_empty() || !imports.is_empty() || !clone_bodies.is_empty())
+                    && (chunks
+                        .len()
+                        .saturating_add(imports.len())
+                        .saturating_add(clone_bodies.len())
+                        >= self.maximum_page_chunks
                         || page_bytes
                             .saturating_add(symbol_display_bytes)
                             .saturating_add(import_bytes)
+                            .saturating_add(clone_body_bytes)
                             .saturating_add(serialized.len())
                             > self.maximum_page_bytes)
                 {
@@ -1797,6 +2012,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                             symbol_displays,
                             imports,
                             import_bytes,
+                            clone_bodies,
+                            clone_body_bytes,
                             cursor,
                             page_hasher,
                         },
@@ -1823,6 +2040,38 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     )
                 })?;
             }
+            let clone_page_full = CloneBodyPageStageV1 {
+                existing_records: chunks.len().saturating_add(imports.len()),
+                existing_bytes: page_bytes
+                    .saturating_add(symbol_display_bytes)
+                    .saturating_add(import_bytes),
+                clone_bodies: &mut clone_bodies,
+                clone_body_bytes: &mut clone_body_bytes,
+                cursor: &mut cursor,
+                page_hasher: &mut page_hasher,
+            }
+            .append(
+                &admitted,
+                self.maximum_page_chunks,
+                self.maximum_page_bytes,
+                control,
+            )?;
+            if clone_page_full {
+                return self.commit_page(
+                    previous_cursor,
+                    PendingSealedLexicalPageV1 {
+                        chunks,
+                        page_bytes,
+                        symbol_displays,
+                        imports,
+                        import_bytes,
+                        clone_bodies,
+                        clone_body_bytes,
+                        cursor,
+                        page_hasher,
+                    },
+                );
+            }
             let next_file_offset = admitted.next_file_offset;
             self.admitted_window.remove(&cursor.next_file_offset);
             cursor.next_file_ordinal =
@@ -1834,10 +2083,10 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             cursor.next_file_offset = next_file_offset;
             cursor.next_chunk_ordinal = 0;
             cursor.next_import_ordinal = 0;
-            // The page contract serializes every chunk before every import.
-            // Commit after an importing file so a later file cannot append a
-            // chunk after bytes already hashed as import records.
-            if !imports.is_empty() {
+            cursor.next_clone_body_ordinal = 0;
+            // The page contract serializes chunks, then imports, then clone
+            // bodies. Commit before a later file restarts that ordering.
+            if !imports.is_empty() || !clone_bodies.is_empty() {
                 return self.commit_page(
                     previous_cursor,
                     PendingSealedLexicalPageV1 {
@@ -1846,6 +2095,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         symbol_displays,
                         imports,
                         import_bytes,
+                        clone_bodies,
+                        clone_body_bytes,
                         cursor,
                         page_hasher,
                     },
@@ -1853,7 +2104,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             }
         }
 
-        if !chunks.is_empty() || !imports.is_empty() {
+        if !chunks.is_empty() || !imports.is_empty() || !clone_bodies.is_empty() {
             return self.commit_page(
                 previous_cursor,
                 PendingSealedLexicalPageV1 {
@@ -1862,6 +2113,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     symbol_displays,
                     imports,
                     import_bytes,
+                    clone_bodies,
+                    clone_body_bytes,
                     cursor,
                     page_hasher,
                 },
@@ -1876,6 +2129,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 total_payload_bytes: cursor.emitted_payload_bytes,
                 total_imports: cursor.emitted_imports,
                 import_payload_bytes: cursor.emitted_import_payload_bytes,
+                total_clone_bodies: cursor.emitted_clone_bodies,
+                clone_body_payload_bytes: cursor.emitted_clone_body_payload_bytes,
                 import_dictionary_digest: cursor.import_dictionary_digest.clone(),
                 cumulative_digest: cursor.cumulative_digest.clone(),
             },
@@ -2090,6 +2345,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             symbol_displays,
             imports,
             import_bytes,
+            clone_bodies,
+            clone_body_bytes,
             mut cursor,
             mut page_hasher,
         } = pending;
@@ -2114,44 +2371,25 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 "sealed lexical page import byte count exceeds u64".to_owned(),
             )
         })?;
-        cursor.next_page_ordinal = cursor.next_page_ordinal.checked_add(1).ok_or_else(|| {
+        let clone_body_count = u64::try_from(clone_bodies.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
-                "sealed lexical page ordinal overflowed".to_owned(),
+                "sealed lexical page clone-body count exceeds u64".to_owned(),
             )
         })?;
-        cursor.emitted_chunks =
-            cursor
-                .emitted_chunks
-                .checked_add(chunk_count)
-                .ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed lexical source chunk count overflowed".to_owned(),
-                    )
-                })?;
-        cursor.emitted_payload_bytes = cursor
-            .emitted_payload_bytes
-            .checked_add(payload_bytes)
-            .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical source byte count overflowed".to_owned(),
-                )
-            })?;
-        cursor.emitted_imports = cursor
-            .emitted_imports
-            .checked_add(import_count)
-            .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical source import count overflowed".to_owned(),
-                )
-            })?;
-        cursor.emitted_import_payload_bytes = cursor
-            .emitted_import_payload_bytes
-            .checked_add(import_payload_bytes)
-            .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical source import byte count overflowed".to_owned(),
-                )
-            })?;
+        let clone_body_payload_bytes = u64::try_from(clone_body_bytes).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page clone-body byte count exceeds u64".to_owned(),
+            )
+        })?;
+        advance_page_cursor(
+            &mut cursor,
+            chunk_count,
+            payload_bytes,
+            import_count,
+            import_payload_bytes,
+            clone_body_count,
+            clone_body_payload_bytes,
+        )?;
         hash_cursor(&mut page_hasher, &cursor)?;
         let page = VerifiedSealedLexicalPageV1 {
             page_ordinal,
@@ -2159,18 +2397,72 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             payload_bytes,
             import_count,
             import_payload_bytes,
+            clone_body_count,
+            clone_body_payload_bytes,
             page_digest: digest_hasher(page_hasher)?,
             cumulative_digest: cursor.cumulative_digest.clone(),
             next_cursor: cursor.clone(),
             chunks,
             symbol_displays,
             imports,
+            clone_bodies,
             previous_cursor: previous_cursor.clone(),
         };
         Ok(StagedSealedLexicalPageReadV1::Page(
             StagedSealedLexicalPageV1 { page, cursor },
         ))
     }
+}
+
+fn advance_page_cursor(
+    cursor: &mut VerifiedSealedLexicalCursorV1,
+    chunk_count: u64,
+    payload_bytes: u64,
+    import_count: u64,
+    import_payload_bytes: u64,
+    clone_body_count: u64,
+    clone_body_payload_bytes: u64,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    cursor.next_page_ordinal = cursor.next_page_ordinal.checked_add(1).ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("sealed lexical page ordinal overflowed".to_owned())
+    })?;
+    for (total, increment, message) in [
+        (
+            &mut cursor.emitted_chunks,
+            chunk_count,
+            "sealed lexical source chunk count overflowed",
+        ),
+        (
+            &mut cursor.emitted_payload_bytes,
+            payload_bytes,
+            "sealed lexical source byte count overflowed",
+        ),
+        (
+            &mut cursor.emitted_imports,
+            import_count,
+            "sealed lexical source import count overflowed",
+        ),
+        (
+            &mut cursor.emitted_import_payload_bytes,
+            import_payload_bytes,
+            "sealed lexical source import byte count overflowed",
+        ),
+        (
+            &mut cursor.emitted_clone_bodies,
+            clone_body_count,
+            "sealed lexical source clone-body count overflowed",
+        ),
+        (
+            &mut cursor.emitted_clone_body_payload_bytes,
+            clone_body_payload_bytes,
+            "sealed lexical source clone-body byte count overflowed",
+        ),
+    ] {
+        *total = total
+            .checked_add(increment)
+            .ok_or_else(|| CodeIndexProductionErrorV1::Contract(message.to_owned()))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -2181,6 +2473,8 @@ struct AdmittedSealedLexicalFileV1 {
     serialized_displays: Vec<Option<Vec<u8>>>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     serialized_imports: Vec<Vec<u8>>,
+    clone_bodies: Vec<CodeIndexCloneBodyV1>,
+    serialized_clone_bodies: Vec<Vec<u8>>,
     next_file_offset: u64,
 }
 
@@ -3004,15 +3298,15 @@ fn admit_validated_file_parts(
             }
         }
         let imports = artifacts.imports.clone();
+        let clone_bodies = artifacts.clone_bodies.clone();
         let chunks = hotpath::measure_block!(
             "code_index.restore.file_admit.exact_admission",
             exact_authority
                 .admit_all(artifacts.chunks.chunks.clone())
                 .map_err(CodeIndexProductionErrorV1::Chunk)
         )?;
-        let (serialized_chunks, serialized_displays, serialized_imports) = hotpath::measure_block!(
-            "code_index.restore.file_admit.serialize",
-            {
+        let (serialized_chunks, serialized_displays, serialized_imports, serialized_clone_bodies) =
+            hotpath::measure_block!("code_index.restore.file_admit.serialize", {
                 let mut serialized_chunks = Vec::with_capacity(chunks.len());
                 let mut serialized_displays = Vec::with_capacity(chunks.len());
                 let mut staging = Vec::new();
@@ -3048,13 +3342,23 @@ fn admit_validated_file_parts(
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let serialized_clone_bodies = clone_bodies
+                    .iter()
+                    .map(|body| {
+                        serialize_page_row(
+                            body,
+                            &mut staging,
+                            "sealed lexical clone-body serialization failed",
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok::<_, CodeIndexProductionErrorV1>((
                     serialized_chunks,
                     serialized_displays,
                     serialized_imports,
+                    serialized_clone_bodies,
                 ))
-            }
-        )?;
+            })?;
         Ok(AdmittedSealedLexicalFileV1 {
             chunks,
             serialized_chunks,
@@ -3062,6 +3366,8 @@ fn admit_validated_file_parts(
             serialized_displays,
             imports,
             serialized_imports,
+            clone_bodies,
+            serialized_clone_bodies,
             next_file_offset,
         })
     })
@@ -3116,17 +3422,28 @@ fn hash_cursor(
     hasher.update(cursor.next_file_ordinal.to_le_bytes());
     hasher.update(cursor.next_chunk_ordinal.to_le_bytes());
     hasher.update(cursor.next_import_ordinal.to_le_bytes());
+    hasher.update(cursor.next_clone_body_ordinal.to_le_bytes());
     hasher.update(cursor.next_page_ordinal.to_le_bytes());
     hasher.update(cursor.emitted_chunks.to_le_bytes());
     hasher.update(cursor.emitted_payload_bytes.to_le_bytes());
     hasher.update(cursor.emitted_imports.to_le_bytes());
     hasher.update(cursor.emitted_import_payload_bytes.to_le_bytes());
+    hasher.update(cursor.emitted_clone_bodies.to_le_bytes());
+    hasher.update(cursor.emitted_clone_body_payload_bytes.to_le_bytes());
     hash_record(hasher, cursor.import_dictionary_digest.as_str().as_bytes())?;
     hash_record(hasher, cursor.cumulative_digest.as_str().as_bytes())
 }
 
 fn hash_import_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProductionErrorV1> {
     hasher.update(IMPORT_RECORD_DOMAIN);
+    hash_record(hasher, bytes)
+}
+
+fn hash_clone_body_record(
+    hasher: &mut Sha256,
+    bytes: &[u8],
+) -> Result<(), CodeIndexProductionErrorV1> {
+    hasher.update(CLONE_BODY_RECORD_DOMAIN);
     hash_record(hasher, bytes)
 }
 

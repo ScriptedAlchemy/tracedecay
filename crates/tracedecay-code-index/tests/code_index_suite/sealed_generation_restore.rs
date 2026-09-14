@@ -188,13 +188,16 @@ fn sealed_restore_defaults_absent_unresolved_references() {
             .expect("file artifacts")
             .remove("unresolved_references");
     }
-    let state_digest = sealed_generation_payload_digest(6, &envelope["generation"])
-        .expect("compatible generation digest");
+    let state_digest = sealed_generation_payload_digest(
+        MINIMUM_SEALED_GENERATION_FORMAT_REVISION,
+        &envelope["generation"],
+    )
+    .expect("compatible generation digest");
     envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
     let historical = serde_json::to_vec(&envelope).expect("historical sealed generation");
 
     let restored = CodeIndexPublishedGenerationV1::decode_sealed(&historical)
-        .expect("revision-six records without the additive field restore");
+        .expect("current records without the additive field restore");
     let restored: Value = serde_json::from_slice(
         &restored
             .encode_sealed()

@@ -36,7 +36,7 @@ use super::format::{
     VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt, artifact_digest,
     decode_padded_receipt, decode_padded_receipt_with_control, finish_base_section_receipt_fold,
     initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
-    verify_artifact_table_layout, verify_required_artifact_indexes,
+    section_names, verify_artifact_table_layout, verify_required_artifact_indexes,
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::{
@@ -220,7 +220,8 @@ impl PreparedExactInsertRefV1<'_> {
             }
             LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
-            | LexicalArtifactLayoutV1::V14 => PreparedExactInsertKeyV1::V12 {
+            | LexicalArtifactLayoutV1::V14
+            | LexicalArtifactLayoutV1::V15 => PreparedExactInsertKeyV1::V12 {
                 term_id: self.term_id,
                 field: self.field_code,
                 document_id: self.document_id,
@@ -342,6 +343,61 @@ const EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
         "builder_gate_exact_vocabulary_delete",
         "exact_vocabulary",
         "DELETE",
+    ),
+];
+const CLONE_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
+    (
+        "builder_gate_clone_body_payloads_insert",
+        "clone_body_payloads",
+        "INSERT",
+    ),
+    (
+        "builder_gate_clone_occurrences_insert",
+        "clone_occurrences",
+        "INSERT",
+    ),
+    (
+        "builder_gate_clone_exact_postings_insert",
+        "clone_exact_postings",
+        "INSERT",
+    ),
+];
+const CLONE_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 6] = [
+    (
+        "immutable_clone_body_payloads_update",
+        "clone_body_payloads",
+        "UPDATE",
+        "immutable clone body payloads",
+    ),
+    (
+        "immutable_clone_body_payloads_delete",
+        "clone_body_payloads",
+        "DELETE",
+        "immutable clone body payloads",
+    ),
+    (
+        "immutable_clone_occurrences_update",
+        "clone_occurrences",
+        "UPDATE",
+        "immutable clone occurrences",
+    ),
+    (
+        "immutable_clone_occurrences_delete",
+        "clone_occurrences",
+        "DELETE",
+        "immutable clone occurrences",
+    ),
+    (
+        "immutable_clone_exact_postings_update",
+        "clone_exact_postings",
+        "UPDATE",
+        "immutable clone exact postings",
+    ),
+    (
+        "immutable_clone_exact_postings_delete",
+        "clone_exact_postings",
+        "DELETE",
+        "immutable clone exact postings",
     ),
 ];
 const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 10] = [
@@ -564,10 +620,13 @@ enum FinalizationSectionV1 {
     FieldStatistics,
     TermStatistics,
     Vocabulary,
+    CloneOccurrences,
+    CloneExactPostings,
+    CloneBodyPayloads,
 }
 
 impl FinalizationSectionV1 {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 14] = [
         Self::SourcePages,
         Self::DocumentIntegrity,
         Self::ImportIntegrity,
@@ -579,6 +638,9 @@ impl FinalizationSectionV1 {
         Self::FieldStatistics,
         Self::TermStatistics,
         Self::Vocabulary,
+        Self::CloneOccurrences,
+        Self::CloneExactPostings,
+        Self::CloneBodyPayloads,
     ];
 
     fn from_ordinal(ordinal: usize) -> Result<Self, CodeLexicalArtifactErrorV1> {
@@ -600,6 +662,9 @@ impl FinalizationSectionV1 {
             Self::TermPostings => "term_postings",
             Self::ExactPostings => "exact_postings",
             Self::NgramPostings => "ngram_postings",
+            Self::CloneOccurrences => "clone_occurrences",
+            Self::CloneExactPostings => "clone_exact_postings",
+            Self::CloneBodyPayloads => "clone_body_payloads",
             Self::FieldStatistics => "field_stats",
             Self::TermStatistics => "term_stats",
             Self::Vocabulary => "vocabulary",
@@ -612,9 +677,10 @@ impl FinalizationSectionV1 {
             (Self::SourcePages, _) => {
                 "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor FROM source_pages ORDER BY page_ordinal"
             }
-            (Self::DocumentIntegrity, LexicalArtifactLayoutV1::V14) => {
-                "SELECT document_id, digest FROM document_integrity ORDER BY document_id"
-            }
+            (
+                Self::DocumentIntegrity,
+                LexicalArtifactLayoutV1::V14 | LexicalArtifactLayoutV1::V15,
+            ) => "SELECT document_id, digest FROM document_integrity ORDER BY document_id",
             (Self::DocumentIntegrity, _) => {
                 "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id"
             }
@@ -633,7 +699,8 @@ impl FinalizationSectionV1 {
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
-                | LexicalArtifactLayoutV1::V14,
+                | LexicalArtifactLayoutV1::V14
+                | LexicalArtifactLayoutV1::V15,
             ) => {
                 "SELECT term_id, field, document_id, frequency FROM term_postings ORDER BY term_id, field, document_id"
             }
@@ -642,6 +709,15 @@ impl FinalizationSectionV1 {
             }
             (Self::NgramPostings, _) => {
                 "SELECT page_ordinal, kind, ngram, documents, cardinality FROM ngram_postings ORDER BY page_ordinal, kind, ngram"
+            }
+            (Self::CloneOccurrences, _) => {
+                "SELECT symbol_occurrence_id, payload_digest, path, body_start, body_end, occurrence FROM clone_occurrences ORDER BY symbol_occurrence_id"
+            }
+            (Self::CloneExactPostings, _) => {
+                "SELECT class, normalization_revision, digest, symbol_occurrence_id, payload_digest FROM clone_exact_postings ORDER BY class, normalization_revision, digest, symbol_occurrence_id"
+            }
+            (Self::CloneBodyPayloads, _) => {
+                "SELECT payload_digest, payload FROM clone_body_payloads ORDER BY payload_digest"
             }
             (Self::FieldStatistics, _) => {
                 "SELECT field, total_length FROM field_stats ORDER BY field"
@@ -654,7 +730,8 @@ impl FinalizationSectionV1 {
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
-                | LexicalArtifactLayoutV1::V14,
+                | LexicalArtifactLayoutV1::V14
+                | LexicalArtifactLayoutV1::V15,
             ) => {
                 "SELECT term_id, field, document_frequency FROM term_stats ORDER BY term_id, field"
             }
@@ -666,7 +743,8 @@ impl FinalizationSectionV1 {
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
-                | LexicalArtifactLayoutV1::V14,
+                | LexicalArtifactLayoutV1::V14
+                | LexicalArtifactLayoutV1::V15,
             ) => "SELECT term_id, term, in_fuzzy FROM vocabulary ORDER BY term_id",
         }
     }
@@ -674,11 +752,24 @@ impl FinalizationSectionV1 {
     /// Bounded resumes seek a native table key, never a computed cursor.
     #[hotpath::skip]
     const fn seek_query(self, layout: LexicalArtifactLayoutV1, after: bool) -> &'static str {
+        if let Some(query) = self.clone_seek_query(after) {
+            return query;
+        }
         match (self, after) {
-            (Self::DocumentIntegrity, false) if matches!(layout, LexicalArtifactLayoutV1::V14) => {
+            (Self::DocumentIntegrity, false)
+                if matches!(
+                    layout,
+                    LexicalArtifactLayoutV1::V14 | LexicalArtifactLayoutV1::V15
+                ) =>
+            {
                 "SELECT document_id, digest FROM document_integrity ORDER BY document_id LIMIT ?1"
             }
-            (Self::DocumentIntegrity, true) if matches!(layout, LexicalArtifactLayoutV1::V14) => {
+            (Self::DocumentIntegrity, true)
+                if matches!(
+                    layout,
+                    LexicalArtifactLayoutV1::V14 | LexicalArtifactLayoutV1::V15
+                ) =>
+            {
                 "SELECT document_id, digest FROM document_integrity WHERE document_id > ?1 ORDER BY document_id LIMIT ?2"
             }
             (Self::SourcePages, false) => {
@@ -747,6 +838,33 @@ impl FinalizationSectionV1 {
             (Self::Vocabulary, true) => {
                 "SELECT term_id, term, in_fuzzy FROM vocabulary WHERE term_id > ?1 ORDER BY term_id LIMIT ?2"
             }
+            (Self::CloneOccurrences | Self::CloneExactPostings | Self::CloneBodyPayloads, _) => {
+                unreachable!()
+            }
+        }
+    }
+
+    const fn clone_seek_query(self, after: bool) -> Option<&'static str> {
+        match (self, after) {
+            (Self::CloneOccurrences, false) => Some(
+                "SELECT symbol_occurrence_id, payload_digest, path, body_start, body_end, occurrence FROM clone_occurrences ORDER BY symbol_occurrence_id LIMIT ?1",
+            ),
+            (Self::CloneOccurrences, true) => Some(
+                "SELECT symbol_occurrence_id, payload_digest, path, body_start, body_end, occurrence FROM clone_occurrences WHERE symbol_occurrence_id > ?1 ORDER BY symbol_occurrence_id LIMIT ?2",
+            ),
+            (Self::CloneExactPostings, false) => Some(
+                "SELECT class, normalization_revision, digest, symbol_occurrence_id, payload_digest FROM clone_exact_postings ORDER BY class, normalization_revision, digest, symbol_occurrence_id LIMIT ?1",
+            ),
+            (Self::CloneExactPostings, true) => Some(
+                "SELECT class, normalization_revision, digest, symbol_occurrence_id, payload_digest FROM clone_exact_postings WHERE (class, normalization_revision, digest, symbol_occurrence_id) > (?1, ?2, ?3, ?4) ORDER BY class, normalization_revision, digest, symbol_occurrence_id LIMIT ?5",
+            ),
+            (Self::CloneBodyPayloads, false) => Some(
+                "SELECT payload_digest, payload FROM clone_body_payloads ORDER BY payload_digest LIMIT ?1",
+            ),
+            (Self::CloneBodyPayloads, true) => Some(
+                "SELECT payload_digest, payload FROM clone_body_payloads WHERE payload_digest > ?1 ORDER BY payload_digest LIMIT ?2",
+            ),
+            _ => None,
         }
     }
 }
@@ -780,6 +898,12 @@ enum PersistedFinalizationKeyV1 {
         first: i64,
         second: i64,
     },
+    ClonePosting {
+        class: i64,
+        normalization_revision: i64,
+        digest: String,
+        symbol_occurrence_id: String,
+    },
 }
 
 impl PersistedFinalizationKeyV1 {
@@ -806,6 +930,12 @@ impl PersistedFinalizationKeyV1 {
             ) | (
                 Self::IntegerPair { .. },
                 FinalizationSectionV1::TermStatistics
+            ) | (
+                Self::Text(_),
+                FinalizationSectionV1::CloneOccurrences | FinalizationSectionV1::CloneBodyPayloads
+            ) | (
+                Self::ClonePosting { .. },
+                FinalizationSectionV1::CloneExactPostings
             )
         )
     }
@@ -975,6 +1105,18 @@ impl FinalizationWakeMetricsV1 {
             }
             FinalizationSectionV1::NgramPostings => {
                 hotpath::gauge!("query.artifact.finalization.phase.ngram_postings_total").inc(1u64);
+            }
+            FinalizationSectionV1::CloneOccurrences => {
+                hotpath::gauge!("query.artifact.finalization.phase.clone_occurrences_total")
+                    .inc(1u64);
+            }
+            FinalizationSectionV1::CloneExactPostings => {
+                hotpath::gauge!("query.artifact.finalization.phase.clone_exact_postings_total")
+                    .inc(1u64);
+            }
+            FinalizationSectionV1::CloneBodyPayloads => {
+                hotpath::gauge!("query.artifact.finalization.phase.clone_body_payloads_total")
+                    .inc(1u64);
             }
             FinalizationSectionV1::FieldStatistics => {
                 hotpath::gauge!("query.artifact.finalization.phase.field_stats_total").inc(1u64);
@@ -1623,6 +1765,12 @@ impl CodeLexicalArtifactBuilderV1 {
                     Ok::<(), CodeLexicalArtifactErrorV1>(())
                 })?;
                 record_batch_import_metrics(pages);
+                if self.layout.has_clone_index() {
+                    hotpath::measure_block!(
+                        "query.artifact.batch.clone_bodies",
+                        append_prepared_clone_bodies(&transaction, pages, control)
+                    )?;
+                }
                 if self.layout.interns_row_dictionary() {
                     hotpath::measure_block!(
                         "query.artifact.batch.rows.stage_dictionary",
@@ -1759,7 +1907,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact finalization marker disappeared".to_owned(),
             )
         })?;
-        validate_finalization_state(&state)?;
+        validate_finalization_state(&state, self.layout)?;
         wake_metrics.digest_pass(state.phase);
         ensure_content_epoch(&transaction, state.content_epoch)?;
         if &state.source_state_digest != source.source_state_digest() {
@@ -1784,7 +1932,8 @@ impl CodeLexicalArtifactBuilderV1 {
             return Ok(step);
         }
         let mut remaining_work = maximum_work;
-        let section_count = u64::try_from(SECTION_NAMES.len()).map_err(contract_number)?;
+        let section_names = section_names(self.layout);
+        let section_count = u64::try_from(section_names.len()).map_err(contract_number)?;
         while remaining_work > 0 && state.section_ordinal < section_count {
             checkpoint(control)?;
             let section_ordinal =
@@ -1841,7 +1990,7 @@ impl CodeLexicalArtifactBuilderV1 {
             state.section_row_count = 0;
             state.section_last_key = None;
             if state.section_ordinal < section_count {
-                let next = SECTION_NAMES
+                let next = section_names
                     [usize::try_from(state.section_ordinal).map_err(contract_number)?];
                 state.section_accumulator = initial_section_accumulator(next)?.to_vec();
             }
@@ -1862,7 +2011,7 @@ impl CodeLexicalArtifactBuilderV1 {
             return Ok(step);
         }
 
-        if state.completed_sections.len() != SECTION_NAMES.len() {
+        if state.completed_sections.len() != section_names.len() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact finalization completed with an invalid section receipt"
                     .to_owned(),
@@ -3406,6 +3555,69 @@ fn sql_blob(value: &[u8]) -> ToSqlOutput<'_> {
     ToSqlOutput::Borrowed(ValueRef::Blob(value))
 }
 
+fn append_prepared_clone_bodies(
+    transaction: &Transaction<'_>,
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut insert_payload = transaction
+        .prepare_cached(
+            "INSERT INTO clone_body_payloads(payload_digest, payload) VALUES (?1, ?2) ON CONFLICT(payload_digest) DO NOTHING",
+        )
+        .map_err(sqlite_error)?;
+    let mut read_payload = transaction
+        .prepare_cached("SELECT payload FROM clone_body_payloads WHERE payload_digest = ?1")
+        .map_err(sqlite_error)?;
+    let mut insert_occurrence = transaction
+        .prepare_cached(
+            "INSERT INTO clone_occurrences(symbol_occurrence_id, payload_digest, path, body_start, body_end, occurrence) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .map_err(sqlite_error)?;
+    let mut insert_posting = transaction
+        .prepare_cached(
+            "INSERT INTO clone_exact_postings(class, normalization_revision, digest, symbol_occurrence_id, payload_digest) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .map_err(sqlite_error)?;
+    for page in pages {
+        for body in &page.clone_bodies {
+            checkpoint(control)?;
+            insert_payload
+                .execute(params![body.payload_digest, body.payload])
+                .map_err(sqlite_error)?;
+            let stored: Vec<u8> = read_payload
+                .query_row(params![body.payload_digest], |row| row.get(0))
+                .map_err(sqlite_error)?;
+            if stored != body.payload {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "clone payload digest collision".to_owned(),
+                ));
+            }
+            insert_occurrence
+                .execute(params![
+                    body.symbol_occurrence_id,
+                    body.payload_digest,
+                    body.path,
+                    i64::try_from(body.body_start).map_err(contract_number)?,
+                    i64::try_from(body.body_end).map_err(contract_number)?,
+                    body.occurrence,
+                ])
+                .map_err(sqlite_error)?;
+            for key in &body.exact_keys {
+                insert_posting
+                    .execute(params![
+                        i64::from(key.class as u8),
+                        i64::from(key.normalization_revision),
+                        key.digest.as_str(),
+                        body.symbol_occurrence_id,
+                        body.payload_digest,
+                    ])
+                    .map_err(sqlite_error)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn append_prepared_imports(
     transaction: &Transaction<'_>,
     page: &PreparedCodeLexicalArtifactPageV1,
@@ -3474,7 +3686,8 @@ fn append_prepared_postings(
     let exact_table_columns = match layout {
         LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13
-        | LexicalArtifactLayoutV1::V14 => "exact_postings(term_id, field, document_id)",
+        | LexicalArtifactLayoutV1::V14
+        | LexicalArtifactLayoutV1::V15 => "exact_postings(term_id, field, document_id)",
         LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
             "exact_postings(field, term, document_id)"
         }
@@ -3545,7 +3758,8 @@ fn append_prepared_postings(
                 }
                 LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
-                | LexicalArtifactLayoutV1::V14 => {
+                | LexicalArtifactLayoutV1::V14
+                | LexicalArtifactLayoutV1::V15 => {
                     exact_insert.push([
                         sql_integer(entry.term_id),
                         sql_integer(entry.field_code),
@@ -3905,6 +4119,43 @@ fn create_schema(
             )
             .map_err(sqlite_error)?;
     }
+    if layout.has_clone_index() {
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE clone_body_payloads (
+                    payload_digest TEXT PRIMARY KEY,
+                    payload BLOB NOT NULL
+                ) WITHOUT ROWID;
+                CREATE TABLE clone_occurrences (
+                    symbol_occurrence_id TEXT PRIMARY KEY,
+                    payload_digest TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    body_start INTEGER NOT NULL,
+                    body_end INTEGER NOT NULL,
+                    occurrence BLOB NOT NULL
+                ) WITHOUT ROWID;
+                CREATE TABLE clone_exact_postings (
+                    class INTEGER NOT NULL,
+                    normalization_revision INTEGER NOT NULL,
+                    digest TEXT NOT NULL,
+                    symbol_occurrence_id TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    PRIMARY KEY(class, normalization_revision, digest, symbol_occurrence_id)
+                ) WITHOUT ROWID;
+                CREATE TRIGGER builder_gate_clone_body_payloads_insert BEFORE INSERT ON clone_body_payloads WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_clone_occurrences_insert BEFORE INSERT ON clone_occurrences WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_clone_exact_postings_insert BEFORE INSERT ON clone_exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER immutable_clone_body_payloads_update BEFORE UPDATE ON clone_body_payloads BEGIN SELECT RAISE(ABORT, 'immutable clone body payloads'); END;
+                CREATE TRIGGER immutable_clone_body_payloads_delete BEFORE DELETE ON clone_body_payloads BEGIN SELECT RAISE(ABORT, 'immutable clone body payloads'); END;
+                CREATE TRIGGER immutable_clone_occurrences_update BEFORE UPDATE ON clone_occurrences BEGIN SELECT RAISE(ABORT, 'immutable clone occurrences'); END;
+                CREATE TRIGGER immutable_clone_occurrences_delete BEFORE DELETE ON clone_occurrences BEGIN SELECT RAISE(ABORT, 'immutable clone occurrences'); END;
+                CREATE TRIGGER immutable_clone_exact_postings_update BEFORE UPDATE ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'immutable clone exact postings'); END;
+                CREATE TRIGGER immutable_clone_exact_postings_delete BEFORE DELETE ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'immutable clone exact postings'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
     Ok(())
 }
 
@@ -3927,13 +4178,20 @@ fn verify_builder_mutation_gate_schema(
         );
         verify_trigger_schema(connection, name, table, &expected)?;
     }
+    verify_layout_dependent_triggers(connection)
+}
+
+fn verify_layout_dependent_triggers(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
     // Layout-dependent tables are verified only when present: `exact_vocabulary`
     // from revision 12, and the staging tables (revision-14 dictionary, field
     // statistics) that finalization drops once their sealed table is derived.
     let has_exact_vocabulary = table_exists(connection, "exact_vocabulary")?;
     let has_row_dictionary_pages = table_exists(connection, "row_dictionary_pages")?;
     let has_field_stats_staging = table_exists(connection, "field_stats_staging")?;
-    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 3] = [
+    let has_clone_index = table_exists(connection, "clone_body_payloads")?;
+    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 4] = [
         (
             has_exact_vocabulary,
             &EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT,
@@ -3946,6 +4204,7 @@ fn verify_builder_mutation_gate_schema(
             has_field_stats_staging,
             &FIELD_STATS_STAGING_BUILDER_GATE_TRIGGER_LAYOUT,
         ),
+        (has_clone_index, &CLONE_BUILDER_GATE_TRIGGER_LAYOUT),
     ];
     for (name, table, operation) in gated_layouts
         .into_iter()
@@ -3957,7 +4216,7 @@ fn verify_builder_mutation_gate_schema(
         );
         verify_trigger_schema(connection, name, table, &expected)?;
     }
-    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 3] = [
+    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 4] = [
         (true, &IMMUTABLE_TRIGGER_LAYOUT),
         (
             has_exact_vocabulary,
@@ -3967,6 +4226,7 @@ fn verify_builder_mutation_gate_schema(
             has_row_dictionary_pages,
             &ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
         ),
+        (has_clone_index, &CLONE_IMMUTABLE_TRIGGER_LAYOUT),
     ];
     for (name, table, operation, message) in immutable_layouts
         .into_iter()
@@ -4061,6 +4321,25 @@ fn install_base_freeze(
             )
             .map_err(sqlite_error)?;
     }
+    install_clone_freeze(transaction, layout)?;
+    Ok(())
+}
+
+fn install_clone_freeze(
+    transaction: &Transaction<'_>,
+    layout: LexicalArtifactLayoutV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    if layout.has_clone_index() {
+        transaction
+            .execute_batch(
+                "
+                CREATE TRIGGER frozen_clone_body_payloads_insert BEFORE INSERT ON clone_body_payloads BEGIN SELECT RAISE(ABORT, 'frozen clone body payloads'); END;
+                CREATE TRIGGER frozen_clone_occurrences_insert BEFORE INSERT ON clone_occurrences BEGIN SELECT RAISE(ABORT, 'frozen clone occurrences'); END;
+                CREATE TRIGGER frozen_clone_exact_postings_insert BEFORE INSERT ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'frozen clone exact postings'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
     Ok(())
 }
 
@@ -4096,7 +4375,31 @@ fn authenticated_authority_epoch(
             "lexical artifact authenticated authority disagrees with its source receipt".to_owned(),
         ));
     }
+    if layout_has_clone_index(transaction)? {
+        let (occurrences, missing_payloads, dangling_postings): (i64, i64, i64) = transaction
+            .query_row(
+                "SELECT \
+                 (SELECT COUNT(*) FROM clone_occurrences), \
+                 (SELECT COUNT(*) FROM clone_occurrences AS occurrence LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = occurrence.payload_digest WHERE payload.payload_digest IS NULL), \
+                 (SELECT COUNT(*) FROM clone_exact_postings AS posting LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest WHERE occurrence.symbol_occurrence_id IS NULL OR payload.payload_digest IS NULL OR occurrence.payload_digest != posting.payload_digest)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(sqlite_error)?;
+        if u64::try_from(occurrences).map_err(contract_number)? != source.total_clone_bodies()
+            || missing_payloads != 0
+            || dangling_postings != 0
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone rows disagree with their source receipt or payload bindings".to_owned(),
+            ));
+        }
+    }
     Ok(actual_epoch)
+}
+
+fn layout_has_clone_index(connection: &Connection) -> Result<bool, CodeLexicalArtifactErrorV1> {
+    Ok(read_staged_artifact_layout(connection)?.has_clone_index())
 }
 
 fn advance_pre_digest_work(
@@ -4395,7 +4698,8 @@ fn build_serving_index_step(
                 }
                 LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
-            | LexicalArtifactLayoutV1::V14 => {
+            | LexicalArtifactLayoutV1::V14
+            | LexicalArtifactLayoutV1::V15 => {
                     "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term_id)"
                 }
             };
@@ -4558,7 +4862,8 @@ fn read_staged_artifact_layout(
         layout @ (LexicalArtifactLayoutV1::V11
         | LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13
-        | LexicalArtifactLayoutV1::V14) => Ok(layout),
+        | LexicalArtifactLayoutV1::V14
+        | LexicalArtifactLayoutV1::V15) => Ok(layout),
     }
 }
 
@@ -4633,8 +4938,10 @@ fn store_finalization_state(
 
 fn validate_finalization_state(
     state: &PersistedFinalizationStateV1,
+    layout: LexicalArtifactLayoutV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let section_count = u64::try_from(SECTION_NAMES.len()).map_err(contract_number)?;
+    let section_names = section_names(layout);
+    let section_count = u64::try_from(section_names.len()).map_err(contract_number)?;
     let completed_section_count = if state.phase == PersistedFinalizationPhaseV1::Digest {
         usize::try_from(state.section_ordinal).map_err(contract_number)?
     } else {
@@ -4651,7 +4958,7 @@ fn validate_finalization_state(
             && state.section_ordinal
                 < u64::try_from(1 + BASE_SECTION_NAMES.len()).map_err(contract_number)?)
         || state.completed_sections.len() != completed_section_count
-        || state.completed_sections.len() > SECTION_NAMES.len()
+        || state.completed_sections.len() > section_names.len()
         || state.section_accumulator.len() != 32
         || state.base_section_row_counts.len() != BASE_SECTION_NAMES.len()
         || state.base_section_accumulators.len() != BASE_SECTION_NAMES.len()
@@ -4668,8 +4975,8 @@ fn validate_finalization_state(
     if state
         .completed_sections
         .iter()
-        .zip(SECTION_NAMES)
-        .any(|(section, expected_name)| section.name != expected_name)
+        .zip(section_names)
+        .any(|(section, expected_name)| section.name != *expected_name)
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "persisted lexical artifact finalization sections are out of order".to_owned(),
@@ -4716,6 +5023,22 @@ fn advance_section_rows(
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let limit = i64::try_from(maximum_rows).map_err(contract_number)?;
     let last_key = state.section_last_key.clone();
+    if matches!(
+        section,
+        FinalizationSectionV1::CloneOccurrences
+            | FinalizationSectionV1::CloneExactPostings
+            | FinalizationSectionV1::CloneBodyPayloads
+    ) {
+        return advance_clone_section_rows(
+            transaction,
+            section,
+            layout,
+            state,
+            limit,
+            last_key.as_ref(),
+            control,
+        );
+    }
     match (section, last_key.as_ref()) {
         (FinalizationSectionV1::SourcePages, None)
         | (FinalizationSectionV1::DocumentIntegrity, None)
@@ -4823,6 +5146,69 @@ fn advance_section_rows(
     }
 }
 
+fn advance_clone_section_rows(
+    transaction: &Transaction<'_>,
+    section: FinalizationSectionV1,
+    layout: LexicalArtifactLayoutV1,
+    state: &mut PersistedFinalizationStateV1,
+    limit: i64,
+    last_key: Option<&PersistedFinalizationKeyV1>,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    match (section, last_key) {
+        (
+            FinalizationSectionV1::CloneOccurrences
+            | FinalizationSectionV1::CloneExactPostings
+            | FinalizationSectionV1::CloneBodyPayloads,
+            None,
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(layout, false),
+            params![limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::CloneOccurrences | FinalizationSectionV1::CloneBodyPayloads,
+            Some(PersistedFinalizationKeyV1::Text(value)),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(layout, true),
+            params![value, limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::CloneExactPostings,
+            Some(PersistedFinalizationKeyV1::ClonePosting {
+                class,
+                normalization_revision,
+                digest,
+                symbol_occurrence_id,
+            }),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(layout, true),
+            params![
+                class,
+                normalization_revision,
+                digest,
+                symbol_occurrence_id,
+                limit
+            ],
+            state,
+            control,
+        ),
+        _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "persisted lexical artifact clone finalization key does not match its section"
+                .to_owned(),
+        )),
+    }
+}
+
 fn advance_native_section_rows<P: rusqlite::Params>(
     transaction: &Transaction<'_>,
     section: FinalizationSectionV1,
@@ -4922,6 +5308,15 @@ fn native_row_key(
                 ngram: row.get(2).map_err(sqlite_error)?,
             })
         }
+        FinalizationSectionV1::CloneOccurrences | FinalizationSectionV1::CloneBodyPayloads => Ok(
+            PersistedFinalizationKeyV1::Text(row.get(0).map_err(sqlite_error)?),
+        ),
+        FinalizationSectionV1::CloneExactPostings => Ok(PersistedFinalizationKeyV1::ClonePosting {
+            class: row.get(0).map_err(sqlite_error)?,
+            normalization_revision: row.get(1).map_err(sqlite_error)?,
+            digest: row.get(2).map_err(sqlite_error)?,
+            symbol_occurrence_id: row.get(3).map_err(sqlite_error)?,
+        }),
         FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary => Ok(
             PersistedFinalizationKeyV1::Integer(row.get(0).map_err(sqlite_error)?),
         ),
@@ -5297,7 +5692,7 @@ pub(super) fn compute_section_digests(
 ) -> Result<Vec<CodeLexicalArtifactSectionDigestV1>, CodeLexicalArtifactErrorV1> {
     let (source_pages, base_sections) =
         digest_source_pages_and_base_receipts(connection, control, layout)?;
-    let mut sections = Vec::with_capacity(SECTION_NAMES.len());
+    let mut sections = Vec::with_capacity(section_names(layout).len());
     sections.push(source_pages);
     sections.extend(base_sections);
     for section in [
@@ -5306,6 +5701,15 @@ pub(super) fn compute_section_digests(
         FinalizationSectionV1::Vocabulary,
     ] {
         sections.push(digest_query(connection, section, control, layout)?);
+    }
+    if layout.has_clone_index() {
+        for section in [
+            FinalizationSectionV1::CloneOccurrences,
+            FinalizationSectionV1::CloneExactPostings,
+            FinalizationSectionV1::CloneBodyPayloads,
+        ] {
+            sections.push(digest_query(connection, section, control, layout)?);
+        }
     }
     Ok(sections)
 }
@@ -6011,7 +6415,7 @@ mod tests {
                 .iter()
                 .map(|section| section.name.as_str())
                 .collect::<Vec<_>>(),
-            SECTION_NAMES
+            section_names(LexicalArtifactLayoutV1::V11)
         );
     }
 
@@ -6448,7 +6852,14 @@ mod tests {
             .expect("build ngram serving index before digest verification");
         transaction.commit().expect("commit ngram serving index");
 
-        for section in FinalizationSectionV1::ALL {
+        for section in FinalizationSectionV1::ALL.into_iter().filter(|section| {
+            !matches!(
+                section,
+                FinalizationSectionV1::CloneOccurrences
+                    | FinalizationSectionV1::CloneExactPostings
+                    | FinalizationSectionV1::CloneBodyPayloads
+            )
+        }) {
             let plan = explain_native_seek_plan(&connection, section)
                 .expect("explain bounded finalization resume query");
             assert!(
@@ -6492,6 +6903,12 @@ mod tests {
             }
             FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary => {
                 statement.query(params![0i64, 1i64])
+            }
+            FinalizationSectionV1::CloneOccurrences | FinalizationSectionV1::CloneBodyPayloads => {
+                statement.query(params!["", 1i64])
+            }
+            FinalizationSectionV1::CloneExactPostings => {
+                statement.query(params![0i64, 0i64, "", "", 1i64])
             }
         }
         .map_err(sqlite_error)?;

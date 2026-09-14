@@ -16,7 +16,7 @@ use std::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_code_extraction::ExtractionArtifactV1;
+use tracedecay_code_extraction::{ExtractedCloneBodyV1, ExtractionArtifactV1};
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
@@ -33,6 +33,7 @@ use super::{
     intake::ReceiptBoundCodeFileV1,
     lineage::LineageSymbolRecordV1,
 };
+use crate::clones::{CloneBodyOccurrenceV1, CloneBodyPayloadV1, CodeIndexCloneBodyV1};
 use crate::extract::{ExtractionBatchV1, ParseOutcomeV1};
 
 mod artifacts;
@@ -789,6 +790,55 @@ struct SymbolRow {
     occurrence: SymbolOccurrenceId,
 }
 
+fn bind_clone_bodies(
+    extracted: &[ExtractedCloneBodyV1],
+    symbols: &[SymbolRow],
+    file: &ValidatedCodeFileV1,
+    authority: &crate::intake::ReceiptBoundCodeFileAuthorityV1,
+    batch: &ExtractionBatchV1,
+) -> Result<Vec<CodeIndexCloneBodyV1>, ChunkingFailureV1> {
+    let mut occurrences = HashMap::with_capacity(symbols.len());
+    for symbol in symbols {
+        if occurrences
+            .insert(symbol.node_id.as_str(), &symbol.occurrence)
+            .is_some()
+        {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "one parser node id names multiple symbol occurrences".to_owned(),
+            ));
+        }
+    }
+    extracted
+        .iter()
+        .map(|body| {
+            let symbol_occurrence_id = occurrences
+                .get(body.symbol_occurrence_id.as_str())
+                .ok_or_else(|| {
+                    ChunkingFailureV1::NonCanonicalIdentity(
+                        "clone body is not bound to an indexed symbol".to_owned(),
+                    )
+                })?;
+            let payload = CloneBodyPayloadV1::from_extracted(body)
+                .map_err(ChunkingFailureV1::NonCanonicalIdentity)?;
+            Ok(CodeIndexCloneBodyV1 {
+                occurrence: CloneBodyOccurrenceV1 {
+                    project_id: authority.project_id.clone(),
+                    repository_id: authority.repository_id.clone(),
+                    worktree_id: authority.worktree_id.clone(),
+                    source_generation: batch.generation_id.clone(),
+                    snapshot_digest: file.snapshot_digest.clone(),
+                    symbol_occurrence_id: (*symbol_occurrence_id).clone(),
+                    path: body.logical_path.clone(),
+                    body_span: body.body_span,
+                    payload_digest: payload.payload_digest.clone(),
+                    eligibility: body.eligibility,
+                },
+                payload,
+            })
+        })
+        .collect()
+}
+
 /// Byte offset of one line start for every line in the source.
 fn line_offsets(bytes: &[u8]) -> Vec<u64> {
     let mut offsets = vec![0u64];
@@ -1093,6 +1143,7 @@ impl DeterministicCodeChunker {
         if cancellation.is_cancelled() {
             return Err(ChunkingFailureV1::Cancelled);
         }
+        let authority = file.authority();
         let file = file.validated_file();
         if batch.language != descriptor.language
             || batch.descriptor_revision != descriptor.descriptor_revision
@@ -1117,6 +1168,7 @@ impl DeterministicCodeChunker {
             ParseOutcomeV1::Partial { reason } => {
                 return self.build_partial_artifacts(
                     file,
+                    authority,
                     batch,
                     descriptor,
                     parse_artifact,
@@ -1153,6 +1205,7 @@ impl DeterministicCodeChunker {
         }
         self.build_partial_artifacts(
             file,
+            authority,
             batch,
             descriptor,
             parse_artifact,
@@ -1168,6 +1221,7 @@ impl DeterministicCodeChunker {
     fn build_partial_artifacts(
         &self,
         file: &ValidatedCodeFileV1,
+        authority: &crate::intake::ReceiptBoundCodeFileAuthorityV1,
         batch: &ExtractionBatchV1,
         descriptor: &LanguageDescriptorV1,
         parse_artifact: Option<&ExtractionArtifactV1>,
@@ -1264,6 +1318,8 @@ impl DeterministicCodeChunker {
                 &published_symbol_spans(chunks.iter()),
             )
         })?;
+        let clone_bodies =
+            bind_clone_bodies(&artifact.clone_bodies, &symbol_rows, file, authority, batch)?;
         let (mut edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
         let (same_file_edges, unresolved_references) =
             resolve_file_references(source, &offsets, &result.unresolved_refs, &symbol_rows);
@@ -1293,6 +1349,7 @@ impl DeterministicCodeChunker {
             edges,
             edge_abstentions,
             unresolved_references,
+            clone_bodies,
             artifact,
             batch,
         )

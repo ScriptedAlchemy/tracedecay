@@ -13,6 +13,7 @@ use tracedecay_domain::{
 };
 
 use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key};
+use crate::clones::CodeIndexCloneBodyV1;
 use crate::extract::ExtractionBatchV1;
 use crate::extract::parser_import_rows_digest;
 use crate::lineage::LineageSymbolRecordV1;
@@ -168,6 +169,7 @@ pub struct CodeFileIndexArtifactsV1 {
     pub edges: Vec<CanonicalRelationEdgeV1>,
     pub edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     pub imports: Vec<CodeIndexImportEvidenceV1>,
+    pub clone_bodies: Vec<CodeIndexCloneBodyV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_evidence: Option<ExtractedSchemaEvidenceV1>,
     /// References this file could not bind locally, canonically ordered.
@@ -205,6 +207,7 @@ impl CodeFileIndexArtifactsV1 {
         edges: Vec<CanonicalRelationEdgeV1>,
         edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
         unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
+        clone_bodies: Vec<CodeIndexCloneBodyV1>,
         artifact: &ExtractionArtifactV1,
         extraction: &ExtractionBatchV1,
     ) -> Result<Self, ChunkingFailureV1> {
@@ -221,6 +224,7 @@ impl CodeFileIndexArtifactsV1 {
             edges,
             edge_abstentions,
             imports,
+            clone_bodies,
             artifact.schema_evidence.clone(),
             unresolved_references,
         )?;
@@ -238,6 +242,7 @@ impl CodeFileIndexArtifactsV1 {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             None,
             Vec::new(),
         )?;
@@ -245,16 +250,23 @@ impl CodeFileIndexArtifactsV1 {
         Ok(artifacts)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_parts(
         chunks: CodeFileChunksV1,
         symbols: Vec<Arc<LineageSymbolRecordV1>>,
         edges: Vec<CanonicalRelationEdgeV1>,
         edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
         mut imports: Vec<CodeIndexImportEvidenceV1>,
+        mut clone_bodies: Vec<CodeIndexCloneBodyV1>,
         mut schema_evidence: Option<ExtractedSchemaEvidenceV1>,
         mut unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
     ) -> Result<Self, ChunkingFailureV1> {
         imports.sort_by(canonical_import_order);
+        clone_bodies.sort_by(|left, right| {
+            left.occurrence
+                .symbol_occurrence_id
+                .cmp(&right.occurrence.symbol_occurrence_id)
+        });
         if let Some(evidence) = &mut schema_evidence {
             evidence.issues.sort();
             evidence.issues.dedup();
@@ -269,6 +281,7 @@ impl CodeFileIndexArtifactsV1 {
             edges,
             edge_abstentions,
             imports,
+            clone_bodies,
             schema_evidence,
             unresolved_references,
         };
@@ -283,6 +296,7 @@ impl CodeFileIndexArtifactsV1 {
     pub fn validate(&self) -> Result<(), ChunkingFailureV1> {
         self.chunks.validate()?;
         self.validate_imports()?;
+        self.validate_clone_bodies()?;
         self.validate_schema_evidence()?;
         if self
             .symbols
@@ -340,6 +354,28 @@ impl CodeFileIndexArtifactsV1 {
         {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
                 "unresolved references are not in strict canonical order".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_clone_bodies(&self) -> Result<(), ChunkingFailureV1> {
+        let occurrences = self
+            .symbols
+            .iter()
+            .map(|symbol| &symbol.occurrence)
+            .collect::<std::collections::BTreeSet<_>>();
+        if self.clone_bodies.windows(2).any(|pair| {
+            pair[0].occurrence.symbol_occurrence_id >= pair[1].occurrence.symbol_occurrence_id
+        }) || self.clone_bodies.iter().any(|body| {
+            body.occurrence.path.is_empty()
+                || body.occurrence.body_span.is_empty()
+                || body.occurrence.payload_digest != body.payload.payload_digest
+                || body.payload.validate().is_err()
+                || !occurrences.contains(&body.occurrence.symbol_occurrence_id)
+        }) {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "clone body evidence is not canonically bound to file symbols".to_owned(),
             ));
         }
         Ok(())
@@ -462,7 +498,7 @@ impl CodeFileIndexArtifactsV1 {
         self.validate()?;
         let chunks = self
             .chunks
-            .rematerialize_for_generation(generation_id, file_occurrence_id.clone())?;
+            .rematerialize_for_generation(generation_id.clone(), file_occurrence_id.clone())?;
         let mut occurrences = BTreeMap::new();
         for (prior, current) in self.chunks.chunks.iter().zip(&chunks.chunks) {
             if let Some(prior_occurrence) = &prior.anchor.symbol_occurrence_id {
@@ -515,12 +551,24 @@ impl CodeFileIndexArtifactsV1 {
                 rematerialized_occurrence(&occurrences, &reference.from_occurrence)?;
         }
         unresolved_references.sort();
+        let mut clone_bodies = self.clone_bodies.clone();
+        for body in &mut clone_bodies {
+            body.occurrence.source_generation = generation_id.clone();
+            body.occurrence.symbol_occurrence_id =
+                rematerialized_occurrence(&occurrences, &body.occurrence.symbol_occurrence_id)?;
+        }
+        clone_bodies.sort_by(|left, right| {
+            left.occurrence
+                .symbol_occurrence_id
+                .cmp(&right.occurrence.symbol_occurrence_id)
+        });
         let result = Self {
             chunks,
             symbols,
             edges,
             edge_abstentions: self.edge_abstentions.clone(),
             imports,
+            clone_bodies,
             schema_evidence: self.schema_evidence.clone(),
             unresolved_references,
         };

@@ -29,9 +29,9 @@ mod routes;
 pub use self::projection::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
-    CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuildProgressV1,
-    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneExactArtifactMemberV1,
+    CloneExactArtifactPageV1, CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactBatchLimitV1,
+    CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
