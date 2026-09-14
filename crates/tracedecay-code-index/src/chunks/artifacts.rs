@@ -8,14 +8,15 @@ use tracedecay_code_extraction::{
     ImportNamespaceV1, SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1, import_module_kind,
 };
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1, SourceSpan,
-    SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, ManifestDigest,
+    RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
 };
 
 use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key};
 use crate::clones::CodeIndexCloneBodyV1;
 use crate::extract::ExtractionBatchV1;
 use crate::extract::parser_import_rows_digest;
+use crate::intake::ReceiptBoundCodeFileAuthorityV1;
 use crate::lineage::LineageSymbolRecordV1;
 
 const IMPORT_AUTHORITY_MISMATCH: &str =
@@ -377,6 +378,25 @@ impl CodeFileIndexArtifactsV1 {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
                 "clone body evidence is not canonically bound to file symbols".to_owned(),
             ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_generation_clone_authority(
+        &self,
+        authority: &ReceiptBoundCodeFileAuthorityV1,
+        extraction: &ExtractionBatchV1,
+        snapshot_digest: &ManifestDigest,
+    ) -> Result<(), ChunkingFailureV1> {
+        if self.clone_bodies.iter().any(|body| {
+            body.occurrence.project_id != authority.project_id
+                || body.occurrence.repository_id != authority.repository_id
+                || body.occurrence.worktree_id != authority.worktree_id
+                || body.occurrence.source_generation != extraction.generation_id
+                || body.occurrence.snapshot_digest != *snapshot_digest
+                || body.occurrence.path != authority.logical_path
+        }) {
+            return Err(ChunkingFailureV1::GenerationMismatch);
         }
         Ok(())
     }

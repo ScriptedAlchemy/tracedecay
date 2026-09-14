@@ -57,9 +57,9 @@ use tracedecay_query::retrieval::lexical::{
     CodeLexicalArtifactWriterRevisionV1, CodeLexicalProjectionAdapterV1,
     CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
-    MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
-    VerifiedCodeLexicalArtifactV1,
+    LexicalLaneRequest, LexicalLaneRetriever, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
+    MAX_LEXICAL_QUERY_TERM_BYTES_V1, VerifiedCodeLexicalArtifactV1,
 };
 use tracedecay_query::retrieval::ports::{
     ExactTermPostingReadPort, LexicalPostingReadPort, RetrievalExecutionControl, RetrievalPortError,
@@ -1354,6 +1354,7 @@ fn v15_clone_payloads_are_content_addressed_and_exact_postings_page() {
         .into_iter()
         .find(|key| key.class == CloneNormalizationClassV1::Conservative)
         .expect("conservative exact key");
+    let authority = clone_bodies[0].occurrence.clone();
 
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let legacy_path = directory.path().join("lexical-artifact-v14.sqlite");
@@ -1381,14 +1382,8 @@ fn v15_clone_payloads_are_content_addressed_and_exact_postings_page() {
     )
     .expect("open V14 artifact");
     assert!(matches!(
-        legacy_reader.clone_exact_page(
-            &id::<RepositoryId>("repository.artifact"),
-            &key,
-            None,
-            1,
-            &control,
-        ),
-        Err(CodeLexicalArtifactErrorV1::ResetRequired(_))
+        legacy_reader.clone_exact_page(&authority, &key, None, 1, &control,),
+        Err(CodeLexicalArtifactErrorV1::Incompatible(_))
     ));
     let verified = {
         let mut builder =
@@ -1428,26 +1423,59 @@ fn v15_clone_payloads_are_content_addressed_and_exact_postings_page() {
         &control,
     )
     .expect("open V15 artifact");
-    let repository = id::<RepositoryId>("repository.artifact");
+    let mut unauthorized = authority.clone();
+    unauthorized.repository_id = id::<RepositoryId>("repository.unauthorized");
+    assert!(matches!(
+        reader.clone_exact_page(&unauthorized, &key, None, 1, &control),
+        Err(CodeLexicalArtifactErrorV1::Missing(_))
+    ));
     assert!(matches!(
         reader.clone_exact_page(
-            &id::<RepositoryId>("repository.unauthorized"),
+            &authority,
             &key,
             None,
+            MAX_CLONE_EXACT_PAGE_MEMBERS_V1 + 1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Contract(_))
+    ));
+    let first = reader
+        .clone_exact_page(&authority, &key, None, 1, &control)
+        .expect("first clone page");
+    assert_eq!(first.members.len(), 1);
+    let rename_key = clone_bodies[0]
+        .payload
+        .exact_keys(clone_bodies[0].occurrence.eligibility)
+        .into_iter()
+        .find(|key| key.class == CloneNormalizationClassV1::Rename)
+        .expect("rename exact key");
+    assert!(matches!(
+        reader.clone_exact_page(
+            &authority,
+            &rename_key,
+            first.next_cursor.as_ref(),
             1,
             &control,
         ),
-        Err(CodeLexicalArtifactErrorV1::Missing(_))
+        Err(CodeLexicalArtifactErrorV1::Contract(_))
     ));
-    let first = reader
-        .clone_exact_page(&repository, &key, None, 1, &control)
-        .expect("first clone page");
-    assert_eq!(first.members.len(), 1);
+    let mut altered_scope = authority.clone();
+    altered_scope.project_id = id::<ProjectId>("project.other");
+    assert!(matches!(
+        reader.clone_exact_page(
+            &altered_scope,
+            &key,
+            first.next_cursor.as_ref(),
+            1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Contract(_))
+    ));
     let second = reader
-        .clone_exact_page(&repository, &key, first.next_after.as_ref(), 1, &control)
+        .clone_exact_page(&authority, &key, first.next_cursor.as_ref(), 1, &control)
         .expect("second clone page");
     assert_eq!(second.members.len(), 1);
-    assert!(second.next_after.is_none());
+    assert!(second.next_cursor.is_none());
     assert_eq!(
         first.members[0].payload.payload_digest,
         second.members[0].payload.payload_digest
@@ -1500,7 +1528,7 @@ fn v15_clone_payloads_are_content_addressed_and_exact_postings_page() {
     .expect("open reduced V15 artifact");
     assert_eq!(
         reduced_reader
-            .clone_exact_page(&repository, &key, None, 10, &control)
+            .clone_exact_page(&reduced_payload.occurrence, &key, None, 10, &control)
             .expect("query after deletion")
             .members
             .len(),

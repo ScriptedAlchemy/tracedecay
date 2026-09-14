@@ -2189,6 +2189,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         file_offset: u64,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
         let start_index = self.file_range_index(file_offset)?;
         let workers = crate::parallelism::indexing_workers().max(1);
         let mut prefetch_bytes = 0u64;
@@ -2231,7 +2232,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         }
         let admitted =
             super::collect_bounded_ordered(&inputs, |(_start, bytes, next_offset), _| {
-                admit_persisted_file_bytes(bytes, *next_offset, control)
+                admit_persisted_file_bytes(bytes, &snapshot_digest, *next_offset, control)
             })?;
         for ((start, _, _), admitted) in inputs.into_iter().zip(admitted) {
             self.admitted_window.insert(start, Arc::new(admitted));
@@ -2244,6 +2245,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         file_offset: u64,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
         let Some(SealedLexicalFilesV1::Published(files)) = self.file_source.as_ref() else {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical memory admit ran without published files".to_owned(),
@@ -2288,7 +2290,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         }
         let admitted =
             super::collect_bounded_ordered(&inputs, |(_start, file, next_offset), _| {
-                admit_file_generation_artifacts(file, *next_offset, control)
+                admit_file_generation_artifacts(file, &snapshot_digest, *next_offset, control)
             })?;
         for ((start, _, _), admitted) in inputs.into_iter().zip(admitted) {
             self.admitted_window.insert(start, Arc::new(admitted));
@@ -2302,6 +2304,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         file_offset: u64,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
         let start = self.file_range_index(file_offset)?;
         let Some(SealedLexicalFilesV1::Partitioned(source)) = self.file_source.as_mut() else {
             return Err(CodeIndexProductionErrorV1::Contract(
@@ -2321,7 +2324,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     "sealed lexical file ordinal exceeds u64".to_owned(),
                 )
             })?;
-            admit_file_generation_artifacts(file, next_offset, control)
+            admit_file_generation_artifacts(file, &snapshot_digest, next_offset, control)
         })?;
         for (index, file) in admitted.into_iter().enumerate() {
             let offset = u64::try_from(start + index).map_err(|_| {
@@ -3192,6 +3195,7 @@ fn read_file_bytes_at_range<R: Read + Seek>(
 
 fn admit_persisted_file_bytes(
     bytes: &[u8],
+    snapshot_digest: &ManifestDigest,
     next_file_offset: u64,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
@@ -3211,6 +3215,7 @@ fn admit_persisted_file_bytes(
         &file.extraction,
         &file.artifacts,
         &exact_authority,
+        snapshot_digest,
         next_file_offset,
         control,
     )
@@ -3218,6 +3223,7 @@ fn admit_persisted_file_bytes(
 
 fn admit_file_generation_artifacts(
     file: &FileGenerationArtifactsV1,
+    snapshot_digest: &ManifestDigest,
     next_file_offset: u64,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
@@ -3227,6 +3233,7 @@ fn admit_file_generation_artifacts(
         &file.extraction,
         &file.artifacts,
         &file.exact_authority,
+        snapshot_digest,
         next_file_offset,
         control,
     )
@@ -3255,6 +3262,7 @@ fn admit_validated_file_parts(
     extraction: &ExtractionBatchV1,
     artifacts: &CodeFileIndexArtifactsV1,
     exact_authority: &ExactExtractionAuthorityV1,
+    snapshot_digest: &ManifestDigest,
     next_file_offset: u64,
     _control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
@@ -3264,6 +3272,9 @@ fn admit_validated_file_parts(
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
         artifacts
             .validate_generation_import_authority(extraction)
+            .map_err(CodeIndexProductionErrorV1::Chunk)?;
+        artifacts
+            .validate_generation_clone_authority(authority, extraction, snapshot_digest)
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
         let document = &artifacts.chunks.document;
         if extraction.file_occurrence_id != document.file_occurrence_id

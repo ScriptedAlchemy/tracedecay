@@ -667,10 +667,7 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
         CodeLexicalArtifactErrorV1::Interrupted(
             crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
         ) => RetrievalPortError::BudgetExceeded,
-        CodeLexicalArtifactErrorV1::Incompatible(_)
-        | CodeLexicalArtifactErrorV1::ResetRequired(_) => {
-            RetrievalPortError::IncompatibleProjection
-        }
+        CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Unreserved(_)

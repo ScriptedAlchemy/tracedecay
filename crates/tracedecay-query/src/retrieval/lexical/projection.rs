@@ -21,15 +21,16 @@ mod in_memory;
 pub use artifact::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneExactArtifactMemberV1,
-    CloneExactArtifactPageV1, CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactBatchLimitV1,
-    CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneExactArtifactCursorV1,
+    CloneExactArtifactMemberV1, CloneExactArtifactPageV1, CodeExactLexicalArtifactReaderV1,
+    CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuildProgressV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
-    CodeLexicalImportMembershipWitnessV1, PreparedCodeLexicalArtifactBatchV1,
-    PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
-    code_lexical_artifact_build_memory_budget_for,
+    CodeLexicalImportMembershipWitnessV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
+    PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
+    VerifiedCodeLexicalArtifactV1, code_lexical_artifact_build_memory_budget_for,
 };
 #[cfg(feature = "search-eval")]
 pub use in_memory::{

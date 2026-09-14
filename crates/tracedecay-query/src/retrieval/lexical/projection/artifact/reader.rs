@@ -19,9 +19,9 @@ use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1,
-    FixedPointScore, LogicalEvidenceId, ManifestDigest, RepositoryId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
-    SymbolOccurrenceId,
+    FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, SymbolOccurrenceId,
+    canonical_sha256,
 };
 use tracedecay_private_fs::open_private_file;
 
@@ -81,10 +81,35 @@ pub struct CloneExactArtifactMemberV1 {
     pub occurrence: CloneBodyOccurrenceV1,
 }
 
+pub const MAX_CLONE_EXACT_PAGE_MEMBERS_V1: usize = 1_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneExactArtifactCursorV1 {
+    artifact_digest: ManifestDigest,
+    generation: CodeGenerationId,
+    key: CloneExactKeyV1,
+    authority_digest: ManifestDigest,
+    last_symbol_occurrence_id: SymbolOccurrenceId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloneExactArtifactPageV1 {
     pub members: Vec<CloneExactArtifactMemberV1>,
-    pub next_after: Option<SymbolOccurrenceId>,
+    pub next_cursor: Option<CloneExactArtifactCursorV1>,
+}
+
+fn clone_authority_digest(
+    authority: &CloneBodyOccurrenceV1,
+) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+    canonical_sha256(&(
+        "tracedecay.clone-exact-authority.v1",
+        &authority.project_id,
+        &authority.repository_id,
+        &authority.worktree_id,
+        &authority.source_generation,
+        &authority.snapshot_digest,
+    ))
+    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
 type ArtifactConnectionMutex<T> = StdMutex<T>;
@@ -553,28 +578,32 @@ impl CodeLexicalArtifactReaderV1 {
 
     pub fn clone_exact_page(
         &self,
-        repository_id: &RepositoryId,
+        authority: &CloneBodyOccurrenceV1,
         key: &CloneExactKeyV1,
-        after: Option<&SymbolOccurrenceId>,
+        cursor: Option<&CloneExactArtifactCursorV1>,
         limit: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CloneExactArtifactPageV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
-        if self.metadata.repository_id.as_ref() != Some(repository_id) {
+        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
+            || self.metadata.generation != authority.source_generation
+        {
             return Err(CodeLexicalArtifactErrorV1::Missing(
-                "clone lookup repository is unavailable".to_owned(),
+                "clone lookup authority is unavailable".to_owned(),
             ));
         }
         if !self.layout.has_clone_index() {
-            return Err(CodeLexicalArtifactErrorV1::ResetRequired(
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
                 "clone lookup requires lexical artifact revision 15".to_owned(),
             ));
         }
-        if limit == 0 {
-            return Err(CodeLexicalArtifactErrorV1::Contract(
-                "clone exact page limit must be non-zero".to_owned(),
-            ));
+        if limit == 0 || limit > MAX_CLONE_EXACT_PAGE_MEMBERS_V1 {
+            return Err(CodeLexicalArtifactErrorV1::Contract(format!(
+                "clone exact page limit must be within 1..={MAX_CLONE_EXACT_PAGE_MEMBERS_V1}"
+            )));
         }
+        let authority_digest = clone_authority_digest(authority)?;
+        let after = self.clone_exact_after(key, cursor, &authority_digest)?;
         let fetch = limit.checked_add(1).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract("clone exact page limit overflowed".to_owned())
         })?;
@@ -590,7 +619,6 @@ impl CodeLexicalArtifactReaderV1 {
                  ORDER BY posting.symbol_occurrence_id LIMIT ?5",
             )
             .map_err(sqlite_error)?;
-        let after = after.map_or("", SymbolOccurrenceId::as_str);
         let mut rows = statement
             .query(rusqlite::params![
                 i64::from(key.class as u8),
@@ -604,51 +632,91 @@ impl CodeLexicalArtifactReaderV1 {
         let mut members = Vec::with_capacity(fetch);
         while let Some(row) = rows.next().map_err(sqlite_error)? {
             checkpoint(control)?;
-            let posting_occurrence: String = row.get(0).map_err(sqlite_error)?;
-            let posting_payload: String = row.get(1).map_err(sqlite_error)?;
-            let occurrence_bytes: Option<Vec<u8>> = row.get(2).map_err(sqlite_error)?;
-            let payload_bytes: Option<Vec<u8>> = row.get(3).map_err(sqlite_error)?;
-            let (Some(occurrence_bytes), Some(payload_bytes)) = (occurrence_bytes, payload_bytes)
-            else {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "clone exact posting is missing its occurrence or payload".to_owned(),
-                ));
-            };
-            let occurrence: CloneBodyOccurrenceV1 = serde_json::from_slice(&occurrence_bytes)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-            let payload: CloneBodyPayloadV1 = serde_json::from_slice(&payload_bytes)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-            if occurrence.symbol_occurrence_id.as_str() != posting_occurrence
-                || &occurrence.repository_id != repository_id
-                || occurrence.source_generation != self.metadata.generation
-                || occurrence.payload_digest.as_str() != posting_payload
-                || occurrence.payload_digest != payload.payload_digest
-                || payload.validate().is_err()
-                || !payload
-                    .exact_keys(occurrence.eligibility)
-                    .iter()
-                    .any(|candidate| candidate == key)
-            {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "clone exact posting does not match its payload and occurrence".to_owned(),
-                ));
-            }
-            members.push(CloneExactArtifactMemberV1 {
-                payload,
-                occurrence,
-            });
+            members.push(self.verified_clone_member(authority, key, row)?);
         }
-        let next_after = (members.len() > limit)
+        let next_cursor = (members.len() > limit)
             .then(|| {
                 members
                     .get(limit - 1)
-                    .map(|member| member.occurrence.symbol_occurrence_id.clone())
+                    .map(|member| CloneExactArtifactCursorV1 {
+                        artifact_digest: self.receipt.artifact_digest().clone(),
+                        generation: self.metadata.generation.clone(),
+                        key: key.clone(),
+                        authority_digest,
+                        last_symbol_occurrence_id: member.occurrence.symbol_occurrence_id.clone(),
+                    })
             })
             .flatten();
         members.truncate(limit);
         Ok(CloneExactArtifactPageV1 {
             members,
-            next_after,
+            next_cursor,
+        })
+    }
+
+    fn clone_exact_after<'a>(
+        &self,
+        key: &CloneExactKeyV1,
+        cursor: Option<&'a CloneExactArtifactCursorV1>,
+        authority_digest: &ManifestDigest,
+    ) -> Result<&'a str, CodeLexicalArtifactErrorV1> {
+        match cursor {
+            Some(cursor)
+                if cursor.artifact_digest == *self.receipt.artifact_digest()
+                    && cursor.generation == self.metadata.generation
+                    && cursor.key == *key
+                    && cursor.authority_digest == *authority_digest =>
+            {
+                Ok(cursor.last_symbol_occurrence_id.as_str())
+            }
+            Some(_) => Err(CodeLexicalArtifactErrorV1::Contract(
+                "clone exact cursor does not match its artifact, key, or authority".to_owned(),
+            )),
+            None => Ok(""),
+        }
+    }
+
+    fn verified_clone_member(
+        &self,
+        authority: &CloneBodyOccurrenceV1,
+        key: &CloneExactKeyV1,
+        row: &rusqlite::Row<'_>,
+    ) -> Result<CloneExactArtifactMemberV1, CodeLexicalArtifactErrorV1> {
+        let posting_occurrence: String = row.get(0).map_err(sqlite_error)?;
+        let posting_payload: String = row.get(1).map_err(sqlite_error)?;
+        let occurrence_bytes: Option<Vec<u8>> = row.get(2).map_err(sqlite_error)?;
+        let payload_bytes: Option<Vec<u8>> = row.get(3).map_err(sqlite_error)?;
+        let (Some(occurrence_bytes), Some(payload_bytes)) = (occurrence_bytes, payload_bytes)
+        else {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone exact posting is missing its occurrence or payload".to_owned(),
+            ));
+        };
+        let occurrence: CloneBodyOccurrenceV1 = serde_json::from_slice(&occurrence_bytes)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        let payload: CloneBodyPayloadV1 = serde_json::from_slice(&payload_bytes)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        if occurrence.symbol_occurrence_id.as_str() != posting_occurrence
+            || occurrence.project_id != authority.project_id
+            || occurrence.repository_id != authority.repository_id
+            || occurrence.worktree_id != authority.worktree_id
+            || occurrence.source_generation != self.metadata.generation
+            || occurrence.snapshot_digest != authority.snapshot_digest
+            || occurrence.payload_digest.as_str() != posting_payload
+            || occurrence.payload_digest != payload.payload_digest
+            || payload.validate().is_err()
+            || !payload
+                .exact_keys(occurrence.eligibility)
+                .iter()
+                .any(|candidate| candidate == key)
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone exact posting does not match its payload and occurrence".to_owned(),
+            ));
+        }
+        Ok(CloneExactArtifactMemberV1 {
+            payload,
+            occurrence,
         })
     }
 
@@ -3042,10 +3110,7 @@ fn map_query_sql_error(error: rusqlite::Error) -> RetrievalPortError {
 fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
         CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
-        CodeLexicalArtifactErrorV1::Incompatible(_)
-        | CodeLexicalArtifactErrorV1::ResetRequired(_) => {
-            RetrievalPortError::IncompatibleProjection
-        }
+        CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(error) => RetrievalPortError::Contract(error),
         CodeLexicalArtifactErrorV1::Unreserved(_)
         | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
