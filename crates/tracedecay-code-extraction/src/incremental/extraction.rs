@@ -1,4 +1,4 @@
-use tracedecay_domain::{ExtractionResult, NodeKind};
+use tracedecay_domain::{ExtractionResult, NodeKind, SourceSpan};
 
 use super::{
     ParseCompleteness, ParseError, ParseInputEdit, ParseReport, ParseResetReason, ParseReuse,
@@ -120,7 +120,7 @@ impl RetainedParseDocument {
             );
         }
 
-        let delta = extractor.extract_parsed_artifact_prepared(
+        let delta = extractor.extract_parsed_artifact(
             self.identity.logical_path(),
             &self.source,
             self.parsed_source_text(),
@@ -153,7 +153,7 @@ impl RetainedParseDocument {
         extractor: &dyn LanguageExtractor,
         reason: Option<ParsedExtractionResetReason>,
     ) -> ParsedExtractionArtifactV1 {
-        let extracted = extractor.extract_parsed_artifact_prepared(
+        let extracted = extractor.extract_parsed_artifact(
             self.identity.logical_path(),
             &self.source,
             self.parsed_source_text(),
@@ -247,13 +247,30 @@ fn merge_changed_artifact_unmeasured(
         .map(|row| shift_unaffected_import(row, edit, old_end_row))
         .collect::<Option<Vec<_>>>()?;
     imports.extend(delta.imports);
+    let mut clone_bodies = previous
+        .clone_bodies
+        .iter()
+        .filter(|row| !superseded.contains(row.symbol_occurrence_id.as_str()))
+        .cloned()
+        .map(|row| shift_unaffected_clone_body(row, edit))
+        .collect::<Option<Vec<_>>>()?;
+    clone_bodies.extend(delta.clone_bodies);
     let mut artifact = ExtractionArtifactV1 {
         result,
         imports,
+        clone_bodies,
         schema_evidence: None,
     };
     artifact.canonicalize_order();
     Some(artifact)
+}
+
+fn shift_unaffected_clone_body(
+    mut row: crate::ExtractedCloneBodyV1,
+    edit: ParseInputEdit,
+) -> Option<crate::ExtractedCloneBodyV1> {
+    row.body_span = shift_unaffected_span(row.body_span, edit)?.0;
+    Some(row)
 }
 
 fn import_position_is_within(
@@ -271,17 +288,11 @@ fn shift_unaffected_import(
     edit: ParseInputEdit,
     old_end_row: u32,
 ) -> Option<ExtractedImportEvidenceV1> {
-    let edit_start = u64::try_from(edit.start_byte).ok()?;
-    let old_end = u64::try_from(edit.old_end_byte).ok()?;
-    if row.span.end_byte <= edit_start {
+    let (span, shifted) = shift_unaffected_span(row.span, edit)?;
+    row.span = span;
+    if !shifted {
         return Some(row);
     }
-    if row.span.start_byte < old_end {
-        return None;
-    }
-
-    row.span.start_byte = shift_value(row.span.start_byte, edit.old_end_byte, edit.new_end_byte)?;
-    row.span.end_byte = shift_value(row.span.end_byte, edit.old_end_byte, edit.new_end_byte)?;
     if row.start_line == old_end_row {
         row.start_column = shift_value(
             u64::from(row.start_column),
@@ -292,6 +303,20 @@ fn shift_unaffected_import(
         .ok()?;
     }
     Some(row)
+}
+
+fn shift_unaffected_span(mut span: SourceSpan, edit: ParseInputEdit) -> Option<(SourceSpan, bool)> {
+    let edit_start = u64::try_from(edit.start_byte).ok()?;
+    let old_end = u64::try_from(edit.old_end_byte).ok()?;
+    if span.end_byte <= edit_start {
+        return Some((span, false));
+    }
+    if span.start_byte < old_end {
+        return None;
+    }
+    span.start_byte = shift_value(span.start_byte, edit.old_end_byte, edit.new_end_byte)?;
+    span.end_byte = shift_value(span.end_byte, edit.old_end_byte, edit.new_end_byte)?;
+    Some((span, true))
 }
 
 fn shift_value(value: u64, old_end: usize, new_end: usize) -> Option<u64> {

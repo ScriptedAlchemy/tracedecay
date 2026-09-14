@@ -1896,6 +1896,7 @@ impl RustExtractor {
                 duration_ms: start.elapsed().as_millis() as u64,
             },
             imports: state.imports,
+            clone_bodies: Vec::new(),
             schema_evidence: None,
         }
     }

@@ -13,6 +13,7 @@ mod bash;
 #[cfg(feature = "lang-batch")]
 mod batch;
 mod c;
+mod clone_body_tokens;
 #[cfg(feature = "lang-cobol")]
 mod cobol;
 mod complexity_budget;

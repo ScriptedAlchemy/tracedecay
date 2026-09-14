@@ -114,6 +114,16 @@ impl TypeScriptExtractor {
             &tree,
             crate::parsed_extraction::ParsedExtractionScope::FullDocument,
         )
+        .with_conservative_clone_bodies(
+            &tree,
+            source,
+            match ext {
+                "tsx" => "tsx",
+                "js" | "jsx" => "javascript",
+                _ => "typescript",
+            },
+            file_path,
+        )
         .artifact
     }
 
@@ -1686,6 +1696,7 @@ impl TypeScriptExtractor {
                 duration_ms: start.elapsed().as_millis() as u64,
             },
             imports: state.imports,
+            clone_bodies: Vec::new(),
             schema_evidence: None,
         }
     }
