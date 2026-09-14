@@ -1043,12 +1043,15 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     wait_until("post-recovery cancellation child", || {
         cancellation_started.exists().then_some(())
     });
-    let running = client
-        .execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
+    let running = wait_until("durably recovered workflow run", || {
+        match client.execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
             run_id: run_id.clone(),
-        })
-        .expect("durably recovered workflow run")
-        .result;
+        }) {
+            Ok(response) => Some(response.result),
+            Err(ClientError::Problem(problem)) if problem.kind == "unavailable" => None,
+            Err(error) => panic!("durably recovered workflow run: {error}"),
+        }
+    });
     assert_eq!(running.status(), WorkflowRunStatus::Running);
     let paused_workflow = client
         .execute::<WorkflowPauseRun>(&WorkflowRunPauseRequest {

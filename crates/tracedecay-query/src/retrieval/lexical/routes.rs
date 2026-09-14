@@ -188,6 +188,15 @@ impl LexicalRoutingV1 {
         }
     }
 
+    /// Query route plus the preferred-symbol name route. Name similarity
+    /// (`tracedecay_similar`) uses this instead of a dense embedding lane.
+    pub const fn prefer_symbol() -> Self {
+        Self {
+            anchors: Vec::new(),
+            prefer_symbol: true,
+        }
+    }
+
     pub fn is_query_only(&self) -> bool {
         self.anchors.is_empty() && !self.prefer_symbol
     }

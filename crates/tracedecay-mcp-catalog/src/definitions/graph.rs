@@ -311,7 +311,7 @@ pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_similar",
         "Similar Symbols",
-        "Find symbols with similar names using full-text search and substring matching.",
+        "Find symbols with similar names through exact and lexical identifier routes (camelCase / snake_case splits, qualified names, substring). Not embedding search. Prefer tracedecay_search when you want ranked body/phrase hits; this tool is name-first.",
         input_schema,
     )
 }

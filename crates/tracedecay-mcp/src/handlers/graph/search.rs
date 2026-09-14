@@ -1053,7 +1053,7 @@ pub async fn handle_similar(
                 source_reference: None,
                 limit,
                 cursor: None,
-                lexical_routing: LexicalRoutingV1::query_only(),
+                lexical_routing: LexicalRoutingV1::prefer_symbol(),
                 authority: ctx.code_index_search_authority().cloned(),
                 deadline: ctx.deadline().cloned(),
                 cancellation: ctx.cancellation().cloned(),

@@ -775,10 +775,22 @@ fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v5() {
     );
 }
 
-/// A restart over a dirty checkout must seat the retained complete generation
-/// before the successor rebuild finishes. Waiting for that rebuild left remount
-/// serving empty (`last_reconcile_micros` unset, no seated publication) while
-/// a sealed artifact was already on disk.
+/// A restart over a dirty checkout must serve the retained generation before
+/// the successor rebuild finishes. Waiting for that rebuild left remount
+/// warming with no seated publication while a sealed artifact was already on
+/// disk.
+///
+/// Revision-7 partitioned remounts deliberately leave the complete
+/// `serving_generation` slot empty and answer through the lightweight text
+/// owner (and verified graph head) instead of replaying partition bytes.
+/// [`CodeIndexSchedulerRegistryV1::latest_generation_id`] is the product
+/// authority for that contract: it prefers the complete slot when seated and
+/// falls back to the text owner when the complete slot is intentionally empty.
+///
+/// The retained-graph recovery successor gate is required for observation: a
+/// tiny dirty fixture can publish its successor in well under one poll tick,
+/// so an ungated wait sees only the rebuild even when the retained text owner
+/// was installed first.
 #[tokio::test]
 async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -799,6 +811,13 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
 
     let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    let remount_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical remount root");
+    let (recovery_entered, release_successor) = restarted
+        .pause_next_retained_graph_recovery_before_successor(remount_root.clone())
+        .await;
     restarted
         .mount_worktree(
             test_project_id(),
@@ -807,33 +826,28 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
         )
         .await
         .expect("remount worktree over a dirty checkout");
-    let seated = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(latest) = restarted
-                .latest_complete_serving_for_test(fixture.path())
-                .await
-            {
-                break latest;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("dirty remount must seat the retained generation before the successor rebuild");
+    tokio::time::timeout(Duration::from_secs(5), recovery_entered)
+        .await
+        .expect("dirty remount must recover the retained graph before the successor rebuild")
+        .expect("retained graph recovery gate stays open until this test releases it");
+    let seated = restarted
+        .latest_generation_id(&remount_root)
+        .await
+        .expect("retained text owner must serve while the successor is held");
     assert_eq!(
-        seated.generation().manifest().generation_id,
-        sealed_id,
-        "the empty serving slot takes the retained generation, not the in-flight rebuild"
+        seated, sealed_id,
+        "the remount serves the retained generation, not the in-flight rebuild"
     );
+    release_successor
+        .send(())
+        .expect("release the dirty successor rebuild");
 
     let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(latest) = restarted
-                .latest_complete_serving_for_test(fixture.path())
-                .await
-                && latest.generation().manifest().generation_id != sealed_id
+            if let Some(generation_id) = restarted.latest_generation_id(&remount_root).await
+                && generation_id != sealed_id
             {
-                break latest.generation().manifest().generation_id.clone();
+                break generation_id;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }

@@ -1266,13 +1266,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                         "partitioned manifest matched the durable verified graph \
                                          head; startup seated graph reads without replay"
                                     );
-                                    #[cfg(any(test, feature = "test-helpers"))]
-                                    if !complete_generation_requested {
-                                        Self::wait_for_retained_graph_recovery_successor_gate(
-                                            &worker_project_root,
-                                        )
-                                        .await;
-                                    }
                                 }
                                 Ok(false) => {}
                                 Err(error) => {
@@ -1302,6 +1295,18 @@ impl CodeIndexSchedulerRegistryV1 {
                                  pending while the admitted worker repairs the generation"
                             );
                         }
+                    }
+                    // Hold a test-installed successor gate after every reserved
+                    // recovery attempt — including Memory authorities that
+                    // abstain (`Ok(false)`) and degraded recoveries. Quiet
+                    // Persistent recoveries already pause here so observers can
+                    // see the retained text owner before the dirty successor
+                    // publishes; Memory remounts used to skip the gate and race
+                    // the rebuild past that observation window.
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    if !worker_complete_generation_requested.load(Ordering::Acquire) {
+                        Self::wait_for_retained_graph_recovery_successor_gate(&worker_project_root)
+                            .await;
                     }
                     // The reserved pass deliberately did not capture the
                     // checkout, and it consumed whatever wake ran it. Schedule

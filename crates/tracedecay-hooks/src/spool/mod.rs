@@ -1048,19 +1048,11 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
             return Err(HookSpoolError::UnsafePath);
         }
         Ok(_) => {
-            // An existing root must already be private to the current owner:
-            // a group/world-writable or foreign-owned directory lets another
-            // local account replace spool members despite their per-file
-            // modes. Transient metadata failures stay Io rather than
-            // condemning the path.
-            return tracedecay_private_fs::validate_private_directory(root).map_err(|error| {
-                match error.kind() {
-                    io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => {
-                        HookSpoolError::UnsafePath
-                    }
-                    _ => HookSpoolError::Io,
-                }
-            });
+            // An existing root must end private to the current owner. Foreign
+            // ownership stays UnsafePath; an owned but permissive directory
+            // (template copies under a group umask, legacy layouts) is healed
+            // through the same authority Hook configuration publication uses.
+            return ensure_existing_private_root(root);
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(HookSpoolError::Io),
@@ -1071,22 +1063,35 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
     match tracedecay_private_fs::create_private_directory(root) {
         Ok(()) => {}
         // A concurrent opener may win the creation race; the directory is
-        // acceptable only if it is private.
+        // acceptable only if it is (or can be healed to) private.
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            tracedecay_private_fs::validate_private_directory(root).map_err(|error| match error
-                .kind()
-            {
-                io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => {
-                    HookSpoolError::UnsafePath
-                }
-                _ => HookSpoolError::Io,
-            })?;
+            ensure_existing_private_root(root)?;
         }
         Err(_) => return Err(HookSpoolError::Io),
     }
     hotpath::measure_block!("hooks.spool.fsync.directory", {
         shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
     })
+}
+
+fn ensure_existing_private_root(root: &Path) -> Result<(), HookSpoolError> {
+    match tracedecay_private_fs::validate_private_directory(root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            tracedecay_private_fs::make_private_directory(root)
+                .map(|_| ())
+                .map_err(|heal_error| match heal_error.kind() {
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => {
+                        HookSpoolError::UnsafePath
+                    }
+                    _ => HookSpoolError::Io,
+                })
+        }
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+            Err(HookSpoolError::UnsafePath)
+        }
+        Err(_) => Err(HookSpoolError::Io),
+    }
 }
 
 fn validate_regular_or_missing(path: &Path) -> Result<bool, HookSpoolError> {
