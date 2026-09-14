@@ -213,7 +213,7 @@ def main():
     assert {"tool_search", "tool_describe", "tool_call"}.issubset(visible_names)
     search_result = json.loads(
         dispatch_tool_search(
-            {"query": "semantic code search"},
+            {"query": "exact lexical symbol search"},
             current_tool_defs=raw_tool_defs,
             config=forced_search,
         )
