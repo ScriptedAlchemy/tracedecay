@@ -5,6 +5,8 @@ use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{ExtractionResult, SourceSpan};
 
+use crate::ExtractedCloneBodyV1;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaEvidenceLanguageV1 {
@@ -221,6 +223,7 @@ impl PartialOrd for ExtractedImportEvidenceV1 {
 pub struct ExtractionArtifactV1 {
     pub result: ExtractionResult,
     pub imports: Vec<ExtractedImportEvidenceV1>,
+    pub clone_bodies: Vec<ExtractedCloneBodyV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_evidence: Option<ExtractedSchemaEvidenceV1>,
 }
@@ -230,6 +233,7 @@ impl ExtractionArtifactV1 {
         Self {
             result,
             imports: Vec::new(),
+            clone_bodies: Vec::new(),
             schema_evidence: None,
         }
     }
@@ -237,6 +241,7 @@ impl ExtractionArtifactV1 {
     pub(crate) fn canonicalize_order(&mut self) {
         self.result.canonicalize_order();
         self.imports.sort();
+        crate::clone_body::canonicalize_clone_body_order(&mut self.clone_bodies);
         if let Some(evidence) = &mut self.schema_evidence {
             evidence.canonicalize_order();
         }

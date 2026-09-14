@@ -12,6 +12,7 @@ mod types;
 // Lite — always available (no cfg needed)
 mod astro_extractor;
 mod c_extractor;
+mod clone_body;
 mod cpp_extractor;
 mod csharp_extractor;
 mod go_extractor;
@@ -124,6 +125,11 @@ mod zig_extractor;
 // Lite — always available (no cfg needed)
 pub use astro_extractor::AstroExtractor;
 pub use c_extractor::CExtractor;
+pub use clone_body::{
+    CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1, CloneBodyEligibilityV1,
+    CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1,
+    ExtractedCloneBodyV1, MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+};
 pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;
 pub use extraction_artifact::{
@@ -266,6 +272,24 @@ pub trait LanguageExtractor: Send + Sync {
         Cow::Borrowed(source)
     }
 
+    /// Extract graph and source-bound clone facts from one parser-owned tree.
+    fn extract_parsed_artifact(
+        &self,
+        file_path: &str,
+        source: &str,
+        parsed_source: &str,
+        tree: &Tree,
+        scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtractionArtifactV1 {
+        self.extract_parsed_artifact_prepared(file_path, source, parsed_source, tree, scope)
+            .with_conservative_clone_bodies(
+                tree,
+                parsed_source,
+                &self.retained_grammar_key(file_path),
+                file_path,
+            )
+    }
+
     /// Extract from a retained tree together with the exact text the parser
     /// consumed (the [`LanguageExtractor::prepare_parse_source`] output the
     /// retained document already holds). This is the one required entry
@@ -299,7 +323,7 @@ pub trait LanguageExtractor: Send + Sync {
                     &parsed_source,
                 ) {
                     Ok(tree) => {
-                        self.extract_parsed_artifact_prepared(
+                        self.extract_parsed_artifact(
                             file_path,
                             source,
                             &parsed_source,

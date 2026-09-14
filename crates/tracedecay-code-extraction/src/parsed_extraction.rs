@@ -60,6 +60,23 @@ pub struct ParsedExtractionArtifactV1 {
 }
 
 impl ParsedExtractionArtifactV1 {
+    pub(crate) fn with_conservative_clone_bodies(
+        mut self,
+        tree: &Tree,
+        source: &str,
+        language: &str,
+        logical_path: &str,
+    ) -> Self {
+        crate::clone_body::attach_conservative_clone_bodies(
+            &mut self.artifact,
+            tree,
+            source,
+            language,
+            logical_path,
+        );
+        self
+    }
+
     pub(crate) fn complete(
         mut artifact: ExtractionArtifactV1,
         scope: ParsedExtractionScope<'_>,
