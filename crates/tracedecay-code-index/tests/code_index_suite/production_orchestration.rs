@@ -597,6 +597,9 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
             &ActiveControl,
         )
         .expect("initial generation");
+    let initial_clone_stats = owner.physical_artifact_pool_stats();
+    assert_eq!(initial_clone_stats.clone_payloads_computed, 2);
+    assert_eq!(initial_clone_stats.clone_payloads_reused, 0);
     owner
         .build_and_publish(
             request_with_source(
@@ -620,6 +623,9 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     assert!(stats.changed_bytes < 60);
     assert!(stats.visited_top_level_nodes <= 3);
     assert!(stats.extracted_bytes < 120);
+    let clone_stats = owner.physical_artifact_pool_stats();
+    assert_eq!(clone_stats.clone_payloads_reused, 1);
+    assert_eq!(clone_stats.clone_payloads_computed, 3);
 }
 
 /// Carry-forward rematerialize already succeeds for unchanged files, including
@@ -638,6 +644,7 @@ fn unchanged_increment_does_not_reextract_carried_files() {
         .build_and_publish(request("file.carry.1", 1_100_000), &ActiveControl)
         .expect("first generation");
     let after_first = owner.retained_parse_stats();
+    let clone_after_first = owner.physical_artifact_pool_stats();
     assert_eq!(after_first.full_extractions, 1);
     assert_eq!(after_first.initial_parses, 1);
     assert_eq!(after_first.incremental_parses, 0);
@@ -648,6 +655,7 @@ fn unchanged_increment_does_not_reextract_carried_files() {
         .build_and_publish(request("file.carry.2", 1_200_000), &ActiveControl)
         .expect("unchanged increment");
     let after_second = owner.retained_parse_stats();
+    let clone_after_second = owner.physical_artifact_pool_stats();
 
     assert_eq!(
         after_second.full_extractions, after_first.full_extractions,
@@ -663,6 +671,11 @@ fn unchanged_increment_does_not_reextract_carried_files() {
         after_first.incremental_parses
     );
     assert_eq!(after_second.noop_parses, after_first.noop_parses);
+    assert_eq!(
+        clone_after_second.clone_payloads_computed,
+        clone_after_first.clone_payloads_computed
+    );
+    assert!(clone_after_second.clone_payloads_reused > clone_after_first.clone_payloads_reused);
 
     let mut restarted = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
         .expect("restart owner");
@@ -674,6 +687,7 @@ fn unchanged_increment_does_not_reextract_carried_files() {
         .build_and_publish(request("file.carry.3", 1_300_000), &ActiveControl)
         .expect("unchanged increment after restore");
     let after_restored = restarted.retained_parse_stats();
+    let clone_after_restored = restarted.physical_artifact_pool_stats();
     assert_eq!(
         after_restored.full_extractions, 0,
         "restored carry-forward rematerialize must not fall back to full re-extract"
@@ -682,6 +696,8 @@ fn unchanged_increment_does_not_reextract_carried_files() {
     assert_eq!(after_restored.initial_parses, 0);
     assert_eq!(after_restored.incremental_parses, 0);
     assert_eq!(after_restored.noop_parses, 0);
+    assert_eq!(clone_after_restored.clone_payloads_computed, 0);
+    assert!(clone_after_restored.clone_payloads_reused > 0);
 }
 
 /// The physical reuse pool is an index over immutable generation-owned
