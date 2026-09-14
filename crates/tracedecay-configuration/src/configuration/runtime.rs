@@ -4,7 +4,6 @@
 //! authorization, mutation, audit, and credential semantics remain in the
 //! existing application operations and transactional store.
 
-use std::any::Any;
 use std::sync::{Arc, OnceLock};
 
 use tracedecay_contracts::now_micros;
@@ -46,8 +45,6 @@ pub struct ProjectConfigurationRuntime {
     configuration_database: RegisteredGlobalDbLeaseV1,
     authorities: Arc<ConfigurationAuthoritySlots>,
     client: Arc<ProductionConfigurationDaemonClient>,
-    semantic_activation: OnceLock<Arc<dyn Any + Send + Sync>>,
-    semantic_inventory: OnceLock<Arc<dyn Any + Send + Sync>>,
     user_settings: Arc<ProductionUserSettingsDaemonClient>,
 }
 
@@ -92,8 +89,6 @@ impl ProjectConfigurationRuntime {
                 configuration_database: registered_database,
                 authorities,
                 client,
-                semantic_activation: OnceLock::new(),
-                semantic_inventory: OnceLock::new(),
                 user_settings,
             },
             configuration,
@@ -156,34 +151,6 @@ impl ProjectConfigurationRuntime {
         self.client
             .store
             .observed_component_configuration(RUNTIME_CONFIGURATION_COMPONENT.to_owned())
-    }
-
-    /// First-wins type-erased semantic activation payload. Callers in
-    /// `tracedecay-application` downcast to the production coordinator.
-    pub fn install_semantic_activation<T: Send + Sync + 'static>(&self, value: Arc<T>) {
-        let _ = self
-            .semantic_activation
-            .set(value as Arc<dyn Any + Send + Sync>);
-    }
-
-    pub fn semantic_activation<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        self.semantic_activation
-            .get()
-            .and_then(|value| Arc::clone(value).downcast::<T>().ok())
-    }
-
-    /// First-wins type-erased inventory payload. Callers downcast to the
-    /// production retrieval configuration store.
-    pub fn install_semantic_inventory<T: Send + Sync + 'static>(&self, value: T) {
-        let _ = self
-            .semantic_inventory
-            .set(Arc::new(value) as Arc<dyn Any + Send + Sync>);
-    }
-
-    pub fn semantic_inventory<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
-        self.semantic_inventory
-            .get()
-            .and_then(|value| value.downcast_ref::<T>().cloned())
     }
 
     pub fn installed_mutation_authorization(

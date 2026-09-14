@@ -70,7 +70,6 @@ mod mcp_workflow_index;
 pub mod profile_host_admission_replay;
 pub mod project_owner_registration;
 pub mod project_runtime;
-pub mod query_authority_provider;
 pub mod query_mcp_admission;
 pub mod remote_http_transport;
 mod remote_protocol;
@@ -84,7 +83,6 @@ pub use callable_code_authorization::{
     DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission, GRANT_HORIZON,
     daemon_owned_project_source_access_at, project_open_source_access_authority,
 };
-pub use invocation::semantic_evaluation::SemanticInvocationControlV1;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use invocation::{
     AuthorizedDaemonLspWorkspace, DaemonConfigurationRuntimeRegistrationPauseV1,
@@ -104,15 +102,14 @@ pub use invocation::{
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspInvocationOwner,
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
-    DaemonRetainedRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-    DaemonSourceEditOwnerRegistrationError, DaemonWorkProposalRoutingAuthorityV1,
-    DaemonWorkRuntimeRegistrar, FeedbackCycleRuntimeBuilderV1, HookOrchestrationAdmissionV1,
-    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
-    LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1, LspDeliverySettlementAdmissionV1,
-    MAX_COALESCED_HOOK_COMPLETIONS, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredRetainedRequestContextError, RegisteredRetainedRuntime,
-    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    DaemonRetainedRuntimeRegistrar, DaemonSourceEditOwnerRegistrationError,
+    DaemonWorkProposalRoutingAuthorityV1, DaemonWorkRuntimeRegistrar,
+    FeedbackCycleRuntimeBuilderV1, HookOrchestrationAdmissionV1, HookOrchestrationRequestV1,
+    HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1, LSP_WORKSPACE_CAPABILITY_ID_V1,
+    LSP_WORKSPACE_USE_CASE_ID_V1, LspDeliverySettlementAdmissionV1, MAX_COALESCED_HOOK_COMPLETIONS,
+    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
+    RegisteredRetainedRequestContextError, RegisteredRetainedRuntime, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
     callable_code_request_context, daemon_operation_event_authority,
     register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
@@ -130,13 +127,8 @@ pub use project_runtime::{
     ProjectRuntimePublicationAttemptV1, ProjectRuntimePublicationStateV1,
     ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1, ProjectRuntimeRequestLeaseV1,
     ProjectRuntimeRootQuiescenceV1, RegisteredDeliveryReadAuthorityV1,
-    RegisteredObservabilityProducerV1, RegisteredSemanticOwnerTaskV1,
-    SemanticOwnerRegistrationSignalsV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
+    RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
-};
-pub use query_authority_provider::{
-    DaemonQueryActivationRegistrarV1, DaemonQueryAuthorityProviderV1,
-    QueryAuthorityProviderStatusV1, QueryAuthorityUpdateErrorV1,
 };
 pub use query_mcp_admission::{
     QUERY_MCP_READ_CAPABILITY_V1, QueryMcpAdmissionUnavailableV1, QueryMcpReadAdmissionProviderV1,

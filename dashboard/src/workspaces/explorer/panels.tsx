@@ -100,11 +100,7 @@ export function LaneReadout({
       ) : (
         <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
           <StateChip kind={laneStateKind(read)} detail={laneStateDetail(read)} />
-          <span className="text-2xs leading-tight text-text-muted">
-            {/* A typed absence reported a real fact — the store holds
-              * nothing — where every other non-answer reported no count. */}
-            {read.state === 'absent' ? 'nothing indexed to count' : 'no count reported'}
-          </span>
+          <span className="text-2xs leading-tight text-text-muted">no count reported</span>
         </span>
       )}
       {share !== null ? (

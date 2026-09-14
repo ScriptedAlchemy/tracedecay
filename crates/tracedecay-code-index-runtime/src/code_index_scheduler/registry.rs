@@ -24,13 +24,10 @@ use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
 };
-use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId, host_cpu_target,
+    CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId, host_cpu_target,
 };
 use tracedecay_lsp::LspRuntimeFailure;
-
-use tracedecay_application::semantic_runtime::SavedGenerationScheduleOutcomeV1;
 
 #[cfg(test)]
 use super::CodeIndexBytePoolStatsV1;
@@ -178,49 +175,6 @@ enum PublishedTextProjectionOutcomeV1 {
     Shutdown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SemanticEvaluationGenerationRefusalV1 {
-    ProjectRootCanonicalizationFailed,
-    ProjectRootNotMounted,
-    ScopeIdentityMismatch,
-    SourceUnverified,
-    SourceChanged,
-    SchedulerUnavailable,
-    GitAuthorityUnavailable,
-    GenerationUnavailable,
-    GenerationScopeMismatch,
-    WorkerJoinFailed,
-}
-
-impl SemanticEvaluationGenerationRefusalV1 {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ProjectRootCanonicalizationFailed => "project_root_canonicalization_failed",
-            Self::ProjectRootNotMounted => "project_root_not_mounted",
-            Self::ScopeIdentityMismatch => "scope_identity_mismatch",
-            Self::SourceUnverified => "source_unverified",
-            Self::SourceChanged => "source_changed",
-            Self::SchedulerUnavailable => "scheduler_unavailable",
-            Self::GitAuthorityUnavailable => "git_authority_unavailable",
-            Self::GenerationUnavailable => "generation_unavailable",
-            Self::GenerationScopeMismatch => "generation_scope_mismatch",
-            Self::WorkerJoinFailed => "worker_join_failed",
-        }
-    }
-}
-
-fn record_semantic_candidate_refusal(
-    project_root: &Path,
-    reason: SemanticEvaluationGenerationRefusalV1,
-) {
-    tracing::info!(
-        event = "code_index_semantic_candidate_unavailable",
-        project = %project_root.display(),
-        reason = reason.as_str(),
-        "semantic evaluation generation is unavailable"
-    );
-}
-
 impl GraphSeatGateV1 {
     /// `text_owner_admitted_for_graph` means a publication's replacement
     /// owner is ready, or an unchanged pass has a retained owner from which it
@@ -356,7 +310,7 @@ pub enum ServingSwapOutcomeV1 {
     /// The durable pointer already names a successor and the incumbent *is*
     /// that active publication, so the slot keeps what it has.
     Superseded,
-    /// The generation already serves; only semantic admission was re-offered.
+    /// The generation already serves; this pass only re-proved its seat.
     Offered,
 }
 
@@ -393,14 +347,6 @@ impl ServingSwapOutcomeV1 {
     pub const fn installs(self) -> bool {
         matches!(self, Self::Seated | Self::SeatedStale)
     }
-}
-
-pub(crate) fn semantic_handoff_has_exact_witness(
-    publication_matches: bool,
-    witness: Option<&super::ServingSourceWitnessV1>,
-    generation: &CodeGenerationId,
-) -> bool {
-    publication_matches && witness.is_some_and(|witness| &witness.generation_id == generation)
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -464,20 +410,6 @@ fn published_text_projection_gate()
     static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, PublishedTextProjectionGateV1>>> =
         std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-#[cfg(test)]
-struct ExistingSemanticScheduleReplacementGateV1 {
-    project_root: PathBuf,
-    entered: tokio::sync::oneshot::Sender<()>,
-}
-
-#[cfg(test)]
-fn existing_semantic_schedule_replacement_gate()
--> &'static Mutex<Option<ExistingSemanticScheduleReplacementGateV1>> {
-    static GATE: std::sync::OnceLock<Mutex<Option<ExistingSemanticScheduleReplacementGateV1>>> =
-        std::sync::OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(None))
 }
 
 mod resident_memory;
@@ -709,13 +641,6 @@ pub struct CodeIndexGenerationPublishedV1 {
     pub observation_time_micros: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QueryActivationAttemptV1 {
-    revision: ConfigurationRevisionId,
-    token: u64,
-    preserves_existing_authority: bool,
-}
-
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CodeIndexSchedulerMemoryStatsV1 {
@@ -725,25 +650,13 @@ pub struct CodeIndexSchedulerMemoryStatsV1 {
 }
 
 pub struct MountedCodeIndexWorktreeV1 {
+    pub project_id: ProjectId,
     pub repository_id: RepositoryId,
     pub worktree_id: WorktreeId,
     pub query_authority: Option<(
         ManifestDigest,
         Arc<tracedecay_query::retrieval::QueryAuthorityV1>,
     )>,
-    pub semantic_query_authority: Option<(
-        ManifestDigest,
-        Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>,
-    )>,
-    pub semantic_lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-    pub query_activation_revision: Option<ConfigurationRevisionId>,
-    pub query_activation_epoch: Option<i64>,
-    pub query_activation_transition_digest: Option<ManifestDigest>,
-    pub query_activation_attempt: u64,
-    pub query_activation_redundancy:
-        Option<tracedecay_application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1>,
-    pub semantic_vector_graph_provider:
-        Option<Arc<dyn tracedecay_application::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     /// Explicit same-store build/publication invariant shared by source
     /// reconcile, ignored-dependency publication, and historical generation
@@ -822,7 +735,6 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Live handle to the publication's encoded-byte counter; observed only by
     /// test memory accounting today.
     _active_generation_encoded_bytes: Arc<AtomicU64>,
-    pub semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
     pub task: tokio::task::JoinHandle<()>,
 }
 
@@ -1048,10 +960,6 @@ fn dashboard_text_freshness_identity(
         identity.sealed_at_micros = Some(metadata.manifest().seal.sealed_at.0);
     }
     identity
-}
-
-pub struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
-    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 /// A cold-mount reservation publishes no runtime. Its sole authority is to
@@ -1582,12 +1490,6 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn background_reconcile_admission(&self) -> Arc<tokio::sync::Semaphore> {
-        Arc::clone(&self.background_reconcile_admission)
-    }
-
-    /// Share the bounded background scheduler admission with semantic
-    /// evaluation so native model work cannot bypass the project-wide limit.
-    pub fn semantic_evaluation_admission(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.background_reconcile_admission)
     }
 
@@ -2473,17 +2375,6 @@ impl CodeIndexSchedulerRegistryV1 {
         self.mounted.lock().await.contains_key(&project_root)
     }
 
-    /// Complete bounded snapshot of roots protected by a live mounted
-    /// scheduler lease. Scope retention folds this into its revision-bound
-    /// proof; returning every profile mount is deliberately conservative.
-    pub async fn scope_retention_mounted_roots(&self) -> Result<BTreeSet<PathBuf>, &'static str> {
-        let mounted = self.mounted.lock().await;
-        if mounted.len() > self.max_worktrees {
-            return Err("mounted_root_inventory_exceeds_bound");
-        }
-        Ok(mounted.keys().cloned().collect())
-    }
-
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
@@ -2585,107 +2476,6 @@ impl CodeIndexSchedulerRegistryV1 {
         self.diagnostics_change_generation(project_root)
             .await
             .is_some()
-    }
-
-    #[hotpath::measure(label = "daemon.code_index.registry.install_semantic", future = true)]
-    pub async fn install_semantic_vector_graph_provider(
-        &self,
-        project_root: &Path,
-        provider: Arc<dyn tracedecay_application::semantic_runtime::SemanticVectorGraphProviderV1>,
-    ) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
-            return false;
-        };
-        let mut mounted = self.mounted.lock().await;
-        let Some(worktree) = mounted.get_mut(&project_root) else {
-            return false;
-        };
-        worktree.semantic_vector_graph_provider = Some(provider);
-        true
-    }
-
-    pub async fn semantic_vector_graph_provider(
-        &self,
-        project_root: &Path,
-    ) -> Option<Arc<dyn tracedecay_application::semantic_runtime::SemanticVectorGraphProviderV1>>
-    {
-        let project_root = project_root.canonicalize().ok()?;
-        self.mounted
-            .lock()
-            .await
-            .get(&project_root)?
-            .semantic_vector_graph_provider
-            .clone()
-    }
-
-    pub async fn reschedule_semantic_generation(
-        &self,
-        project_root: &Path,
-    ) -> SavedGenerationScheduleOutcomeV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
-            return Self::record_reschedule_decline(
-                project_root,
-                SavedGenerationScheduleOutcomeV1::SchedulerUnavailable,
-            );
-        };
-        let (scheduler, shutting_down, generation) = {
-            let mounted = self.mounted.lock().await;
-            let Some(worktree) = mounted.get(&project_root) else {
-                return Self::record_reschedule_decline(
-                    &project_root,
-                    SavedGenerationScheduleOutcomeV1::SchedulerUnavailable,
-                );
-            };
-            let generation = worktree
-                .serving_generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .map(LatestCompleteCodeIndexV1::generation_handle);
-            (
-                Arc::clone(&worktree.scheduler),
-                Arc::clone(&worktree.shutting_down),
-                generation,
-            )
-        };
-        let Some(generation) = generation else {
-            return Self::record_reschedule_decline(
-                &project_root,
-                SavedGenerationScheduleOutcomeV1::NoServingGeneration,
-            );
-        };
-        let outcome = tokio::task::spawn_blocking(move || {
-            let scheduler =
-                Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down).ok()?;
-            Some(scheduler.schedule_semantic_generation(generation))
-        })
-        .await
-        .ok()
-        .flatten();
-        match outcome {
-            // `schedule_semantic_generation` already recorded this outcome.
-            Some(outcome) => outcome,
-            None => Self::record_reschedule_decline(
-                &project_root,
-                SavedGenerationScheduleOutcomeV1::SchedulerUnavailable,
-            ),
-        }
-    }
-
-    /// Name a re-offer that never reached the scheduler. Without this the
-    /// activation reconciler's retry produced no evidence at all, so a runtime
-    /// that stopped scheduling looked identical to one with nothing to do.
-    fn record_reschedule_decline(
-        project_root: &Path,
-        outcome: SavedGenerationScheduleOutcomeV1,
-    ) -> SavedGenerationScheduleOutcomeV1 {
-        tracing::warn!(
-            event = "code_index_semantic_schedule_declined",
-            outcome = outcome.as_str(),
-            project = %project_root.display(),
-            "code-index could not re-offer a serving generation to semantic projection"
-        );
-        outcome
     }
 
     /// The per-worktree scheduler handle, cloned out of the registry map. Test

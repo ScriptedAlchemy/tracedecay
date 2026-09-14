@@ -4,19 +4,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
-use grafeo_common::types::{PropertyKey, Value};
+use grafeo_common::types::Value;
 
-use super::{
-    VectorRefreshUpdate, refresh_vector_indexes, require_committed_vector_scalar, sync_wal,
-    vector_property_key,
-};
+use super::sync_wal;
 use crate::recovery::set_projection_quarantine;
 use crate::{
     GraphCommit, GraphDbError, GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
     GraphDbRuntimeState, GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion,
     GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
-    GraphTraversalDirection, GraphVector, GraphWatermark, GraphWriteBatch, NeverCancelled,
-    SourceGeneration, TraversalRequest, VectorMetric, mutation,
+    GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    TraversalRequest, mutation,
 };
 
 fn memory_db() -> GraphDbLeaseV1 {
@@ -235,105 +232,6 @@ fn grafeo_query_mutations_track_conflicting_marker_writes() {
     second.rollback().unwrap();
 }
 
-#[test]
-fn vector_index_refresh_requires_the_identical_committed_scalar() {
-    let database = grafeo_engine::GrafeoDB::new_in_memory();
-    let expected = Value::Vector(vec![1.0_f32, 2.0].into());
-    let node = database
-        .session()
-        .create_node_with_props(&["Vector"], [("embedding", expected.clone())])
-        .unwrap();
-    let committed = database
-        .graph_store()
-        .get_node_property(node, &PropertyKey::new("embedding"));
-
-    assert_eq!(
-        require_committed_vector_scalar(committed.as_ref(), "embedding", &expected),
-        Ok(())
-    );
-    assert!(matches!(
-        require_committed_vector_scalar(
-            committed.as_ref(),
-            "embedding",
-            &Value::Vector(vec![2.0_f32, 1.0].into()),
-        ),
-        Err(GraphDbError::DurabilityUncertain { .. })
-    ));
-    assert!(matches!(
-        require_committed_vector_scalar(None, "embedding", &expected),
-        Err(GraphDbError::DurabilityUncertain { .. })
-    ));
-}
-
-fn refresh_update(identity: &str, values: Vec<f32>) -> VectorRefreshUpdate {
-    VectorRefreshUpdate {
-        identity: GraphEntityId::new(identity).unwrap(),
-        property: PropertyKey::new(vector_property_key(
-            &GraphPropertyName::new("embedding").unwrap(),
-            2,
-            VectorMetric::Cosine,
-        )),
-        value: Value::Vector(values.into()),
-    }
-}
-
-/// The batched refresh must fail closed on exactly the rows the per-row path
-/// did: an identity the index no longer resolves, and a committed scalar that
-/// is not the one about to be re-applied. A healthy row still refreshes.
-#[test]
-fn vector_index_refresh_fails_closed_on_missing_and_differing_committed_rows() {
-    let db = memory_db();
-    db.apply_unverified(vector_batch("committed")).unwrap();
-    let guard = db.write_guard().unwrap();
-    let database = guard.as_ref().unwrap();
-    let namespace = GraphNamespace::new("project").unwrap();
-
-    assert_eq!(
-        refresh_vector_indexes(
-            database,
-            &namespace,
-            vec![refresh_update("vector-entity", vec![1.0, 2.0])],
-        ),
-        Ok(())
-    );
-
-    let differing = refresh_vector_indexes(
-        database,
-        &namespace,
-        vec![
-            refresh_update("vector-entity", vec![1.0, 2.0]),
-            refresh_update("vector-entity", vec![2.0, 1.0]),
-        ],
-    )
-    .unwrap_err();
-    assert!(
-        matches!(
-            &differing,
-            GraphDbError::DurabilityUncertain { message }
-                if message.contains("differs before native index refresh")
-        ),
-        "a differing committed scalar must be durability-uncertain: {differing:?}"
-    );
-
-    let missing = refresh_vector_indexes(
-        database,
-        &namespace,
-        vec![
-            refresh_update("vector-entity", vec![1.0, 2.0]),
-            refresh_update("never-committed", vec![1.0, 2.0]),
-        ],
-    )
-    .unwrap_err();
-    assert!(
-        matches!(
-            &missing,
-            GraphDbError::DurabilityUncertain { message }
-                if message.contains("`never-committed` is missing from native identity index")
-        ),
-        "an unresolvable identity must be durability-uncertain: {missing:?}"
-    );
-}
-
 const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
 const GRAPH_CRASH_CHILD_ROOT_ENV: &str = "TRACEDECAY_GRAPH_CRASH_CHILD_ROOT";
 const GRAPH_CRASH_CHILD_READY: &str = "durable-phase.ready";
@@ -411,36 +309,12 @@ fn capture_unclean_walsync_image(destination: &Path) {
     copy_directory(&sidecar_wal_path(&source_store), &sidecar_wal_path(&target));
 }
 
-fn vector_batch(value: &str) -> GraphWriteBatch {
-    GraphWriteBatch::new(
-        GraphNamespace::new("project").unwrap(),
-        GraphProjectionId::new("code").unwrap(),
-        SourceGeneration::new(value).unwrap(),
-        GraphWatermark::new(value).unwrap(),
-        vec![GraphMutation::UpsertEntity(
-            GraphEntity::new(
-                GraphEntityId::new("vector-entity").unwrap(),
-                BTreeSet::new(),
-                BTreeMap::from([(
-                    GraphPropertyName::new("embedding").unwrap(),
-                    GraphProperty::Vector(
-                        GraphVector::new(vec![1.0, 2.0], 2, VectorMetric::Cosine).unwrap(),
-                    ),
-                )]),
-            )
-            .unwrap(),
-        )],
-        Arc::new(NeverCancelled),
-    )
-    .unwrap()
-}
-
-fn apply_vector_batch_with_check(
+fn apply_scalar_batch_with_check(
     db: &GraphDbLeaseV1,
     value: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphCommit, GraphDbError> {
-    let mut batch = vector_batch(value);
+    let mut batch = scalar_batch(value);
     let digest = batch.validate_and_digest().unwrap();
     let _snapshot_gate = db.inner.snapshot_gate.write();
     let guard = db.write_guard().unwrap();
@@ -462,7 +336,7 @@ fn committed_entity_present(db: &GraphDbLeaseV1) -> bool {
         .unwrap()
         .entity(
             &GraphNamespace::new("project").unwrap(),
-            &GraphEntityId::new("vector-entity").unwrap(),
+            &GraphEntityId::new("a").unwrap(),
             Arc::new(NeverCancelled),
         )
         .unwrap()
@@ -634,8 +508,8 @@ fn persisted_quarantine_survives_checkpointed_reopen_and_blocks_reads_until_clea
 /// Sweeping every expiry point proves the durability contract: cancellation
 /// may only surface while the Grafeo transaction is still uncommitted (rolled
 /// back, nothing durable); once the transaction commits, the apply must settle
-/// HNSW refresh and WAL sync and report the commit. A committed write reported
-/// as `Cancelled`/`DeadlineExceeded` on a `Ready` handle is the F-class defect:
+/// WAL sync and report the commit. A committed write reported as
+/// `Cancelled`/`DeadlineExceeded` on a `Ready` handle is the F-class defect:
 /// replay short-circuits on the committed publication record and the skipped
 /// settlement is never repaired.
 #[test]
@@ -645,7 +519,7 @@ fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
         let dir = tempfile::tempdir().unwrap();
         let db = walsync_db(&dir);
         let observations = AtomicUsize::new(0);
-        apply_vector_batch_with_check(&db, "calibrate", &|| {
+        apply_scalar_batch_with_check(&db, "calibrate", &|| {
             observations.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
@@ -659,7 +533,7 @@ fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
         let dir = tempfile::tempdir().unwrap();
         let db = walsync_db(&dir);
         let observations = AtomicUsize::new(0);
-        let result = apply_vector_batch_with_check(&db, "window", &|| {
+        let result = apply_scalar_batch_with_check(&db, "window", &|| {
             if observations.fetch_add(1, Ordering::Relaxed) + 1 >= expiry_point {
                 Err(GraphDbError::DeadlineExceeded)
             } else {
@@ -684,7 +558,7 @@ fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
                 assert!(
                     !committed,
                     "expiry point {expiry_point}: durably committed write was mistyped as \
-                     cancelled, stranding unsynced WAL and stale HNSW state on a Ready handle"
+                     cancelled, stranding unsynced WAL on a Ready handle"
                 );
                 assert_eq!(
                     db.runtime_state(),

@@ -404,8 +404,7 @@ async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() 
     // route's tier-1 git signal: its code lanes are typed stale until its next
     // reconcile re-resolves identity (a Noop for an unchanged checkout), and
     // the first stale read requests that pass. Judge isolation on the answer
-    // the re-verified primary gives. `recall` stays `partial` here by
-    // contract: the semantic lane is disclosed unavailable without a model.
+    // the re-verified primary gives.
     let mut isolated = Value::Null;
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {

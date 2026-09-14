@@ -1,20 +1,19 @@
 use tracedecay_domain::canonical_text::sha256_hex;
 
 use super::candidate_output::{
-    CandidateWorkloadV1, compute_corpus_digest_from_embedded_bytes,
-    validate_need_provenance_against_embedded_corpus, validate_workload_for_tuning,
+    CandidateWorkloadV1, validate_need_provenance_against_embedded_corpus,
+    validate_workload_for_tuning,
 };
 use super::evaluate::SearchEvalError;
 
-const WORKLOAD_PATH: &str =
-    "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
-const WORKLOAD_SHA256: &str = "2aa1f772243a83e2cc938409084c8c41fcab4bfc5785405c0125b75c1ec9c7bb";
+const WORKLOAD_PATH: &str = "tests/fixtures/search_quality/query-lexical-graph-workload-v1.json";
+const WORKLOAD_SHA256: &str = "4734fb5190de7b00c1e450aa69089bc49c061370aa0d03e114ca138d7262d969";
 
 const FILES: &[(&str, &[u8])] = &[
     (
         WORKLOAD_PATH,
         include_bytes!(
-            "../../assets/runtime-root/tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
+            "../../assets/runtime-root/tests/fixtures/search_quality/query-lexical-graph-workload-v1.json"
         ),
     ),
     (
@@ -103,12 +102,6 @@ const FILES: &[(&str, &[u8])] = &[
             "../../assets/runtime-root/tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture"
         ),
     ),
-    (
-        "tests/fixtures/search_quality/incremental/time-after.rs",
-        include_bytes!(
-            "../../assets/runtime-root/tests/fixtures/search_quality/incremental/time-after.rs"
-        ),
-    ),
 ];
 
 pub fn packaged_evaluator_files() -> &'static [(&'static str, &'static [u8])] {
@@ -129,12 +122,4 @@ pub fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
     validate_workload_for_tuning(&workload)?;
     validate_need_provenance_against_embedded_corpus(&workload, FILES)?;
     Ok(workload)
-}
-
-/// Derive the corpus binding from the bytes embedded in this package. This is
-/// deliberately separate from evaluator materialization: qualification loading
-/// must not create a temporary evaluator root merely to establish corpus identity.
-#[hotpath::measure(label = "search_eval.packaged.corpus_digest")]
-pub fn current_corpus_digest(workload: &CandidateWorkloadV1) -> Result<String, SearchEvalError> {
-    Ok(compute_corpus_digest_from_embedded_bytes(workload, FILES)?)
 }

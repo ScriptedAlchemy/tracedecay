@@ -1159,7 +1159,7 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
 }
 
 #[test]
-fn code_generation_retention_never_sweeps_vector_readable_source() {
+fn code_generation_retention_never_sweeps_retained_readable_source() {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
@@ -1168,28 +1168,28 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
     let store = TempDir::new().expect("store root");
     let generations = retention_generations(&fixture, store.path(), 6);
     remove_historical_pointer_entries(store.path());
-    let vector_readable = BTreeSet::from([generations[0].clone()]);
+    let retained_readable = BTreeSet::from([generations[0].clone()]);
 
     let report = run_code_generation_retention(
         store.path(),
-        &vector_readable,
+        &retained_readable,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(60),
         None,
     )
     .expect("apply retention");
 
-    let vector_generation = report
+    let retained_generation = report
         .plan
         .superseded_generations
         .iter()
         .find(|generation| generation.generation_id == generations[0])
-        .expect("vector-readable generation was inventoried");
+        .expect("retained-readable generation was inventoried");
     assert!(
         store
             .path()
             .join("code-generations-v1")
-            .join(&vector_generation.generation_file)
+            .join(&retained_generation.generation_file)
             .is_file(),
         "a generation named by retained_readable_sources must survive the sweep"
     );

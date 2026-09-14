@@ -68,7 +68,6 @@ impl Fixture {
                 tracedecay_domain::ProjectId::new(project_id).expect("project identity"),
                 &project,
                 root.path().join("store"),
-                None,
             )
             .await
             .expect("mount scheduler");

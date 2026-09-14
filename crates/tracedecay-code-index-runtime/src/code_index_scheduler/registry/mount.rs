@@ -10,7 +10,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracedecay_application::semantic_runtime::SavedGenerationScheduleOutcomeV1;
 use tracedecay_code_index::production::CodeIndexInterruptionV1;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
@@ -34,7 +33,7 @@ use super::{
     MountedCodeIndexWorktreeV1, PendingWakeV1, PublishedTextProjectionOutcomeV1,
     ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
     convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
-    retained_noop_requires_follow_up_wake, semantic_handoff_has_exact_witness,
+    retained_noop_requires_follow_up_wake,
 };
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -70,25 +69,19 @@ impl CodeIndexSchedulerRegistryV1 {
         project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
-        semantic_schedule: Option<
-            tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
-        >,
         graph_runtime: Arc<dyn crate::code_graph_seat::CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         graph_activation_policy: CodeGraphActivationPolicyV1,
-        semantic_lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
             project_root,
             store_root,
-            semantic_schedule,
             CodeGraphActivationAuthorityV1::Persistent {
                 runtime: graph_runtime,
                 project_database,
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
             },
-            semantic_lifecycle_owner,
         )
         .await
     }
@@ -100,19 +93,14 @@ impl CodeIndexSchedulerRegistryV1 {
         project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
-        semantic_schedule: Option<
-            tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
-        >,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
             project_root,
             store_root,
-            semantic_schedule,
             CodeGraphActivationAuthorityV1::Memory {
                 policy: Arc::new(AtomicBool::new(true)),
             },
-            None,
         )
         .await
     }
@@ -123,104 +111,40 @@ impl CodeIndexSchedulerRegistryV1 {
         project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
-        semantic_schedule: Option<
-            tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
-        >,
         policy: CodeGraphActivationPolicyV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
             project_root,
             store_root,
-            semantic_schedule,
             CodeGraphActivationAuthorityV1::Memory {
                 policy: Arc::new(AtomicBool::new(policy.is_enabled())),
             },
-            None,
         )
         .await
     }
 
-    async fn replace_existing_semantic_schedule(
-        &self,
-        project_root: &Path,
-        scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
-        serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
-        pending_wake: Arc<PendingWakeV1>,
-        shutting_down: Arc<AtomicBool>,
-        project_id: ProjectId,
-        semantic_schedule: Option<
-            tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
-        >,
+    /// A same-root remount keeps the incumbent owner: it may only refresh the
+    /// graph activation policy, and it wakes the worker so a policy change or
+    /// an edit that raced the remount is picked up by the next pass.
+    fn refresh_existing_mount(
+        existing: &MountedCodeIndexWorktreeV1,
+        project_id: &ProjectId,
+        graph_activation: &CodeGraphActivationAuthorityV1,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        // Reconcile and tests may hold this mutex. `lock()` would park remount
-        // behind that holder and lose the retiring identity: retirement now
-        // cancels the worker via try_lock, drains, and leaves remount seeing
-        // only "owner changed". Poll try_lock and abort as soon as the owner
-        // is shutting down so remount observes "retired while … waited".
-        let incumbent = Arc::clone(&scheduler);
-        tokio::task::spawn_blocking(move || {
-            loop {
-                if shutting_down.load(Ordering::Acquire) {
-                    return Err(CodeIndexSchedulerErrorV1::Identity(
-                        "code-index scheduler owner was retired while semantic schedule update waited; remount must retry"
-                            .to_owned(),
-                    ));
-                }
-                let mut scheduler = match scheduler.try_lock() {
-                    Ok(guard) => guard,
-                    Err(std::sync::TryLockError::WouldBlock) => {
-                        std::thread::sleep(Duration::from_millis(5));
-                        continue;
-                    }
-                    Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-                };
-                if scheduler.project_id() != &project_id {
-                    return Err(CodeIndexSchedulerErrorV1::Identity(
-                        "mounted worktree belongs to a different project identity".to_owned(),
-                    ));
-                }
-                scheduler.replace_semantic_schedule_hook(semantic_schedule);
-                if let Some(latest) = serving_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                {
-                    let _ = scheduler.schedule_semantic_generation(latest.generation_handle());
-                }
-                // A replaced hook must not leave the worker parked: the next
-                // reconcile (including an edit that raced the remount) needs a
-                // wake even when this pass already finished text.
-                Self::note_wake(
-                    pending_wake.as_ref(),
-                    scheduler.wake.as_ref(),
-                    CodeIndexCadenceTriggerV1::BusyFollowUp,
-                );
-                return Ok(());
-            }
-        })
-        .await
-        .map_err(|_error| {
-            CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
-        })??;
-
-        let retiring = self.retiring.lock().await;
-        if retiring.contains_key(project_root) {
+        if existing.project_id != *project_id {
             return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler owner was retired while semantic schedule update waited; remount must retry"
-                    .to_owned(),
+                "mounted worktree belongs to a different project identity".to_owned(),
             ));
         }
-        let mounted = self.mounted.lock().await;
-        if !mounted
-            .get(project_root)
-            .is_some_and(|current| Arc::ptr_eq(&current.scheduler, &incumbent))
-        {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler owner changed while semantic schedule update waited; remount must retry"
-                    .to_owned(),
-            ));
-        }
+        existing
+            .graph_activation
+            .update_policy(graph_activation.policy());
+        Self::note_wake(
+            existing.pending_wake.as_ref(),
+            existing.wake.as_ref(),
+            CodeIndexCadenceTriggerV1::BusyFollowUp,
+        );
         Ok(())
     }
 
@@ -229,30 +153,9 @@ impl CodeIndexSchedulerRegistryV1 {
         project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
-        semantic_schedule: Option<
-            tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
-        >,
         graph_activation: CodeGraphActivationAuthorityV1,
-        semantic_lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
-        let validate_lifecycle_owner = |existing: &MountedCodeIndexWorktreeV1| {
-            let same_owner = match (
-                existing.semantic_lifecycle_owner.as_ref(),
-                semantic_lifecycle_owner.as_ref(),
-            ) {
-                (Some(incumbent), Some(incoming)) => Arc::ptr_eq(incumbent, incoming),
-                (None, None) => true,
-                _ => false,
-            };
-            if same_owner {
-                Ok(())
-            } else {
-                Err(CodeIndexSchedulerErrorV1::Identity(
-                    "mounted worktree belongs to a different semantic lifecycle owner".to_owned(),
-                ))
-            }
-        };
         #[cfg(test)]
         Self::pause_cold_mount_admission_for_test(&project_root).await;
         let cold_mount_reservation = loop {
@@ -274,28 +177,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
             let mounted = self.mounted.lock().await;
             if let Some(existing) = mounted.get(&project_root) {
-                validate_lifecycle_owner(existing)?;
-                existing
-                    .graph_activation
-                    .update_policy(graph_activation.policy());
-                let scheduler = Arc::clone(&existing.scheduler);
-                let serving_generation = Arc::clone(&existing.serving_generation);
-                let pending_wake = Arc::clone(&existing.pending_wake);
-                let shutting_down = Arc::clone(&existing.shutting_down);
-                drop(mounted);
-                drop(retiring);
-                #[cfg(test)]
-                Self::observe_existing_semantic_schedule_replacement(&project_root);
-                self.replace_existing_semantic_schedule(
-                    &project_root,
-                    scheduler,
-                    serving_generation,
-                    pending_wake,
-                    shutting_down,
-                    project_id,
-                    semantic_schedule,
-                )
-                .await?;
+                Self::refresh_existing_mount(existing, &project_id, &graph_activation)?;
                 return Ok(false);
             }
             let admission = self.admit_cold_mount(&project_root, mounted.len())?;
@@ -316,7 +198,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_project_id = project_id.clone();
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
-        let open_semantic_schedule = semantic_schedule.clone();
         let open_resident_memory = Arc::clone(&self.resident_memory);
         let progress_daemon_incarnation = self.progress_daemon_incarnation;
         let progress_producer_incarnation = self.mint_progress_producer_incarnation()?;
@@ -332,7 +213,6 @@ impl CodeIndexSchedulerRegistryV1 {
             #[cfg(test)]
             Self::finish_cold_mount_open_for_test(&open_project_root);
             let mut opened = opened?;
-            opened.replace_semantic_schedule_hook(open_semantic_schedule);
             opened.bind_resident_memory(open_resident_memory);
             opened.bind_progress_incarnations(
                 progress_daemon_incarnation,
@@ -378,7 +258,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let shutting_down = Arc::clone(&opened.shutting_down);
         let scheduler = Arc::new(Mutex::new(opened));
         let build_publication_lock = Arc::new(tokio::sync::Mutex::new(()));
-        let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
         let pending_wake = Arc::new(PendingWakeV1::default());
         let index_observability = Arc::new(OnceLock::<
@@ -405,14 +284,12 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_build_publication_lock = Arc::clone(&build_publication_lock);
-        let worker_semantic_evaluation_publication_gate =
-            Arc::clone(&semantic_evaluation_publication_gate);
         let worker_background_reconcile_admission =
             Arc::clone(&self.background_reconcile_admission);
         let worker_generation_publications = self.generation_publications.clone();
         let worker_serving_seats = Arc::clone(&self.serving_seats);
         let worker_project_root = project_root.clone();
-        let worker_project_id = project_id;
+        let worker_project_id = project_id.clone();
         let worker_repository_id = repository_id.clone();
         let worker_worktree_id = worktree_id.clone();
         let worker_graph_activation = graph_activation.clone();
@@ -436,32 +313,7 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         if let Some(existing) = mounted.get(&project_root) {
-            validate_lifecycle_owner(existing)?;
-            // The scheduler Arc is the mounted owner's exact identity. It is
-            // rechecked after the asynchronous update so a retirement or
-            // replacement cannot turn this remount into a success for a
-            // detached worker.
-            existing
-                .graph_activation
-                .update_policy(graph_activation.policy());
-            let scheduler = Arc::clone(&existing.scheduler);
-            let serving_generation = Arc::clone(&existing.serving_generation);
-            let pending_wake = Arc::clone(&existing.pending_wake);
-            let shutting_down = Arc::clone(&existing.shutting_down);
-            drop(mounted);
-            drop(retiring);
-            #[cfg(test)]
-            Self::observe_existing_semantic_schedule_replacement(&project_root);
-            self.replace_existing_semantic_schedule(
-                &project_root,
-                scheduler,
-                serving_generation,
-                pending_wake,
-                shutting_down,
-                worker_project_id,
-                semantic_schedule,
-            )
-            .await?;
+            Self::refresh_existing_mount(existing, &project_id, &graph_activation)?;
             return Ok(false);
         }
         let at_capacity = mounted.len() >= self.max_worktrees;
@@ -600,8 +452,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 };
-                let _semantic_evaluation_publication =
-                    worker_semantic_evaluation_publication_gate.lock().await;
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(
                         event = "code_index_worker_shutdown_observed",
@@ -1853,8 +1703,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     let serving_generation_changed = worker_serving_generation_changed.clone();
                     let source_freshness = worker_source_freshness.clone();
                     let project_root = worker_project_root.clone();
-                    let control_epoch = Arc::clone(&worker_control_epoch);
-                    let semantic_observed_epoch = control_epoch.load(Ordering::Acquire);
                     let text_latest = latest.clone();
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1960,36 +1808,11 @@ impl CodeIndexSchedulerRegistryV1 {
                             }
                             drop(serving);
                             // The serving slot is now fully published, including
-                            // its exact-source witness. Wake dependent readers
-                            // before the optional semantic handoff: that hook is
-                            // independently retryable and must not hold serving
-                            // readiness hostage if it blocks or loses capacity.
+                            // its exact-source witness, so dependent readers
+                            // may wake.
                             if outcome.installs() {
                                 Self::record_serving_seat(&serving_seats);
                                 serving_generation_changed.send_replace(());
-                            }
-                            // Only the exact-source witness authorizes this
-                            // decoded-seat handoff. A retained stale seat is
-                            // allowed to keep reads available while refresh
-                            // runs, but must not enter semantic projection. Its
-                            // later current Noop uses the retained-text handoff
-                            // below. A witnessed `Offered` generation remains
-                            // eligible for the existing retry semantics.
-                            let semantic_source_is_current = semantic_handoff_has_exact_witness(
-                                publication_matches,
-                                serving_source_witness
-                                    .read()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .as_ref(),
-                                &latest.generation().manifest().generation_id,
-                            ) && control_epoch
-                                .load(Ordering::Acquire)
-                                == semantic_observed_epoch
-                                && source_freshness
-                                    .ready_without_stat(&project_root, &shutting_down);
-                            if semantic_source_is_current {
-                                let _ = scheduler
-                                    .schedule_semantic_generation(latest.generation_handle());
                             }
                             Ok::<_, CodeIndexSchedulerErrorV1>(outcome)
                         }),
@@ -2049,7 +1872,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 "the serving-swap task failed; the sealed generation stays unseated"
                             );
                             result = Ok((
-                                Err(CodeIndexSchedulerErrorV1::SemanticSchedule(format!(
+                                Err(CodeIndexSchedulerErrorV1::Identity(format!(
                                     "serving-swap task failed: {error}"
                                 ))),
                                 None,
@@ -2059,8 +1882,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                 }
                 // The source proof and serving witness are now published as
-                // one lifecycle. Optional receipts and semantic scheduling do
-                // not keep source verification in flight.
+                // one lifecycle. Optional receipts do not keep source
+                // verification in flight.
                 drop(reconcile_pass.take());
                 if let Ok((Ok(outcome), _, _)) = &result {
                     // A pass that ran to a terminal outcome proves neither the
@@ -2082,100 +1905,17 @@ impl CodeIndexSchedulerRegistryV1 {
                     // intentionally leaves that seat empty, so the canonical
                     // text owner and current source proof are the wake
                     // authority. Readers still validate scope and freshness.
-                    let retained_generation =
+                    let retained_text_serves =
                         matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_))
-                            .then(|| {
-                                worker_text_generation
-                                    .read()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .as_ref()
-                                    .map(|latest| {
-                                        latest.metadata().manifest().generation_id.clone()
-                                    })
-                            })
-                            .flatten();
-                    let source_is_current = retained_generation.is_some()
-                        && worker_source_freshness
-                            .ready_without_stat(&worker_project_root, &worker_shutting_down);
-                    if source_is_current {
-                        worker_serving_generation_changed.send_replace(());
-                    }
-                    if source_is_current && let Some(expected_generation) = retained_generation {
-                        // Semantic projection consumes the canonical immutable
-                        // generation, not the text/graph serving adapters. A
-                        // partitioned retained head intentionally has no decoded
-                        // seat, so load its shared publication only after the
-                        // quiet source proof. Publication caching makes repeated
-                        // Noops reuse this Arc; the semantic scheduler retains
-                        // its existing at-least-once deduplication and retry.
-                        let scheduler = Arc::clone(&worker_scheduler);
-                        let serving_generation = Arc::clone(&worker_serving_generation);
-                        let shutting_down = Arc::clone(&worker_shutting_down);
-                        let source_freshness = worker_source_freshness.clone();
-                        let project_root = worker_project_root.clone();
-                        let control_epoch = Arc::clone(&worker_control_epoch);
-                        let observed_epoch = control_epoch.load(Ordering::Acquire);
-                        let handoff = tokio::task::spawn_blocking(move || -> Result<
-                            Option<SavedGenerationScheduleOutcomeV1>,
-                            CodeIndexSchedulerErrorV1,
-                        > {
-                            let scheduler = Self::lock_scheduler_unless_shutting_down(
-                                &scheduler,
-                                &shutting_down,
-                            )?;
-                            if scheduler.semantic_schedule.is_none()
-                                || control_epoch.load(Ordering::Acquire) != observed_epoch
-                            {
-                                return Ok(None);
-                            }
-                            let generation = serving_generation
+                            && worker_text_generation
                                 .read()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .as_ref()
-                                .filter(|latest| {
-                                    latest.generation().manifest().generation_id
-                                        == expected_generation
-                                })
-                                .map(LatestCompleteCodeIndexV1::generation_handle)
-                                .or_else(|| {
-                                    scheduler.latest_complete().and_then(|latest| {
-                                        (latest.generation().manifest().generation_id
-                                            == expected_generation)
-                                            .then(|| latest.generation_handle())
-                                        })
-                                });
-                            if control_epoch.load(Ordering::Acquire) != observed_epoch
-                                || !source_freshness
-                                    .ready_without_stat(&project_root, &shutting_down)
-                            {
-                                return Ok(None);
-                            }
-                            let Some(generation) = generation else {
-                                tracing::warn!(
-                                    event = "code_index_semantic_schedule_declined",
-                                    outcome = SavedGenerationScheduleOutcomeV1::NoServingGeneration
-                                        .as_str(),
-                                    generation = %expected_generation,
-                                    "current retained generation could not be loaded for semantic projection"
-                                );
-                                return Ok(None);
-                            };
-                            Ok(Some(scheduler.schedule_semantic_generation(generation)))
-                        })
-                        .await;
-                        match handoff {
-                            Ok(Ok(Some(_) | None)) => {}
-                            Ok(Err(error)) => tracing::warn!(
-                                event = "code_index_semantic_retained_handoff_failed",
-                                error = %error,
-                                "current retained generation could not reach semantic projection"
-                            ),
-                            Err(error) => tracing::warn!(
-                                event = "code_index_semantic_retained_handoff_task_failed",
-                                error = %error,
-                                "retained semantic handoff task failed"
-                            ),
-                        }
+                                .is_some();
+                    if retained_text_serves
+                        && worker_source_freshness
+                            .ready_without_stat(&worker_project_root, &worker_shutting_down)
+                    {
+                        worker_serving_generation_changed.send_replace(());
                     }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
@@ -2420,17 +2160,10 @@ impl CodeIndexSchedulerRegistryV1 {
             label = "daemon.code_index.scheduler_worker"
         ));
         entry.insert(MountedCodeIndexWorktreeV1 {
+            project_id,
             repository_id,
             worktree_id,
             query_authority: None,
-            semantic_query_authority: None,
-            semantic_lifecycle_owner,
-            query_activation_revision: None,
-            query_activation_epoch: None,
-            query_activation_transition_digest: None,
-            query_activation_attempt: 0,
-            query_activation_redundancy: None,
-            semantic_vector_graph_provider: None,
             scheduler,
             build_publication_lock,
             historical_generation_owner,
@@ -2457,7 +2190,6 @@ impl CodeIndexSchedulerRegistryV1 {
             shutting_down,
             reconcile_in_progress,
             _active_generation_encoded_bytes: active_generation_encoded_bytes,
-            semantic_evaluation_publication_gate,
             task,
         });
         // Until retained decode/truth verification completes, reads see warming

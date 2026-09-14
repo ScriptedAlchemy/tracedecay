@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::Ordering};
-use tracedecay_application::semantic_runtime::RetiredProjectSemanticRuntimeV1;
 
 use super::{ProjectRuntime, ProjectRuntimeRegistryV1};
 use crate::invocation::UnavailableFeedbackCycleRuntimeV1;
@@ -81,11 +80,6 @@ impl ProjectRuntimeRegistryV1 {
             Ok(mut runtimes) => {
                 let mut clean = shut_down_advisory(&runtimes).await;
                 clean &= shut_down_feedback(&runtimes).await;
-                clean &= shut_down_semantic(
-                    &mut runtimes,
-                    tokio::time::Instant::now() + crate::TASK_ABORT_DEADLINE,
-                )
-                .await;
                 clean &= shut_down_observability(&mut runtimes).await;
                 drop(shut_down_runtimes(runtimes));
                 clean
@@ -157,8 +151,8 @@ impl ProjectRuntimeRegistryV1 {
 
     /// Shut every project runtime down and leave the registry empty.
     ///
-    /// Routers become unavailable before feedback owners drop, Work providers
-    /// are joined, and process-wide semantic handles are unregistered.
+    /// Routers become unavailable before feedback owners drop and Work
+    /// providers are joined.
     #[hotpath::measure(label = "daemon.service.project_runtime.shutdown", future = true)]
     pub(crate) async fn shut_down_all(&self) -> bool {
         self.begin_shutdown();
@@ -286,8 +280,6 @@ impl ProjectRuntimeRegistryV1 {
         &self,
         mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,
     ) -> bool {
-        let deadline =
-            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
         let started = std::time::Instant::now();
         let step = |outcome: &str| {
             tracedecay_runtime_core::logging::log_daemon_event(
@@ -303,46 +295,12 @@ impl ProjectRuntimeRegistryV1 {
         step("advisory_shut_down");
         clean &= shut_down_feedback(&runtimes).await;
         step("feedback_shut_down");
-        clean &= shut_down_semantic(&mut runtimes, deadline).await;
-        step("semantic_shut_down");
         clean &= shut_down_observability(&mut runtimes).await;
         step("observability_shut_down");
-        let (runtimes, semantic) = shut_down_runtimes(runtimes);
-        release_drained_runtimes(runtimes, semantic);
+        release_drained_runtimes(shut_down_runtimes(runtimes));
         step("runtimes_release_detached");
         clean
     }
-}
-
-/// Cancel and join every semantic owner before its project database can enter
-/// retirement. Targeted project retirement and whole-daemon shutdown share
-/// this exact sequence so neither path can leave a worker holding a counted
-/// database client after the runtime map entry has been removed.
-async fn shut_down_semantic(
-    runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>,
-    deadline: tokio::time::Instant,
-) -> bool {
-    let mut clean = true;
-    for runtime in runtimes.values_mut() {
-        if let Some(owner_task) = runtime.semantic_owner_task.take() {
-            clean &= owner_task.cancel_and_join().await;
-        }
-        if let Some(reconciler) = runtime.semantic_activation_reconciler.take() {
-            reconciler.reconciler.cancel_and_join().await;
-        }
-        if let Some(configuration) = runtime.configuration.as_ref() {
-            let receipt = tracedecay_code_index_runtime::collect_semantic_evaluation_shutdown(
-                configuration.semantic_evaluation_workers().as_ref(),
-                deadline,
-            )
-            .await;
-            clean &= receipt.is_clean();
-        }
-        if let Some(semantic) = runtime.semantic.as_ref() {
-            clean &= semantic.cancel_and_join_until(deadline).await.is_clean();
-        }
-    }
-    clean
 }
 
 async fn shut_down_advisory(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> bool {
@@ -413,16 +371,12 @@ async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime
 /// shutdown and by targeted retirement (`retire_roots`), so a deletion cleanup
 /// tears a project's runtimes down exactly the way shutdown does.
 ///
-/// Returns the torn-down runtimes and the semantic owners their unregistration
-/// released instead of dropping them: the caller decides whether their
-/// deallocation may run inline (targeted retirement, where the next mount must
-/// observe every handle released) or off the shutdown path.
+/// Returns the torn-down runtimes instead of dropping them: the caller decides
+/// whether their deallocation may run inline (targeted retirement, where the
+/// next mount must observe every handle released) or off the shutdown path.
 fn shut_down_runtimes(
-    mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,
-) -> (
-    BTreeMap<PathBuf, ProjectRuntime>,
-    Vec<RetiredProjectSemanticRuntimeV1>,
-) {
+    runtimes: BTreeMap<PathBuf, ProjectRuntime>,
+) -> BTreeMap<PathBuf, ProjectRuntime> {
     let started = std::time::Instant::now();
     let step = |outcome: &str| {
         tracedecay_runtime_core::logging::log_daemon_event(
@@ -445,43 +399,24 @@ fn shut_down_runtimes(
         )));
     }
     step("feedback_routers_replaced");
-
-    let mut retired = Vec::with_capacity(runtimes.len());
-    for (project_root, runtime) in &mut runtimes {
-        retired.push(
-            tracedecay_application::semantic_runtime::unregister_project_semantic_runtime(
-                project_root,
-            ),
-        );
-        step("semantic_runtime_unregistered");
-        if let Some(semantic) = runtime.semantic.as_ref() {
-            semantic.cancel();
-            step("semantic_cancelled");
-        }
-    }
-    (runtimes, retired)
+    runtimes
 }
 
 /// Free the drained runtimes off the daemon shutdown path.
 ///
-/// A project runtime and the semantic registries it unregistered from hold
-/// the last references to generation-sized owners (the retained decoded
-/// code-index generation, the semantic query cache, feedback and evidence
+/// A project runtime holds the last references to generation-sized owners
+/// (the retained decoded code-index generation, feedback and evidence
 /// readers). Dropping them frees millions of small allocations and on a
 /// repository-sized corpus that took several seconds — inside the invocation
 /// owner's join, after its bounded code-index sweep had already spent its
 /// abort deadline, which is exactly what outlived the supervisor's TERM
-/// grace. Every handle was already cancelled, joined, and unregistered by
-/// `shut_down_runtimes`; the blocking pool releases the memory while shutdown
-/// proceeds, and process exit reclaims whatever is still being freed.
-fn release_drained_runtimes(
-    runtimes: BTreeMap<PathBuf, ProjectRuntime>,
-    semantic: Vec<RetiredProjectSemanticRuntimeV1>,
-) {
+/// grace. Every owner was already cancelled and joined by the shutdown phases
+/// ahead of `shut_down_runtimes`; the blocking pool releases the memory while
+/// shutdown proceeds, and process exit reclaims whatever is still being freed.
+fn release_drained_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
     let count = runtimes.len();
     let started = std::time::Instant::now();
     drop(tokio::task::spawn_blocking(move || {
-        drop(semantic);
         drop(runtimes);
         tracedecay_runtime_core::logging::log_daemon_event(
             "daemon_shutdown",

@@ -770,7 +770,7 @@ mod tests {
                     0,
                     RetrievalQueryObservedV1 {
                         query_family: "natural_language".to_owned(),
-                        enabled_lanes: vec!["lexical".to_owned(), "semantic".to_owned()],
+                        enabled_lanes: vec!["lexical".to_owned(), "graph".to_owned()],
                         candidate_budget: 64,
                         context_budget: 16,
                         token_budget: 4_096,

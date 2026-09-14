@@ -362,9 +362,6 @@ pub async fn handle_branch_search(ctx: &McpToolContext<'_>, args: Value) -> Resu
                 code_generation: None,
                 reason:
                     tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
-                semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
-                    reason: "code_index_unavailable",
-                },
                 coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
                     "code_index_unavailable",
                 ),
@@ -381,7 +378,6 @@ pub async fn handle_branch_search(ctx: &McpToolContext<'_>, args: Value) -> Resu
             source_reference: Some(source_reference),
             limit,
             cursor,
-            mode: tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed,
             lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::query_only(),
             authority: authority.cloned(),
             deadline,

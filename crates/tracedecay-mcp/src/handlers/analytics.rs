@@ -115,7 +115,6 @@ const ANALYSIS_TOOLS: &[&str] = &[
     "health",
     "runtime",
     "test_risk",
-    "redundancy",
     "dsm",
 ];
 const SESSION_TOOLS: &[&str] = &[

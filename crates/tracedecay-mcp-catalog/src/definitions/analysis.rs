@@ -335,15 +335,6 @@ pub(super) fn def_health() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_redundancy(input_schema: Value) -> ToolDefinition {
-    def(
-        "tracedecay_redundancy",
-        "Redundancy Hunt",
-        "Find functionally duplicated function/method bodies via AST isomorphism, control-flow match, call-sequence match, token-shingle Jaccard similarity, and body-vector cosine similarity. Results include similarity, ranking_score (a rank key, not a thresholded quantity), grouped duplicate components (connected components over the returned pairs only), and signal details such as body_vector_cosine and generic_helper_downranked. Each pair is bucketed as 'definite' (AST-identical with score >= 0.8), 'likely' (CFG, algorithmic, token, body-vector, or lower-scoring AST match at score >= 0.55), or 'naming_only' (weaker signals). Use when consolidating helpers or auditing code health. Computed lazily and cached per (node, body source hash) — first call on a fresh index can be slow on large repos.",
-        input_schema,
-    )
-}
-
 pub(super) fn def_dsm() -> ToolDefinition {
     def(
         "tracedecay_dsm",

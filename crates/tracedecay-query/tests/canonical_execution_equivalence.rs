@@ -4,33 +4,26 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_domain::{
-    CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
-    ComponentRevision, DiversityPolicy, EdgeAuthorityV1, EmbeddingDeviceClassV1,
-    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
-    EvidenceRole, ExactAdmissionProof, ExactAdmissionRuleRevision, ExactFieldV1,
+    CalibrationProfileId, CodeGenerationId, CompactCandidate, ComponentRevision, DiversityPolicy,
+    EdgeAuthorityV1, EvidenceRole, ExactAdmissionProof, ExactAdmissionRuleRevision, ExactFieldV1,
     ExactTechnicalTermKindV1, FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1,
     FusionProfile, ManifestDigest, PrincipalId, RelationEdgeKindV1, RetrievalAnchorId,
     RetrievalBudget, RetrievalBudgetUsage, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope,
     RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    ScoreDomainCalibrationV1, ScoreDomainId, SemanticSearchIndexProfileV1, SingleRootScopeV1,
-    SourceFreshness, SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorGenerationIdV1, VectorWatermark,
+    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SourceFreshness,
+    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLiteralV1};
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::graph::{GraphLaneEvidence, GraphPathSegmentV1};
 use tracedecay_query::retrieval::lexical::{LexicalFieldV1, LexicalLaneEvidence};
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
-use tracedecay_query::retrieval::semantic::{
-    CanonicalSemanticDistanceV1, CodeSemanticEvidenceV1, SemanticSearchExecutionV1,
-};
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSemanticRecordV1, NativeSymbolRecordV1, PreparedQueryBindingsV1,
-    PreparedQueryRoutingBindingsV1, PreparedQueryV1, QUERY_RANKING_REVISION_V1, QueryAuthorityV1,
-    authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
+    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
+    QUERY_RANKING_REVISION_V1, QueryAuthorityV1, authenticate_prepared_query_cursor_for_routing,
+    route_authenticated_prepared_query_cursor,
 };
 
 fn id<T>(value: &str) -> T
@@ -184,49 +177,6 @@ fn graph_evidence() -> GraphLaneEvidence {
     }
 }
 
-fn semantic_evidence() -> CodeSemanticEvidenceV1 {
-    let projection = EmbeddingProjectionKeyV1 {
-        model_artifact_digest: digest('1'),
-        tokenizer_digest: digest('2'),
-        config_digest: digest('3'),
-        query_instruction_digest: Some(digest('4')),
-        document_instruction_digest: Some(digest('5')),
-        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
-        pooling: EmbeddingPoolingV1::Mean,
-        truncation_side: EmbeddingTruncationSideV1::Right,
-        truncation_length: 128,
-        inference_batch_size: 8,
-        inference_batch_bytes: 4 * 1024,
-        runtime_backend: "onnx.cpu".to_owned(),
-        runtime_build_revision: "runtime.canonical-equivalence.v1".to_owned(),
-        device_class: EmbeddingDeviceClassV1::Cpu,
-        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
-        dimensions: 2,
-        metric: EmbeddingMetricV1::Cosine,
-        normalization: EmbeddingNormalizationV1::L2,
-        precision: EmbeddingPrecisionV1::Fp32,
-        chunk_schema_revision: "chunk.canonical-equivalence.v1".to_owned(),
-        chunker_revision: id::<ChunkerRevision>("chunker.canonical-equivalence.v1"),
-        privacy_domain: id("privacy.canonical-equivalence"),
-        privacy_key_epoch: 7,
-    }
-    .admit()
-    .expect("valid semantic projection");
-    let distance: CanonicalSemanticDistanceV1 =
-        serde_json::from_str("125000000").expect("public canonical distance wire");
-
-    CodeSemanticEvidenceV1 {
-        projection_key: projection.embedding_key().clone(),
-        search_index_key: SemanticSearchIndexProfileV1::exact_flat_v1()
-            .and_then(|profile| profile.index_key())
-            .expect("exact-flat semantic index"),
-        vector_generation: VectorGenerationIdV1::new(digest('6')),
-        chunk_id: id("chunk.canonical-equivalence"),
-        distance,
-        search: SemanticSearchExecutionV1::ExactFlat,
-    }
-}
-
 struct FixtureRecords {
     generation: CodeGenerationId,
 }
@@ -274,14 +224,6 @@ impl NativeRecordReadPortV1 for FixtureRecords {
     fn occurrence(
         &self,
         _: &CodeCandidateBindingV1,
-    ) -> Result<NativeCodeOccurrenceV1, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
-    {
-        Ok(Self::occurrence())
-    }
-
-    fn occurrence_by_chunk(
-        &self,
-        _: &CodeSearchChunkId,
     ) -> Result<NativeCodeOccurrenceV1, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
     {
         Ok(Self::occurrence())
@@ -383,29 +325,6 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
             coverage: coverage(),
         })
     );
-
-    let semantic = context
-        .semantic(
-            RetrieverOutcome::Complete(batch(
-                candidate(RetrieverKind::Semantic, 700_000),
-                semantic_evidence(),
-            )),
-            |path| path.starts_with("src/query/"),
-        )
-        .expect("semantic translation");
-    assert_eq!(
-        semantic,
-        NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
-            generation: generation(),
-            items: vec![NativeSemanticRecordV1 {
-                occurrence: FixtureRecords::occurrence(),
-                distance_micros: 125_000_000,
-                score: FixedPointScore(700_000),
-            }],
-            total_eligible: 1,
-            coverage: coverage(),
-        })
-    );
 }
 
 #[test]
@@ -448,7 +367,7 @@ fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
     );
     assert_eq!(
         context
-            .semantic(RetrieverOutcome::Cancelled, |_| true)
+            .lexical(RetrieverOutcome::Cancelled, |_| true)
             .expect("cancelled decision"),
         NativeLaneOutcomeV1::Cancelled
     );
@@ -559,7 +478,6 @@ fn query_authority_with_secret(secret: u8) -> Arc<QueryAuthorityV1> {
         .into_iter()
         .collect(),
         diversity_policy_id: id("diversity.canonical-equivalence.v1"),
-        rerank_policy_id: None,
         retrieval_budget: retrieval_budget(),
     };
     let diversity = DiversityPolicy {

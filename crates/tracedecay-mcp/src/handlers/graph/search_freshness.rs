@@ -67,7 +67,6 @@ fn stale_lanes(coverage: &CodeIndexSearchCoverageV1) -> Vec<String> {
         ("exact", &coverage.exact),
         ("lexical", &coverage.lexical),
         ("graph", &coverage.graph),
-        ("semantic", &coverage.semantic),
     ]
     .into_iter()
     .filter(|(_, status)| matches!(status, CodeIndexLaneStatusV1::Stale { .. }))
@@ -216,8 +215,7 @@ mod tests {
 
     #[test]
     fn executor_stale_lanes_are_possibly_stale_even_without_a_scheduler() {
-        let semantic = tracedecay_query::code_search::CodeIndexSemanticStatusV1::Complete;
-        let coverage = CodeIndexSearchCoverageV1::fused_stale("generation.0", &semantic);
+        let coverage = CodeIndexSearchCoverageV1::stale("generation.0");
         let freshness = search_freshness(
             ServedGenerationV1::Served("generation.0"),
             &coverage,

@@ -5,11 +5,10 @@ publish = false
 edition.workspace = true
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-description = "TraceDecay code retrieval query kernel and search-quality candidate/profile inputs"
+description = "TraceDecay exact/lexical/graph code retrieval query kernel and search-quality candidate/profile inputs"
 include = ["/src/**", "/assets/**"]
 
 [dependencies]
-flate2 = "1"
 fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
 gix = { version = "=0.86.0", default-features = false, features = ["revision", "parallel", "sha1", "sha256"] }
 hex = "0.4"
@@ -56,7 +55,6 @@ search-eval = []
 production = ["tracedecay-code-index/lite", "tracedecay-code-index/full"]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
 # Self dev-dependency: the search-quality suites drive the eval-only in-memory
 # lexical projection, so the crate's own test build enables it.
 tracedecay-query = { path = ".", features = ["search-eval"] }
@@ -77,10 +75,6 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", feat
 name = "code_lexical_catchup"
 harness = false
 required-features = ["hotpath"]
-
-[[bench]]
-name = "semantic_flat_scan"
-harness = false
 
 # Daemon-free indexing workload profiled by `.github/workflows/hotpath-profile.yml`.
 [[bin]]

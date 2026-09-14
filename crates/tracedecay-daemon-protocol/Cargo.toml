@@ -16,7 +16,6 @@ doctest = false
 test-helpers = ["tracedecay-framing/test-helpers"]
 
 [dependencies]
-base64 = "0.22"
 hex = "0.4"
 hotpath.workspace = true
 semver = "1"

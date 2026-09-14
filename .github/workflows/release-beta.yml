@@ -136,7 +136,6 @@ jobs:
           python3 .release-automation/scripts/test-check-distribution-feature-wiring.py
           python3 .release-automation/scripts/test-resolve-release-source-profile.py
           python3 .release-automation/scripts/test-package-release-archive.py
-          python3 .release-automation/scripts/test-prepare-release-runtime.py
           bash .release-automation/scripts/test-check-distribution-clean-source.sh
           bash .release-automation/scripts/test-check-distribution-snapshot.sh
 
@@ -160,31 +159,6 @@ jobs:
           else
             echo "binary_args=--bin tracedecay" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Prepare target release runtime
-        id: target-runtime
-        shell: bash
-        run: |
-          python3 .release-automation/scripts/prepare-release-runtime.py \
-            --manifest .github/release-targets.json \
-            --name "${{ matrix.name }}" \
-            --output "$RUNNER_TEMP/tracedecay-release-runtime" \
-            --github-env "$GITHUB_ENV" \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Verify target runtime compatibility
-        if: steps.target-runtime.outputs.runtime_library != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          runtime="${{ steps.target-runtime.outputs.runtime_library }}"
-          test "$(readelf -d "$runtime" | sed -n 's/.*SONAME.*\[\([^]]*\)\].*/\1/p')" = \
-            "${{ steps.target-runtime.outputs.runtime_entry_name }}"
-          max_glibc="$(readelf --version-info "$runtime" \
-            | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
-            | sort -Vu \
-            | tail -n 1)"
-          test "$max_glibc" = "${{ matrix.runtime.max_glibc }}"
 
       - name: Install mold
         if: runner.os == 'Linux'
@@ -244,21 +218,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install bash
 
-      - name: Validate immutable FastEmbed fixture pins
-        if: steps.release-profile.outputs.profile == 'production'
-        shell: bash
-        run: |
-          set -euo pipefail
-          gate="scripts/check-distribution-acceptance.sh"
-          prepare="tests/distribution/fastembed/prepare_fixture.py"
-          validator="tests/distribution/fastembed/validate_fixture.py"
-          if [[ ! -x "$gate" || ! -f "$prepare" || ! -f "$validator" ]]; then
-            echo "::error title=FastEmbed acceptance setup missing::Expected executable $gate plus $prepare and $validator from the distribution fixture work."
-            exit 1
-          fi
-          python3 "$prepare" --check tests/distribution/fastembed
-          cargo fetch --locked --target ${{ matrix.target }}
-
       - name: Run distribution acceptance
         if: steps.release-profile.outputs.profile == 'production'
         shell: bash
@@ -268,8 +227,11 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             gate_shell="$(brew --prefix)/bin/bash"
           fi
+          # The gate runs Cargo offline so packaging and the packaged-crate
+          # builds prove the checked-in lockfile resolves without the network.
+          cargo fetch --locked --target ${{ matrix.target }}
           lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 \
+          CARGO_NET_OFFLINE=true \
             "$gate_shell" scripts/check-distribution-acceptance.sh
           actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
           test "$actual_lockfile_sha" = "$lockfile_sha"
@@ -301,20 +263,11 @@ jobs:
             binary="${binary}.exe"
           fi
           bundle="tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.mcpb"
-          runtime_args=()
-          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
-            runtime_args+=(
-              --runtime-library "${{ steps.target-runtime.outputs.runtime_library }}"
-              --runtime-license "${{ steps.target-runtime.outputs.runtime_license }}"
-              --runtime-notices "${{ steps.target-runtime.outputs.runtime_notices }}"
-            )
-          fi
           python3 .release-automation/scripts/build-mcpb.py build \
             --binary "$binary" \
             --output "$bundle" \
             --version "${{ steps.version.outputs.version }}" \
-            --platform "${{ matrix.name }}" \
-            "${runtime_args[@]}"
+            --platform "${{ matrix.name }}"
           python3 .release-automation/scripts/build-mcpb.py verify \
             --bundle "$bundle" \
             --version "${{ steps.version.outputs.version }}" \
@@ -329,8 +282,8 @@ jobs:
           rm -rf verify-mcpb
           python3 -m zipfile -e "$bundle" verify-mcpb
           test -x verify-mcpb/server/tracedecay
-          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --version
-          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --help >/dev/null
+          verify-mcpb/server/tracedecay --version
+          verify-mcpb/server/tracedecay --help >/dev/null
 
       - name: Upload MCPB artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -349,24 +302,12 @@ jobs:
             source="${source}.exe"
             entry_name="${entry_name}.exe"
           fi
-          companion_args=()
-          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
-            companion_args+=(
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_library }}=${{ steps.target-runtime.outputs.runtime_entry_name }}"
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_license }}=onnxruntime-LICENSE"
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_notices }}=onnxruntime-ThirdPartyNotices.txt"
-            )
-          fi
           python3 .release-automation/scripts/package-release-archive.py \
             --binary "$source" \
             --output "tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.${{ matrix.archive }}" \
             --format "${{ matrix.archive }}" \
             --entry-name "$entry_name" \
-            --epoch "${{ needs.validate.outputs.source_epoch }}" \
-            "${companion_args[@]}"
+            --epoch "${{ needs.validate.outputs.source_epoch }}"
 
       - name: Verify binary archive (unix)
         if: matrix.archive == 'tar.gz'
@@ -377,8 +318,8 @@ jobs:
           mkdir verify-binary
           tar xzf "$archive" -C verify-binary
           test -x verify-binary/tracedecay
-          env -u LD_LIBRARY_PATH verify-binary/tracedecay --version
-          env -u LD_LIBRARY_PATH verify-binary/tracedecay --help >/dev/null
+          verify-binary/tracedecay --version
+          verify-binary/tracedecay --help >/dev/null
 
       - name: Verify binary archive (windows)
         if: matrix.archive == 'zip'

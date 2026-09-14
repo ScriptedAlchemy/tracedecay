@@ -20,7 +20,7 @@ pub(super) fn def_search() -> ToolDefinition {
     def_always_load(
         "tracedecay_search",
         "Search Symbols",
-        "Semantic code search over the active project's code graph: find symbols (functions, structs, traits, etc.) by name, keyword, or concept, fusing semantic and lexical routes (lexical-only when semantic retrieval is unavailable). Every response opens with a `freshness: fresh | possibly_stale` line, so no status preflight is needed. Pass known identifiers as `lexical_anchors` (each an extra ranked route) and set `prefer_symbol` to add a symbol-name route for identifier-shaped query words.",
+        "Exact and lexical code search over the active project's code graph: find symbols (functions, structs, traits, etc.) by name, identifier fragment, signature, path, or phrase through ranked exact and lexical routes. Every response opens with a `freshness: fresh | possibly_stale` line, so no status preflight is needed. Pass known identifiers as `lexical_anchors` (each an extra ranked route) and set `prefer_symbol` to add a symbol-name route for identifier-shaped query words.",
         json!({
             "type": "object",
             "properties": {
@@ -47,11 +47,6 @@ pub(super) fn def_search() -> ToolDefinition {
                 "prefer_symbol": {
                     "type": "boolean",
                     "description": "Add a lexical route restricted to symbol-name matches for the identifier-shaped words of the query (default: false). Query words such as class/struct/function/find/explain are ignored; 'Foo::bar' and 'Foo.bar' contribute 'bar'."
-                },
-                "semantic_mode": {
-                    "type": "string",
-                    "enum": ["fallback_allowed", "strict_semantic"],
-                    "description": "Optional semantic policy. fallback_allowed (default) preserves the exact existing search response when semantic retrieval is unavailable; strict_semantic returns a typed unavailable result instead."
                 },
                 "lazy_index_ignored_dependencies": {
                     "type": "boolean",
@@ -673,16 +668,13 @@ pub(super) fn def_find_exact_symbol() -> ToolDefinition {
 }
 
 #[cfg(test)]
-mod semantic_search_tests {
+mod search_schema_tests {
     use super::{SEARCH_MAX_LEXICAL_ANCHORS, def_search};
 
     #[test]
-    fn search_schema_exposes_only_the_two_planned_semantic_modes() {
+    fn search_schema_has_no_semantic_mode_and_keeps_the_cursor() {
         let definition = def_search();
-        assert_eq!(
-            definition.input_schema["properties"]["semantic_mode"]["enum"],
-            serde_json::json!(["fallback_allowed", "strict_semantic"])
-        );
+        assert!(definition.input_schema["properties"]["semantic_mode"].is_null());
         assert_eq!(
             definition.input_schema["properties"]["cursor"]["type"],
             "string"

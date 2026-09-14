@@ -10,9 +10,9 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use crate::limits::{
     MAX_GRAPH_BATCH_CANONICAL_BYTES, MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS,
     MAX_GRAPH_IDENTIFIER_BYTES, MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
-    MAX_GRAPH_PROPERTY_VALUE_BYTES, MAX_GRAPH_VECTOR_DIMENSION,
+    MAX_GRAPH_PROPERTY_VALUE_BYTES,
 };
-use crate::{GraphBudgetKind, GraphDbError, VectorMetric};
+use crate::{GraphBudgetKind, GraphDbError};
 
 const RESERVED_PREFIX: &str = "__tracedecay_graph_db_";
 const CHECKED_DIGEST_INTERVAL_BYTES: u64 = 64 * 1024;
@@ -99,54 +99,6 @@ fn validate_opaque(kind: &str, value: &str) -> Result<(), GraphDbError> {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct GraphVector {
-    pub values: Vec<f32>,
-    pub dimension: usize,
-    pub metric: VectorMetric,
-}
-
-impl GraphVector {
-    pub fn new(
-        values: Vec<f32>,
-        dimension: usize,
-        metric: VectorMetric,
-    ) -> Result<Self, GraphDbError> {
-        let vector = Self {
-            values,
-            dimension,
-            metric,
-        };
-        vector.validate()?;
-        Ok(vector)
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), GraphDbError> {
-        if self.dimension == 0 {
-            return Err(GraphDbError::invalid(
-                "vector dimension must be greater than zero",
-            ));
-        }
-        if self.dimension > MAX_GRAPH_VECTOR_DIMENSION {
-            return Err(GraphDbError::budget_exhausted_count(
-                GraphBudgetKind::Capacity,
-                MAX_GRAPH_VECTOR_DIMENSION,
-            ));
-        }
-        if self.values.len() != self.dimension {
-            return Err(GraphDbError::invalid(format!(
-                "vector has {} values but declares dimension {}",
-                self.values.len(),
-                self.dimension
-            )));
-        }
-        if self.values.iter().any(|value| !value.is_finite()) {
-            return Err(GraphDbError::invalid("vector values must all be finite"));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value")]
 pub enum GraphProperty {
     Bool(bool),
@@ -154,7 +106,6 @@ pub enum GraphProperty {
     F64(f64),
     String(String),
     Bytes(Vec<u8>),
-    Vector(GraphVector),
 }
 
 impl GraphProperty {
@@ -163,7 +114,6 @@ impl GraphProperty {
             Self::F64(value) if !value.is_finite() => {
                 Err(GraphDbError::invalid("floating properties must be finite"))
             }
-            Self::Vector(vector) => vector.validate(),
             Self::String(value) if value.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES => {
                 Err(GraphDbError::budget_exhausted_count(
                     GraphBudgetKind::Capacity,
@@ -584,9 +534,6 @@ fn property_payload_bytes(property: &GraphProperty) -> Option<usize> {
         GraphProperty::F64(_) => Some(std::mem::size_of::<f64>()),
         GraphProperty::String(value) => Some(value.len()),
         GraphProperty::Bytes(value) => Some(value.len()),
-        GraphProperty::Vector(vector) => {
-            vector.values.len().checked_mul(std::mem::size_of::<f32>())
-        }
     }
 }
 
@@ -640,24 +587,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        GraphNamespace, GraphProjectionId, GraphVector, GraphWatermark, GraphWriteBatch,
-        NeverCancelled, SourceGeneration,
+        GraphNamespace, GraphProjectionId, GraphWatermark, GraphWriteBatch, NeverCancelled,
+        SourceGeneration,
     };
-    use crate::{GraphBudgetKind, GraphDbError, MAX_GRAPH_VECTOR_DIMENSION, VectorMetric};
+    use crate::{GraphBudgetKind, GraphDbError};
 
     #[test]
-    fn vector_dimension_and_streamed_canonical_bytes_are_bounded() {
-        assert_eq!(
-            GraphVector::new(
-                vec![0.0; MAX_GRAPH_VECTOR_DIMENSION + 1],
-                MAX_GRAPH_VECTOR_DIMENSION + 1,
-                VectorMetric::Cosine,
-            ),
-            Err(GraphDbError::budget_exhausted_count(
-                GraphBudgetKind::Capacity,
-                MAX_GRAPH_VECTOR_DIMENSION,
-            ))
-        );
+    fn streamed_canonical_bytes_are_bounded() {
         let batch = GraphWriteBatch::new(
             GraphNamespace::new("namespace.bounded").unwrap(),
             GraphProjectionId::new("projection.bounded").unwrap(),

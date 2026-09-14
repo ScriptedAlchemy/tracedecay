@@ -23,8 +23,6 @@ pub enum GlobalRequestSurface {
     McpFallback,
     ManagedTestRun,
     FeedbackObservation,
-    SemanticEvaluation,
-    SemanticQualification,
     ProjectOpenFeedbackCycle,
     ProjectOpenGithubDiscovery,
     DaemonDoctor,
@@ -50,8 +48,6 @@ impl GlobalRequestSurface {
             Self::McpFallback => "request.mcp.fallback",
             Self::ManagedTestRun => "request.managed-test-run",
             Self::FeedbackObservation => "request.feedback-observe",
-            Self::SemanticEvaluation => "request.semantic-evaluation",
-            Self::SemanticQualification => "request.semantic-qualification",
             Self::ProjectOpenFeedbackCycle => "request.project-open.cycle",
             Self::ProjectOpenGithubDiscovery => "request.project-open.github-discovery",
             Self::DaemonDoctor => "request.daemon.doctor",
@@ -393,14 +389,6 @@ mod tests {
             (
                 GlobalRequestSurface::FeedbackObservation,
                 "request.feedback-observe.100000000",
-            ),
-            (
-                GlobalRequestSurface::SemanticEvaluation,
-                "request.semantic-evaluation.100000000",
-            ),
-            (
-                GlobalRequestSurface::SemanticQualification,
-                "request.semantic-qualification.100000000",
             ),
             (
                 GlobalRequestSurface::ProjectOpenFeedbackCycle,

@@ -7,11 +7,8 @@
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_daemon_service::{
-    DaemonSemanticRuntimeRegistrationError, daemon_owned_project_source_access_at,
-};
+use tracedecay_daemon_service::daemon_owned_project_source_access_at;
 use tracedecay_runtime_core::logging::log_daemon_event;
-use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
     ProfileSessionHistoricalIngestor, ProjectSessionHistoricalIngestor,
@@ -37,8 +34,6 @@ pub(super) struct ProductionProjectComposition {
     pub(super) server: Arc<crate::mcp::McpServer>,
     #[cfg(unix)]
     pub(super) inserted: bool,
-    #[cfg(any(test, feature = "test-transport"))]
-    pub(super) semantic_auto_download_enabled: Option<bool>,
 }
 
 pub(super) fn project_server_response_lifecycle_has_in_flight(
@@ -362,8 +357,6 @@ pub(super) async fn production_project_server(
         server: resolved,
         #[cfg(unix)]
         inserted,
-        #[cfg(any(test, feature = "test-transport"))]
-        semantic_auto_download_enabled: Some(opened.semantic.auto_download_enabled),
     })
 }
 
@@ -442,7 +435,6 @@ struct OpenedProjectGraph {
     cg: Arc<crate::project::TraceDecay>,
     key: ProjectServerKey,
     runtime_configuration: tracedecay_configuration::config::PinnedRuntimeConfiguration,
-    semantic: SemanticProjectRuntime,
     project_database_is_read_only: bool,
     code_index_store_root: PathBuf,
 }
@@ -453,7 +445,6 @@ struct ProjectRoutePorts {
     code_index: ProjectCodeIndexAuthorities,
     dashboard_code_index_freshness_reader:
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
-    dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader,
     dashboard_feedback_status_reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     dashboard_pr_autotrack_reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -476,7 +467,6 @@ struct ComposedCoreServer {
     /// publication below compares against it first.
     current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
     route_registered: Arc<AtomicBool>,
-    route_cancellation: CancellationToken,
     database_owner_reconciler: crate::mcp::DatabaseOwnerReconciler,
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
     registered_profile_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -484,7 +474,6 @@ struct ComposedCoreServer {
     graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     transcript_source_home: Option<PathBuf>,
     code_index_activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
-    semantic_runtime_readiness: tokio::sync::watch::Receiver<bool>,
     ports: ProjectRoutePorts,
 }
 
@@ -502,9 +491,6 @@ impl ComposedCoreServer {
         let mut context = context
             .with_dashboard_code_index_freshness_reader(Arc::clone(
                 &ports.dashboard_code_index_freshness_reader,
-            ))
-            .with_dashboard_explorer_semantic_reader(Arc::clone(
-                &ports.dashboard_explorer_semantic_reader,
             ))
             .with_dashboard_feedback_status_reader(Arc::clone(
                 &ports.dashboard_feedback_status_reader,
@@ -558,7 +544,10 @@ struct CoreRouteBinding {
 /// Owners the published core carries into the full upgrade and its failure
 /// funnel.
 struct CoreRouteActivation {
-    publication_attempt: tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1,
+    /// The mandatory-owner publication of the registered project runtime;
+    /// `None` when no owner published a runtime for this root (a read-only
+    /// database mounts no source-edit owner and nothing else in the core).
+    publication_attempt: Option<tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1>,
     /// The core's preview-only source-edit lane; `None` for a read-only database.
     core_source_edit_mutation:
         Option<Arc<tracedecay_daemon_service::project_owner_registration::SourceEditMutationGate>>,
@@ -605,7 +594,6 @@ impl ProjectOpenInputs<'_> {
                 self.canonical_project_path,
                 cached_key,
                 cached_server,
-                None,
             )));
         }
 
@@ -625,7 +613,6 @@ impl ProjectOpenInputs<'_> {
                 self.canonical_project_path,
                 cached_key,
                 cached_server,
-                None,
             )));
         }
         let foreground_project_open = self
@@ -655,8 +642,8 @@ impl ProjectOpenInputs<'_> {
     }
 
     /// Open the project graph behind the admitted route, re-check the deletion
-    /// fence and the owner registry, and resolve the route-wide semantic and
-    /// configuration choices every later phase reads.
+    /// fence and the owner registry, and resolve the route-wide configuration
+    /// choices every later phase reads.
     #[hotpath::measure(label = "daemon.project.compose.open_graph", future = true)]
     async fn open_graph(&self, route: &ProjectRouteKey) -> Result<GraphOpen> {
         #[cfg(test)]
@@ -697,25 +684,6 @@ impl ProjectOpenInputs<'_> {
             .map_err(|error| TraceDecayError::Config {
                 message: format!("authoritative runtime configuration unavailable: {error}"),
             })?;
-        let semantic_project_id =
-            tracedecay_domain::ProjectId::new(key.owner.project_id.clone().ok_or_else(|| {
-                TraceDecayError::Config {
-                    message: "semantic selection requires authoritative project identity"
-                        .to_owned(),
-                }
-            })?)
-            .map_err(|error| TraceDecayError::Config {
-                message: error.to_string(),
-            })?;
-        let semantic = semantic_project_runtime(
-            &runtime_configuration,
-            self.runtime,
-            self.store_administration
-                .session_runtime_registry()
-                .await?
-                .project_semantic_lifecycle(&semantic_project_id)
-                .await?,
-        )?;
         let project_database_is_read_only = !cg.db().is_writable();
         let existing = {
             let mut servers = self.store_administration.project_servers().lock().await;
@@ -730,14 +698,12 @@ impl ProjectOpenInputs<'_> {
                 self.canonical_project_path,
                 key,
                 existing,
-                Some(semantic.auto_download_enabled),
             )));
         }
         Ok(GraphOpen::Opened(Box::new(OpenedProjectGraph {
             cg,
             key,
             runtime_configuration,
-            semantic,
             project_database_is_read_only,
             code_index_store_root,
         })))
@@ -758,7 +724,6 @@ impl ProjectOpenInputs<'_> {
             cg,
             key,
             runtime_configuration,
-            semantic,
             project_database_is_read_only,
             code_index_store_root,
         } = opened;
@@ -813,25 +778,17 @@ impl ProjectOpenInputs<'_> {
             &route_registered,
             *project_database_is_read_only,
         )?;
-        let (semantic_runtime_ready, semantic_runtime_readiness) =
-            tokio::sync::watch::channel(false);
         let code_index_mount = code_index_activation_mount(CodeIndexActivationMountInputs {
             invocation: self.invocation.clone(),
             project_id: code_index.project_id.clone(),
             project_root: self.canonical_project_path.to_path_buf(),
             store_root: code_index_store_root.clone(),
-            semantic_runtime: semantic.handle.clone(),
-            semantic_lifecycle: semantic.lifecycle.clone(),
-            semantic_resources: semantic.resources,
-            semantic_document_composition: semantic.document_composition,
             native_graph_activation: runtime_configuration.config().native_graph_activation,
             scope: code_index.scope.clone(),
             route_registered: Arc::clone(&route_registered),
             cancellation: route_cancellation.clone(),
             graph_runtime: Arc::clone(&graph_runtime),
             graph_publication_database: Arc::new(cg.db().clone()),
-            semantic_runtime_ready,
-            profile_id: cg.store_runtime_registry().profile_id().clone(),
         });
         let code_index_hint_sink = code_index_activation_hint_sink(
             self.invocation.code_index_schedulers.clone(),
@@ -888,7 +845,6 @@ impl ProjectOpenInputs<'_> {
             project_id,
             current_key,
             route_registered,
-            route_cancellation,
             database_owner_reconciler,
             profile_identity,
             registered_profile_db,
@@ -896,14 +852,10 @@ impl ProjectOpenInputs<'_> {
             graph_runtime,
             transcript_source_home,
             code_index_activation,
-            semantic_runtime_readiness,
             ports: ProjectRoutePorts {
                 code_index,
                 dashboard_code_index_freshness_reader: project_dashboard_freshness_reader(
                     self.invocation.code_index_schedulers.clone(),
-                ),
-                dashboard_explorer_semantic_reader: project_dashboard_explorer_semantic_reader(
-                    cg.configuration_runtime().client(),
                 ),
                 dashboard_feedback_status_reader:
                     tracedecay_dashboard_api::feedback_api::feedback_status_reader(
@@ -1013,10 +965,9 @@ impl ProjectOpenInputs<'_> {
         Ok(CoreRouteBinding { resolved, inserted })
     }
 
-    /// Publish the inserted core: register the code-index activation, start
-    /// the semantic owner publication, install the preview-only source-edit
-    /// lane, mark the route ready, and kick off the background default-model
-    /// selection.
+    /// Publish the inserted core: register the code-index activation, install
+    /// the preview-only source-edit lane, begin the runtime publication, and
+    /// mark the route ready.
     #[hotpath::measure(label = "daemon.project.compose.publish_core", future = true)]
     async fn activate_core_route(
         &self,
@@ -1037,16 +988,6 @@ impl ProjectOpenInputs<'_> {
                 message: "code-index activation scope does not match the project route".to_owned(),
             });
         }
-        let publication_attempt = project_open_owners::spawn_semantic_owner_registration(
-            self.invocation.clone(),
-            self.canonical_project_path.to_path_buf(),
-            Arc::clone(opened.cg.configuration_runtime()),
-            core.ports.code_index.scope.clone(),
-            core.semantic_runtime_readiness.clone(),
-            Arc::clone(&core.route_registered),
-            core.route_cancellation.clone(),
-        )
-        .await?;
         // The core's own lane never opens: only the full server reaches a Git
         // transaction authority. Its gate is kept so a rolled-back publication
         // can report a terminal failure instead of warming forever.
@@ -1064,6 +1005,19 @@ impl ProjectOpenInputs<'_> {
                 .await?,
             )
         };
+        // The source-edit owner is the core's only runtime component, so its
+        // registration is what creates the registry slot this publication
+        // attempt fences. A read-only database registers none.
+        let publication_attempt = self
+            .invocation
+            .service
+            .project_runtimes
+            .begin_publication(self.canonical_project_path);
+        if publication_attempt.is_none() && core_source_edit_mutation.is_some() {
+            return Err(TraceDecayError::Config {
+                message: "project runtime disappeared before its publication began".to_owned(),
+            });
+        }
         // Publish the graph/search/diagnostic core before session admission.
         // Source-edit previews are available, while mutations fail closed as
         // warming until the full server has its transaction authority.
@@ -1077,29 +1031,6 @@ impl ProjectOpenInputs<'_> {
             }
         }
         self.log_phase("core_published", None, self.started);
-        if !retain_project_semantic_startup(
-            core.graph_runtime.as_ref(),
-            self.canonical_project_path.to_path_buf(),
-            self.invocation.code_index_schedulers.clone(),
-            Arc::clone(opened.cg.configuration_runtime()),
-            opened.semantic.lifecycle.clone(),
-            self.runtime.semantic_auto_download(),
-        ) {
-            if let Some(mutation) = &core_source_edit_mutation {
-                mutation.mark_failed();
-            }
-            retire_failed_project_open_owner(
-                self.store_administration,
-                &opened.key,
-                resolved,
-                false,
-                &core.route_registered,
-            )
-            .await;
-            return Err(TraceDecayError::Config {
-                message: "semantic startup task owner is not accepting work".to_owned(),
-            });
-        }
         Ok(CoreRouteActivation {
             publication_attempt,
             core_source_edit_mutation,
@@ -1355,9 +1286,7 @@ impl ProjectOpenInputs<'_> {
                 self.invocation.code_index_schedulers.clone(),
                 Arc::clone(&core.ports.diagnostic_broker),
                 self.invocation.feedback_runtime_registrar(),
-                self.invocation.semantic_owner_runtime_registrar(),
                 store_telemetry_sampling,
-                Arc::clone(cg.configuration_runtime()),
             );
         let (delivery_settlement_authority, delivery_settlement_recorder) =
             project_delivery_settlement_ports(self.invocation, self.canonical_project_path).await?;
@@ -1440,8 +1369,8 @@ impl ProjectOpenInputs<'_> {
     }
 
     /// Mount the full server's dependent owners: the source-edit lane, Git
-    /// index transactions, the production owners, the semantic runtime, the
-    /// owners that depend on them, and the HTTP application router.
+    /// index transactions, the production owners, the owners that depend on
+    /// them, and the HTTP application router.
     ///
     /// The widest project-open phase: the two owner registrations it awaits
     /// are the largest leaves of the open (each ~20 KB, ~80 KB when
@@ -1505,30 +1434,6 @@ impl ProjectOpenInputs<'_> {
             Some(state)
         };
         project_open_cancellation_checkpoint(self.cancellation)?;
-        match self
-            .invocation
-            .semantic_runtime_registrar()
-            .register(
-                self.canonical_project_path.to_path_buf(),
-                opened.semantic.handle.clone(),
-            )
-            .await
-        {
-            Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
-            Err(DaemonSemanticRuntimeRegistrationError::RegistryClosed) => {
-                return Err(TraceDecayError::Config {
-                    message: "semantic runtime registration failed: the daemon project runtime registry is closed".to_owned(),
-                });
-            }
-            Err(DaemonSemanticRuntimeRegistrationError::ConcurrentBuildFailed { detail }) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "semantic runtime registration failed after a concurrent build: {detail}"
-                    ),
-                });
-            }
-        }
-        self.log_phase("semantic_runtime_registered", None, full_setup_started);
         if let Some(dependent_owners) = dependent_owners {
             project_open_owners::register_project_open_dependent_owners(
                 self.invocation,
@@ -1576,11 +1481,12 @@ impl ProjectOpenInputs<'_> {
                 message: "project changed branch during full capability admission".to_owned(),
             });
         }
-        if !self
-            .invocation
-            .service
-            .project_runtimes
-            .mark_publication_ready(&activation.publication_attempt)
+        if let Some(attempt) = &activation.publication_attempt
+            && !self
+                .invocation
+                .service
+                .project_runtimes
+                .mark_publication_ready(attempt)
         {
             return Err(TraceDecayError::Config {
                 message: "project runtime publication attempt was superseded".to_owned(),
@@ -1660,10 +1566,12 @@ impl ProjectOpenInputs<'_> {
             mutation.mark_failed();
         }
         if core_retained {
-            self.invocation
-                .service
-                .project_runtimes
-                .mark_publication_failed(&activation.publication_attempt);
+            if let Some(attempt) = &activation.publication_attempt {
+                self.invocation
+                    .service
+                    .project_runtimes
+                    .mark_publication_failed(attempt);
+            }
             if let Some(failed_full_server) = failed_full_server {
                 failed_full_server.revoke_project_server_responses();
                 schedule_project_server_retirement(
@@ -1693,118 +1601,6 @@ impl ProjectOpenInputs<'_> {
     }
 }
 
-/// The existing retained-task owner drains startup selection before semantic
-/// lifecycle shutdown. A blocking selection is always joined, even after its
-/// async task receives cancellation.
-pub(super) fn retain_project_semantic_startup(
-    registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
-    semantic_startup_project: PathBuf,
-    semantic_startup_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
-    semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-    semantic_download_allowed: bool,
-) -> bool {
-    let semantic_configuration_client = configuration.client();
-    let task_key = tracedecay_domain::canonical_text::encode_lowercase_hex(
-        semantic_startup_project.as_os_str().as_encoded_bytes(),
-    );
-    registry.retain_hook_task("semantic-config-selection", &task_key, move |cancellation| async move {
-            let started = Instant::now();
-            let selected: Result<()> = async {
-                let owner = semantic_lifecycle.ok_or_else(|| TraceDecayError::Config {
-                    message: "project semantic lifecycle owner is unavailable".to_owned(),
-                })?;
-                // Linked worktrees read and apply the same logical project's
-                // configuration under its one selection gate. A delayed open
-                // cannot replay a snapshot captured before another open.
-                if cancellation.is_cancelled() {
-                    return Err(project_open_cancellation_error());
-                }
-                let selection = owner.configuration_selection_guard().await;
-                if cancellation.is_cancelled() {
-                    return Err(project_open_cancellation_error());
-                }
-                let current = semantic_configuration_client
-                    .current()
-                    .await
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("semantic startup configuration unavailable: {error}"),
-                    })?;
-                if cancellation.is_cancelled() {
-                    return Err(project_open_cancellation_error());
-                }
-                let owner = Arc::clone(&owner);
-                tokio::task::spawn_blocking(move || {
-                    let _selection = selection;
-                    owner.select_model(
-                        current.config().semantic.selected_model.as_deref(),
-                        current.config().semantic.auto_download && semantic_download_allowed,
-                    )
-                })
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("semantic startup worker failed: {error}"),
-                })?
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("semantic startup selection failed: {error:?}"),
-                })?;
-                Ok(())
-            }
-            .await;
-            match selected {
-                Ok(()) if !cancellation.is_cancelled() => {
-                    let _ = semantic_startup_schedulers
-                        .reschedule_semantic_generation(&semantic_startup_project)
-                        .await;
-                }
-                Ok(()) => {}
-                Err(error) => {
-                    tracing::warn!(%error, project = %semantic_startup_project.display(), "semantic startup selection unavailable");
-                }
-            }
-            log_project_open_phase(
-                &semantic_startup_project,
-                "semantic_config_selection_settled",
-                None,
-                started,
-            );
-    })
-}
-
-/// Dashboard-facing semantic status reader: whether this project committed
-/// semantic pins plus the runtime status resolved from current configuration.
-fn project_dashboard_explorer_semantic_reader(
-    configuration_client: Arc<tracedecay_configuration::ProductionConfigurationDaemonClient>,
-) -> tracedecay_dashboard_api::ExplorerSemanticReader {
-    Arc::new(move |project_root: std::path::PathBuf| {
-        let configuration_client = Arc::clone(&configuration_client);
-        Box::pin(async move {
-            let activated =
-                tracedecay_application::semantic_runtime::project_committed_semantic_pins(
-                    &project_root,
-                )
-                .is_some();
-            let configuration = configuration_client
-                .current()
-                .await
-                .ok()
-                .and_then(|pinned| {
-                    tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
-                        &pinned.into_current_state(),
-                    )
-                    .ok()
-                });
-            let status = Some(
-                tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
-                    Some(&project_root),
-                    configuration,
-                ),
-            );
-            tracedecay_dashboard_api::ExplorerSemanticReadV1 { activated, status }
-        })
-    })
-}
-
 /// Look this route up in the published project-server cache, refreshing its
 /// recency on a hit. Callers reuse the returned server instead of opening.
 async fn cached_route_server(
@@ -1823,12 +1619,9 @@ fn cached_project_composition(
     canonical_project_path: &Path,
     key: ProjectServerKey,
     server: Arc<crate::mcp::McpServer>,
-    semantic_auto_download_enabled: Option<bool>,
 ) -> ProductionProjectComposition {
     #[cfg(not(unix))]
     let _ = key;
-    #[cfg(not(any(test, feature = "test-transport")))]
-    let _ = semantic_auto_download_enabled;
     ProductionProjectComposition {
         #[cfg(unix)]
         key,
@@ -1836,83 +1629,7 @@ fn cached_project_composition(
         server,
         #[cfg(unix)]
         inserted: false,
-        #[cfg(any(test, feature = "test-transport"))]
-        semantic_auto_download_enabled,
     }
-}
-
-/// Semantic-code choices this route resolves once from its authoritative
-/// runtime configuration.
-struct SemanticProjectRuntime {
-    handle: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
-    lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-    resources: SemanticResourceCeilings,
-    document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1,
-    auto_download_enabled: bool,
-}
-
-/// This route's semantic ceilings with its resident ceiling resolved once
-/// against the host.
-///
-/// Whether the operator pinned a ceiling is a value on the setting, never an
-/// inference from which configuration layer won. The predicate this replaced
-/// asked whether `semantic.runtime.v1` was still Default-layer, but activation
-/// writes the whole composed setting at the Project layer, so after the first
-/// activation every route saw a Project-layer winner and passed the struct
-/// default back as though the operator had chosen it — which discarded the
-/// host derivation for the rest of the daemon's life.
-fn route_semantic_resources(
-    semantic_config: &tracedecay_semantic_contracts::SemanticConfig,
-    admitted_process_bytes: u64,
-) -> (
-    SemanticResourceCeilings,
-    tracedecay_semantic::embedding_parallelism::SemanticResidentCeilingV1,
-) {
-    let mut resources = semantic_config.resources;
-    let resident_ceiling = tracedecay_semantic::embedding_parallelism::effective_resident_ceiling(
-        admitted_process_bytes,
-        resources,
-    );
-    resources.max_resident_bytes = Some(resident_ceiling.bytes);
-    (resources, resident_ceiling)
-}
-
-/// Derive this route's semantic runtime handle and startup choices. The
-/// composition runtime can veto auto-download even when configuration allows
-/// it, so both inputs are consulted here rather than at the use site.
-fn semantic_project_runtime(
-    runtime_configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
-    runtime: &ProductionProjectCompositionRuntime,
-    lifecycle: Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>,
-) -> Result<SemanticProjectRuntime> {
-    let semantic_config = &runtime_configuration.config().semantic;
-    let (semantic_resources, resident_ceiling) = route_semantic_resources(
-        semantic_config,
-        runtime.resident_memory_admission_limit_bytes(),
-    );
-    // The configured ceiling still caps concurrency; this only narrows it to
-    // what the serving reservation leaves room for and adds one slot so an
-    // interactive query keeps a warm session while a rebuild holds the rest.
-    let handle = tracedecay_semantic::DaemonSemanticRuntimeHandleV1::new(
-        tracedecay_semantic::embedding_parallelism::embedding_pool_sessions(
-            semantic_resources.max_threads,
-            semantic_resources.max_concurrent_sessions,
-        ),
-        usize::try_from(resident_ceiling.bytes / 4096)
-            .unwrap_or(usize::MAX)
-            .max(semantic_resources.max_batch_size as usize),
-        resident_ceiling.bytes,
-    )
-    .map_err(|_| TraceDecayError::Config {
-        message: "semantic runtime resource ceilings are invalid".to_owned(),
-    })?;
-    Ok(SemanticProjectRuntime {
-        handle,
-        lifecycle: Some(lifecycle),
-        resources: semantic_resources,
-        document_composition: semantic_config.document_composition,
-        auto_download_enabled: semantic_config.auto_download && runtime.semantic_auto_download(),
-    })
 }
 
 /// Every exact-scope code-index port this route publishes to its MCP servers.
@@ -2178,98 +1895,4 @@ async fn retire_failed_project_open_owner(
         Some(Arc::clone(route_registered)),
     )
     .await;
-}
-
-#[cfg(test)]
-mod semantic_resident_ceiling_tests {
-    use tracedecay_semantic::embedding_parallelism::SemanticResidentCeilingSourceV1;
-    use tracedecay_semantic_contracts::{
-        DEFAULT_FASTEMBED_MODEL_ID, DEFAULT_SEMANTIC_RESIDENT_BYTES, SemanticConfig,
-        SemanticProfileSelection,
-    };
-
-    use super::route_semantic_resources;
-
-    const GIB: u64 = 1024 * 1024 * 1024;
-    /// `default_resident_ceiling_for` gives a 96 GiB host an eighth of its
-    /// admitted process memory.
-    const ADMITTED_PROCESS_BYTES: u64 = 96 * GIB;
-    const HOST_DERIVED_CEILING: u64 = 12 * GIB;
-
-    /// The `semantic.runtime.v1` bytes the activation journey writes at the
-    /// Project layer for an operator who never pinned a resident ceiling.
-    ///
-    /// `compose_activated_semantic_config` composes the accepted profile over
-    /// the *effective* configuration, which for such an operator is the
-    /// registry default, then `semantic_activation` serializes the whole
-    /// result as one Project-layer `Set`. Round-tripping through that text is
-    /// the load-bearing part: it is where a struct default would become
-    /// indistinguishable from an operator's choice.
-    fn activated_project_layer_setting() -> String {
-        let artifact_digest = "ab".repeat(32);
-        let activated = SemanticConfig {
-            selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
-            active_profile: Some(SemanticProfileSelection {
-                profile_id: "hybrid-conservative".to_owned(),
-                accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
-                    "sha256:{artifact_digest}"
-                ))
-                .expect("accepted profile digest"),
-                artifact_digest,
-                artifact_path: if cfg!(windows) {
-                    std::path::PathBuf::from("C:\\models\\model.onnx")
-                } else {
-                    std::path::PathBuf::from("/models/model.onnx")
-                },
-            }),
-            ..SemanticConfig::default()
-        };
-        activated.validate().expect("activated semantic settings");
-        serde_json::to_string(&activated).expect("activated semantic runtime text")
-    }
-
-    /// Audit finding B1: the host-derived ceiling must survive activation.
-    ///
-    /// Before this, "the operator chose a ceiling" was inferred from the
-    /// winning provenance layer, and activation makes every route read a
-    /// Project-layer winner — so the struct default was handed back as an
-    /// operator choice and the derivation was discarded forever.
-    #[test]
-    fn a_project_layer_activation_write_keeps_the_host_derived_ceiling() {
-        let activated: SemanticConfig =
-            serde_json::from_str(&activated_project_layer_setting()).expect("activated settings");
-        assert_eq!(
-            activated.resources.max_resident_bytes, None,
-            "activation must not materialize a ceiling the operator never chose"
-        );
-
-        let (resources, ceiling) = route_semantic_resources(&activated, ADMITTED_PROCESS_BYTES);
-
-        assert_eq!(ceiling.source, SemanticResidentCeilingSourceV1::HostDerived);
-        assert_eq!(ceiling.bytes, HOST_DERIVED_CEILING);
-        assert_eq!(resources.max_resident_bytes, Some(HOST_DERIVED_CEILING));
-        assert_ne!(
-            ceiling.bytes, DEFAULT_SEMANTIC_RESIDENT_BYTES,
-            "the shipped 2 GiB struct default is not a host derivation"
-        );
-    }
-
-    /// The other half of the same contract: a ceiling the operator really did
-    /// pin is a value, and survives untouched on a host that would derive a
-    /// larger one.
-    #[test]
-    fn an_operator_pinned_ceiling_survives_the_host_derivation() {
-        let mut pinned: SemanticConfig =
-            serde_json::from_str(&activated_project_layer_setting()).expect("activated settings");
-        pinned.resources.max_resident_bytes = Some(3 * GIB);
-        pinned.validate().expect("pinned semantic settings");
-
-        let (resources, ceiling) = route_semantic_resources(&pinned, ADMITTED_PROCESS_BYTES);
-
-        assert_eq!(
-            ceiling.source,
-            SemanticResidentCeilingSourceV1::OperatorPinned
-        );
-        assert_eq!(resources.max_resident_bytes, Some(3 * GIB));
-    }
 }

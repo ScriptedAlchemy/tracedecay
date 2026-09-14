@@ -12,9 +12,9 @@ use tracedecay_graph_db::{
     VerifiedGraphSnapshot,
 };
 use tracedecay_store::{
-    FactReadControl, ProjectId, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1,
-    StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    FactReadControl, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1,
+    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1, StoreRuntimeBindingV1,
+    VerifiedStoreLocatorV1,
 };
 
 struct CancelledSnapshotProbe {
@@ -1162,51 +1162,6 @@ async fn graph_publication_storage_retains_the_issuing_client_token() {
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("graph publication storage must retain its issuing client token");
-    };
-    assert!(refusal.blockers().iter().any(|blocker| matches!(
-        blocker,
-        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
-            count: 1,
-            ..
-        }
-    )));
-    drop(refusal);
-
-    drop(storage);
-    assert!(owner.issue_lease().is_ok());
-}
-
-#[tokio::test]
-async fn semantic_vector_staging_retains_the_issuing_client_token() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("project.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "semantic staging guard").unwrap();
-    let fixture = Database::publish_registered_test_runtime_with_retirement_control(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestDatabaseRuntimeScope::Project {
-            project_id: ProjectId::try_from("project.semantic-guard".to_owned()).unwrap(),
-        },
-    )
-    .await
-    .unwrap();
-    let (owner, runtime, control) = fixture.into_parts();
-    drop(runtime);
-
-    let database = owner.issue_lease().unwrap();
-    let storage = database.semantic_vector_publication_authority().unwrap();
-    drop(database);
-
-    let target = owner
-        .reserve_retirement()
-        .unwrap()
-        .into_store_retirement_target()
-        .unwrap();
-    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
-        control.registry().reserve_retirement_batch(vec![target])
-    else {
-        panic!("semantic staging must retain its issuing client token");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,

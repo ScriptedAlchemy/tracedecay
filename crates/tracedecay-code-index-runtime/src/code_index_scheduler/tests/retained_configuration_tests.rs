@@ -65,7 +65,6 @@ async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("restart over retained generation");

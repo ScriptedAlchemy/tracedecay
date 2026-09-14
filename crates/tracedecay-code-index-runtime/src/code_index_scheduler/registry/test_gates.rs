@@ -7,7 +7,6 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 use super::super::{
@@ -15,13 +14,11 @@ use super::super::{
 };
 use super::{
     CodeIndexSchedulerRegistryV1, ColdMountOpenEventV1, ColdMountOpenTestControlV1,
-    ColdMountPostCheckTestControlV1, ExistingSemanticScheduleReplacementGateV1,
-    PendingWakeDropGateTestV1, PendingWakeV1, PublishedTextProjectionGateV1,
-    QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
+    ColdMountPostCheckTestControlV1, PendingWakeDropGateTestV1, PendingWakeV1,
+    PublishedTextProjectionGateV1, QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
     ServingGenerationRollbackOutcomeV1, cold_mount_admission_barriers, cold_mount_open_controls,
-    cold_mount_post_check_controls, existing_semantic_schedule_replacement_gate,
-    published_text_projection_gate, query_admission_controls, unique_mounted_for_scope,
-    wait_notified_if_unset,
+    cold_mount_post_check_controls, published_text_projection_gate, query_admission_controls,
+    unique_mounted_for_scope, wait_notified_if_unset,
 };
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -60,42 +57,6 @@ impl CodeIndexSchedulerRegistryV1 {
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;
-        }
-    }
-
-    #[cfg(test)]
-    pub async fn observe_next_existing_semantic_schedule_replacement(
-        &self,
-        project_root: PathBuf,
-    ) -> tokio::sync::oneshot::Receiver<()> {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let mut gate = existing_semantic_schedule_replacement_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            gate.is_none(),
-            "only one existing semantic schedule replacement gate may be armed at a time"
-        );
-        *gate = Some(ExistingSemanticScheduleReplacementGateV1 {
-            project_root,
-            entered,
-        });
-        entered_observed
-    }
-
-    #[cfg(test)]
-    pub(super) fn observe_existing_semantic_schedule_replacement(project_root: &Path) {
-        let gate = {
-            let mut armed = existing_semantic_schedule_replacement_gate()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let matches_root = armed
-                .as_ref()
-                .is_some_and(|gate| gate.project_root == project_root);
-            if matches_root { armed.take() } else { None }
-        };
-        if let Some(gate) = gate {
-            let _ = gate.entered.send(());
         }
     }
 
@@ -150,25 +111,6 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-    }
-
-    #[cfg(test)]
-    pub async fn expire_source_freshness_for_test(&self, project_root: &Path) {
-        let project_root = project_root.canonicalize().expect("canonical test root");
-        let mounted = self.mounted.lock().await;
-        let worktree = mounted.get(&project_root).expect("mounted test worktree");
-        worktree
-            .source_freshness
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .staleness_threshold = Duration::ZERO;
-        worktree
-            .scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .policy
-            .staleness_threshold = Duration::ZERO;
     }
 
     #[cfg(test)]

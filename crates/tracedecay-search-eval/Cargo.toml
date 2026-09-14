@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "TraceDecay search-quality evaluator: candidate generation, direct evaluation, and native semantic measurement"
+description = "TraceDecay search-quality evaluator: exact/lexical/graph candidate generation and direct evaluation"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/assets/**", "/src/**"]
 
@@ -17,12 +17,9 @@ serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["eval-helpers"] }
-tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0", features = ["search-eval"] }
@@ -38,7 +35,7 @@ controlled-workload-hotpath = ["hotpath/hotpath"]
 # `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
 # feature exists only for the `cfg(feature = "hotpath")` sites in this crate
 # that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath", "hotpath/tokio"]
+hotpath = ["hotpath/hotpath"]
 # Language tiers forwarded to the code-index owner the evaluator mounts. Off by
 # default so a composing binary keeps its own tier selection authoritative; the
 # checked-in evaluator corpus is Rust, so the crate's own tests enable `lite`

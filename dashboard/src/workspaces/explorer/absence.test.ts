@@ -27,7 +27,6 @@ const SOURCE_LABELS = {
   code_graph: 'Code graph',
   sessions: 'Sessions',
   knowledge: 'Knowledge',
-  semantic: 'Semantic',
 } as const;
 
 function source(id: keyof typeof SOURCE_LABELS, over: Record<string, unknown> = {}) {
@@ -48,27 +47,6 @@ function source(id: keyof typeof SOURCE_LABELS, over: Record<string, unknown> = 
   };
 }
 
-/** The live semantic source today: not activated, typed absent, with the
- * complete accounting of an empty domain its constructor carries. */
-function semanticAbsent(over: Record<string, unknown> = {}) {
-  return source('semantic', {
-    outcome: 'absent',
-    completed_units: 0,
-    total_units: 0,
-    coverage: coverage({
-      eligible: 0,
-      examined: 0,
-      matched: 0,
-      denominator: 0,
-      unit: 'indexed vectors',
-    }),
-    error_code: 'semantic_not_activated',
-    message: 'semantic search is not activated for this project',
-    page: null,
-    ...over,
-  });
-}
-
 /** Parsed through the real schema, so a fixture that the contract would reject
  * cannot quietly prove anything here. */
 function run(sources: unknown[], finality: 'complete' | 'partial' = 'complete') {
@@ -78,7 +56,7 @@ function run(sources: unknown[], finality: 'complete' | 'partial' = 'complete') 
     request_revision: 'explorer-query-request-v1',
     plan_revision: 'explorer-query-plan-v1',
     merge_revision: 'source-local-no-merge-v1',
-    required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
+    required_source_ids: ['code_graph', 'sessions', 'knowledge'],
     ordering_policy: 'source_local_no_cross_source_merge',
     explanation: 'test',
     submitted_at_micros: 1,
@@ -92,71 +70,11 @@ function run(sources: unknown[], finality: 'complete' | 'partial' = 'complete') 
 
 describe('absenceVerdict', () => {
   it('confirms absence when every source examined its full denominator', () => {
-    // The semantic source rides along as the live typed absence: complete
-    // coverage of an empty domain must not block absence the way a failed
-    // read does — otherwise absence claims are permanently unearnable in the
-    // default install, where semantic search is not activated.
     const verdict = absenceVerdict(
-      run([source('code_graph'), source('sessions'), source('knowledge'), semanticAbsent()]),
+      run([source('code_graph'), source('sessions'), source('knowledge')]),
     );
     expect(verdict.confirmed).toBe(true);
     expect(verdict.quality).toBe('measured');
-  });
-
-  it('refuses an absence claim from an absent source without complete-zero accounting', () => {
-    const verdict = absenceVerdict(
-      run([
-        source('code_graph'),
-        source('sessions'),
-        source('knowledge'),
-        semanticAbsent({
-          coverage: coverage({
-            completeness: 'unknown',
-            eligible: null,
-            examined: null,
-            matched: null,
-            excluded: null,
-            omitted: null,
-            unknown: null,
-            denominator: null,
-            unit: 'indexed vectors',
-          }),
-        }),
-      ]),
-    );
-    expect(verdict.confirmed).toBe(false);
-    expect(verdict.confirmed === false && verdict.reason).toBe(
-      'Semantic reports unknown coverage',
-    );
-  });
-
-  it('blocks absence while the semantic provider is still indexing', () => {
-    const verdict = absenceVerdict(
-      run([
-        source('code_graph'),
-        source('sessions'),
-        source('knowledge'),
-        source('semantic', {
-          outcome: 'indexing',
-          completed_units: 3,
-          total_units: 10,
-          coverage: coverage({
-            completeness: 'partial',
-            eligible: 10,
-            examined: 3,
-            denominator: 10,
-            unit: 'semantic units',
-            omission_reasons: ['semantic vector projection is in progress'],
-          }),
-          error_code: 'semantic_indexing',
-          page: null,
-        }),
-      ]),
-    );
-    expect(verdict.confirmed).toBe(false);
-    expect(verdict.confirmed === false && verdict.reason).toBe(
-      'Semantic is still building its index',
-    );
   });
 
   it('blocks absence when a source answered with omitted records', () => {
@@ -168,7 +86,6 @@ describe('absenceVerdict', () => {
           error_code: 'lcm_temporal_read_incomplete',
         }),
         source('knowledge'),
-        semanticAbsent(),
       ]),
     );
     expect(verdict.confirmed).toBe(false);

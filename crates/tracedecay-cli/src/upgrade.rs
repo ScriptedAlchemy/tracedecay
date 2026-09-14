@@ -2,9 +2,8 @@
 //!
 //! Direct installs use GitHub release assets: the platform archive is
 //! verified against the release's `SHA256SUMS`, every required release member
-//! (the executable plus the runtime companions the executable resolves beside
-//! itself) is staged in an attempt-owned scratch directory, and only then is
-//! the bundle published around the running executable. Installations owned by
+//! (the executable alone) is staged in an attempt-owned scratch directory, and
+//! only then is it published over the running executable. Installations owned by
 //! a package manager (Homebrew, Scoop) are upgraded by that manager and never
 //! written to directly; see [`UpgradeSource`].
 //! Beta and stable are separate channels — a beta build only sees beta
@@ -27,32 +26,15 @@ use tracedecay_session_memory::user_config::UserConfig;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 
-/// Kind of a required release-archive member.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReleaseMemberKind {
-    /// The `tracedecay` entry point; published last, mode `0755`.
-    Executable,
-    /// A runtime file the executable resolves beside itself (`$ORIGIN`);
-    /// published before the entry point, mode `0644`.
-    Companion,
-}
-
-/// One member every release archive for this platform must carry.
+/// One member every release archive for this platform must carry. Every
+/// required member is an entry point published with [`RELEASE_MEMBER_MODE`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ReleaseMember {
     name: &'static str,
-    kind: ReleaseMemberKind,
 }
 
-impl ReleaseMember {
-    #[cfg(unix)]
-    const fn mode(self) -> u32 {
-        match self.kind {
-            ReleaseMemberKind::Executable => 0o755,
-            ReleaseMemberKind::Companion => 0o644,
-        }
-    }
-}
+#[cfg(unix)]
+const RELEASE_MEMBER_MODE: u32 = 0o755;
 
 const EXECUTABLE_MEMBER: ReleaseMember = ReleaseMember {
     name: if cfg!(windows) {
@@ -60,33 +42,16 @@ const EXECUTABLE_MEMBER: ReleaseMember = ReleaseMember {
     } else {
         "tracedecay"
     },
-    kind: ReleaseMemberKind::Executable,
 };
 
-/// Runtime companions the Linux release archives carry beside the executable:
-/// the ONNX Runtime the binary is linked against with an `$ORIGIN` rpath and
-/// that library's redistribution notices. These are the `entry_name`s the
-/// Linux targets in `.github/release-targets.json` declare; the unit test
-/// `required_members_match_the_release_target_manifest` pins the two together
-/// so the installer and the packaging step cannot disagree about what a
-/// complete release is. Other platforms ship the executable alone.
-#[cfg(target_os = "linux")]
-const RUNTIME_COMPANIONS: &[&str] = &[
-    "libonnxruntime.so.1",
-    "onnxruntime-LICENSE",
-    "onnxruntime-ThirdPartyNotices.txt",
-];
-#[cfg(not(target_os = "linux"))]
-const RUNTIME_COMPANIONS: &[&str] = &[];
-
-/// Every member a release archive for this platform must contain.
+/// Every member a release archive must contain: the executable alone, on
+/// every platform. The unit test
+/// `required_members_match_the_release_target_manifest` pins this to
+/// `.github/release-targets.json` declaring no runtime companions, so the
+/// installer and the packaging step cannot disagree about what a complete
+/// release is.
 fn required_members() -> Vec<ReleaseMember> {
-    std::iter::once(EXECUTABLE_MEMBER)
-        .chain(RUNTIME_COMPANIONS.iter().map(|name| ReleaseMember {
-            name,
-            kind: ReleaseMemberKind::Companion,
-        }))
-        .collect()
+    vec![EXECUTABLE_MEMBER]
 }
 
 /// A verified release whose required members sit in an attempt-owned scratch
@@ -95,7 +60,6 @@ fn required_members() -> Vec<ReleaseMember> {
 #[derive(Debug)]
 struct StagedRelease {
     scratch: TempDir,
-    members: Vec<ReleaseMember>,
 }
 
 impl StagedRelease {
@@ -105,13 +69,6 @@ impl StagedRelease {
 
     fn executable(&self) -> PathBuf {
         self.path_of(EXECUTABLE_MEMBER)
-    }
-
-    fn companions(&self) -> impl Iterator<Item = ReleaseMember> + '_ {
-        self.members
-            .iter()
-            .copied()
-            .filter(|member| member.kind == ReleaseMemberKind::Companion)
     }
 }
 
@@ -409,10 +366,7 @@ fn stage_release_in(
     extract_zip(io::BufReader::new(archive), scratch.path(), members)?;
 
     eprintln!(" Done");
-    Ok(StagedRelease {
-        scratch,
-        members: members.to_vec(),
-    })
+    Ok(StagedRelease { scratch })
 }
 
 /// The required member an archive entry path names, if any. Release archives
@@ -459,7 +413,7 @@ fn stage_member(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(member.mode()))
+        file.set_permissions(std::fs::Permissions::from_mode(RELEASE_MEMBER_MODE))
             .map_err(io_err("cannot set staged member permissions"))?;
     }
     staged.push(member.name);
@@ -576,23 +530,13 @@ fn publish_release(staged: &StagedRelease) -> Result<Option<PathBuf>> {
     }
 }
 
-/// Publishes a staged release with `executable` as its entry point.
-/// Companions are renamed into the executable's directory first so the new
-/// entry point never appears without the runtime it resolves beside itself;
-/// the executable is replaced last.
+/// Publishes a staged release by replacing `executable` with its entry point.
 #[cfg(unix)]
 fn publish_release_at(staged: &StagedRelease, executable: &Path) -> Result<()> {
-    let install_dir = executable.parent().ok_or_else(|| TraceDecayError::Config {
+    executable.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine the running executable's directory".into(),
     })?;
-    for member in staged.companions() {
-        publish_member(
-            &staged.path_of(member),
-            &install_dir.join(member.name),
-            member.mode(),
-        )?;
-    }
-    publish_member(&staged.executable(), executable, EXECUTABLE_MEMBER.mode())
+    publish_member(&staged.executable(), executable, RELEASE_MEMBER_MODE)
 }
 
 /// Outcome of an upgrade attempt that completed without error.
@@ -1682,9 +1626,8 @@ mod tests {
     }
 
     /// The installer's idea of a complete release must be the packaging
-    /// step's: the companions it requires are exactly the runtime
-    /// `entry_name`s `.github/release-targets.json` declares for this
-    /// platform (none when the platform has no runtime, or no release target).
+    /// step's: `.github/release-targets.json` declares no runtime companions
+    /// for this platform, so the executable is the whole release.
     #[test]
     fn required_members_match_the_release_target_manifest() {
         let manifest_path =
@@ -1697,18 +1640,12 @@ mod tests {
             .iter()
             .find(|target| target["name"] == current_platform());
 
-        let mut expected: Vec<&str> = Vec::new();
-        if let Some(runtime) = target.and_then(|target| target.get("runtime")) {
-            expected.push(runtime["entry_name"].as_str().unwrap());
-            for notice in runtime["notices"].as_array().unwrap() {
-                expected.push(notice["entry_name"].as_str().unwrap());
-            }
-        }
-
-        assert_eq!(RUNTIME_COMPANIONS, expected.as_slice());
-        let members = required_members();
-        assert_eq!(members[0], EXECUTABLE_MEMBER);
-        assert_eq!(members.len(), 1 + RUNTIME_COMPANIONS.len());
+        assert_eq!(
+            target.and_then(|target| target.get("runtime")),
+            None,
+            "release targets must not declare runtime companions"
+        );
+        assert_eq!(required_members(), vec![EXECUTABLE_MEMBER]);
     }
 
     #[cfg(unix)]
@@ -1724,23 +1661,13 @@ mod tests {
         use tar::{Builder, EntryType, Header};
 
         use super::super::{
-            EXECUTABLE_MEMBER, ReleaseDownload, ReleaseMember, ReleaseMemberKind, StagedRelease,
+            EXECUTABLE_MEMBER, RELEASE_MEMBER_MODE, ReleaseDownload, ReleaseMember, StagedRelease,
             extract_targz, intended_member, publish_member, publish_release_at, stage_release_in,
         };
 
-        const RUNTIME: ReleaseMember = ReleaseMember {
-            name: "libonnxruntime.so.1",
-            kind: ReleaseMemberKind::Companion,
-        };
-        const LICENSE: ReleaseMember = ReleaseMember {
-            name: "onnxruntime-LICENSE",
-            kind: ReleaseMemberKind::Companion,
-        };
-
-        /// The Linux release contract, independent of the test host so the
-        /// companion path is exercised on every Unix.
-        fn linux_members() -> Vec<ReleaseMember> {
-            vec![EXECUTABLE_MEMBER, RUNTIME, LICENSE]
+        /// The release contract every platform shares: the executable alone.
+        fn members() -> Vec<ReleaseMember> {
+            vec![EXECUTABLE_MEMBER]
         }
 
         struct Entry {
@@ -1775,20 +1702,13 @@ mod tests {
         }
 
         fn complete_release() -> Vec<u8> {
-            targz(&[
-                file("tracedecay", b"new-executable"),
-                file("libonnxruntime.so.1", b"new-runtime"),
-                file("onnxruntime-LICENSE", b"license"),
-            ])
+            targz(&[file("tracedecay", b"new-executable")])
         }
 
         fn stage(archive: &[u8], members: &[ReleaseMember]) -> super::super::Result<StagedRelease> {
             let scratch = tempfile::tempdir().unwrap();
             extract_targz(Cursor::new(archive), scratch.path(), members)?;
-            Ok(StagedRelease {
-                scratch,
-                members: members.to_vec(),
-            })
+            Ok(StagedRelease { scratch })
         }
 
         fn mode_of(path: &std::path::Path) -> u32 {
@@ -1796,55 +1716,35 @@ mod tests {
         }
 
         #[test]
-        fn extraction_stages_every_required_member_with_its_publication_mode() {
-            let staged = stage(&complete_release(), &linux_members()).unwrap();
+        fn extraction_stages_the_executable_with_its_publication_mode() {
+            let staged = stage(&complete_release(), &members()).unwrap();
 
             assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
-            assert_eq!(mode_of(&staged.executable()), 0o755);
-            assert_eq!(fs::read(staged.path_of(RUNTIME)).unwrap(), b"new-runtime");
-            assert_eq!(mode_of(&staged.path_of(RUNTIME)), 0o644);
-            assert_eq!(fs::read(staged.path_of(LICENSE)).unwrap(), b"license");
-            assert_eq!(
-                staged.companions().collect::<Vec<_>>(),
-                vec![RUNTIME, LICENSE]
-            );
+            assert_eq!(mode_of(&staged.executable()), RELEASE_MEMBER_MODE);
         }
 
         #[test]
-        fn a_release_missing_its_runtime_companion_is_rejected() {
-            let executable_only = targz(&[file("tracedecay", b"new-executable")]);
+        fn a_release_missing_its_executable_is_rejected() {
+            let no_executable = targz(&[file("README", b"unrequested")]);
 
-            let error = stage(&executable_only, &linux_members()).unwrap_err();
+            let error = stage(&no_executable, &members()).unwrap_err();
 
             let message = error.to_string();
             assert!(
-                message.contains(
-                    "missing required member(s): libonnxruntime.so.1, onnxruntime-LICENSE"
-                ),
+                message.contains("missing required member(s): tracedecay"),
                 "{message}"
             );
-        }
-
-        #[test]
-        fn an_executable_only_release_satisfies_a_platform_without_companions() {
-            let executable_only = targz(&[file("tracedecay", b"new-executable")]);
-
-            let staged = stage(&executable_only, &[EXECUTABLE_MEMBER]).unwrap();
-
-            assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
-            assert_eq!(staged.companions().count(), 0);
         }
 
         #[test]
         fn duplicate_executable_entries_are_ambiguous_not_a_choice() {
             let duplicated = targz(&[
                 file("tracedecay", b"first"),
-                file("libonnxruntime.so.1", b"runtime"),
-                file("onnxruntime-LICENSE", b"license"),
+                file("README", b"unrequested"),
                 file("tracedecay", b"second"),
             ]);
 
-            let error = stage(&duplicated, &linux_members()).unwrap_err();
+            let error = stage(&duplicated, &members()).unwrap_err();
 
             assert!(
                 error
@@ -1856,22 +1756,18 @@ mod tests {
 
         #[test]
         fn a_required_member_that_is_not_a_regular_file_is_rejected() {
-            let symlinked_runtime = targz(&[
-                file("tracedecay", b"new-executable"),
-                Entry {
-                    path: "libonnxruntime.so.1",
-                    contents: b"",
-                    kind: EntryType::Symlink,
-                },
-                file("onnxruntime-LICENSE", b"license"),
-            ]);
+            let symlinked_executable = targz(&[Entry {
+                path: "tracedecay",
+                contents: b"",
+                kind: EntryType::Symlink,
+            }]);
 
-            let error = stage(&symlinked_runtime, &linux_members()).unwrap_err();
+            let error = stage(&symlinked_executable, &members()).unwrap_err();
 
             assert!(
                 error
                     .to_string()
-                    .contains("'libonnxruntime.so.1' is not a regular file"),
+                    .contains("'tracedecay' is not a regular file"),
                 "{error}"
             );
         }
@@ -1880,14 +1776,14 @@ mod tests {
         fn only_flat_entries_can_name_a_required_member() {
             use std::path::Path;
 
-            let members = linux_members();
+            let members = members();
             assert_eq!(
                 intended_member(Path::new("tracedecay"), &members),
                 Some(EXECUTABLE_MEMBER)
             );
             assert_eq!(
-                intended_member(Path::new("./libonnxruntime.so.1"), &members),
-                Some(RUNTIME)
+                intended_member(Path::new("./tracedecay"), &members),
+                Some(EXECUTABLE_MEMBER)
             );
             assert_eq!(intended_member(Path::new("bin/tracedecay"), &members), None);
             assert_eq!(intended_member(Path::new("../tracedecay"), &members), None);
@@ -1901,22 +1797,16 @@ mod tests {
             let archive = targz(&[
                 file("tracedecay", b"new-executable"),
                 file("bin/tracedecay", b"nested-decoy"),
-                file("libonnxruntime.so.1", b"runtime"),
-                file("onnxruntime-LICENSE", b"license"),
                 file("README", b"unrequested"),
             ]);
 
-            extract_targz(Cursor::new(&archive[..]), scratch.path(), &linux_members()).unwrap();
+            extract_targz(Cursor::new(&archive[..]), scratch.path(), &members()).unwrap();
 
-            let mut staged: Vec<String> = fs::read_dir(scratch.path())
+            let staged: Vec<String> = fs::read_dir(scratch.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            staged.sort();
-            assert_eq!(
-                staged,
-                ["libonnxruntime.so.1", "onnxruntime-LICENSE", "tracedecay"]
-            );
+            assert_eq!(staged, ["tracedecay"]);
             assert_eq!(
                 fs::read(scratch.path().join("tracedecay")).unwrap(),
                 b"new-executable"
@@ -1924,69 +1814,39 @@ mod tests {
         }
 
         #[test]
-        fn publishing_places_companions_where_the_executable_resolves_them() {
-            let staged = stage(&complete_release(), &linux_members()).unwrap();
+        fn publishing_replaces_the_executable_and_leaves_no_staging_sibling() {
+            let staged = stage(&complete_release(), &members()).unwrap();
             let install = tempfile::tempdir().unwrap();
             let executable = install.path().join("tracedecay");
             fs::write(&executable, b"old-executable").unwrap();
-            fs::write(install.path().join("libonnxruntime.so.1"), b"old-runtime").unwrap();
 
             publish_release_at(&staged, &executable).unwrap();
 
             assert_eq!(fs::read(&executable).unwrap(), b"new-executable");
-            assert_eq!(mode_of(&executable), 0o755);
-            let runtime = install.path().join("libonnxruntime.so.1");
-            assert_eq!(fs::read(&runtime).unwrap(), b"new-runtime");
-            assert_eq!(mode_of(&runtime), 0o644);
-            assert_eq!(
-                fs::read(install.path().join("onnxruntime-LICENSE")).unwrap(),
-                b"license"
-            );
-            let mut published: Vec<String> = fs::read_dir(install.path())
+            assert_eq!(mode_of(&executable), RELEASE_MEMBER_MODE);
+            let published: Vec<String> = fs::read_dir(install.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            published.sort();
             assert_eq!(
                 published,
-                ["libonnxruntime.so.1", "onnxruntime-LICENSE", "tracedecay"],
+                ["tracedecay"],
                 "no staging sibling may outlive publication"
             );
         }
 
         #[test]
-        fn a_companion_that_cannot_be_published_leaves_the_old_executable_in_place() {
-            let staged = stage(&complete_release(), &linux_members()).unwrap();
-            let install = tempfile::tempdir().unwrap();
-            let executable = install.path().join("tracedecay");
-            fs::write(&executable, b"old-executable").unwrap();
-            fs::create_dir(install.path().join("libonnxruntime.so.1")).unwrap();
-
-            let error = publish_release_at(&staged, &executable).unwrap_err();
-
-            assert!(
-                error.to_string().contains("cannot replace release member"),
-                "{error}"
-            );
-            assert_eq!(
-                fs::read(&executable).unwrap(),
-                b"old-executable",
-                "companions publish before the entry point, so a companion failure never \
-                 leaves a new executable beside an old runtime"
-            );
-        }
-
-        #[test]
-        fn a_failed_companion_publication_leaves_the_target_untouched() {
-            let staged = stage(&complete_release(), &linux_members()).unwrap();
+        fn a_failed_member_publication_leaves_the_target_untouched() {
+            let staged = stage(&complete_release(), &members()).unwrap();
             let install = tempfile::tempdir().unwrap();
             // The target name is occupied by a directory, so the rename over it
             // must fail after the sibling was fully staged.
-            let occupied = install.path().join("libonnxruntime.so.1");
+            let occupied = install.path().join("tracedecay");
             fs::create_dir(&occupied).unwrap();
             fs::write(occupied.join("marker"), b"keep").unwrap();
 
-            let error = publish_member(&staged.path_of(RUNTIME), &occupied, 0o644).unwrap_err();
+            let error =
+                publish_member(&staged.executable(), &occupied, RELEASE_MEMBER_MODE).unwrap_err();
 
             assert!(
                 error.to_string().contains("cannot replace release member"),
@@ -1996,7 +1856,7 @@ mod tests {
             let leftovers: Vec<_> = fs::read_dir(install.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
-                .filter(|name| name != "libonnxruntime.so.1")
+                .filter(|name| name != "tracedecay")
                 .collect();
             assert!(
                 leftovers.is_empty(),
@@ -2074,7 +1934,7 @@ mod tests {
             let download = download(&base, archive.len() as u64, manifest.len() as u64);
 
             let staged =
-                stage_release_in(scratch_in(parent.path()), &download, &linux_members()).unwrap();
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap();
 
             assert!(staged.scratch.path().starts_with(parent.path()));
             assert_eq!(
@@ -2083,7 +1943,6 @@ mod tests {
                 "the verified bytes are the ones extracted"
             );
             assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
-            assert_eq!(fs::read(staged.path_of(RUNTIME)).unwrap(), b"new-runtime");
             drop(staged);
             assert!(
                 is_empty_dir(parent.path()),
@@ -2102,8 +1961,8 @@ mod tests {
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64 - 1, manifest.len() as u64);
 
-            let error = stage_release_in(scratch_in(parent.path()), &download, &linux_members())
-                .unwrap_err();
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
 
             assert!(error.to_string().contains("exceeds the"), "{error}");
             assert!(
@@ -2123,8 +1982,8 @@ mod tests {
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64 + 1, manifest.len() as u64);
 
-            let error = stage_release_in(scratch_in(parent.path()), &download, &linux_members())
-                .unwrap_err();
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
 
             assert!(error.to_string().contains("ended after"), "{error}");
             assert!(is_empty_dir(parent.path()));
@@ -2141,8 +2000,8 @@ mod tests {
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64, manifest.len() as u64);
 
-            let error = stage_release_in(scratch_in(parent.path()), &download, &linux_members())
-                .unwrap_err();
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
 
             assert!(error.to_string().contains("checksum mismatch"), "{error}");
             assert!(is_empty_dir(parent.path()));
@@ -2159,8 +2018,8 @@ mod tests {
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64, manifest.len() as u64 - 1);
 
-            let error = stage_release_in(scratch_in(parent.path()), &download, &linux_members())
-                .unwrap_err();
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
 
             assert!(
                 error.to_string().contains("checksum manifest exceeds"),

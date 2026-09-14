@@ -12,8 +12,7 @@ use tracedecay_code_index::languages::LanguageRegistry;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationManifestV1, CodeSearchChunkGrainV1, ComponentVersion,
     CoverageSummaryV1, ExactTechnicalTermKindV1, GenerationSealV1, MAX_CHUNK_TEXT_BYTES,
-    PrivacyDomainId, ProjectionKeyV1, ProjectionKindV1, RepositoryId, SanitizationReceiptId,
-    SanitizerRevision, UtcMicros,
+    PrivacyDomainId, RepositoryId, SanitizationReceiptId, SanitizerRevision, UtcMicros,
 };
 
 use crate::support::{RUST_SOURCE, digest, id, registry, rust_descriptor, validated_rust_file};
@@ -359,15 +358,7 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
     );
     BaseCapabilityValidator::new()
         .authorize_privacy_domain(&privacy_domain, 7)
-        .validate_for_candidates(
-            &generation.generation_id,
-            &ProjectionKeyV1 {
-                kind: ProjectionKindV1::Lexical,
-                schema_revision: "lexical.v1".to_owned(),
-                profile_digest: digest('c'),
-            },
-            &first,
-        )
+        .validate_for_candidates(&generation.generation_id, &first)
         .expect("authorized lexical candidate production");
 
     let mut mixed_registry = generation.clone();

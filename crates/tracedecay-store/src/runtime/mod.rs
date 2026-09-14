@@ -19,7 +19,6 @@ mod outbox;
 mod ports;
 mod repository_read;
 mod scope_set;
-mod semantic_vector_staging;
 mod telemetry;
 
 pub use consistency::{
@@ -107,52 +106,6 @@ pub use repository_read::{
 pub use scope_set::{
     AuthorizedScopeSetRecordV1, MAX_AUTHORIZED_SCOPE_SET_BYTES_V1, ScopeSetCasOutcomeV1,
     ScopeSetCompareAndSwapV1, ScopeSetStoreContractError,
-};
-pub use semantic_vector_staging::{
-    MAX_SEMANTIC_VECTOR_ADOPTION_PAGE_RECORDS, MAX_SEMANTIC_VECTOR_CENSUS_PAGE_RECORDS,
-    MAX_SEMANTIC_VECTOR_EMBEDDING_DIMENSION, MAX_SEMANTIC_VECTOR_PENDING_EFFECT_PAGE_RECORDS,
-    MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH, MAX_SEMANTIC_VECTOR_STAGE_PAGE_RECORDS,
-    SemanticEmbeddingProjectionDigestV1, SemanticModelArtifactDigestV1,
-    SemanticPrivacyDomainDigestV1, SemanticProjectionManifestDigestV1,
-    SemanticVectorBatchInputDigest, SemanticVectorBatchOutputDigest,
-    SemanticVectorBatchReceiptDigest, SemanticVectorBuildId, SemanticVectorCancelledRetirement,
-    SemanticVectorCancelledRetirementOutcome, SemanticVectorCensusDependencyV1,
-    SemanticVectorCheckpointDigest, SemanticVectorChunkDigest, SemanticVectorChunkId,
-    SemanticVectorChunkManifestAccumulator, SemanticVectorChunkManifestDigest,
-    SemanticVectorChunkManifestMember, SemanticVectorCodeScopeHash,
-    SemanticVectorEffectFailureDigest, SemanticVectorGraphBatchDigest,
-    SemanticVectorOutboxSequence, SemanticVectorOutputDigest, SemanticVectorPlanDigest,
-    SemanticVectorProjectCensusReceipt, SemanticVectorPublicationAuthority,
-    SemanticVectorPublicationIntentDigest, SemanticVectorPublishedGenerationDependencyLookup,
-    SemanticVectorPublishedGenerationKey, SemanticVectorPublishedGenerationLookup,
-    SemanticVectorPublishedRetirement, SemanticVectorPublishedRetirementOutcome,
-    SemanticVectorReadyPublicationCursor, SemanticVectorReadyPublicationPage,
-    SemanticVectorReadyPublicationPageRequest, SemanticVectorReconstructionRecipe,
-    SemanticVectorRetirementCleanupCursor, SemanticVectorRetirementCleanupRecord,
-    SemanticVectorSourceDependencyV1, SemanticVectorSourceGenerationId,
-    SemanticVectorSourceManifestDigest, SemanticVectorSourceScopeBindingLookup,
-    SemanticVectorStageAdoptionCursor, SemanticVectorStageAdoptionPage,
-    SemanticVectorStageAdoptionPageRequest, SemanticVectorStageAdoptionRecord,
-    SemanticVectorStageAppendOutcome, SemanticVectorStageBatchCursor, SemanticVectorStageBatchKey,
-    SemanticVectorStageBatchPage, SemanticVectorStageBatchPageRequest,
-    SemanticVectorStageBatchReceipt, SemanticVectorStageBatchReceiptLookup,
-    SemanticVectorStageBeginOutcome, SemanticVectorStageCancelOutcome,
-    SemanticVectorStageCensusCounts, SemanticVectorStageCensusCursor,
-    SemanticVectorStageCensusPage, SemanticVectorStageCensusRecord,
-    SemanticVectorStageCensusRequest, SemanticVectorStageCensusRevision,
-    SemanticVectorStageChunkOperation, SemanticVectorStageChunkReceipt,
-    SemanticVectorStageEffectState, SemanticVectorStageEffectTerminal,
-    SemanticVectorStageGraphBatchEffect, SemanticVectorStageIncomplete, SemanticVectorStageKey,
-    SemanticVectorStagePendingEffectCursor, SemanticVectorStagePendingEffectPage,
-    SemanticVectorStagePendingEffectPageRequest, SemanticVectorStagePlan,
-    SemanticVectorStagePublicationIntent, SemanticVectorStagePublicationPrepareOutcome,
-    SemanticVectorStagePublicationPrepareRequest, SemanticVectorStagePublishOutcome,
-    SemanticVectorStagePublishSettlement, SemanticVectorStageRecord,
-    SemanticVectorStageResumeOutcome, SemanticVectorStageSettlement,
-    SemanticVectorStageSettlementOutcome, SemanticVectorStageState,
-    SemanticVectorStageWriterAdoption, SemanticVectorStageWriterAdoptionOutcome,
-    SemanticVectorStagingStore, SemanticVectorStagingStoreError, SemanticVectorStagingStoreResult,
-    SemanticVectorWriterFence, semantic_vector_chunk_manifest_digest,
 };
 pub use telemetry::{
     MaintenanceTelemetryV1, ReaderLaneV1, RuntimeMaintenanceStateV1, WalPressureV1,

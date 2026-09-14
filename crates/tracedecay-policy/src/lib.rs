@@ -16,7 +16,6 @@ pub mod curation;
 pub mod diagnostic_curation;
 pub mod git;
 pub mod hint_delivery;
-pub mod retrieval_selection;
 pub mod routing;
 pub mod work_loop;
 

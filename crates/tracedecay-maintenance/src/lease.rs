@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::storage::StoreLayout;
@@ -19,7 +18,6 @@ pub struct ProjectStoreMaintenanceLeaseV1 {
     store_layout: StoreLayout,
     graph_db: Database,
     store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
-    configuration_runtime: Arc<ProjectConfigurationRuntime>,
     profile_database: RegisteredGlobalDbLeaseV1,
 }
 
@@ -30,7 +28,6 @@ impl ProjectStoreMaintenanceLeaseV1 {
         store_layout: StoreLayout,
         graph_db: Database,
         store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
-        configuration_runtime: Arc<ProjectConfigurationRuntime>,
         profile_database: RegisteredGlobalDbLeaseV1,
     ) -> Self {
         Self {
@@ -38,7 +35,6 @@ impl ProjectStoreMaintenanceLeaseV1 {
             store_layout,
             graph_db,
             store_runtime,
-            configuration_runtime,
             profile_database,
         }
     }
@@ -61,11 +57,6 @@ impl ProjectStoreMaintenanceLeaseV1 {
     #[must_use]
     pub fn store_runtime(&self) -> &Arc<DaemonSessionRuntimeRegistryV1> {
         &self.store_runtime
-    }
-
-    #[must_use]
-    pub fn configuration_runtime(&self) -> &Arc<ProjectConfigurationRuntime> {
-        &self.configuration_runtime
     }
 
     #[must_use]

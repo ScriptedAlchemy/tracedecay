@@ -5,7 +5,6 @@ mod epoch_cache;
 mod error;
 mod generation;
 mod generation_runtime;
-mod generation_staging_runtime;
 mod hotpath_observe;
 mod lease;
 mod limits;
@@ -22,11 +21,9 @@ mod registry;
 mod runtime;
 mod schema;
 mod sealed_store;
-pub mod semantic_vector_native;
 mod state;
 mod store_quarantine;
 mod traversal;
-mod vector;
 mod verified_marker;
 
 pub use backup::GraphBackupReceipt;
@@ -42,16 +39,14 @@ pub use generation::{
     GraphGenerationManifestIdentity, GraphGenerationManifestProvider, GraphGenerationRelation,
     GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphProjectionIdentity,
     GraphProjectorRevision, GraphRelationRef, GraphReplayCollectionOutcome,
-    SealedCodeGenerationReplay, SealedGraphStateDigest, SemanticVectorGenerationReplay,
-    SupersededReplayRetirement,
+    SealedCodeGenerationReplay, SealedGraphStateDigest, SupersededReplayRetirement,
 };
 pub use generation_runtime::{SealedStagingRelease, SealedStagingRetentionReason};
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};
 pub use limits::{
     MAX_GRAPH_BATCH_CANONICAL_BYTES, MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS,
     MAX_GRAPH_IDENTIFIER_BYTES, MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
-    MAX_GRAPH_PROPERTY_VALUE_BYTES, MAX_GRAPH_VECTOR_DIMENSION,
-    MAX_SEMANTIC_VECTOR_GRAPH_BATCH_CANONICAL_BYTES, MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+    MAX_GRAPH_PROPERTY_VALUE_BYTES, MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
     MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, MAX_VERIFIED_GENERATION_ENTITIES,
     MAX_VERIFIED_GENERATION_RELATIONS,
 };
@@ -73,7 +68,7 @@ pub use projection::{
     GraphCancellation, GraphCommit, GraphEntity, GraphEntityId, GraphGenerationId,
     GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace, GraphProjectionId,
     GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphVector, GraphWatermark, GraphWriteBatch, SourceGeneration,
+    GraphWatermark, GraphWriteBatch, SourceGeneration,
 };
 pub use projection::{NeverCancelled, ProjectionReplacement};
 pub use projection_read::{
@@ -98,10 +93,7 @@ pub use registry::{
     GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryCapacity,
     GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementCommit,
     GraphDbRetirementOutcome, GraphDbRetirementRefusal, GraphDbRetirementReservation,
-    GraphPublicationPreparationV1, ProvenGraphPublicationV1, SemanticVectorRetentionAction,
-    SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
-    SemanticVectorRetirementReservation, VerifiedGenerationBatchApply,
-    VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
+    GraphPublicationPreparationV1, ProvenGraphPublicationV1,
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
 pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
@@ -178,8 +170,4 @@ pub fn take_graph_db_traversal_counters() -> GraphDbTraversalCounters {
 pub use traversal::{
     GraphRelationTarget, GraphTraversalDirection, RelationFanoutOverflow, TraversalRequest,
     TraversalResult, TraversalVisit,
-};
-pub use vector::{
-    GraphVectorIndexRequest, GraphVectorIndexStatus, MAX_VECTOR_SEARCH_LIMIT, VectorMatch,
-    VectorMetric, VectorSearchRequest, VectorSearchResult,
 };

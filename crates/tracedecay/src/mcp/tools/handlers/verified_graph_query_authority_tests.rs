@@ -60,7 +60,6 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         "tracedecay_dsm",
         "tracedecay_gini",
         "tracedecay_dependency_depth",
-        "tracedecay_redundancy",
         "tracedecay_diagnose",
         "tracedecay_run_affected_tests",
     ]

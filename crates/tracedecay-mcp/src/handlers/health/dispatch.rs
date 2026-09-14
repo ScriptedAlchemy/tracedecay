@@ -11,7 +11,6 @@ use super::{
     handle_test_risk,
 };
 use crate::ToolResult;
-use crate::handlers::redundancy::handle_redundancy;
 use crate::handlers::support::unknown_tool_error;
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
 
@@ -36,9 +35,6 @@ pub async fn dispatch_tool(
         }
         "tracedecay_health" => {
             handle_health(&open(read("health_read")?).await?, args, scope_prefix).await
-        }
-        "tracedecay_redundancy" => {
-            handle_redundancy(&open(read("redundancy")?).await?, args, scope_prefix).await
         }
         "tracedecay_dsm" => {
             handle_dsm(&open(read("health_read")?).await?, args, scope_prefix).await

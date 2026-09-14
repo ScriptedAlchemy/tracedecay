@@ -1,17 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphEntity,
     GraphEntityId, GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace,
-    GraphProjectionId, GraphProperty, GraphPropertyName, GraphPublication,
-    GraphPublicationInputDigest, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphTraversalDirection, GraphVector, GraphVectorIndexRequest, GraphVectorIndexStatus,
-    GraphWatermark, GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration,
-    TraversalRequest, VectorMetric, VectorSearchRequest,
+    GraphProjectionId, GraphPublication, GraphPublicationInputDigest, GraphRelation,
+    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch,
+    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
 };
 
 use crate::support;
@@ -115,24 +113,6 @@ fn batch(
 ) -> GraphWriteBatch {
     GraphWriteBatch::new(
         namespace(),
-        projection(owner),
-        generation(generation_value),
-        watermark(watermark_value),
-        mutations,
-        live(),
-    )
-    .unwrap()
-}
-
-fn batch_in(
-    namespace_value: &str,
-    owner: &str,
-    generation_value: &str,
-    watermark_value: &str,
-    mutations: Vec<GraphMutation>,
-) -> GraphWriteBatch {
-    GraphWriteBatch::new(
-        GraphNamespace::new(namespace_value).unwrap(),
         projection(owner),
         generation(generation_value),
         watermark(watermark_value),
@@ -768,205 +748,6 @@ fn reachability_excludes_relations_owned_by_another_projection() {
     );
 }
 
-fn vector_entity(value: &str, vector: Vec<f32>, metric: VectorMetric) -> GraphEntity {
-    vector_entity_with_dimension(value, vector.clone(), vector.len(), metric)
-}
-
-fn vector_entity_with_dimension(
-    value: &str,
-    vector: Vec<f32>,
-    dimension: usize,
-    metric: VectorMetric,
-) -> GraphEntity {
-    let mut properties = BTreeMap::new();
-    properties.insert(
-        GraphPropertyName::new("embedding").unwrap(),
-        GraphProperty::Vector(GraphVector::new(vector, dimension, metric).unwrap()),
-    );
-    GraphEntity::new(entity_id(value), BTreeSet::new(), properties).unwrap()
-}
-
-fn vector_request(metric: VectorMetric, query: Vec<f32>) -> VectorSearchRequest {
-    VectorSearchRequest {
-        namespace: namespace(),
-        projection: projection("vectors"),
-        property: GraphPropertyName::new("embedding").unwrap(),
-        query,
-        dimension: 2,
-        metric,
-        limit: 10,
-        cancellation: live(),
-    }
-}
-
-#[test]
-fn vector_admission_rejects_dimension_and_non_finite_values() {
-    assert!(matches!(
-        GraphVector::new(Vec::new(), 0, VectorMetric::Cosine),
-        Err(GraphDbError::InvalidRequest { .. })
-    ));
-    assert!(matches!(
-        GraphVector::new(vec![1.0], 2, VectorMetric::Cosine),
-        Err(GraphDbError::InvalidRequest { .. })
-    ));
-    assert!(matches!(
-        GraphVector::new(vec![f32::NAN, 0.0], 2, VectorMetric::Cosine),
-        Err(GraphDbError::InvalidRequest { .. })
-    ));
-    let db = memory_db();
-    assert!(matches!(
-        db.vector_search(vector_request(VectorMetric::Cosine, vec![1.0])),
-        Err(GraphDbError::InvalidRequest { .. })
-    ));
-}
-
-#[test]
-fn vector_metric_rejects_unsupported_values() {
-    assert_eq!(
-        VectorMetric::parse("manhattan").unwrap_err(),
-        GraphDbError::InvalidRequest {
-            message: "unsupported vector metric `manhattan`".to_owned()
-        }
-    );
-}
-
-#[test]
-fn vector_search_supports_dot_product_and_euclidean() {
-    for metric in [VectorMetric::DotProduct, VectorMetric::Euclidean] {
-        let db = memory_db();
-        db.apply_unverified(batch(
-            "vectors",
-            "g1",
-            "w1",
-            vec![
-                GraphMutation::UpsertEntity(vector_entity("near", vec![1.0, 0.0], metric)),
-                GraphMutation::UpsertEntity(vector_entity("far", vec![0.0, 1.0], metric)),
-            ],
-        ))
-        .unwrap();
-        let result = db
-            .vector_search(vector_request(metric, vec![1.0, 0.0]))
-            .unwrap();
-        assert_eq!(result.matches[0].entity.as_str(), "near");
-    }
-}
-
-#[test]
-fn vector_search_isolates_dimension_metric_and_namespace_before_distance() {
-    let db = memory_db();
-    db.apply_unverified(batch_in(
-        "project",
-        "vectors",
-        "g1",
-        "w1",
-        vec![
-            GraphMutation::UpsertEntity(vector_entity_with_dimension(
-                "wanted",
-                vec![1.0, 0.0],
-                2,
-                VectorMetric::Cosine,
-            )),
-            GraphMutation::UpsertEntity(vector_entity_with_dimension(
-                "wrong-dimension",
-                vec![1.0, 0.0, 0.0],
-                3,
-                VectorMetric::Cosine,
-            )),
-            GraphMutation::UpsertEntity(vector_entity_with_dimension(
-                "wrong-metric",
-                vec![1.0, 0.0],
-                2,
-                VectorMetric::Euclidean,
-            )),
-        ],
-    ))
-    .unwrap();
-    db.apply_unverified(batch_in(
-        "another-project",
-        "vectors",
-        "g2",
-        "w2",
-        vec![GraphMutation::UpsertEntity(vector_entity_with_dimension(
-            "foreign-dimension",
-            vec![1.0, 0.0, 0.0, 0.0],
-            4,
-            VectorMetric::Cosine,
-        ))],
-    ))
-    .unwrap();
-
-    let result = db
-        .vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
-        .unwrap();
-    assert_eq!(result.matches.len(), 1);
-    assert_eq!(result.matches[0].entity.as_str(), "wanted");
-}
-
-#[test]
-fn vector_upsert_clears_prior_dimension_and_metric_keys() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "vectors",
-        "g1",
-        "w1",
-        vec![GraphMutation::UpsertEntity(vector_entity_with_dimension(
-            "changing",
-            vec![1.0, 0.0, 0.0],
-            3,
-            VectorMetric::Cosine,
-        ))],
-    ))
-    .unwrap();
-    db.apply_unverified(batch(
-        "vectors",
-        "g2",
-        "w2",
-        vec![GraphMutation::UpsertEntity(vector_entity_with_dimension(
-            "changing",
-            vec![1.0, 0.0],
-            2,
-            VectorMetric::Euclidean,
-        ))],
-    ))
-    .unwrap();
-
-    let stale = db
-        .vector_search(VectorSearchRequest {
-            namespace: namespace(),
-            projection: projection("vectors"),
-            property: GraphPropertyName::new("embedding").unwrap(),
-            query: vec![1.0, 0.0, 0.0],
-            dimension: 3,
-            metric: VectorMetric::Cosine,
-            limit: 10,
-            cancellation: live(),
-        })
-        .unwrap();
-    assert!(stale.matches.is_empty());
-    let current_index = GraphVectorIndexRequest {
-        namespace: namespace(),
-        projection: projection("vectors"),
-        property: GraphPropertyName::new("embedding").unwrap(),
-        dimension: 2,
-        metric: VectorMetric::Euclidean,
-        cancellation: live(),
-    };
-    assert_eq!(
-        db.vector_index_status(current_index.clone()).unwrap(),
-        GraphVectorIndexStatus::Missing,
-        "a new vector shape must wait for the retained index owner"
-    );
-    assert!(matches!(
-        db.ensure_vector_index(current_index).unwrap(),
-        GraphVectorIndexStatus::Available { .. }
-    ));
-    let current = db
-        .vector_search(vector_request(VectorMetric::Euclidean, vec![1.0, 0.0]))
-        .unwrap();
-    assert_eq!(current.matches.len(), 1);
-    assert_eq!(current.matches[0].entity.as_str(), "changing");
-}
-
 #[test]
 fn conditional_projection_replacement_rejects_a_stale_source_snapshot() {
     let db = memory_db();
@@ -1153,15 +934,15 @@ fn publication_changed_input_and_stale_watermark_conflict() {
 }
 
 #[test]
-fn persistent_close_and_reopen_preserves_graph_and_vector() {
+fn persistent_close_and_reopen_preserves_graph() {
     let temp = TempDir::new().unwrap();
     let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     db.apply_unverified(batch(
-        "vectors",
+        "code",
         "g1",
         "w1",
         vec![
-            GraphMutation::UpsertEntity(vector_entity("a", vec![1.0, 0.0], VectorMetric::Cosine)),
+            GraphMutation::UpsertEntity(entity("a")),
             GraphMutation::UpsertEntity(entity("b")),
             GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
         ],
@@ -1172,139 +953,6 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
 
     let reopened = registered.reopen_lease().unwrap();
     assert_eq!(reopened.traverse(traversal("a")).unwrap().visits.len(), 2);
-    let index = GraphVectorIndexRequest {
-        namespace: namespace(),
-        projection: projection("vectors"),
-        property: GraphPropertyName::new("embedding").unwrap(),
-        dimension: 2,
-        metric: VectorMetric::Cosine,
-        cancellation: live(),
-    };
-    // The `.grafeo` file carries this index's HNSW topology and the
-    // pinned grafeo restores it at open, so the reopened store serves
-    // vector search with no `ensure_vector_index` step and no rebuild.
-    // Gated in the fork by `vector_index_reopen` / `torn_vector_checkpoint`.
-    assert!(
-        matches!(
-            reopened.vector_index_status(index).unwrap(),
-            GraphVectorIndexStatus::Available { .. }
-        ),
-        "reopen must restore the persisted vector index"
-    );
-    assert_eq!(
-        reopened
-            .vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
-            .unwrap()
-            .matches[0]
-            .entity
-            .as_str(),
-        "a"
-    );
-}
-
-#[test]
-fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
-    let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
-    let vectors = (0..2_049)
-        .map(|ordinal| {
-            GraphMutation::UpsertEntity(vector_entity(
-                &format!("vector-{ordinal:04}"),
-                vec![ordinal as f32, ordinal as f32],
-                VectorMetric::Euclidean,
-            ))
-        })
-        .collect();
-    db.apply_unverified(batch("vectors", "g1", "w1", vectors))
-        .unwrap();
-    drop(db);
-    registered.close().unwrap();
-
-    let admission_started = Instant::now();
-    let reopened = registered.reopen_lease().unwrap();
-    let admission_elapsed = admission_started.elapsed();
-    assert!(
-        admission_elapsed < Duration::from_secs(5),
-        "opening a 2,049-vector graph took {admission_elapsed:?}"
-    );
-    assert_eq!(
-        reopened
-            .vector_index_status(GraphVectorIndexRequest {
-                namespace: namespace(),
-                projection: projection("vectors"),
-                property: GraphPropertyName::new("embedding").unwrap(),
-                dimension: 2,
-                metric: VectorMetric::Euclidean,
-                cancellation: live(),
-            })
-            .unwrap(),
-        GraphVectorIndexStatus::Available { vectors: 2_049 },
-        "the persisted corpus index must come back restored"
-    );
-    // Both assertions carry weight: the admission bound above proves the
-    // open did not pay for an HNSW rebuild of the 2,049-vector corpus,
-    // and `Available` proves the index came back anyway — restored from
-    // its persisted topology, not rebuilt.
-}
-
-#[test]
-fn vector_write_after_reopen_updates_the_restored_index() {
-    let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
-    db.apply_unverified(batch(
-        "vectors",
-        "g1",
-        "w1",
-        vec![GraphMutation::UpsertEntity(vector_entity(
-            "before",
-            vec![1.0, 0.0],
-            VectorMetric::Cosine,
-        ))],
-    ))
-    .unwrap();
-    drop(db);
-    registered.close().unwrap();
-
-    let reopened = registered.reopen_lease().unwrap();
-    let index = GraphVectorIndexRequest {
-        namespace: namespace(),
-        projection: projection("vectors"),
-        property: GraphPropertyName::new("embedding").unwrap(),
-        dimension: 2,
-        metric: VectorMetric::Cosine,
-        cancellation: live(),
-    };
-    assert_eq!(
-        reopened.vector_index_status(index.clone()).unwrap(),
-        GraphVectorIndexStatus::Available { vectors: 1 },
-        "reopen must restore the persisted vector index"
-    );
-    reopened
-        .apply_unverified(batch(
-            "vectors",
-            "g2",
-            "w2",
-            vec![GraphMutation::UpsertEntity(vector_entity(
-                "after",
-                vec![0.0, 1.0],
-                VectorMetric::Cosine,
-            ))],
-        ))
-        .unwrap();
-    assert_eq!(
-        reopened.vector_index_status(index).unwrap(),
-        GraphVectorIndexStatus::Available { vectors: 2 },
-        "an ordinary write lands in the restored index, no rebuild step"
-    );
-    assert_eq!(
-        reopened
-            .vector_search(vector_request(VectorMetric::Cosine, vec![0.0, 1.0]))
-            .unwrap()
-            .matches[0]
-            .entity
-            .as_str(),
-        "after"
-    );
 }
 
 #[test]
@@ -1367,116 +1015,5 @@ fn closed_handle_fails_typed() {
         db.apply_unverified(batch("code", "g1", "w1", Vec::new()))
             .unwrap_err(),
         GraphDbError::Closed
-    );
-}
-
-/// An index that exists over zero vectors gets its own status.
-///
-/// Grafeo's `create_vector_index` scans the label and succeeds over an
-/// empty match, so a projection whose entities carry no vector of the
-/// requested shape ends up with an index registered and covering
-/// nothing. `has_vector_index` then answers `true` while every search
-/// returns no matches - a working-looking index that indexes no rows.
-/// Reporting that as `Available` is what let it stay hidden.
-#[test]
-fn an_index_covering_no_vectors_reports_stale_not_available() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "vectors",
-        "g1",
-        "w1",
-        vec![GraphMutation::UpsertEntity(entity("no-embedding"))],
-    ))
-    .unwrap();
-
-    let index = GraphVectorIndexRequest {
-        namespace: namespace(),
-        projection: projection("vectors"),
-        property: GraphPropertyName::new("embedding").unwrap(),
-        dimension: 2,
-        metric: VectorMetric::Cosine,
-        cancellation: live(),
-    };
-    assert_eq!(
-        db.vector_index_status(index.clone()).unwrap(),
-        GraphVectorIndexStatus::Missing,
-        "nothing has built an index yet"
-    );
-
-    // Building over a projection with no matching vectors registers an
-    // index that covers nothing. The typed answer must say so rather
-    // than claim the index is usable.
-    assert_eq!(
-        db.ensure_vector_index(index.clone()).unwrap(),
-        GraphVectorIndexStatus::Stale,
-        "an index built over zero vectors must not report Available"
-    );
-    assert_eq!(
-        db.vector_index_status(index.clone()).unwrap(),
-        GraphVectorIndexStatus::Stale,
-        "the status call must agree with the build that produced it"
-    );
-    assert!(
-        db.vector_index_status(index).unwrap().needs_build(),
-        "Stale is a state a caller must act on, like Missing"
-    );
-}
-
-/// Once the rows the index covers exist, the same request goes green.
-///
-/// The interesting half is that it recovers *without* the caller
-/// tracking that it had previously seen a stale index: `ensure` drops
-/// the empty one and builds again.
-#[test]
-fn a_stale_index_rebuilds_once_its_vectors_arrive() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "vectors",
-        "g1",
-        "w1",
-        vec![GraphMutation::UpsertEntity(entity("no-embedding"))],
-    ))
-    .unwrap();
-    let index = GraphVectorIndexRequest {
-        namespace: namespace(),
-        projection: projection("vectors"),
-        property: GraphPropertyName::new("embedding").unwrap(),
-        dimension: 2,
-        metric: VectorMetric::Cosine,
-        cancellation: live(),
-    };
-    assert_eq!(
-        db.ensure_vector_index(index.clone()).unwrap(),
-        GraphVectorIndexStatus::Stale
-    );
-
-    db.apply_unverified(batch(
-        "vectors",
-        "g2",
-        "w2",
-        vec![GraphMutation::UpsertEntity(vector_entity(
-            "with-embedding",
-            vec![1.0, 0.0],
-            VectorMetric::Cosine,
-        ))],
-    ))
-    .unwrap();
-
-    assert_eq!(
-        db.ensure_vector_index(index.clone()).unwrap(),
-        GraphVectorIndexStatus::Available { vectors: 1 },
-        "the rebuild must pick up the vectors that have since landed"
-    );
-    assert_eq!(
-        db.vector_index_status(index).unwrap(),
-        GraphVectorIndexStatus::Available { vectors: 1 }
-    );
-    assert_eq!(
-        db.vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
-            .unwrap()
-            .matches[0]
-            .entity
-            .as_str(),
-        "with-embedding"
     );
 }

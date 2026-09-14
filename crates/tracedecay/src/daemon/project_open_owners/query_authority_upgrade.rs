@@ -12,8 +12,6 @@ use tracedecay_contracts::ResolvedScope;
 
 use super::DaemonInvocationState;
 
-pub(super) use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::DeferredQueryAuthorityMountV1;
-
 /// Spawns the deferred query-authority waiter on the project owner.
 ///
 /// A route whose code index is disabled never seats a text generation, so this
@@ -23,7 +21,7 @@ pub(super) fn spawn_deferred_query_authority_mount(
     invocation: DaemonInvocationState,
     project_root: PathBuf,
     scope: ResolvedScope,
-    mount: DeferredQueryAuthorityMountV1,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> bool {
     // Same contract as the deferred advisory owner: a route whose code index
     // is disabled never seats a text generation, so this retry has nothing to
@@ -49,8 +47,8 @@ pub(super) fn spawn_deferred_query_authority_mount(
                 let invocation = invocation.clone();
                 let project_root = project_root.clone();
                 let scope = scope.clone();
-                let mount = mount.clone();
-                async move { try_deferred_mount(&invocation, &project_root, &scope, &mount).await }
+                let session_db = session_db.clone();
+                async move { try_deferred_mount(&invocation, &project_root, &scope, &session_db).await }
             })
             .await;
         },
@@ -63,45 +61,23 @@ async fn try_deferred_mount(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     scope: &ResolvedScope,
-    mount: &DeferredQueryAuthorityMountV1,
+    session_db: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> DeferredMountAttemptV1 {
-    let outcome = match mount {
-        DeferredQueryAuthorityMountV1::Configured { profile_id } => {
-            invocation
-                .mount_query_authority_for_project(project_root, profile_id, scope)
-                .await
+    let cursor_keys = match session_db.load_session_cursor_key_provider_result().await {
+        Ok(cursor_keys) => cursor_keys,
+        Err(error) => {
+            tracing::warn!(
+                event = "query_authority_mount",
+                outcome = "deferred_failed",
+                project_id = %scope.project_id,
+                reason = %error,
+                "durable query cursor key is unavailable; deferred mount abandoned"
+            );
+            return DeferredMountAttemptV1::Terminal;
         }
-        DeferredQueryAuthorityMountV1::CoreFallback {
-            session_db,
-            committed_revision,
-        } => match session_db.load_session_cursor_key_provider_result().await {
-            Ok(cursor_keys) => {
-                if let Some(committed_revision) = committed_revision {
-                    invocation
-                        .mount_core_query_authority_for_committed_fallback(
-                            project_root,
-                            scope,
-                            committed_revision,
-                            &cursor_keys,
-                        )
-                        .await
-                } else {
-                    invocation
-                        .mount_core_query_authority_for_project(project_root, scope, &cursor_keys)
-                        .await
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    event = "query_authority_mount",
-                    outcome = "deferred_failed",
-                    project_id = %scope.project_id,
-                    reason = %error,
-                    "durable query cursor key is unavailable; deferred mount abandoned"
-                );
-                return DeferredMountAttemptV1::Terminal;
-            }
-        },
     };
+    let outcome = invocation
+        .mount_core_query_authority_for_project(project_root, scope, &cursor_keys)
+        .await;
     classify_deferred_query_authority_mount(scope, outcome)
 }

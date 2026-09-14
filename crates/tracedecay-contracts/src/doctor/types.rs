@@ -1,7 +1,7 @@
 //! Transport-neutral Doctor kernel contract types.
 //!
 //! The Doctor application use case composes typed inputs from the advisory,
-//! configuration, storage-runtime, language server, semantic index, and
+//! configuration, storage-runtime, language server, code index, and
 //! observability authorities into stable finding families. It never evaluates a
 //! generic health score or collapses unknown/partial evidence into a healthy or
 //! clean result. Findings contain diagnostic evidence only.
@@ -44,7 +44,8 @@ pub enum DoctorFindingFamilyV1 {
     /// Language-server / analyzer engine status from the LSP gateway's
     /// `AnalyzerState`.
     LanguageServer,
-    /// Semantic search / index runtime state (indexing, stale, unavailable).
+    /// Code index mount state (mounted, indexing, stale, unmounted,
+    /// incompatible, parked). The wire label stays `semantic_index`.
     SemanticIndex,
     /// Denominator-safe measurement and telemetry health from analytics,
     /// accounting read models, and session ingest.

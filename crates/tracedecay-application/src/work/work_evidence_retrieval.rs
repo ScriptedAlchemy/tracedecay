@@ -796,7 +796,6 @@ pub mod tests {
                 .map(|lane| (lane, 100_000))
                 .collect(),
             diversity_policy_id: id("diversity.work-task-session"),
-            rerank_policy_id: None,
             retrieval_budget: budget,
         };
         let diversity = DiversityPolicy {

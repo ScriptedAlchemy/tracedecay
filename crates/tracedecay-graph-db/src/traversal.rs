@@ -20,7 +20,6 @@ use crate::schema::{
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphNamespace,
     GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind, GraphSnapshot,
-    VectorSearchRequest, VectorSearchResult,
 };
 
 const MAX_BATCH_TRAVERSAL_STARTS: usize = 100_000;
@@ -119,13 +118,6 @@ impl GraphSnapshot {
             max_relations,
             cancellation,
         )
-    }
-
-    pub fn vector_search(
-        &self,
-        request: VectorSearchRequest,
-    ) -> Result<VectorSearchResult, GraphDbError> {
-        self.database.vector_search(request)
     }
 }
 

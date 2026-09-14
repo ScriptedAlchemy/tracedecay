@@ -97,8 +97,8 @@ pub use tool_call_deadline::{
 };
 pub use tool_context::{
     AdmittedCodeIndex, AdmittedProjectStore, McpAdmittedProjectV1, McpDoctorReportV1,
-    McpProjectIdentityV1, McpRequestAuthoritiesV1, McpSemanticOwnerV1, McpToolBinding,
-    McpToolBindingError, McpToolContext, RequestControls,
+    McpProjectIdentityV1, McpRequestAuthoritiesV1, McpToolBinding, McpToolBindingError,
+    McpToolContext, RequestControls,
 };
 pub use tool_errors::{
     mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,

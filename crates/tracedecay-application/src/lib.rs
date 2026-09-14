@@ -30,12 +30,6 @@
 //! - Transport-independent response handles live in
 //!   `tracedecay_session_memory::response_handles`; MCP adapters should call
 //!   that module rather than keep a parallel handle store.
-//!
-//! ## Packaging
-//!
-//! `publish = false`. `semantic_runtime` reaches search-quality fixtures via
-//! `include_str!` outside this package's root (repo-root `tests/fixtures/`);
-//! workspace builds resolve it, but a standalone package build would not.
 
 /// Installs the registered global/session schema into the kernel's fail-closed
 /// port for this crate's test process.
@@ -59,7 +53,6 @@ pub(crate) fn register_test_schema_installer() {
 
 pub mod advisory;
 pub mod code_index;
-pub mod config;
 pub mod dashboard_diagnostics;
 pub mod delivery;
 pub mod diagnose;
@@ -84,7 +77,6 @@ pub mod pr_tracking;
 pub mod primitives;
 pub mod project_adoption;
 pub mod project_open_authorization;
-pub mod semantic_runtime;
 pub mod settings_control;
 pub mod source_authorization;
 pub mod stack_coordinator;

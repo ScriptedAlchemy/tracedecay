@@ -9,8 +9,8 @@
 //! hydration.
 //!
 //! Foreground retrieval is explicitly single-root. The exact lane is
-//! independent of the fielded lexical/BM25 lane. Semantic is an optional,
-//! independently admitted augmentation.
+//! independent of the fielded lexical/BM25 lane; the graph lane expands from
+//! their seeds.
 
 pub mod dedupe;
 pub mod diversity;
@@ -27,15 +27,13 @@ pub mod ports;
 pub mod prepared_query;
 pub mod query_authority;
 pub mod request;
-pub mod rerank;
-pub mod semantic;
 mod stage_counters;
 pub mod task_session;
 
 pub use self::execution::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSemanticRecordV1, NativeSymbolRecordV1, QueryExecutionContractErrorV1,
+    NativeSymbolRecordV1, QueryExecutionContractErrorV1,
 };
 pub use self::observation::{
     ContextUseOutcomeV1, ObservedWithCoverageV1, RetrievalPipelineObservationV1,
@@ -65,22 +63,6 @@ pub const QUERY_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v1";
 pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
-pub const QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1: &str = "score.semantic-distance.evaluation.v1";
-/// Score domain stamped on published production semantic candidates.
-///
-/// Seated hybrid profiles calibrate
-/// [`QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1`]. Production search must
-/// stamp the same identity so a completed semantic batch can enter
-/// composition. A parallel `score.semantic-distance.daemon.v1` spelling is
-/// not a second admitted domain.
-pub const QUERY_SEMANTIC_SCORE_DOMAIN_V1: &str = QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1;
-/// Descending-score bounds for the useful half of canonical cosine distance,
-/// scaled by one billion. They express nonnegative cosine similarity directly
-/// in parts per million; zero and negative similarity both calibrate to zero.
-/// Consequently a profile threshold of `700_000` means cosine similarity
-/// `0.7`, rather than `0.4` under a shifted `[-1, 1]` mapping.
-pub const QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1: u64 = i64::MAX as u64 - 1_000_000_000;
-pub const QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1: u64 = i64::MAX as u64;
 
 #[cfg(test)]
 mod tests;

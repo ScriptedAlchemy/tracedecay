@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_application::semantic_runtime::project_lifecycle_status;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 
@@ -344,26 +343,6 @@ pub async fn handle_runtime(
     {
         attach_doctor_report(&mut value, ctx.doctor_report());
     }
-    let semantic_configuration = hotpath::future!(
-        ctx.configuration_runtime().client().current(),
-        label = "mcp.health.runtime.semantic"
-    )
-    .await
-    .ok()
-    .and_then(|pinned| {
-        tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
-            &pinned.into_current_state(),
-        )
-        .ok()
-    });
-    value["semantic_runtime"] = serde_json::to_value(
-        tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
-            Some(ctx.project_root()),
-            semantic_configuration,
-        ),
-    )
-    .unwrap_or_else(|_| json!({}));
-    value["semantic_model"] = json!(project_lifecycle_status(ctx.project_root()));
     Ok(generic_tool_result(
         Some(ctx.project_root()),
         &args,

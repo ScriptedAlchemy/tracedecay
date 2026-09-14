@@ -19,10 +19,8 @@ use tokio::task::JoinSet;
 
 mod knowledge;
 mod lifecycle;
-mod semantic;
 
 use lifecycle::{admitted_deadline_elapsed, mark_cancelled, mark_timed_out};
-pub use semantic::{ExplorerSemanticReadFuture, ExplorerSemanticReadV1, ExplorerSemanticReader};
 
 use super::lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
@@ -37,11 +35,10 @@ use super::{DashboardHttpRequestControlV1, DashboardState, graph_service};
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 use tracedecay_session_memory::context::CancellationToken;
 
-const SOURCE_IDS: [ExplorerSourceIdV1; 4] = [
+const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [
     ExplorerSourceIdV1::CodeGraph,
     ExplorerSourceIdV1::Sessions,
     ExplorerSourceIdV1::Knowledge,
-    ExplorerSourceIdV1::Semantic,
 ];
 const MAX_QUERY_RUNS: usize = 256;
 const QUERY_LIMIT_DEFAULT: i64 = 25;
@@ -67,7 +64,6 @@ pub(super) enum ExplorerSourceIdV1 {
     CodeGraph,
     Sessions,
     Knowledge,
-    Semantic,
 }
 
 impl ExplorerSourceIdV1 {
@@ -76,7 +72,6 @@ impl ExplorerSourceIdV1 {
             Self::CodeGraph => "Code graph",
             Self::Sessions => "Sessions",
             Self::Knowledge => "Knowledge",
-            Self::Semantic => "Semantic",
         }
     }
 }
@@ -116,29 +111,18 @@ pub(super) enum ExplorerSourcePhaseV1 {
 /// producer; none is speculative:
 /// - `Partial`: the source answered with rows but its own read reported
 ///   omitted records (LCM temporal reads).
-/// - `Indexing`: the provider is acquiring its model or projecting vectors
-///   (semantic runtime acquisition/indexing states).
 /// - `Stale`: the source's store exists but does not match the current
-///   generation (verified graph stale reads, LCM stale projections, semantic
-///   generation staleness).
+///   generation (verified graph stale reads, LCM stale projections).
 /// - `TimedOut`: the source's own read exceeded the admitted deadline.
-/// - `Unsupported`: this dashboard surface cannot consult the source at all
-///   (no daemon authority attached, or the provider state cannot be consumed
-///   on this surface yet).
-/// - `Absent`: the source's store does not exist for this project — a typed
-///   absence, not a failure (semantic search not activated).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ExplorerSourceOutcomeV1 {
     Pending,
     Ready,
     Partial,
-    Indexing,
     Stale,
     TimedOut,
     Unavailable,
-    Unsupported,
-    Absent,
     Error,
     Cancelled,
 }
@@ -240,47 +224,6 @@ impl ExplorerSourceProgressV1 {
             ..Self::unavailable(source_id, error_code, message)
         }
     }
-
-    fn unsupported(
-        source_id: ExplorerSourceIdV1,
-        error_code: &'static str,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            outcome: ExplorerSourceOutcomeV1::Unsupported,
-            ..Self::unavailable(source_id, error_code, message)
-        }
-    }
-
-    fn indexing(
-        source_id: ExplorerSourceIdV1,
-        error_code: &'static str,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            outcome: ExplorerSourceOutcomeV1::Indexing,
-            ..Self::unavailable(source_id, error_code, message)
-        }
-    }
-
-    /// A typed absence: the source's store does not exist for this project.
-    /// Coverage is the complete accounting of an empty domain, so absence
-    /// claims over the run stay checkable instead of being blocked forever by
-    /// a source that holds nothing.
-    fn absent(
-        source_id: ExplorerSourceIdV1,
-        error_code: &'static str,
-        message: impl Into<String>,
-        unit: &'static str,
-    ) -> Self {
-        Self {
-            outcome: ExplorerSourceOutcomeV1::Absent,
-            completed_units: Some(0),
-            total_units: Some(0),
-            coverage: DashboardCoverageV1::complete(0, unit),
-            ..Self::unavailable(source_id, error_code, message)
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -290,7 +233,7 @@ pub(super) struct ExplorerQueryRunV1 {
     request_revision: &'static str,
     plan_revision: &'static str,
     merge_revision: &'static str,
-    required_source_ids: [ExplorerSourceIdV1; 4],
+    required_source_ids: [ExplorerSourceIdV1; 3],
     ordering_policy: &'static str,
     explanation: &'static str,
     submitted_at_micros: i64,
@@ -372,7 +315,7 @@ fn initial_run(run_id: String, request: ExplorerQueryRequestV1) -> ExplorerQuery
         merge_revision: "source-local-no-merge-v1",
         required_source_ids: SOURCE_IDS,
         ordering_policy: "source_local_no_cross_source_merge",
-        explanation: "Search the code graph, active-project session store, and bounded project fact authority in parallel, and consult the semantic provider's typed state; preserve each source's own order and coverage.",
+        explanation: "Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source's own order and coverage.",
         submitted_at_micros: now_micros(),
         completed_at_micros: None,
         elapsed_micros: 0,
@@ -675,15 +618,10 @@ async fn execute_query(
         mark_cancelled(&mut current);
         return;
     }
-    // `Absent` is a truthful terminal answer ("this store does not exist"),
-    // so it counts toward completion alongside `Ready` — its constructor
-    // carries the complete accounting of an empty domain.
-    let every_concluded = current.sources.iter().all(|source| {
-        matches!(
-            source.outcome,
-            ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Absent
-        )
-    });
+    let every_concluded = current
+        .sources
+        .iter()
+        .all(|source| matches!(source.outcome, ExplorerSourceOutcomeV1::Ready));
     let complete = every_concluded
         && current
             .sources
@@ -700,9 +638,7 @@ async fn execute_query(
     } else if current.sources.iter().any(|source| {
         matches!(
             source.outcome,
-            ExplorerSourceOutcomeV1::Ready
-                | ExplorerSourceOutcomeV1::Partial
-                | ExplorerSourceOutcomeV1::Absent
+            ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Partial
         )
     }) {
         current.state = ExplorerRunStateV1::Partial;
@@ -726,7 +662,6 @@ async fn execute_source(
         ExplorerSourceIdV1::Knowledge => {
             knowledge::knowledge_source(&state, &request, &control, cancellation).await
         }
-        ExplorerSourceIdV1::Semantic => semantic::semantic_source(&state).await,
     }
 }
 

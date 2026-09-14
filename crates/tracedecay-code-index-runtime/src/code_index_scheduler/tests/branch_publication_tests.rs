@@ -19,7 +19,6 @@ async fn mounted_registry(fixture: &GitFixture, store: &TempDir) -> CodeIndexSch
             test_project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount worktree");
@@ -231,7 +230,6 @@ async fn exact_branch_publication_completes_from_a_retained_graph_head() {
             project_id.clone(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("remount retained worktree");

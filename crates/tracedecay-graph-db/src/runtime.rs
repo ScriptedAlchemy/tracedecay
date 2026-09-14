@@ -1,8 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{
@@ -17,18 +16,16 @@ use crate::recovery::{
     validate_or_initialize_format,
 };
 use crate::state::{
-    EntityOwnerColumns, FormatState, indexed_entity_node, latest_projection, load_entity_locator,
-    outgoing_relation_projections, projection_entities, projection_relations, publication,
+    FormatState, latest_projection, load_entity_locator, outgoing_relation_projections,
+    projection_entities, projection_relations, publication,
 };
 use crate::verified_marker::{ContainerIdentity, GenerationMarkers};
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability,
     GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
-    GraphProperty, GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest,
-    GraphPublicationReceipt, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphRelationTarget, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
-    GraphWriteBatch, ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
-    VectorSearchResult, mutation, traversal, vector,
+    GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest, GraphPublicationReceipt,
+    GraphRelation, GraphRelationId, GraphRelationKind, GraphRelationTarget, GraphWatermark,
+    GraphWriteBatch, ProjectionReplacement, TraversalRequest, TraversalResult, mutation, traversal,
 };
 
 enum ReplacementPrecondition<'a> {
@@ -42,7 +39,6 @@ pub(crate) struct PreparedGraphBatch {
     pub(crate) batch: GraphWriteBatch,
     pub(crate) metadata: mutation::CommitMetadata,
     pub(crate) endpoint_namespaces: mutation::RelationEndpointNamespaces,
-    pub(crate) ensure_page_vector_indexes: bool,
 }
 
 /// Outcome of deriving a gated batch: apply it, or adopt an already-stored
@@ -192,7 +188,6 @@ impl GraphDb {
             }),
         });
         graph.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Open);
-        graph.record_vector_index_census(VectorIndexCensusPhase::Restore);
         Ok(graph)
     }
 
@@ -387,7 +382,6 @@ impl GraphDb {
                         batch,
                         metadata: mutation::CommitMetadata::for_digest(digest),
                         endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
-                        ensure_page_vector_indexes: false,
                     },
                     (),
                 ))
@@ -916,86 +910,6 @@ impl GraphDb {
         Ok(results)
     }
 
-    #[hotpath::measure(label = "graph_db.search.vector", impl_type = "GraphDb")]
-    pub fn vector_search(
-        &self,
-        request: VectorSearchRequest,
-    ) -> Result<VectorSearchResult, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        vector::vector_search(database, request)
-    }
-
-    pub fn vector_index_status(
-        &self,
-        request: GraphVectorIndexRequest,
-    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
-        request.validate()?;
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        let label = vector::native_vector_label(&request.namespace, &request.projection);
-        let property = vector_property_key(&request.property, request.dimension, request.metric);
-        Ok(vector::classify_vector_index(database, &label, &property))
-    }
-
-    /// Rebuilds one missing exact-projection HNSW index outside admission.
-    #[hotpath::measure(label = "graph_db.vector.index.ensure", impl_type = "GraphDb")]
-    pub fn ensure_vector_index(
-        &self,
-        request: GraphVectorIndexRequest,
-    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
-        request.validate()?;
-        let _snapshot_gate = self.wait_snapshot_gate_write();
-        let guard = self.write_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        if request.cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        let label = vector::native_vector_label(&request.namespace, &request.projection);
-        let property = vector_property_key(&request.property, request.dimension, request.metric);
-        match vector::classify_vector_index(database, &label, &property) {
-            status @ GraphVectorIndexStatus::Available { .. } => {
-                if request.cancellation.is_cancelled() {
-                    return Err(GraphDbError::Cancelled);
-                }
-                return Ok(status);
-            }
-            GraphVectorIndexStatus::Stale => {
-                // A registered index covering nothing answers every
-                // search with no matches while reporting that it exists,
-                // so leaving it in place would be worse than having
-                // none. Drop it and build again, and say so: a rebuild
-                // that happens silently every open is the shape of this
-                // bug, and the log line is what makes it visible.
-                tracing::warn!(
-                    projection = %request.projection,
-                    dimension = request.dimension,
-                    "vector index exists but covers no vectors; rebuilding"
-                );
-                database.drop_vector_index(&label, &property);
-            }
-            GraphVectorIndexStatus::Missing => {}
-        }
-        database
-            .create_vector_index(
-                &label,
-                &property,
-                Some(request.dimension),
-                Some(request.metric.engine_name()),
-                None,
-                None,
-                None,
-            )
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        if request.cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        Ok(vector::classify_vector_index(database, &label, &property))
-    }
-
     /// Physically close the underlying graph database.
     ///
     /// The pinned grafeo elides the close-time checkpoint when the container
@@ -1024,9 +938,6 @@ impl GraphDb {
             }
             return Ok(());
         }
-        // Before the write lock, while a read guard is still available:
-        // the census needs the database, and `close` is about to take it.
-        self.record_vector_index_census(VectorIndexCensusPhase::Persist);
         let _snapshot_gate = self.wait_snapshot_gate_write();
         let mut guard = match crate::hotpath_observe::wait_lock(
             crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
@@ -1292,9 +1203,6 @@ impl GraphDb {
                     let state = state.as_mut().ok_or_else(|| {
                         GraphDbError::unavailable("graph format state is unavailable")
                     })?;
-                    if prepared.ensure_page_vector_indexes {
-                        ensure_vector_indexes_for_batch(database, &prepared.batch)?;
-                    }
                     self.apply_locked(
                         database,
                         state,
@@ -1326,36 +1234,6 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         check()?;
-        hotpath::measure_block!(
-            "graph_db.vector_index.ensure_initial",
-            ensure_initial_vector_indexes(database, &batch)
-        )?;
-        let vector_updates = hotpath::measure_block!("graph_db.vector_index.collect_updates", {
-            let mut vector_updates = Vec::new();
-            for mutation in &batch.mutations {
-                check()?;
-                let GraphMutation::UpsertEntity(entity) = mutation else {
-                    continue;
-                };
-                for (name, property) in &entity.properties {
-                    check()?;
-                    let GraphProperty::Vector(vector) = property else {
-                        continue;
-                    };
-                    vector_updates.push(VectorRefreshUpdate {
-                        identity: entity.identity.clone(),
-                        property: PropertyKey::new(vector_property_key(
-                            name,
-                            vector.dimension,
-                            vector.metric,
-                        )),
-                        value: Value::Vector(vector.values.clone().into()),
-                    });
-                }
-            }
-            Ok::<_, GraphDbError>(vector_updates)
-        })?;
-        let namespace = batch.namespace.clone();
         let commit = mutation::apply(
             database,
             state,
@@ -1367,18 +1245,11 @@ impl GraphDb {
         )?;
         // The Grafeo transaction (including any publication record) is durably
         // committed from this point. Cancellation is deliberately not observed
-        // in the commit->refresh window: reporting Cancelled here would mistype
-        // a committed write, skip HNSW refresh and WAL settlement on a Ready
-        // handle, and retry would short-circuit as exact publication replay
-        // without ever repairing them. Settlement failures instead poison the
-        // handle and surface as typed DurabilityUncertain.
-        hotpath::measure_block!(
-            "graph_db.vector_index.refresh",
-            refresh_vector_indexes(database, &namespace, vector_updates)
-        )
-        .inspect_err(|_| {
-            self.inner.poisoned.store(true, Ordering::Release);
-        })?;
+        // in the commit->sync window: reporting Cancelled here would mistype
+        // a committed write, skip WAL settlement on a Ready handle, and retry
+        // would short-circuit as exact publication replay without ever
+        // repairing it. Settlement failures instead poison the handle and
+        // surface as typed DurabilityUncertain.
         if self.inner.durability == GraphDurability::WalSync
             && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
         {
@@ -1531,53 +1402,6 @@ impl GraphDb {
         }
         self.ensure_available()?;
         Ok(Some(guard))
-    }
-
-    /// Reports how much vector index the store is holding right now.
-    ///
-    /// Taken twice per database lifetime, at open and just before close,
-    /// because the pair is what makes a durability leak legible: bytes
-    /// reported at `persist` that do not come back at the next `restore`
-    /// are bytes the daemon is about to spend re-indexing, and a
-    /// `restore` of zero on a store that had an index means vector
-    /// search is unavailable until a rebuild finishes.
-    ///
-    /// Like [`Self::record_memory_checkpoint`], the census walks internal
-    /// store structures and feeds gauges that are feature-off no-ops, so it
-    /// runs only in opt-in Hotpath builds: a production open or close must
-    /// not pay for a full memory walk it then discards.
-    #[inline(always)]
-    pub(crate) fn record_vector_index_census(&self, phase: VectorIndexCensusPhase) {
-        #[cfg(feature = "hotpath")]
-        {
-            let Ok(guard) = self.read_guard() else {
-                return;
-            };
-            let Some(database) = guard.as_ref() else {
-                return;
-            };
-            let indexes = database.memory_usage().indexes.vector_indexes;
-            let vectors = indexes.iter().map(|entry| entry.item_count).sum();
-            let bytes = indexes.iter().map(|entry| entry.bytes).sum();
-            match phase {
-                VectorIndexCensusPhase::Restore => {
-                    crate::hotpath_observe::record_vector_index_restore(
-                        indexes.len(),
-                        vectors,
-                        bytes,
-                    );
-                }
-                VectorIndexCensusPhase::Persist => {
-                    crate::hotpath_observe::record_vector_index_persist(
-                        indexes.len(),
-                        vectors,
-                        bytes,
-                    );
-                }
-            }
-        }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = phase;
     }
 
     /// Best-effort profiler observation that cannot change graph authority or
@@ -1767,7 +1591,6 @@ impl GraphDb {
             Some(PersistentGraphStoreState::Existing);
         drop(database);
         self.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Open);
-        self.record_vector_index_census(VectorIndexCensusPhase::Restore);
         Ok(())
     }
 
@@ -1916,206 +1739,6 @@ fn open_validated_graph(
     })
 }
 
-/// Which side of a database lifetime a vector index census describes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum VectorIndexCensusPhase {
-    /// Taken at open: what came back from the file.
-    Restore,
-    /// Taken before close: what is about to be written out.
-    Persist,
-}
-
-fn ensure_initial_vector_indexes(
-    database: &GrafeoDB,
-    batch: &GraphWriteBatch,
-) -> Result<(), GraphDbError> {
-    if latest_projection(database, &batch.namespace, &batch.projection)?.is_some() {
-        return Ok(());
-    }
-    ensure_vector_indexes_for_batch(database, batch)
-}
-
-fn ensure_vector_indexes_for_batch(
-    database: &GrafeoDB,
-    batch: &GraphWriteBatch,
-) -> Result<(), GraphDbError> {
-    let store = database.graph_store();
-    let label = vector::native_vector_label(&batch.namespace, &batch.projection);
-    // A page carries the same vector key on every row (one per embedding
-    // model), so index presence is settled once per distinct key rather than
-    // probed once per row.
-    let mut ensured = BTreeSet::new();
-    for entity in batch
-        .mutations
-        .iter()
-        .filter_map(|mutation| match mutation {
-            GraphMutation::UpsertEntity(entity) => Some(entity),
-            _ => None,
-        })
-    {
-        for (name, property) in &entity.properties {
-            let GraphProperty::Vector(vector) = property else {
-                continue;
-            };
-            let property = vector_property_key(name, vector.dimension, vector.metric);
-            if ensured.contains(&property) {
-                continue;
-            }
-            if !store.has_vector_index(&label, &property) {
-                database
-                    .create_vector_index(
-                        &label,
-                        &property,
-                        Some(vector.dimension),
-                        Some(vector.metric.engine_name()),
-                        None,
-                        None,
-                        None,
-                    )
-                    .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-            }
-            ensured.insert(property);
-        }
-    }
-    Ok(())
-}
-
-/// One committed vector scalar awaiting HNSW refresh: the entity that owns
-/// it, its exact `name_dimension_metric` property key, and the value
-/// `mutation::apply` committed under that key.
-struct VectorRefreshUpdate {
-    identity: GraphEntityId,
-    property: PropertyKey,
-    value: Value,
-}
-
-/// Re-applies every committed vector scalar as a direct store write so the
-/// HNSW index catches up with the transaction `mutation::apply` just
-/// committed. Grafeo Session mutations do not maintain HNSW, so this identical
-/// direct write is index refresh only. The outer database write guard keeps
-/// readers excluded. The pinned grafeo persists the refreshed index at
-/// checkpoint and restores it on open; a store whose index is still Missing
-/// after reopen (written before index maintenance, or torn before its first
-/// checkpoint) needs an explicit retained owner to call `ensure_vector_index`.
-///
-/// Each row needs three things: the node its identity resolves to, the
-/// projection that names its index, and proof that the scalar committed under
-/// the vector key is the one about to be re-applied. Node ids come from the
-/// unique-key index; the rest is one projected column read over the whole
-/// page, so no committed entity is hydrated (labels, every property, and the
-/// vector decoded into a `GraphEntity`) just to learn its node id and
-/// projection.
-///
-/// Every error here is a settlement failure on an already committed write,
-/// so all of them are `DurabilityUncertain` and the caller poisons the handle.
-fn refresh_vector_indexes(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    vector_updates: Vec<VectorRefreshUpdate>,
-) -> Result<(), GraphDbError> {
-    if vector_updates.is_empty() {
-        return Ok(());
-    }
-    let node_ids = hotpath::measure_block!("graph_db.vector_index.resolve", {
-        let mut node_ids = Vec::with_capacity(vector_updates.len());
-        for update in &vector_updates {
-            match indexed_entity_node(database, namespace, &update.identity) {
-                Ok(Some(node)) => node_ids.push(node),
-                Ok(None) => {
-                    return Err(GraphDbError::DurabilityUncertain {
-                        message: format!(
-                            "committed vector entity `{}` is missing from native identity index; commit settlement is incomplete",
-                            update.identity
-                        ),
-                    });
-                }
-                Err(error) => {
-                    return Err(unreadable_committed_vector_entity(&update.identity, &error));
-                }
-            }
-        }
-        Ok::<_, GraphDbError>(node_ids)
-    })?;
-    let owner_columns = EntityOwnerColumns::default();
-    let mut columns = owner_columns.keys().to_vec();
-    let mut vector_keys = BTreeSet::new();
-    for update in &vector_updates {
-        if vector_keys.insert(update.property.as_str()) {
-            columns.push(update.property.clone());
-        }
-    }
-    let rows = hotpath::measure_block!(
-        "graph_db.vector_index.committed_columns",
-        database
-            .graph_store()
-            .get_nodes_properties_selective_batch(&node_ids, &columns)
-    );
-    if rows.len() != node_ids.len() {
-        return Err(GraphDbError::DurabilityUncertain {
-            message: "committed vector column batch does not cover every committed vector row; commit settlement is incomplete"
-                .to_owned(),
-        });
-    }
-    hotpath::measure_block!("graph_db.vector_index.write", {
-        let store = database.graph_store();
-        // Index presence is a property of (projection, vector key), not of a
-        // row, and cannot change while the write guard is held.
-        let mut indexed = HashMap::<(GraphProjectionId, PropertyKey), bool>::new();
-        for ((update, node), row) in vector_updates.into_iter().zip(node_ids).zip(&rows) {
-            let projection = owner_columns
-                .projection_of(row, namespace, &update.identity)
-                .map_err(|error| unreadable_committed_vector_entity(&update.identity, &error))?;
-            require_committed_vector_scalar(
-                row.get(&update.property),
-                update.property.as_str(),
-                &update.value,
-            )?;
-            let has_index = *indexed
-                .entry((projection, update.property.clone()))
-                .or_insert_with_key(|(projection, property)| {
-                    store.has_vector_index(
-                        &vector::native_vector_label(namespace, projection),
-                        property.as_str(),
-                    )
-                });
-            if has_index {
-                database.set_node_property(node, update.property.as_str(), update.value);
-            }
-        }
-        Ok::<_, GraphDbError>(())
-    })
-}
-
-fn unreadable_committed_vector_entity(
-    identity: &GraphEntityId,
-    error: &GraphDbError,
-) -> GraphDbError {
-    GraphDbError::DurabilityUncertain {
-        message: format!(
-            "committed vector entity `{identity}` could not be read for native index refresh; commit settlement is incomplete: {error}"
-        ),
-    }
-}
-
-/// The scalar the refresh is about to re-apply must be byte-identical to the
-/// one the transaction committed under the same key; anything else means the
-/// index would be refreshed from a value the store does not hold.
-fn require_committed_vector_scalar(
-    committed: Option<&Value>,
-    property: &str,
-    expected: &Value,
-) -> Result<(), GraphDbError> {
-    if committed == Some(expected) {
-        Ok(())
-    } else {
-        Err(GraphDbError::DurabilityUncertain {
-            message: format!(
-                "committed vector scalar `{property}` differs before native index refresh"
-            ),
-        })
-    }
-}
-
 fn durability_uncertain() -> GraphDbError {
     GraphDbError::DurabilityUncertain {
         message: "the handle was poisoned after an observed post-commit persistence failure"
@@ -2141,8 +1764,6 @@ pub(crate) fn sync_wal(database: &GrafeoDB) -> Result<(), GraphDbError> {
             ),
         })
 }
-
-pub(crate) use crate::schema::vector_property_key;
 
 /// Deterministic barriers on the engine lifecycle, for tests that must act
 /// between two runtime steps -- replace the container between marker admission

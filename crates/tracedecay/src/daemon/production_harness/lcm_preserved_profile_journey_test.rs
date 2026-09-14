@@ -870,33 +870,5 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         "LCM status must preserve the redaction authority block: {status}"
     );
 
-    let (strict_elapsed, strict_response) = timed_raw(
-        &harness,
-        &project,
-        "tracedecay_search",
-        json!({
-            "query": PROBE_SYMBOL,
-            "semantic_mode": "strict_semantic",
-            "limit": 5,
-            "format": "json",
-        }),
-    )
-    .await;
-    assert_under_budget(
-        "typed unavailable semantic search",
-        strict_elapsed,
-        ADMISSION_BUDGET,
-    );
-    let (refused, strict) = tool_answer(&strict_response);
-    assert!(
-        refused,
-        "strict semantic search must refuse as a typed unavailable payload: {strict}"
-    );
-    assert_eq!(
-        strict["semantic"]["reason"],
-        json!("calibration_unavailable"),
-        "strict semantic search must abstain with calibration_unavailable: {strict}"
-    );
-
     harness.shutdown().await;
 }

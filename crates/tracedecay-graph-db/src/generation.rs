@@ -51,11 +51,9 @@ use replay::validate_sealed_replay;
 pub use replay::{
     GraphGenerationManifestProvider, GraphGenerationReplayMetadata, GraphGenerationReplaySource,
     GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
-    SemanticVectorGenerationReplay,
 };
 pub(crate) use replay::{
-    checked_decode_replay_source, metadata_manifest_from_source, validate_metadata_binding,
-    validate_supplied_manifest_binding,
+    checked_decode_replay_source, metadata_manifest_from_source, validate_supplied_manifest_binding,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -434,8 +432,7 @@ impl GraphGenerationManifest {
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let manifest = match source {
             GraphGenerationReplaySource::InlineManifest(manifest) => *manifest,
-            GraphGenerationReplaySource::MetadataOnlyManifest(_)
-            | GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
+            GraphGenerationReplaySource::MetadataOnlyManifest(_) => {
                 return Err(GraphDbError::unavailable(
                     "metadata-only replay requires verified native generation rows",
                 ));

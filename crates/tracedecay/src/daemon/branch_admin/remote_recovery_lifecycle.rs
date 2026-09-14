@@ -221,9 +221,8 @@ impl RemoteRecoveryProjectLifecycleV1 {
             })?;
         // Remote recovery drains the same invocation runtime owners every
         // other project drain does. Calling `service.quiesce_project` alone
-        // left the code-index scheduler root, the query authority and the
-        // semantic projection work mounted, and the code-index observability
-        // lane keeps a counted client on the project-session store, so the
+        // left the code-index scheduler root and the query authority mounted,
+        // and the code-index observability lane keeps a counted client on the project-session store, so the
         // store retirement this quiescence exists to admit was refused.
         let invocation = self
             .invocation

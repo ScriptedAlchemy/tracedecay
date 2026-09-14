@@ -3,10 +3,6 @@
 //! Validates multi-root payloads before they cost a project admission,
 //! resolves the roots they name, and runs the invocation on the Unix and
 //! portable executors.
-//!
-//! Semantic execution controls are admitted before project routing and bound
-//! around project-open waits so route failures cannot hide cancellation or
-//! deadline expiry.
 
 use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
@@ -15,22 +11,11 @@ use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_contracts::SharedProfileStoreLocatorV1;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationService, Lease, SemanticInvocationControlV1,
+    DaemonInvocationService, Lease,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store::StoreShardScopeV1;
-
-fn semantic_invocation_interruption_response(
-    request_id: &str,
-    control: Option<&SemanticInvocationControlV1>,
-) -> Option<DaemonInvocationResponse> {
-    control
-        .and_then(|control| control.interruption(tracedecay_contracts::clock::now_micros()))
-        .map(|problem| {
-            DaemonInvocationResponse::application_problem(request_id.to_owned(), problem)
-        })
-}
 
 fn record_project_open_refusal(
     operation: &str,
@@ -71,66 +56,6 @@ fn record_admitted_root_refusal(operation: &str) {
         operation,
         "daemon invocation project route could not form an admitted root"
     );
-}
-
-async fn await_project_open_with_semantic_control<Output>(
-    control: Option<&SemanticInvocationControlV1>,
-    request_cancellation: Option<&CancellationToken>,
-    project_open: impl Future<Output = Output>,
-) -> std::result::Result<Output, tracedecay_contracts::ApplicationProblem> {
-    let Some(control) = control else {
-        return Ok(project_open.await);
-    };
-    if let Some(problem) = control.interruption(tracedecay_contracts::clock::now_micros()) {
-        return Err(problem);
-    }
-    if request_cancellation.is_some_and(CancellationToken::is_cancelled) {
-        return Err(tracedecay_contracts::ApplicationProblem::cancelled_before_admission());
-    }
-    let remaining = control.remaining(tracedecay_contracts::clock::now_micros())?;
-    let deadline = tokio::time::Instant::now()
-        .checked_add(remaining)
-        .ok_or_else(
-            || tracedecay_contracts::ApplicationProblem::InvalidRequest {
-                diagnostic: tracedecay_contracts::SafeDiagnostic {
-                    code: "semantic_evaluation_deadline_out_of_range".to_owned(),
-                    message: "The semantic evaluation deadline is outside the supported range"
-                        .to_owned(),
-                },
-                retry: tracedecay_contracts::RetryDirective::Never,
-                legal_actions: Vec::new(),
-            },
-        )?;
-    tokio::pin!(project_open);
-    tokio::select! {
-        biased;
-        () = async {
-            match request_cancellation {
-                Some(request_cancellation) => request_cancellation.cancelled().await,
-                None => std::future::pending::<()>().await,
-            }
-        } => {
-            Err(tracedecay_contracts::ApplicationProblem::cancelled_before_admission())
-        }
-        () = tokio::time::sleep_until(deadline) => {
-            Err(tracedecay_contracts::ApplicationProblem::TimedOut {
-                stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
-                retry: tracedecay_contracts::RetryDirective::Never,
-                legal_actions: Vec::new(),
-            })
-        }
-        output = &mut project_open => {
-            if request_cancellation.is_some_and(CancellationToken::is_cancelled) {
-                Err(tracedecay_contracts::ApplicationProblem::cancelled_before_admission())
-            } else if let Some(problem) =
-                control.interruption(tracedecay_contracts::clock::now_micros())
-            {
-                Err(problem)
-            } else {
-                Ok(output)
-            }
-        }
-    }
 }
 
 async fn await_lsp_project_open_upgrade(
@@ -383,26 +308,6 @@ pub(super) async fn execute_portable_daemon_invocation(
     }
     let request_id = request.request_id.clone();
     let request_cancellations = invocation.service.request_cancellations();
-    let semantic_control = SemanticInvocationControlV1::from_request(&request);
-    if let Some(response) =
-        semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-    {
-        return response;
-    }
-    let semantic_cancellation_lease = if semantic_control.is_some() {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let semantic_cancellation = semantic_cancellation_lease.as_ref().map(Lease::token);
     let scope_set_cas_cancellation_lease = if scope_set_cas_admission(&request).is_some() {
         match request_cancellations.register(&request_id) {
             Some(lease) => Some(lease),
@@ -430,9 +335,8 @@ pub(super) async fn execute_portable_daemon_invocation(
         None
     };
     let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
-    let request_cancellation = semantic_cancellation
+    let request_cancellation = lsp_cancellation
         .clone()
-        .or(lsp_cancellation.clone())
         .or_else(|| scope_set_cas_cancellation_lease.as_ref().map(Lease::token));
     let lsp_project_open_gates = Arc::clone(&project_open_gates);
     #[cfg(test)]
@@ -443,29 +347,19 @@ pub(super) async fn execute_portable_daemon_invocation(
     if request.requires_project() {
         let project_server = hotpath::measure_block!(
             "daemon.invocation.project_open",
-            await_project_open_with_semantic_control(
-                semantic_control.as_ref(),
-                semantic_cancellation.as_ref(),
-                Box::pin(portable_project_server_for_request(
-                    lifecycle.clone(),
-                    store_administration.clone(),
-                    project_open_gates,
-                    invocation.clone(),
-                    http_application_registry.clone(),
-                    handshake,
-                    ProjectServerRequirement::Core,
-                    #[cfg(test)]
-                    project_open_attempts.clone(),
-                )),
-            )
+            Box::pin(portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                project_open_gates,
+                invocation.clone(),
+                http_application_registry.clone(),
+                handshake,
+                ProjectServerRequirement::Core,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ))
             .await
         );
-        let project_server = match project_server {
-            Ok(project_server) => project_server,
-            Err(problem) => {
-                return DaemonInvocationResponse::application_problem(request_id, problem);
-            }
-        };
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
             return DaemonInvocationResponse::problem(
@@ -474,11 +368,6 @@ pub(super) async fn execute_portable_daemon_invocation(
             );
         }
         let project_route = project_route_for_handshake(handshake);
-        if let Some(response) =
-            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-        {
-            return response;
-        }
         let (mut resolved_project_path, route) = match project_route {
             Ok(route) => route,
             Err(error) => {
@@ -548,11 +437,6 @@ pub(super) async fn execute_portable_daemon_invocation(
             resolved_project_path = canonical_project_path;
         }
         let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
-        if let Some(response) =
-            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-        {
-            return response;
-        }
         if admitted_root.is_none() {
             record_admitted_root_refusal(request.operation().as_str());
             return DaemonInvocationResponse::problem(
@@ -802,26 +686,6 @@ pub(super) async fn execute_daemon_invocation(
     }
     let request_id = request.request_id.clone();
     let request_cancellations = engine.invocation.service.request_cancellations();
-    let semantic_control = SemanticInvocationControlV1::from_request(&request);
-    if let Some(response) =
-        semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-    {
-        return response;
-    }
-    let semantic_cancellation_lease = if semantic_control.is_some() {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let semantic_cancellation = semantic_cancellation_lease.as_ref().map(Lease::token);
     let scope_set_cas_cancellation_lease = if scope_set_cas_admission(&request).is_some() {
         match request_cancellations.register(&request_id) {
             Some(lease) => Some(lease),
@@ -849,9 +713,8 @@ pub(super) async fn execute_daemon_invocation(
         None
     };
     let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
-    let request_cancellation = semantic_cancellation
+    let request_cancellation = lsp_cancellation
         .clone()
-        .or(lsp_cancellation.clone())
         .or_else(|| scope_set_cas_cancellation_lease.as_ref().map(Lease::token));
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
@@ -859,19 +722,10 @@ pub(super) async fn execute_daemon_invocation(
     if request.requires_project() {
         let project_server = hotpath::measure_block!(
             "daemon.invocation.project_open",
-            await_project_open_with_semantic_control(
-                semantic_control.as_ref(),
-                semantic_cancellation.as_ref(),
-                engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
-            )
-            .await
+            engine
+                .project_server_for_request(handshake, ProjectServerRequirement::Core)
+                .await
         );
-        let project_server = match project_server {
-            Ok(project_server) => project_server,
-            Err(problem) => {
-                return DaemonInvocationResponse::application_problem(request_id, problem);
-            }
-        };
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
             return DaemonInvocationResponse::problem(
@@ -880,11 +734,6 @@ pub(super) async fn execute_daemon_invocation(
             );
         }
         let project_route = DaemonEngine::project_route(handshake);
-        if let Some(response) =
-            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-        {
-            return response;
-        }
         let (mut resolved_project_path, route) = match project_route {
             Ok(route) => route,
             Err(error) => {
@@ -944,11 +793,6 @@ pub(super) async fn execute_daemon_invocation(
             resolved_project_path = canonical_project_path;
         }
         let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
-        if let Some(response) =
-            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-        {
-            return response;
-        }
         if admitted_root.is_none() {
             record_admitted_root_refusal(request.operation().as_str());
             return DaemonInvocationResponse::problem(
@@ -1033,103 +877,6 @@ fn project_open_problem(
         DaemonInvocationProblem::NotFoundOrNotAuthorized
     } else {
         DaemonInvocationProblem::Unavailable
-    }
-}
-
-#[cfg(test)]
-mod semantic_control_tests {
-    use super::*;
-    use tracedecay_contracts::ApplicationProblemKind;
-
-    fn active_control(deadline_offset_micros: i64) -> SemanticInvocationControlV1 {
-        let observed_at = tracedecay_contracts::clock::now_micros();
-        SemanticInvocationControlV1::new(
-            observed_at,
-            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
-                observed_at
-                    .0
-                    .checked_add(deadline_offset_micros)
-                    .expect("test deadline"),
-            ))
-            .expect("valid deadline"),
-            tracedecay_contracts::CancellationContext::active("semantic-project-open-active")
-                .expect("active cancellation"),
-        )
-    }
-
-    fn cancelled_control() -> SemanticInvocationControlV1 {
-        let observed_at = tracedecay_contracts::clock::now_micros();
-        SemanticInvocationControlV1::new(
-            observed_at,
-            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
-                observed_at.0.checked_add(1_000_000).expect("test deadline"),
-            ))
-            .expect("valid deadline"),
-            tracedecay_contracts::CancellationContext::cancelled(
-                "semantic-project-open-cancelled",
-                observed_at,
-            )
-            .expect("cancelled cancellation"),
-        )
-    }
-
-    #[tokio::test]
-    async fn portable_dispatch_admits_controls_before_and_during_project_open() {
-        let cancelled = cancelled_control();
-        let cancelled_problem =
-            await_project_open_with_semantic_control(Some(&cancelled), None, async {
-                panic!("pre-cancelled project open must not be polled");
-            })
-            .await
-            .expect_err("pre-cancelled request");
-        assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
-
-        let expired = active_control(0);
-        let expired_problem =
-            await_project_open_with_semantic_control(Some(&expired), None, async {
-                panic!("pre-expired project open must not be polled");
-            })
-            .await
-            .expect_err("pre-expired request");
-        assert_eq!(expired_problem.kind(), ApplicationProblemKind::TimedOut);
-
-        let expiring = active_control(2_000);
-        let during_open_problem = await_project_open_with_semantic_control(
-            Some(&expiring),
-            None,
-            std::future::pending::<()>(),
-        )
-        .await
-        .expect_err("project open must observe deadline");
-        assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);
-
-        let request_cancellation = CancellationToken::new();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let cancelled_open = {
-            let request_cancellation = request_cancellation.clone();
-            tokio::spawn(async move {
-                let control = active_control(1_000_000);
-                await_project_open_with_semantic_control(
-                    Some(&control),
-                    Some(&request_cancellation),
-                    async move {
-                        let _ = started_tx.send(());
-                        std::future::pending::<()>().await;
-                    },
-                )
-                .await
-            })
-        };
-        started_rx.await.expect("project open started");
-        request_cancellation.cancel();
-        assert_eq!(
-            cancelled_open
-                .await
-                .expect("project-open task")
-                .expect_err("request cancellation must interrupt project open")
-                .kind(),
-            ApplicationProblemKind::Cancelled
-        );
     }
 }
 

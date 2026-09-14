@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "Embedded graph and vector storage boundary for TraceDecay"
+description = "Embedded graph storage boundary for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
@@ -134,17 +134,7 @@ harness = false
 required-features = ["test-helpers"]
 
 [[bench]]
-name = "vector_search"
-harness = false
-required-features = ["test-helpers"]
-
-[[bench]]
 name = "mixed_read_write"
-harness = false
-required-features = ["test-helpers"]
-
-[[bench]]
-name = "vector_commit_refresh"
 harness = false
 required-features = ["test-helpers"]
 
@@ -164,9 +154,6 @@ required-features = ["test-helpers"]
 [[test]]
 name = "graph_db_suite"
 required-features = ["test-helpers"]
-
-[[test]]
-name = "semantic_vector_staging_contract"
 
 # Peak-RSS measurement harness for the tiered storage features. Every test in
 # it is `#[ignore]`d, so it costs a compile and nothing else in a normal run.

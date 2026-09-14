@@ -76,7 +76,6 @@ fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> 
         crate::db::evidence_assembly::EVIDENCE_ASSEMBLY_IMMUTABILITY,
         tracedecay_rusqlite_runtime::repository::EXTERNAL_SOURCE_SCHEMA_V1,
         tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1,
-        tracedecay_rusqlite_runtime::repository::SEMANTIC_VECTOR_STAGING_SCHEMA,
         tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1,
         tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA,
     ] {

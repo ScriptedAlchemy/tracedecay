@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
-use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 use tracedecay_contracts::feedback::{FeedbackReadPort, FeedbackRouteAuthorizationPort};
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, ApplicationOutcome, ApplicationProblem,
@@ -72,10 +72,8 @@ use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCase
 
 use crate::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
-    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1,
-    RegisteredSemanticActivationOwnerV1, RegisteredSemanticOwnerTaskV1,
-    SemanticActivationOwnerWithdrawalV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
-    StoreObservabilityRegistryV1,
+    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1,
+    StoreObservabilityMountV1, StoreObservabilityRegistryV1,
 };
 use tracedecay_agent_hosts::agents::context_scout::ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
@@ -129,10 +127,6 @@ use tracedecay_application::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
 };
 use tracedecay_application::primitives::{PrimitiveDispatch, PrimitiveProjectRuntime};
-use tracedecay_application::semantic_runtime::{
-    ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
-    SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
-};
 use tracedecay_contracts::feedback::observations::{
     FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
     FeedbackOperationV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1,
@@ -183,8 +177,6 @@ pub use primitive::callable_code_request_context;
 mod recovery_schedule;
 mod registrars;
 mod retained;
-mod semantic_activation;
-pub mod semantic_evaluation;
 mod source_edit;
 #[cfg(test)]
 mod tests;
@@ -222,7 +214,6 @@ use types::*;
 use work::*;
 pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
 
-pub use configuration::{DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError};
 pub use feedback::{
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
@@ -257,9 +248,8 @@ pub use registrars::{
     DaemonConfigurationGrantAuthority, DaemonConfigurationRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
-    DaemonRetainedRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
-    DaemonSourceEditOwnerRegistrationError, DaemonWorkRuntimeRegistrar,
-    FeedbackCycleRuntimeBuilderV1,
+    DaemonRetainedRuntimeRegistrar, DaemonSourceEditOwnerRegistrationError,
+    DaemonWorkRuntimeRegistrar, FeedbackCycleRuntimeBuilderV1,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use types::{

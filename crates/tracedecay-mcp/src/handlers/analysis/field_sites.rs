@@ -361,15 +361,9 @@ fn qualified_type_matches(qualified_name: &str, type_name: &str) -> bool {
 
 #[cfg(feature = "source-analysis")]
 fn rust_field_receiver_types(source: &str, field: &str) -> Result<HashMap<usize, String>> {
-    let language = tracedecay_code_extraction::ts_provider::try_language("rust")
-        .map_err(|error| verified_analysis_unavailable("field-qualifier", &error))?;
     let tree =
-        tracedecay_code_extraction::redundancy::parse_file(source, &language).ok_or_else(|| {
-            verified_analysis_unavailable(
-                "field-qualifier",
-                "Rust field receiver parse returned no tree",
-            )
-        })?;
+        tracedecay_code_extraction::ts_provider::parse_extractor_source("rust", "Rust", source)
+            .map_err(|error| verified_analysis_unavailable("field-qualifier", &error))?;
     let root = tree.root_node();
     if root.has_error() {
         return Err(verified_analysis_unavailable(

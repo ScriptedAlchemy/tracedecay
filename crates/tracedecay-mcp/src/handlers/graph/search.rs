@@ -35,9 +35,7 @@ use super::context_support::{
     insert_context_memory_section,
 };
 use super::primitive_surface::{
-    search_coverage as primitive_search_coverage,
-    semantic_search_mode as primitive_semantic_search_mode,
-    symbol_location as primitive_symbol_location,
+    search_coverage as primitive_search_coverage, symbol_location as primitive_symbol_location,
 };
 use super::search_evidence::{
     SearchGraphEvidence, bind_verified_graph_to_search, race_primary_search_with_graph,
@@ -56,22 +54,6 @@ use super::{lexical_routing, search_evidence};
 #[cfg(test)]
 use super::context_support::context_memory_section;
 
-fn semantic_search_mode(
-    args: &Value,
-) -> Result<tracedecay_query::code_search::CodeIndexSearchModeV1> {
-    match args.get("semantic_mode").and_then(Value::as_str) {
-        None | Some("fallback_allowed") => {
-            Ok(tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed)
-        }
-        Some("strict_semantic") => {
-            Ok(tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic)
-        }
-        Some(_) => Err(TraceDecayError::Config {
-            message: "semantic_mode must be one of fallback_allowed, strict_semantic".to_owned(),
-        }),
-    }
-}
-
 async fn execute_code_index_search(
     executor: Option<&tracedecay_query::code_search::CodeIndexSearchExecutor>,
     request: tracedecay_query::code_search::CodeIndexSearchRequestV1,
@@ -83,9 +65,6 @@ async fn execute_code_index_search(
                 code_generation: None,
                 reason:
                     tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
-                semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
-                    reason: "code_index_unavailable",
-                },
                 coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
                     "code_index_unavailable",
                 ),
@@ -109,31 +88,6 @@ fn preserve_complete_search_after_lazy_admission(result: Result<()>) -> Result<(
             Ok(())
         }
         result => result,
-    }
-}
-
-fn semantic_status_value(
-    mode: tracedecay_query::code_search::CodeIndexSearchModeV1,
-    status: &tracedecay_query::code_search::CodeIndexSemanticStatusV1,
-) -> Value {
-    let mode = match mode {
-        tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed => "fallback_allowed",
-        tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic => "strict_semantic",
-    };
-    match status {
-        tracedecay_query::code_search::CodeIndexSemanticStatusV1::Complete => json!({
-            "status": "complete",
-            "mode": mode,
-        }),
-        tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable { reason } => json!({
-            "status": "unavailable",
-            "mode": mode,
-            "reason": reason,
-            "qualification": (reason == &"calibration_unavailable").then(
-                tracedecay_query::search_quality::packaged_native_qualification_state
-            ),
-            "fallback": (mode == "fallback_allowed").then_some("lexical"),
-        }),
     }
 }
 
@@ -170,7 +124,6 @@ fn coverage_value(coverage: &tracedecay_query::code_search::CodeIndexSearchCover
         "exact": lane(&coverage.exact),
         "lexical": lane(&coverage.lexical),
         "graph": lane(&coverage.graph),
-        "semantic": lane(&coverage.semantic),
         "recall": if coverage.is_degraded() { "partial" } else { "full" },
     })
 }
@@ -252,7 +205,6 @@ where
                 message: "missing required parameter: query".to_string(),
             })?;
 
-    let semantic_mode = semantic_search_mode(&args)?;
     let lexical_routing = lexical_routing::routing_from_args(&args)?;
     let lazy_indexing_requested = dependency_hints::lazy_indexing_requested(&args);
     let cursor = retrieval_cursor(&args)?;
@@ -275,7 +227,6 @@ where
         source_reference: None,
         limit,
         cursor,
-        mode: semantic_mode,
         lexical_routing,
         authority: search_authority.cloned(),
         deadline: deadline.clone(),
@@ -391,7 +342,6 @@ where
                 "freshness": freshness,
                 "code_generation": complete.code_generation,
                 "query_fallback_digest": &complete.query_fallback.digest,
-                "semantic": semantic_status_value(semantic_mode, &complete.semantic),
                 "next_cursor": complete.next_cursor
                     .as_ref()
                     .map(serde_json::to_string)
@@ -449,7 +399,6 @@ where
                     "results": [],
                     "code_generation": unavailable.code_generation,
                     "query_fallback_digest": Value::Null,
-                    "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
                     "status": "unavailable",
                     "reason": reason,
                     "coverage": coverage_value(&unavailable.coverage),
@@ -459,19 +408,14 @@ where
                 output["verified_graph_evidence"] = unavailable_graph.clone();
             }
             let failure = format!("code-index search unavailable: {reason}");
-            let mut result = rendered_tool_result(ctx, &args, &output, Vec::new(), || {
+            Ok(rendered_tool_result(ctx, &args, &output, Vec::new(), || {
                 format!(
                     "{}{}",
                     freshness_lines(&freshness),
                     render_search_md(&output)
                 )
             })
-            .with_failure_message(failure);
-            if semantic_mode == tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic
-            {
-                result = result.with_semantic_error(true);
-            }
-            Ok(result)
+            .with_failure_message(failure))
         }
     }
 }
@@ -487,7 +431,7 @@ fn append_coverage_md(md: &mut Md, value: &Value) {
         return;
     }
     let mut notes = Vec::new();
-    for lane in ["exact", "lexical", "graph", "semantic"] {
+    for lane in ["exact", "lexical", "graph"] {
         let status = coverage.get(lane);
         match status
             .and_then(|status| status.get("status"))
@@ -593,14 +537,6 @@ fn render_search_md(value: &Value) -> String {
     }
     lexical_routing::append_routes_md(&mut md, value);
     append_coverage_md(&mut md, value);
-    if let Some(semantic) = value.get("semantic")
-        && semantic.get("status").and_then(Value::as_str) == Some("unavailable")
-        && let Some(reason) = semantic.get("reason").and_then(Value::as_str)
-    {
-        md.blank()
-            .heading(3, "Semantic")
-            .line(&format!("Semantic lane unavailable: {reason}."));
-    }
     if let Some(msg) = value
         .get("index_coverage_hint")
         .and_then(|h| h.get("message"))
@@ -783,19 +719,6 @@ fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMa
     }
 }
 
-fn append_context_semantic_pending(output: &mut String, value: &Value) {
-    let semantic = &value["coverage"]["semantic"];
-    let reason = semantic.get("reason").and_then(Value::as_str);
-    if semantic.get("status").and_then(Value::as_str) == Some("unavailable")
-        && matches!(
-            reason,
-            Some("semantic_generation_warming" | "generation_rebuilding")
-        )
-    {
-        output.push_str("\n### Semantic\nSemantic results pending while the generation warms; available fallback and memory results are shown above.\n");
-    }
-}
-
 #[hotpath::measure(label = "mcp.graph.context.total")]
 pub async fn handle_context<F>(
     ctx: &McpToolContext<'_>,
@@ -820,7 +743,6 @@ where
     let max_code_blocks = request
         .max_code_blocks
         .map_or(5, |value| value.clamp(1, 20) as usize);
-    let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
     let lexical_routing = lexical_routing::routing_from_parts(
         request.lexical_anchors.clone().unwrap_or_default(),
         request.prefer_symbol.unwrap_or(false),
@@ -841,7 +763,6 @@ where
             source_reference: None,
             limit: max_nodes,
             cursor: None,
-            mode: semantic_mode,
             lexical_routing,
             authority: search_authority.cloned(),
             deadline,
@@ -855,12 +776,6 @@ where
     // state at serve time, not a snapshot taken before the lanes ran.
     let freshness_payload = ctx.freshness().await;
     let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
-    let strict_semantic_unavailable = semantic_mode
-        == tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic
-        && matches!(
-            &outcome,
-            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(_)
-        );
     let (complete, code_generation, coverage, freshness, search_matches) = match outcome {
         tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
             let search_matches = context_search_matches(&complete, scope_prefix);
@@ -1016,7 +931,6 @@ where
             }),
         );
     }
-    append_context_semantic_pending(&mut output, &value);
     let mut degradation = Md::new();
     append_coverage_md(&mut degradation, &value);
     search_evidence::append_verified_graph_evidence_md(&mut degradation, &value);
@@ -1033,13 +947,14 @@ where
         ),
     );
     let preview = (!render::wants_json(&args)).then(|| context_markdown_lane_preview(&output));
-    let result =
-        rendered_context_tool_result(ctx, &args, value, touched_files, output, preview.as_deref());
-    if strict_semantic_unavailable {
-        Ok(result.with_semantic_error(true))
-    } else {
-        Ok(result)
-    }
+    Ok(rendered_context_tool_result(
+        ctx,
+        &args,
+        value,
+        touched_files,
+        output,
+        preview.as_deref(),
+    ))
 }
 
 /// Bare-name lookup against `idx_nodes_name` — no BM25 scoring, no fuzzy
@@ -1126,7 +1041,6 @@ pub async fn handle_similar(
 ) -> Result<ToolResult> {
     let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
     let limit = request.limit.map_or(10, |value| value.min(100) as usize);
-    let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
 
     let outcome = hotpath::future!(
         execute_code_index_search(
@@ -1139,7 +1053,6 @@ pub async fn handle_similar(
                 source_reference: None,
                 limit,
                 cursor: None,
-                mode: semantic_mode,
                 lexical_routing: LexicalRoutingV1::query_only(),
                 authority: ctx.code_index_search_authority().cloned(),
                 deadline: ctx.deadline().cloned(),
@@ -1593,27 +1506,6 @@ mod tests {
     }
 
     #[test]
-    fn calibration_unavailable_names_qualification_and_lexical_fallback() {
-        let value = semantic_status_value(
-            tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed,
-            &tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
-                reason: "calibration_unavailable",
-            },
-        );
-
-        assert_eq!(value["reason"], "calibration_unavailable");
-        assert_eq!(value["fallback"], "lexical");
-        assert_eq!(
-            value["qualification"]["state"], "unqualified",
-            "semantic abstention must carry the same packaged-evidence state: {value}"
-        );
-        assert_eq!(
-            value["qualification"]["failure"]["reason"], "superseded_schema",
-            "the checked-in PASS predates the current qualification schema: {value}"
-        );
-    }
-
-    #[test]
     fn search_renders_symbol_id_for_source_body_without_graph_enrichment() {
         let node_id =
             "symbol.v1.sha256:4ddd636456fccc2962006c7803bd94b2d7d732c6830993a429535e0b0ff0b688";
@@ -1658,11 +1550,8 @@ mod tests {
                         tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                             code_generation: None,
                             reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "calibration_unavailable",
-                            },
                             coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
-                                "calibration_unavailable",
+                                "authority_unavailable",
                             ),
                         },
                     )
@@ -1724,27 +1613,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn installed_search_executor_owns_fallback_allowed_dispatch() {
+    async fn installed_search_executor_owns_dispatch() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = std::sync::Arc::clone(&calls);
         let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = std::sync::Arc::new(
             move |request| {
                 observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                assert_eq!(
-                    request.mode,
-                    tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed
-                );
                 assert_eq!(request.query, "fixture");
                 Box::pin(async {
                     tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
                         tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                             code_generation: Some("generation.fixture".to_owned()),
                             reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "calibration_unavailable",
-                            },
                             coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
-                                "calibration_unavailable",
+                                "authority_unavailable",
                             ),
                         },
                     )
@@ -1761,7 +1643,6 @@ mod tests {
                 source_reference: None,
                 limit: 10,
                 cursor: None,
-                mode: tracedecay_query::code_search::CodeIndexSearchModeV1::FallbackAllowed,
                 lexical_routing: LexicalRoutingV1::query_only(),
                 authority: None,
                 deadline: None,
@@ -1794,7 +1675,6 @@ mod tests {
                 source_reference: None,
                 limit: 10,
                 cursor: None,
-                mode: tracedecay_query::code_search::CodeIndexSearchModeV1::StrictSemantic,
                 lexical_routing: LexicalRoutingV1::query_only(),
                 authority: None,
                 deadline: None,

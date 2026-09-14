@@ -15,23 +15,6 @@ use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PrimitiveSemanticModeV1 {
-    FallbackAllowed,
-    StrictSemantic,
-}
-
-impl PrimitiveSemanticModeV1 {
-    #[hotpath::skip]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::FallbackAllowed => "fallback_allowed",
-            Self::StrictSemantic => "strict_semantic",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ContextModeV1 {
     Explore,
     Plan,
@@ -58,7 +41,6 @@ pub struct ContextSurfaceRequestV1 {
     pub include_memory: Option<bool>,
     pub memory_limit: Option<u32>,
     pub memory_min_trust: Option<f64>,
-    pub semantic_mode: Option<PrimitiveSemanticModeV1>,
     /// Exact identifiers or technical terms ranked through the lexical lane as
     /// additional routes fused with the task text. Bounded and validated by
     /// the retrieval kernel; a violation is a typed request rejection.
@@ -146,7 +128,6 @@ pub struct NodeSurfaceRequestV1 {
 pub struct SimilarSurfaceRequestV1 {
     pub symbol: String,
     pub limit: Option<u32>,
-    pub semantic_mode: Option<PrimitiveSemanticModeV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -282,7 +263,6 @@ pub struct PrimitiveSearchCoverageV1 {
     pub exact: PrimitiveLaneStatusV1,
     pub lexical: PrimitiveLaneStatusV1,
     pub graph: PrimitiveLaneStatusV1,
-    pub semantic: PrimitiveLaneStatusV1,
     pub recall: PrimitiveRecallV1,
 }
 
@@ -636,7 +616,6 @@ mod tests {
                 exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
                 lexical: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
                 graph: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
-                semantic: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
                 recall: PrimitiveRecallV1::Full,
             },
             memory_matches: vec![],

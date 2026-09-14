@@ -13,21 +13,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
     CodeIndexMountReadV1, CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort,
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
     DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportV1,
-    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingV1,
-    DoctorStorageIncompleteReasonV1, HostConformanceV1, HostIntegrationDoctorPort,
+    DoctorSourceFuture, DoctorStorageFamilyReadV1, HostConformanceV1, HostIntegrationDoctorPort,
     HostIntegrationReadV1, IngestRefusalCensusReadV1, LanguageServerDoctorPort,
     LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
     ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
     ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    SemanticOwnerDoctorPort, SemanticOwnerReadV1, StorageDoctorPort,
-    advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
-    storage_family_read,
+    StorageDoctorPort, advisory_feedback_read_from_publication, merge_storage_reads,
+    runtime_health_read, storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
@@ -35,9 +34,11 @@ use tracedecay_contracts::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
+use tracedecay_domain::CodeGenerationId;
+use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDb};
 use tracedecay_project::config::DaemonRuntimeConfiguration;
 
-use crate::{DaemonFeedbackRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar};
+use crate::DaemonFeedbackRuntimeRegistrar;
 use tracedecay_maintenance::telemetry::GuardedStoreTelemetryPort;
 
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
@@ -145,7 +146,7 @@ fn host_integration_read_from_report(
     }
 }
 
-// === Code/semantic index mount (SemanticIndex family) ========================
+// === Code index mount (SemanticIndex family) =================================
 
 /// Read the real code-index mount state from the daemon scheduler registry.
 ///
@@ -158,7 +159,7 @@ fn host_integration_read_from_report(
 /// request path.
 #[hotpath::measure(label = "daemon.doctor.code_index", future = true)]
 pub async fn code_index_read_from_registry(
-    registry: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> CodeIndexMountReadV1 {
     if !registry.is_worktree_mounted(project_root).await {
@@ -484,97 +485,39 @@ async fn collect_over_budget_store_findings(
     }
 }
 
-/// Published vectors are proven from the mounted code graph; an unproven
-/// protection set reads as its named degradation (unavailable, reset required,
-/// corrupt, denied) or Unknown, never "nothing is pinned".
-async fn collect_semantic_vector_retention_finding(
-    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    maintenance_observations: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
-    configuration: &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+/// The generations the retention pass protects: the one the mounted scheduler
+/// serves, through either the sealed seat or the text projection, and every
+/// live native-preview candidate binding of the repository. This is the set
+/// `run_code_generation_retention` sweeps against, so the census names what
+/// retention would reclaim. `None` when the repository identity or the binding
+/// inventory cannot be read; an unproven set never reads as "nothing is pinned".
+async fn retention_protected_generations(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    profile_database: &RegisteredGlobalDb,
     project_root: &Path,
-) -> std::result::Result<
-    (
-        DoctorStorageFindingV1,
-        std::collections::BTreeSet<tracedecay_domain::CodeGenerationId>,
-        bool,
-    ),
-    DoctorStorageFamilyReadV1,
-> {
-    use tracedecay_contracts::storage::{
-        SemanticVectorRetentionRecordV1, StoreKeyV1, semantic_vector_retention_finding,
+) -> Option<BTreeSet<CodeGenerationId>> {
+    let mut protected = BTreeSet::new();
+    let repository_id = match schedulers.serving_code_scope(project_root).await {
+        Some(scope) => {
+            if let Some(serving) = scope.serving_generation {
+                protected.insert(serving.manifest().generation_id.clone());
+            }
+            scope.repository_id
+        }
+        None => repository_id_for(project_root).ok()?,
     };
-
-    let tracedecay_maintenance::telemetry::SemanticVectorRetentionReadV1::Observed {
-        receipt: semantic_census,
-    } = maintenance_observations.semantic_vector_retention_read(project_root)
-    else {
-        return Err(DoctorStorageFamilyReadV1::Unknown);
-    };
-    let vector_readable_sources =
-        match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
-            schedulers,
-            project_root,
-            configuration,
-            semantic_census.revision,
-        )
-        .await
-        {
-            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
-                sources,
-                configured_root_receipt,
-                ..
-            } => (sources, configured_root_receipt.root_count()),
-            // Each of these is a NAMED vector-authority degradation carrying the
-            // reason the authority reported. Collapsing them into `Unknown`
-            // would claim the state could not be determined when it was in fact
-            // determined and explained, so each keeps its name and its reason.
-            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
-                detail,
-            ) => return Err(DoctorStorageFamilyReadV1::Unavailable { detail }),
-            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
-                detail,
-            ) => return Err(DoctorStorageFamilyReadV1::ResetRequired { detail }),
-            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
-                detail,
-            ) => return Err(DoctorStorageFamilyReadV1::Corrupt { detail }),
-            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
-                _,
-            ) => return Err(DoctorStorageFamilyReadV1::Denied),
-        };
-    let (vector_readable_sources, retained_vector_root_count) = vector_readable_sources;
-    let semantic_backlog =
-        tracedecay_maintenance::telemetry::SemanticVectorRetentionBacklogV1::from_receipt(
-            &semantic_census,
-        );
-    if semantic_backlog.published < retained_vector_root_count {
-        return Err(DoctorStorageFamilyReadV1::Unknown);
+    // A restart that recovered its retained head serves through the text
+    // projection without seating a second copy, so the sealed seat alone
+    // under-reports what is live.
+    if let Some(text) = schedulers.latest_text_serving_for_root(project_root).await {
+        protected.insert(text.metadata().manifest().generation_id.clone());
     }
-    let Ok(semantic_store) = StoreKeyV1::new("semantic-vector-graph") else {
-        return Err(DoctorStorageFamilyReadV1::Unknown);
-    };
-    let semantic_record = SemanticVectorRetentionRecordV1 {
-        store: semantic_store,
-        pending_generation_count: semantic_backlog.pending,
-        ready_generation_count: semantic_backlog.ready,
-        observed_non_configured_published_generation_count: semantic_backlog
-            .published
-            .saturating_sub(retained_vector_root_count),
-        cancelled_generation_count: semantic_backlog.cancelled,
-    };
-    let semantic_completeness = DoctorCoverageCompletenessV1::Complete;
-    let Ok(semantic_finding) =
-        semantic_vector_retention_finding(&semantic_record, semantic_completeness)
-    else {
-        return Err(DoctorStorageFamilyReadV1::Unknown);
-    };
-    let vector_liveness_incomplete = semantic_record.has_backlog()
-        || semantic_record.has_in_flight_generations()
-        || semantic_record.observed_non_configured_published_generation_count > 0;
-    Ok((
-        semantic_finding,
-        vector_readable_sources,
-        vector_liveness_incomplete,
-    ))
+    let native_pins = GlobalDbNativeIntegrationStore::new(profile_database)
+        .live_candidate_generation_bindings(&repository_id, now_micros())
+        .await
+        .ok()?;
+    protected.extend(native_pins);
+    Some(protected)
 }
 
 /// Read the exact code-generation liveness plan and surface superseded,
@@ -586,16 +529,9 @@ async fn collect_semantic_vector_retention_finding(
 /// something to report, because one sealed generation alone exceeds any budget
 /// small enough to be called cheap.
 #[hotpath::measure(label = "daemon.doctor.code_generation_retention", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "The code-generation census is one blocking plan of superseded, collectable, and stranded bytes joined with the already-proven semantic finding."
-)]
 pub async fn collect_code_generation_retention_findings(
-    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    maintenance_observations: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
-    configuration: Option<
-        &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
-    >,
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    profile_database: &RegisteredGlobalDb,
     code_index_store_root: &Path,
     project_root: &Path,
     graph: &tracedecay_runtime_core::db::Database,
@@ -616,27 +552,13 @@ pub async fn collect_code_generation_retention_findings(
     {
         return DoctorStorageFamilyReadV1::Absent;
     }
-    let Some(configuration) = configuration else {
+    let Some(protected_generations) =
+        retention_protected_generations(schedulers, profile_database, project_root).await
+    else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let (semantic_finding, vector_readable_sources, vector_liveness_incomplete) =
-        match collect_semantic_vector_retention_finding(
-            schedulers,
-            maintenance_observations,
-            configuration,
-            project_root,
-        )
-        .await
-        {
-            Ok(parts) => parts,
-            Err(read) => return read,
-        };
-    let semantic_only_unknown = || DoctorStorageFamilyReadV1::ObservedIncomplete {
-        findings: vec![semantic_finding.clone()],
-        reason: DoctorStorageIncompleteReasonV1::Unknown,
-    };
     if !permits_synchronous_generation_census(&code_index_store_root.join("code-generations-v1")) {
-        return semantic_only_unknown();
+        return DoctorStorageFamilyReadV1::Unknown;
     }
     let root = code_index_store_root.to_path_buf();
     // The shared parent that holds every scope root for this repository. A
@@ -662,7 +584,7 @@ pub async fn collect_code_generation_retention_findings(
         });
         let plan = plan_code_generation_retention_with_verification(
             &root,
-            &vector_readable_sources,
+            &protected_generations,
             GenerationDigestVerificationV1::MetadataOnly,
         );
         // Zeros are only ever published together with `Partial`: a live-root set
@@ -685,20 +607,16 @@ pub async fn collect_code_generation_retention_findings(
     })
     .await
     else {
-        return semantic_only_unknown();
+        return DoctorStorageFamilyReadV1::Unknown;
     };
     let (plan, scopes, sealed, live_container_bytes) = census;
     let Ok(plan) = plan else {
-        return semantic_only_unknown();
+        return DoctorStorageFamilyReadV1::Unknown;
     };
     let Ok(store) = StoreKeyV1::new("code-index-v1") else {
-        return semantic_only_unknown();
+        return DoctorStorageFamilyReadV1::Unknown;
     };
-    let completeness = if scopes.is_some()
-        && sealed.is_some()
-        && deferred_retirements.is_some()
-        && !vector_liveness_incomplete
-    {
+    let completeness = if scopes.is_some() && sealed.is_some() && deferred_retirements.is_some() {
         DoctorCoverageCompletenessV1::Complete
     } else {
         DoctorCoverageCompletenessV1::Partial
@@ -708,45 +626,18 @@ pub async fn collect_code_generation_retention_findings(
         store,
         superseded_generation_count: plan.superseded_generations.len() as u64,
         superseded_generation_bytes: StorageByteSizeV1(plan.superseded_generation_bytes()),
-        collectable_generation_count: if vector_liveness_incomplete {
-            0
-        } else {
-            plan.collectable_generations.len() as u64
-        },
-        collectable_generation_bytes: if vector_liveness_incomplete {
-            StorageByteSizeV1::ZERO
-        } else {
-            StorageByteSizeV1(plan.collectable_generation_bytes())
-        },
-        stranded_scope_count: if vector_liveness_incomplete {
-            0
-        } else {
+        collectable_generation_count: plan.collectable_generations.len() as u64,
+        collectable_generation_bytes: StorageByteSizeV1(plan.collectable_generation_bytes()),
+        stranded_scope_count: scopes
+            .as_ref()
+            .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_count),
+        stranded_scope_bytes: StorageByteSizeV1(
             scopes
                 .as_ref()
-                .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_count)
-        },
-        stranded_scope_bytes: if vector_liveness_incomplete {
-            StorageByteSizeV1::ZERO
-        } else {
-            StorageByteSizeV1(
-                scopes
-                    .as_ref()
-                    .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_bytes),
-            )
-        },
-        // Same rule as the collectable figures: while the vector pin set is
-        // unknown, dead sealed bytes are published as zero under `Partial`
-        // rather than as a staleness claim the census cannot yet stand behind.
-        superseded_sealed_generation_count: if vector_liveness_incomplete {
-            0
-        } else {
-            sealed.superseded_count
-        },
-        superseded_sealed_generation_bytes: if vector_liveness_incomplete {
-            StorageByteSizeV1::ZERO
-        } else {
-            StorageByteSizeV1(sealed.superseded_bytes)
-        },
+                .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_bytes),
+        ),
+        superseded_sealed_generation_count: sealed.superseded_count,
+        superseded_sealed_generation_bytes: StorageByteSizeV1(sealed.superseded_bytes),
         abandoned_sealed_staging_count: sealed.abandoned_staging_count,
         abandoned_sealed_staging_bytes: StorageByteSizeV1(sealed.abandoned_staging_bytes),
         sealed_head_generation_bytes: StorageByteSizeV1(sealed.head_bytes),
@@ -756,17 +647,9 @@ pub async fn collect_code_generation_retention_findings(
         deferred_native_retirement_count: deferred_retirements.unwrap_or(0),
     };
     let Ok(finding) = code_generation_retention_finding(&record, completeness) else {
-        return semantic_only_unknown();
+        return DoctorStorageFamilyReadV1::Unknown;
     };
-    let findings = vec![semantic_finding, finding];
-    if vector_liveness_incomplete {
-        DoctorStorageFamilyReadV1::ObservedIncomplete {
-            findings,
-            reason: DoctorStorageIncompleteReasonV1::Unknown,
-        }
-    } else {
-        storage_family_read(findings)
-    }
+    storage_family_read(vec![finding])
 }
 
 /// The journaled generation ids whose sealed artifacts are still live in the
@@ -916,16 +799,6 @@ impl CodeIndexMountDoctorPort for KernelDoctorSources<'_> {
     }
 }
 
-impl SemanticOwnerDoctorPort for KernelDoctorSources<'_> {
-    fn semantic_owner<'b>(
-        &'b self,
-        _context: &'b RequestContext,
-    ) -> DoctorSourceFuture<'b, SemanticOwnerReadV1> {
-        let read = self.inputs.semantic_owner.clone();
-        Box::pin(async move { read })
-    }
-}
-
 impl ObservabilityDoctorPort for KernelDoctorSources<'_> {
     fn observability_health<'b>(
         &'b self,
@@ -975,7 +848,6 @@ pub async fn compose_doctor_report(
         .with_advisory_feedback(&sources)
         .with_language_server(&sources)
         .with_code_index(&sources)
-        .with_semantic_owner(&sources)
         .with_observability(&sources)
         .with_storage(&sources)
         .compose(context)
@@ -1005,12 +877,10 @@ pub fn production_doctor_report_reader(
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
     schema_convergence: Arc<dyn Fn() -> SchemaConvergenceDoctorReadV1 + Send + Sync>,
     retention: tracedecay_configuration::RetentionConfig,
-    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
-    semantic_owner_runtime: DaemonSemanticOwnerRuntimeRegistrar,
     store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
-    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 ) -> tracedecay_dashboard_api::DoctorReportReader {
     Arc::new(move || {
         let project_root = project_root.clone();
@@ -1028,9 +898,7 @@ pub fn production_doctor_report_reader(
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
         let feedback_runtimes = feedback_runtimes.clone();
-        let semantic_owner_runtime = semantic_owner_runtime.clone();
         let store_telemetry_sampling = store_telemetry_sampling.clone();
-        let configuration_runtime = Arc::clone(&configuration_runtime);
         Box::pin(async move {
             let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
                 &project_root,
@@ -1139,8 +1007,6 @@ pub fn production_doctor_report_reader(
                         })
                 })
             });
-            let semantic_configuration_inventory =
-                configuration_runtime.semantic_configuration_inventory_authority();
             let (
                 quick_check,
                 authority_audit_ok,
@@ -1156,7 +1022,6 @@ pub fn production_doctor_report_reader(
                 advisory_feedback,
                 host_read,
                 code_index,
-                semantic_owner,
             ) =
                 hotpath::future!(
                     Box::pin(async {
@@ -1178,8 +1043,7 @@ pub fn production_doctor_report_reader(
                     ),
                     collect_code_generation_retention_findings(
                         &schedulers,
-                        &store_telemetry_sampling,
-                        semantic_configuration_inventory.as_ref(),
+                        registry.as_ref(),
                         &code_index_store_root,
                         &project_root,
                         &graph,
@@ -1197,17 +1061,6 @@ pub fn production_doctor_report_reader(
                     advisory_feedback_read,
                     host_scan,
                     code_index_read_from_registry(&schedulers, &project_root),
-                    async {
-                        semantic_owner_runtime
-                            .state(&project_root)
-                            .await
-                            .map_or(SemanticOwnerReadV1::Absent, |state| {
-                                SemanticOwnerReadV1::Observed {
-                                    state,
-                                    coverage: DoctorCoverageCompletenessV1::Complete,
-                                }
-                            })
-                    },
                 )
                     }),
                     label = "daemon.doctor.collect"
@@ -1276,7 +1129,6 @@ pub fn production_doctor_report_reader(
                 advisory_feedback,
                 language_server,
                 code_index,
-                semantic_owner,
                 observability,
                 ingest_refusals,
                 storage,

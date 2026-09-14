@@ -1,14 +1,13 @@
-//! Production-bound query/semantic candidate-output generator.
+//! Production-bound exact/lexical/graph candidate-output generator.
 //!
 //! Builds one published code generation from checked-in sanitized corpus
 //! fixtures, then runs the shared `CompositionKernel` over the real exact,
-//! lexical, and graph production lanes. A separate native entry point accepts
-//! admitted semantic/rerank authorities; missing optional stages stay pending.
+//! lexical, and graph production lanes.
 //!
 //! Outputs deterministic checked-in `train` / `validation` candidate records
 //! plus current/10x resource samples, cancellation, offline, and fallback
-//! digests. Labels are ordinary reviewable fixture data and never confer
-//! activation authority.
+//! digests. Labels are ordinary reviewable fixture data, never a production
+//! authority.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,22 +36,18 @@ use tracedecay_contracts::historical_query::{
     HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
     HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
 };
-#[cfg(test)]
-use tracedecay_domain::ScoreDomainId;
-use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision,
-    DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass,
-    FileOccurrenceId, HydrationReceipt, HydrationRevision, LanguageId, ManifestDigest,
-    PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision, RelationEdgeKindV1,
-    RepositoryDirtyStateV1, RepositoryId, RerankPolicy, RetrievalBudget, RetrievalFailure,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SingleRootScopeV1, SnapshotFileDispositionV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark,
+    ChunkerRevision, CodeGenerationId, CodeSearchChunkV1, ComponentRevision,
+    EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId,
+    LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, PublicRetrieverStatus, QueryFallbackSubpayload,
+    QueryNormalizationRevision, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
+    RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
@@ -65,44 +60,24 @@ use tracedecay_query::retrieval::fusion::{
 use tracedecay_query::retrieval::graph::{
     GraphLane, GraphLaneRequest, GraphLaneRetriever, production_code_index_freshness,
 };
-use tracedecay_query::retrieval::hydrate::{
-    CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
-    HydrationReadOutcomeV1, HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
-};
 use tracedecay_query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
-use tracedecay_query::search_quality::semantic_native::{
-    SemanticNativeHydrationMeasurementV1, SemanticNativeQueryStageMeasurementsV1,
-    SemanticNativeResourceEvidenceV1, SemanticNativeStageMeasurementV1,
-};
-
 use tracedecay_query::search_quality::candidate_output::{
-    CorpusDocumentV1, EVALUATION_CACHE_STATE, EVALUATION_SEED, REQUIRED_CANCELLATION,
-    REQUIRED_OFFLINE, canonical_json_bytes, canonical_sha256, evaluated_diversity_policy,
-    evaluated_rerank_policy, fusion_profile, retrieval_budget, typed_id as id,
-};
-
-use tracedecay_query::search_quality::candidate_output::{
-    CandidateOutputError, CandidateWorkloadV1, GenerateCandidateOutputsResultV1,
-    HistoricalQueryExecutionV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-    PRODUCTION_BOUNDARY, ProductionCandidateNativeExecutionAuthorityV1,
-    ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1, RankedCandidateRowV1,
-    ResourceSampleV1, WORKLOAD_RELATIVE, WorkloadQueryV1, compute_corpus_digest,
-    compute_profile_material_digest, compute_workload_digest, load_candidate_workload,
-    validate_workload_for_tuning,
+    CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
+    EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
+    PRODUCTION_BOUNDARY, ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1,
+    REQUIRED_CANCELLATION, REQUIRED_OFFLINE, RankedCandidateRowV1, ResourceSampleV1,
+    WORKLOAD_RELATIVE, WorkloadQueryV1, canonical_json_bytes, canonical_sha256,
+    compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
+    evaluated_diversity_policy, fusion_profile, load_candidate_workload, retrieval_budget,
+    typed_id as id, validate_workload_for_tuning,
 };
 
 mod control;
 use control::ActiveControl;
-
-mod native;
-use native::{
-    apply_native_resource_evidence, elapsed_micros, measure_native_partition,
-    native_optional_stage_measurements, retriever_outcome_candidate_count,
-};
 
 mod peak_rss;
 use peak_rss::{completed_resource_sample, peak_rss_bytes};
@@ -123,9 +98,6 @@ pub struct GenerateCandidateOutputsOptions<'a> {
     /// binary. See [`AdmittedCorpusScopeFn`].
     pub admitted_scope: AdmittedCorpusScopeFn,
 }
-
-/// Immutable identity and request material prepared by the production QUERY
-/// generator for one native semantic query.
 
 #[derive(Clone, Default)]
 struct SharedPublicationStore {
@@ -234,7 +206,6 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
 struct OccurrenceMapEntry {
     document_id: String,
     scope: String,
-    fixture_path: String,
     display_anchors: Vec<String>,
 }
 
@@ -242,24 +213,17 @@ struct OccurrenceMapEntry {
 /// as produced by [`canonical_scope_key`].
 type ScopedLexicalProjections = BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>;
 type ScopedGraphEvidence = BTreeMap<Vec<String>, CodeGraphEvidenceReader>;
-type ScopedSemanticAllowedChunks = BTreeMap<Vec<String>, BTreeSet<CodeSearchChunkId>>;
 
 struct PublishedCorpus {
     generation: Arc<CodeIndexPublishedGenerationV1>,
     lexical_projections: ScopedLexicalProjections,
     graph_projections: ScopedGraphEvidence,
-    semantic_allowed_chunks: ScopedSemanticAllowedChunks,
-    incremental_generation: Arc<CodeIndexPublishedGenerationV1>,
-    incremental_before_content_digest: String,
-    incremental_after_content_digest: String,
     occurrence_map: BTreeMap<String, OccurrenceMapEntry>,
     repo_root: PathBuf,
     source_commit: GitOidV1,
     corpus: Vec<CorpusDocumentV1>,
     corpus_digest: String,
     eligible_chunks: u64,
-    no_op_generation: Arc<CodeIndexPublishedGenerationV1>,
-    deletion_generation: Arc<CodeIndexPublishedGenerationV1>,
     admitted_scope: AdmittedCorpusScopeFn,
 }
 
@@ -297,14 +261,7 @@ fn build_query_projections(
     file_scopes: &BTreeMap<String, String>,
     qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
     queries: &[WorkloadQueryV1],
-) -> Result<
-    (
-        ScopedLexicalProjections,
-        ScopedGraphEvidence,
-        ScopedSemanticAllowedChunks,
-    ),
-    CandidateOutputError,
-> {
+) -> Result<(ScopedLexicalProjections, ScopedGraphEvidence), CandidateOutputError> {
     let generation_id = generation.manifest().generation_id.clone();
     let freshness = production_code_index_freshness(
         generation.manifest().seal.sealed_at,
@@ -373,22 +330,15 @@ fn build_query_projections(
     }
     drop(admitted);
     let mut graph_chunks: Vec<Vec<Arc<CodeSearchChunkV1>>> = vec![Vec::new(); scope_keys.len()];
-    let mut semantic_chunks: Vec<BTreeSet<CodeSearchChunkId>> =
-        vec![BTreeSet::new(); scope_keys.len()];
     for chunk in generation.chunks().chunks() {
         for bucket in buckets_for(chunk.anchor.file_occurrence_id.as_str()) {
             graph_chunks[bucket].push(Arc::clone(chunk));
-            semantic_chunks[bucket].insert(chunk.id.clone());
         }
     }
     let mut lexical = BTreeMap::new();
     let mut graph = BTreeMap::new();
-    let mut semantic_allowed_chunks = BTreeMap::new();
-    for (((scope_key, chunks), graph_chunks), semantic) in scope_keys
-        .into_iter()
-        .zip(lexical_chunks)
-        .zip(graph_chunks)
-        .zip(semantic_chunks)
+    for ((scope_key, chunks), graph_chunks) in
+        scope_keys.into_iter().zip(lexical_chunks).zip(graph_chunks)
     {
         lexical.insert(
             scope_key.clone(),
@@ -399,7 +349,6 @@ fn build_query_projections(
             )
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
-        semantic_allowed_chunks.insert(scope_key.clone(), semantic);
         graph.insert(
             scope_key,
             CodeGraphEvidenceReader::new_for_evaluation(
@@ -412,7 +361,7 @@ fn build_query_projections(
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
     }
-    Ok((lexical, graph, semantic_allowed_chunks))
+    Ok((lexical, graph))
 }
 
 /// The corpora published for one candidate-generation call, memoized by scale.
@@ -421,13 +370,8 @@ fn build_query_projections(
 /// identity it mints is content-derived (`content_identity` hashes the corpus
 /// digest and the copy count), both of its timestamps are constants, and it
 /// sorts its files before building. Two calls with equal arguments therefore
-/// produce byte-identical generations down to the generation id, and the store
-/// they publish through is created and dropped inside the call, so nothing
-/// observable distinguishes one build from two.
-///
-/// The fallback phase and the native phase of one evaluation each published
-/// their own 1x and 10x corpora, so the identical build ran twice per scale.
-/// This cache lets the two phases share one build apiece.
+/// produce byte-identical generations down to the generation id, so the 1x
+/// and 10x corpora are each published once per evaluation.
 #[derive(Default)]
 struct PublishedCorpusCache {
     by_scale: BTreeMap<usize, PublishedCorpus>,
@@ -584,93 +528,6 @@ fn generate_candidate_outputs_sharing_corpora(
     })
 }
 
-/// Generate the same byte-stable query fallback plus evidence-bearing native
-/// semantic/rerank results. Missing optional authorities remain pending.
-#[hotpath::measure(label = "search_eval.native.generate")]
-pub fn generate_candidate_outputs_with_native(
-    options: &GenerateCandidateOutputsOptions<'_>,
-    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
-) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
-    // One cache across both phases: the fallback phase below publishes the 1x
-    // and 10x corpora, and the native phase reuses those exact builds instead
-    // of republishing byte-identical ones.
-    let mut corpora = PublishedCorpusCache::default();
-    let mut generated = hotpath::measure_block!(
-        "search_eval.fallback.generate",
-        generate_candidate_outputs_sharing_corpora(options, &mut corpora)
-    )?;
-    let workload_path = options.workload_path.map_or_else(
-        || options.repo_root.join(WORKLOAD_RELATIVE),
-        Path::to_path_buf,
-    );
-    let workload = load_candidate_workload(&workload_path)?;
-    corpora.ensure(options.repo_root, &workload, 1, options.admitted_scope)?;
-    corpora.ensure(options.repo_root, &workload, 10, options.admitted_scope)?;
-    let published = corpora.get(1)?;
-    let ten_x_published = corpora.get(10)?;
-    if ten_x_published.eligible_chunks
-        != published.eligible_chunks.checked_mul(10).ok_or_else(|| {
-            CandidateOutputError::Contract("current eligible chunk count overflows 10x".to_owned())
-        })?
-    {
-        return Err(CandidateOutputError::Contract(
-            "native 10x generation does not contain exactly ten times the eligible chunks"
-                .to_owned(),
-        ));
-    }
-    let corpus_digest = compute_corpus_digest(options.repo_root, &workload)?;
-
-    for output in &mut generated.outputs {
-        let profile = workload
-            .profile_matrix
-            .iter()
-            .find(|profile| profile.profile_id == output.profile_id)
-            .ok_or_else(|| {
-                CandidateOutputError::Contract(format!(
-                    "native output references unknown profile {}",
-                    output.profile_id
-                ))
-            })?;
-        let queries = workload
-            .queries
-            .iter()
-            .filter(|query| query.partition == output.partition)
-            .collect::<Vec<_>>();
-        let (rows, current) = hotpath::measure_block!("search_eval.native_partition.current", {
-            measure_native_partition(
-                published,
-                profile,
-                &queries,
-                authority,
-                &generated.workload_digest,
-                &corpus_digest,
-                "current",
-            )
-        })?;
-        let (_, ten_x) = hotpath::measure_block!("search_eval.native_partition.ten_x", {
-            measure_native_partition(
-                ten_x_published,
-                profile,
-                &queries,
-                authority,
-                &generated.workload_digest,
-                &corpus_digest,
-                "10x",
-            )
-        })?;
-        let evidence = SemanticNativeResourceEvidenceV1 {
-            samples: BTreeMap::from([("current".to_owned(), current), ("10x".to_owned(), ten_x)]),
-        };
-        evidence
-            .validate()
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-        output.optional_stages = native_optional_stage_measurements(profile, &rows)?;
-        apply_native_resource_evidence(output, &evidence)?;
-        output.queries = rows;
-    }
-    Ok(generated)
-}
-
 /// Direct production call for one query/profile — used by tests to prove the
 /// generator emits identical candidate bytes.
 pub fn retrieve_partition_query_bytes(
@@ -751,8 +608,7 @@ fn generate_partition_output(
     let peak_before = peak_rss_bytes();
     for query in &queries {
         let started = Instant::now();
-        // prepare_production_query already fuses the query-fallback profile, so
-        // the row and both partition fallback digests share one composition.
+        // The row and both partition fallback digests share one composition.
         let composed = compose_production_query(published, profile, query)?;
         let fallback = query_fallback_from_composition(&composed)?;
         fallback_digests.push((query.query_id.as_str(), fallback.digest.as_str().to_owned()));
@@ -806,9 +662,7 @@ fn generate_partition_output(
         query_fallback_matches_expected,
         cancellation: REQUIRED_CANCELLATION.to_owned(),
         offline: REQUIRED_OFFLINE.to_owned(),
-        optional_stages: optional_stage_measurements(profile),
         resources,
-        native_resources: None,
         queries: rows,
     })
 }
@@ -856,51 +710,16 @@ fn query_row_from_composition(
         ranked,
         abstained,
         historical,
-        native: None,
     })
 }
 
-pub(super) fn optional_stage_measurements(profile: &ProfileSpecV1) -> OptionalStageMeasurementsV1 {
-    OptionalStageMeasurementsV1 {
-        semantic: if profile.semantic_weight_ppm == 0 {
-            OptionalStageMeasurementV1::NotRequested
-        } else {
-            OptionalStageMeasurementV1::Pending
-        },
-        rerank: if profile.rerank_weight_ppm == 0 {
-            OptionalStageMeasurementV1::NotRequested
-        } else {
-            OptionalStageMeasurementV1::Pending
-        },
-    }
-}
-
+/// Run one query through the real exact, lexical, and graph lanes and compose
+/// them under the profile's fusion material.
 fn compose_production_query(
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
 ) -> Result<CompositionOutputV1, CandidateOutputError> {
-    Ok(prepare_production_query(published, profile, query)?.query_output)
-}
-
-struct PreparedProductionQueryV1 {
-    code_generation: CodeGenerationId,
-    request: RetrievalRequest,
-    query_view: EphemeralSanitizedQueryViewV1,
-    kernel: CompositionKernel,
-    fallback_lanes: Vec<CompositionLaneInput>,
-    query_measurements: SemanticNativeQueryStageMeasurementsV1,
-    query_output: CompositionOutputV1,
-    fallback: QueryFallbackSubpayload,
-    diversity: DiversityPolicy,
-    rerank_policy: Option<RerankPolicy>,
-}
-
-fn prepare_production_query(
-    published: &PublishedCorpus,
-    profile: &ProfileSpecV1,
-    query: &WorkloadQueryV1,
-) -> Result<PreparedProductionQueryV1, CandidateOutputError> {
     let generation_id = published.generation.manifest().generation_id.clone();
     let request = retrieval_request(&profile.profile_id, published)?;
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
@@ -952,15 +771,9 @@ fn prepare_production_query(
         literals: authority.parse_literals(&query_view, &request),
         budget,
     };
-    let exact_started = Instant::now();
     let exact_outcome = exact_lane
         .retrieve_exact(&exact_request)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let exact_measurement = SemanticNativeStageMeasurementV1 {
-        elapsed_micros: elapsed_micros(exact_started),
-        input_candidates: exact_request.literals.len() as u64,
-        output_candidates: retriever_outcome_candidate_count(&exact_outcome),
-    };
 
     let lexical_parts = lexical_query_parts(query_view.as_str())
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
@@ -980,26 +793,11 @@ fn prepare_production_query(
         budget,
         control: &ActiveControl,
     };
-    let lexical_input_candidates = lexical_request
-        .whole_terms
-        .len()
-        .saturating_add(lexical_request.subtokens.len())
-        .saturating_add(lexical_request.phrases.len())
-        .saturating_add(lexical_request.field_filters.len())
-        as u64;
-    let lexical_started = Instant::now();
     let lexical_outcome = lexical_lane
         .retrieve_lexical(&lexical_request)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let lexical_measurement = SemanticNativeStageMeasurementV1 {
-        elapsed_micros: elapsed_micros(lexical_started),
-        input_candidates: lexical_input_candidates,
-        output_candidates: retriever_outcome_candidate_count(&lexical_outcome),
-    };
 
     let seed_anchors = graph_seeds_from_outcomes(&exact_outcome, &lexical_outcome);
-    let graph_input_candidates = seed_anchors.len() as u64;
-    let graph_started = Instant::now();
     let graph_outcome = if seed_anchors.is_empty() {
         RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
             detail: "no graph seeds from exact/lexical".to_owned(),
@@ -1021,18 +819,11 @@ fn prepare_production_query(
             .retrieve_graph(&graph_request, Arc::new(ActiveControl))
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
     };
-    let graph_measurement = SemanticNativeStageMeasurementV1 {
-        elapsed_micros: elapsed_micros(graph_started),
-        input_candidates: graph_input_candidates,
-        output_candidates: retriever_outcome_candidate_count(&graph_outcome),
-    };
 
     let kernel = CompositionKernel::new(id::<ComponentRevision>(
         tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
     )?);
-    let fallback_profile = query_fallback_profile(profile);
-    let fusion_profile = fusion_profile(&fallback_profile, false)?;
-    let fallback_lanes = vec![
+    let lanes = vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         CompositionLaneInput::new(RetrieverKind::Lexical, lexical_outcome)
@@ -1040,42 +831,15 @@ fn prepare_production_query(
         CompositionLaneInput::new(RetrieverKind::Graph, graph_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
     ];
-    let diversity = evaluated_diversity_policy()?;
-    let query_output = kernel
+    kernel
         .compose(
             &FusionStageInput {
-                profile: fusion_profile,
-                lanes: fallback_lanes.clone(),
+                profile: fusion_profile(profile)?,
+                lanes,
             },
-            &diversity,
+            &evaluated_diversity_policy()?,
         )
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let fallback = query_fallback_from_composition(&query_output)?;
-    let rerank_policy = evaluated_rerank_policy(profile)?;
-    Ok(PreparedProductionQueryV1 {
-        code_generation: generation_id,
-        request,
-        query_view,
-        kernel,
-        fallback_lanes,
-        query_measurements: SemanticNativeQueryStageMeasurementsV1 {
-            exact: exact_measurement,
-            lexical: lexical_measurement,
-            graph: graph_measurement,
-        },
-        query_output,
-        fallback,
-        diversity,
-        rerank_policy,
-    })
-}
-
-fn query_fallback_profile(profile: &ProfileSpecV1) -> ProfileSpecV1 {
-    let mut fallback = profile.clone();
-    "query-fallback".clone_into(&mut fallback.profile_id);
-    fallback.semantic_weight_ppm = 0;
-    fallback.rerank_weight_ppm = 0;
-    fallback
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))
 }
 
 fn query_fallback_from_composition(
@@ -1111,145 +875,6 @@ fn map_ranked_candidates(
     output: &CompositionOutputV1,
 ) -> Result<Vec<RankedCandidateRowV1>, CandidateOutputError> {
     map_ranked_candidate_list(published, &output.ranked_candidates)
-}
-
-struct CandidateCorpusHydrationSourceV1<'a> {
-    published: &'a PublishedCorpus,
-    source_fetches: u64,
-}
-
-impl CandidateCorpusHydrationSourceV1<'_> {
-    fn binding<'a>(
-        &'a self,
-        candidate: &'a tracedecay_domain::RankedCandidate,
-    ) -> Option<(
-        &'a OccurrenceMapEntry,
-        &'a tracedecay_domain::OccurrenceProvenance,
-    )> {
-        candidate
-            .candidate
-            .occurrences
-            .iter()
-            .find_map(|occurrence| {
-                self.published
-                    .occurrence_map
-                    .get(occurrence.source_occurrence_id.as_str())
-                    .map(|entry| (entry, occurrence))
-            })
-            .or_else(|| {
-                self.published
-                    .occurrence_map
-                    .get(candidate.candidate.anchor_id.as_str())
-                    .zip(candidate.candidate.occurrences.first())
-            })
-    }
-}
-
-impl LateHydrationSource<Vec<u8>> for CandidateCorpusHydrationSourceV1<'_> {
-    fn authorize(
-        &mut self,
-        _request: &RetrievalRequest,
-        candidate: &tracedecay_domain::RankedCandidate,
-    ) -> HydrationAuthorizationV1 {
-        if self.binding(candidate).is_some() {
-            HydrationAuthorizationV1::Authorized
-        } else {
-            HydrationAuthorizationV1::Unavailable(HydrationUnavailableV1::Invalid)
-        }
-    }
-
-    fn preflight_authorized(
-        &mut self,
-        _request: &RetrievalRequest,
-        candidate: &tracedecay_domain::RankedCandidate,
-        permit: &HydrationWorkPermitV1,
-    ) -> HydrationPreflightOutcomeV1 {
-        let Some((entry, occurrence)) = self.binding(candidate) else {
-            return HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
-        };
-        if !permit
-            .source_occurrence_ids
-            .contains(&occurrence.source_occurrence_id)
-        {
-            return HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
-        }
-        match fs::metadata(self.published.repo_root.join(&entry.fixture_path)) {
-            Ok(metadata) if metadata.len() <= permit.remaining_bytes => {
-                HydrationPreflightOutcomeV1::Ready {
-                    estimated_bytes: metadata.len(),
-                }
-            }
-            Ok(_) => HydrationPreflightOutcomeV1::BudgetExceeded,
-            Err(_) => HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Internal),
-        }
-    }
-
-    fn hydrate_authorized(
-        &mut self,
-        _request: &RetrievalRequest,
-        candidate: &tracedecay_domain::RankedCandidate,
-        _permit: &HydrationWorkPermitV1,
-    ) -> HydrationReadOutcomeV1<Vec<u8>> {
-        let Some((entry, occurrence)) = self.binding(candidate) else {
-            return HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
-        };
-        let anchor_id = candidate.candidate.anchor_id.clone();
-        let source_occurrence_id = occurrence.source_occurrence_id.clone();
-        let freshness = occurrence.freshness.clone();
-        let path = self.published.repo_root.join(&entry.fixture_path);
-        let hydration_revision = match HydrationRevision::new("hydration.search-eval.corpus.v1") {
-            Ok(revision) => revision,
-            Err(_) => {
-                return HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Internal);
-            }
-        };
-        match fs::read(path) {
-            Ok(payload) => {
-                self.source_fetches = self.source_fetches.saturating_add(1);
-                HydrationReadOutcomeV1::Complete {
-                    receipt: HydrationReceipt {
-                        anchor_id,
-                        source_occurrence_id,
-                        hydration_revision,
-                        bytes_hydrated: payload.len() as u64,
-                        authorized: true,
-                        freshness,
-                    },
-                    payload,
-                }
-            }
-            Err(_) => HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Internal),
-        }
-    }
-}
-
-#[hotpath::measure(label = "search_eval.hydrate.late")]
-fn measure_late_hydration(
-    published: &PublishedCorpus,
-    request: &RetrievalRequest,
-    ranked: &[tracedecay_domain::RankedCandidate],
-    budget: &RetrievalBudget,
-) -> Result<SemanticNativeHydrationMeasurementV1, CandidateOutputError> {
-    let mut source = CandidateCorpusHydrationSourceV1 {
-        published,
-        source_fetches: 0,
-    };
-    let started = Instant::now();
-    let page = CanonicalLateHydration::new(&mut source)
-        .hydrate(request, ranked, budget)
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let bytes_hydrated = page
-        .receipts
-        .iter()
-        .map(|receipt| receipt.bytes_hydrated)
-        .sum();
-    Ok(SemanticNativeHydrationMeasurementV1 {
-        elapsed_micros: elapsed_micros(started),
-        selected_candidates: page.results.len() as u64,
-        source_fetches: source.source_fetches,
-        receipts: page.receipts.len() as u64,
-        bytes_hydrated,
-    })
 }
 
 fn map_ranked_candidate_list(
@@ -1551,8 +1176,6 @@ fn publish_corpus_with_scale(
         captured_at: UtcMicros(1_000_000),
         files,
     };
-    let incremental_snapshot_base = snapshot.clone();
-    let incremental_captured_base = captured.clone();
     let target_projection_key = ProjectionKeyV1 {
         kind: ProjectionKindV1::Lexical,
         schema_revision: "lexical.candidate.v1".to_owned(),
@@ -1569,7 +1192,7 @@ fn publish_corpus_with_scale(
             dirty: RepositoryDirtyStateV1::Dirty,
         },
         sealed_at: UtcMicros(1_100_000),
-        target_projection_key: target_projection_key.clone(),
+        target_projection_key,
     };
     let config = CodeIndexProductionConfigV1 {
         project_id: id::<ProjectId>("project.candidate.fixture")?,
@@ -1577,21 +1200,20 @@ fn publish_corpus_with_scale(
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         policy_revision: id::<PolicyRevisionId>("policy.candidate.v1")?,
         // Must match the daemon production code-index projection identity so
-        // evaluate-and-publish can activate the same embedding projection the
-        // mounted journey pins.
+        // the evaluated corpus chunks exactly as the mounted journey does.
         chunker_revision: id::<ChunkerRevision>(DAEMON_CODE_INDEX_CHUNKER_REVISION)?,
         privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
-        .map_err(|error| {
-            CandidateOutputError::Contract(format!("open production owner: {error}"))
-        })?;
-    let generation = owner
-        .build_and_publish(request, &ActiveControl)
-        .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
+    let generation = CodeIndexProductionOwnerV1::new(
+        config,
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .map_err(|error| CandidateOutputError::Contract(format!("open production owner: {error}")))?
+    .build_and_publish(request, &ActiveControl)
+    .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
     let expected_chunks = match copies {
         1 => workload.execution_contract.exact_eligible_chunks_current,
         10 => workload.execution_contract.exact_eligible_chunks_10x,
@@ -1607,198 +1229,6 @@ fn publish_corpus_with_scale(
             "eligible chunk count mismatch for {copies}x corpus: declared {expected_chunks}, observed {observed_chunks}"
         )));
     }
-    let mut incremental_snapshot = incremental_snapshot_base;
-    incremental_snapshot.captured_at = UtcMicros(1_150_000);
-    let mut incremental_captured = incremental_captured_base;
-    let incremental_document = workload
-        .corpus
-        .iter()
-        .find(|document| document.document_id == workload.incremental_fixture.document_id)
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(
-                "incremental fixture names an unknown corpus document".to_owned(),
-            )
-        })?;
-    let changed_file =
-        id::<FileOccurrenceId>(&format!("file.{}", incremental_document.document_id))?;
-    let canonical_root =
-        fs::canonicalize(repo_root).map_err(|source| CandidateOutputError::Read {
-            path: repo_root.to_path_buf(),
-            source,
-        })?;
-    let expected_after_path = canonical_root.join(&workload.incremental_fixture.after_path);
-    let after_path =
-        fs::canonicalize(&expected_after_path).map_err(|source| CandidateOutputError::Read {
-            path: expected_after_path.clone(),
-            source,
-        })?;
-    if after_path != expected_after_path {
-        return Err(CandidateOutputError::Contract(
-            "incremental fixture must be a checked-in non-symlink path".to_owned(),
-        ));
-    }
-    let after_bytes = fs::read(&after_path).map_err(|source| CandidateOutputError::Read {
-        path: after_path,
-        source,
-    })?;
-    let observed_after_sha256 = sha256_hex(&after_bytes);
-    if observed_after_sha256 != workload.incremental_fixture.after_sha256 {
-        return Err(CandidateOutputError::Contract(
-            "incremental fixture bytes do not match the workload digest".to_owned(),
-        ));
-    }
-    let changed = incremental_captured
-        .iter_mut()
-        .find(|file| file.file_occurrence_id == changed_file)
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(
-                "incremental fixture corpus document is not eligible".to_owned(),
-            )
-        })?;
-    if changed.sanitized_bytes.as_ref() == after_bytes.as_slice() {
-        return Err(CandidateOutputError::Contract(
-            "incremental before/after fixture bytes are identical".to_owned(),
-        ));
-    }
-    changed.sanitized_bytes = Arc::from(after_bytes);
-    let changed_digest = content_digest(&changed.sanitized_bytes);
-    let snapshot_file = incremental_snapshot
-        .files
-        .iter_mut()
-        .find(|file| file.file_occurrence_id == changed_file)
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(
-                "incremental resource file is absent from the sanitized snapshot".to_owned(),
-            )
-        })?;
-    let incremental_before_content_digest = snapshot_file.content_digest.as_str().to_owned();
-    snapshot_file.content_digest = changed_digest.clone();
-    let incremental_after_content_digest = changed_digest.as_str().to_owned();
-    incremental_snapshot.content_identity = id(&canonical_sha256(&(
-        "tracedecay.search-eval.incremental-corpus.v1",
-        generation.manifest().generation_id.clone(),
-        changed_file.clone(),
-        changed_digest,
-    ))?)?;
-    let scenario_snapshot = incremental_snapshot.clone();
-    let scenario_captured = incremental_captured.clone();
-    let incremental_generation = owner
-        .build_and_publish(
-            CodeIndexBuildRequestV1 {
-                snapshot: incremental_snapshot,
-                captured_files: incremental_captured,
-                changed_files: BTreeSet::from([incremental_document.source_path.clone()]),
-                invalidations: BTreeSet::new(),
-                ignored_source_admissions: Vec::new(),
-                repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
-                    tree: None,
-                    dirty: RepositoryDirtyStateV1::Dirty,
-                },
-                sealed_at: UtcMicros(1_200_000),
-                target_projection_key: target_projection_key.clone(),
-            },
-            &ActiveControl,
-        )
-        .map_err(|error| {
-            CandidateOutputError::Contract(format!(
-                "publish incremental resource generation: {error}"
-            ))
-        })?;
-    let incremental_changes = &incremental_generation.projection().request().changes;
-    let changed_chunks = incremental_changes
-        .added_or_changed
-        .iter()
-        .filter_map(|change| {
-            incremental_generation
-                .chunks()
-                .chunks()
-                .iter()
-                .find(|chunk| chunk.id == change.chunk_id)
-        })
-        .collect::<Vec<_>>();
-    let deleted_chunks = incremental_changes
-        .deleted
-        .iter()
-        .filter_map(|change| {
-            generation
-                .chunks()
-                .chunks()
-                .iter()
-                .find(|chunk| chunk.id == change.chunk_id)
-        })
-        .collect::<Vec<_>>();
-    let affected_count = incremental_changes
-        .added_or_changed
-        .len()
-        .saturating_add(incremental_changes.deleted.len());
-    if incremental_generation.manifest().parent_generation
-        != Some(generation.manifest().generation_id.clone())
-        || affected_count == 0
-        || affected_count >= incremental_generation.chunks().chunks().len()
-        || changed_chunks.len() != incremental_changes.added_or_changed.len()
-        || deleted_chunks.len() != incremental_changes.deleted.len()
-        || changed_chunks
-            .iter()
-            .chain(deleted_chunks.iter())
-            .any(|chunk| chunk.anchor.file_occurrence_id != changed_file)
-        || !changed_chunks
-            .iter()
-            .any(|chunk| chunk.anchor.symbol_occurrence_id.is_some())
-    {
-        return Err(CandidateOutputError::Contract(
-            "resource corpus did not produce a genuine changed-chunk incremental generation"
-                .to_owned(),
-        ));
-    }
-
-    let no_op_generation = build_projection_source_generation(
-        &mut owner,
-        scenario_snapshot.clone(),
-        scenario_captured.clone(),
-        BTreeSet::new(),
-        UtcMicros(1_250_000),
-        target_projection_key.clone(),
-        "no-op",
-    )?;
-    if !no_op_generation
-        .projection()
-        .request()
-        .changes
-        .added_or_changed
-        .is_empty()
-        || !no_op_generation
-            .projection()
-            .request()
-            .changes
-            .deleted
-            .is_empty()
-    {
-        return Err(CandidateOutputError::Contract(
-            "no-op projection case performed projection work".to_owned(),
-        ));
-    }
-
-    let mut deletion_snapshot = scenario_snapshot.clone();
-    deletion_snapshot.captured_at = UtcMicros(1_300_000);
-    deletion_snapshot
-        .files
-        .retain(|file| file.file_occurrence_id != changed_file);
-    deletion_snapshot.content_identity = id(&canonical_sha256(&(
-        "tracedecay.search-eval.deletion-case.v1",
-        &deletion_snapshot.files,
-    ))?)?;
-    let mut deletion_captured = scenario_captured.clone();
-    deletion_captured.retain(|file| file.file_occurrence_id != changed_file);
-    let deletion_generation = build_projection_source_generation(
-        &mut owner,
-        deletion_snapshot,
-        deletion_captured,
-        BTreeSet::from([incremental_document.source_path.clone()]),
-        UtcMicros(1_350_000),
-        target_projection_key,
-        "deletion",
-    )?;
-
     let qualified_names: Arc<BTreeMap<_, _>> = Arc::new(
         generation
             .symbols()
@@ -1824,7 +1254,6 @@ fn publish_corpus_with_scale(
                 OccurrenceMapEntry {
                     document_id: document.document_id.clone(),
                     scope: document.scope.clone(),
-                    fixture_path: document.path.clone(),
                     display_anchors: display_anchors.clone(),
                 },
             );
@@ -1833,7 +1262,6 @@ fn publish_corpus_with_scale(
                 OccurrenceMapEntry {
                     document_id: document.document_id.clone(),
                     scope: document.scope.clone(),
-                    fixture_path: document.path.clone(),
                     display_anchors: display_anchors.clone(),
                 },
             );
@@ -1843,7 +1271,6 @@ fn publish_corpus_with_scale(
             OccurrenceMapEntry {
                 document_id: document.document_id.clone(),
                 scope: document.scope.clone(),
-                fixture_path: document.path.clone(),
                 display_anchors,
             },
         );
@@ -1853,21 +1280,16 @@ fn publish_corpus_with_scale(
         .admitted_chunks()
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
         .len() as u64;
-    let (lexical_projections, graph_projections, semantic_allowed_chunks) =
-        build_query_projections(
-            &generation,
-            &file_scopes,
-            qualified_names,
-            &workload.queries,
-        )?;
+    let (lexical_projections, graph_projections) = build_query_projections(
+        &generation,
+        &file_scopes,
+        qualified_names,
+        &workload.queries,
+    )?;
     Ok(PublishedCorpus {
         generation,
         lexical_projections,
         graph_projections,
-        semantic_allowed_chunks,
-        incremental_generation,
-        incremental_before_content_digest,
-        incremental_after_content_digest,
         occurrence_map,
         repo_root: repo_root.to_path_buf(),
         source_commit: GitOidV1::new(workload.source_repository_commit.clone())
@@ -1875,45 +1297,8 @@ fn publish_corpus_with_scale(
         corpus: workload.corpus.clone(),
         corpus_digest,
         eligible_chunks,
-        no_op_generation,
-        deletion_generation,
         admitted_scope,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_projection_source_generation(
-    owner: &mut CodeIndexProductionOwnerV1<SharedPublicationStore, ApplyingProjectionSink>,
-    mut snapshot: SanitizedCodeSnapshotV1,
-    captured_files: Vec<CodeIndexCapturedFileV1>,
-    changed_files: BTreeSet<String>,
-    sealed_at: UtcMicros,
-    target_projection_key: ProjectionKeyV1,
-    label: &str,
-) -> Result<Arc<CodeIndexPublishedGenerationV1>, CandidateOutputError> {
-    snapshot.captured_at = UtcMicros(sealed_at.0.saturating_sub(10_000));
-    owner
-        .build_and_publish(
-            CodeIndexBuildRequestV1 {
-                snapshot,
-                captured_files,
-                changed_files,
-                invalidations: BTreeSet::new(),
-                ignored_source_admissions: Vec::new(),
-                repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
-                    tree: None,
-                    dirty: RepositoryDirtyStateV1::Dirty,
-                },
-                sealed_at,
-                target_projection_key,
-            },
-            &ActiveControl,
-        )
-        .map_err(|error| {
-            CandidateOutputError::Contract(format!(
-                "publish {label} semantic projection source: {error}"
-            ))
-        })
 }
 
 fn display_anchors_for_chunk(
@@ -2109,67 +1494,31 @@ fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<(), Candidat
 }
 
 #[cfg(test)]
-mod fallback_baseline_tests;
-
-#[cfg(test)]
 pub(crate) mod tests {
-    use super::native::aggregate_native_stage;
     use super::peak_rss::{
         PeakRssObservation, PeakRssPendingReason, peak_rss_bytes_from_status,
         windows_peak_rss_observation,
     };
     use super::*;
-    use tracedecay_query::search_quality::candidate_output::{
-        ResourceMeasurementStatusV1, load_direct_evaluated_profile_material,
-    };
-    use tracedecay_query::search_quality::semantic_native::{
-        SemanticNativePendingReasonV1, SemanticNativeQueryInputV1, SemanticNativeStageResultV1,
-        evaluate_native_query,
-    };
+    use crate::packaged_assets::PackagedEvaluatorAssets;
+    use tracedecay_query::search_quality::candidate_output::ResourceMeasurementStatusV1;
 
-    pub(crate) struct TestRepositoryFixture {
-        _temp: tempfile::TempDir,
-        pub(crate) root: PathBuf,
-    }
-
-    impl TestRepositoryFixture {
-        fn clone() -> Self {
-            let temp = tempfile::tempdir().expect("temporary repository fixture");
-            let root = temp.path().join("repo");
-            let output = std::process::Command::new("git")
-                .arg("clone")
-                .arg("--quiet")
-                .arg(repo_root())
-                .arg(&root)
-                .output()
-                .expect("clone repository fixture");
-            assert!(
-                output.status.success(),
-                "clone repository fixture: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            // The workload pins historical commits by object identity. Rebasing
-            // the integration branch re-parents those commits, so the pinned
-            // identities survive only as unreachable objects that a
-            // wire-protocol clone never transfers. Backfill the checked-in
-            // evaluator pack so the fixture resolves the same history CI does.
-            crate::packaged_assets::write_checked_in_object_pack(&root.join(".git"))
-                .expect("materialize checked-in historical Git objects");
-            Self { _temp: temp, root }
-        }
-    }
-
-    pub(crate) fn authenticated_repo_fixture() -> Arc<TestRepositoryFixture> {
-        static FIXTURE: std::sync::OnceLock<Mutex<std::sync::Weak<TestRepositoryFixture>>> =
+    /// One materialized copy of the packaged workload, corpus, and Git
+    /// authority shared by every test in this binary. The packaged root is
+    /// the same fixture the production `compare` command evaluates, so the
+    /// tests never depend on the checkout they run from.
+    pub(crate) fn packaged_fixture() -> Arc<PackagedEvaluatorAssets> {
+        static FIXTURE: std::sync::OnceLock<Mutex<std::sync::Weak<PackagedEvaluatorAssets>>> =
             std::sync::OnceLock::new();
         let mut fixture = FIXTURE
             .get_or_init(|| Mutex::new(std::sync::Weak::new()))
             .lock()
-            .expect("repository fixture lock");
+            .expect("packaged fixture lock");
         if let Some(fixture) = fixture.upgrade() {
             return fixture;
         }
-        let replacement = Arc::new(TestRepositoryFixture::clone());
+        let replacement =
+            Arc::new(crate::packaged_assets::materialize().expect("packaged evaluator assets"));
         *fixture = Arc::downgrade(&replacement);
         replacement
     }
@@ -2188,140 +1537,40 @@ pub(crate) mod tests {
         .ok()
     }
 
-    fn repo_root() -> PathBuf {
-        crate::checked_in_fixture_root()
-    }
-
     fn workload() -> CandidateWorkloadV1 {
-        load_candidate_workload(&repo_root().join(WORKLOAD_RELATIVE)).expect("workload loads")
+        packaged_fixture().workload().clone()
     }
 
     #[test]
-    fn direct_evaluated_material_matches_checked_in_profile() {
+    fn fusion_profile_carries_the_checked_in_lane_weights() {
         let workload = workload();
         let spec = workload
             .profile_matrix
             .iter()
             .find(|profile| profile.profile_id == "query-fallback")
             .expect("checked-in fallback profile");
-        let material = load_direct_evaluated_profile_material(&repo_root(), None, &spec.profile_id)
-            .expect("evaluated profile material");
+        let profile = fusion_profile(spec).expect("fusion profile");
 
         assert_eq!(
-            material.profile.profile_id.as_str(),
+            profile.profile_id.as_str(),
             format!("profile.{}", spec.profile_id)
         );
         assert_eq!(
-            material.profile.weights_micros.get(&RetrieverKind::Lexical),
-            Some(&spec.lexical_weight_ppm)
+            profile.weights_micros,
+            BTreeMap::from([
+                (RetrieverKind::ExactLiteral, 1_000_000),
+                (RetrieverKind::Lexical, spec.lexical_weight_ppm),
+                (RetrieverKind::Graph, spec.graph_weight_ppm),
+            ])
         );
         assert_eq!(
-            material.profile.weights_micros.get(&RetrieverKind::Graph),
-            Some(&spec.graph_weight_ppm)
+            profile.calibrations.keys().copied().collect::<Vec<_>>(),
+            RetrieverKind::QUERY_FALLBACK_LANES
         );
-        assert!(
-            !material
-                .profile
-                .weights_micros
-                .contains_key(&RetrieverKind::Semantic)
-        );
-        assert!(material.rerank.is_none());
-
-        let semantic =
-            load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-conservative")
-                .expect("semantic material");
-        assert!(
-            semantic
-                .profile
-                .weights_micros
-                .contains_key(&RetrieverKind::Semantic)
-        );
-        let semantic_score_domain = id::<ScoreDomainId>(
-            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
-        )
-        .expect("evaluation semantic score domain");
-        let semantic_calibration = semantic
-            .profile
-            .score_domain_calibrations
-            .get(&semantic_score_domain)
-            .expect("semantic score calibration");
+        assert!(profile.minimum_calibrated_feature_micros.is_empty());
         assert_eq!(
-            semantic_calibration.raw_min_micros,
-            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1
-        );
-        assert_eq!(
-            semantic_calibration.raw_max_micros,
-            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1
-        );
-        // Pin the binding, not the number. Restating the constant here just
-        // makes it a second place to edit when someone tunes the gate; what
-        // must hold is that the checked-in declaration is exactly the cut that
-        // reaches fusion.
-        let declared = workload
-            .profile_matrix
-            .iter()
-            .find(|spec| spec.profile_id == "hybrid-conservative")
-            .expect("checked-in hybrid-conservative profile")
-            .calibration_threshold_ppm;
-        assert_eq!(
-            semantic
-                .profile
-                .minimum_calibrated_feature_micros
-                .get(&RetrieverKind::Semantic),
-            Some(&declared)
-        );
-        let reranked =
-            load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")
-                .expect("rerank material");
-        assert_eq!(
-            reranked.profile.rerank_policy_id.as_ref(),
-            reranked.rerank.as_ref().map(|policy| &policy.policy_id)
-        );
-        assert_eq!(reranked.diversity.per_file, Some(2));
-        assert_eq!(
-            reranked.rerank.as_ref().map(|policy| policy.max_candidates),
-            Some(16)
-        );
-    }
-
-    /// `calibration_threshold_ppm` was documented as "not a threshold in
-    /// force" while it was in fact gating production fusion. That false claim
-    /// made the field look like a free fixture knob, and it was re-tuned five
-    /// times in one day to move a failing activation gate. This test states
-    /// the real contract so the claim cannot silently return.
-    #[test]
-    fn calibration_threshold_ppm_is_in_force() {
-        let mut spec = workload()
-            .profile_matrix
-            .iter()
-            .find(|spec| spec.semantic_weight_ppm > 0)
-            .expect("a semantic profile")
-            .clone();
-
-        let declared = fusion_profile(&spec, true).expect("semantic fusion profile");
-        assert_eq!(
-            declared
-                .minimum_calibrated_feature_micros
-                .get(&RetrieverKind::Semantic),
-            Some(&spec.calibration_threshold_ppm),
-            "the declared cut must reach fusion verbatim"
-        );
-
-        spec.calibration_threshold_ppm += 1;
-        let moved = fusion_profile(&spec, true).expect("moved fusion profile");
-        assert_ne!(
-            declared.minimum_calibrated_feature_micros, moved.minimum_calibrated_feature_micros,
-            "moving the declaration must move the gate: this field is not documentation"
-        );
-
-        // With the semantic lane absent there is nothing for the cut to gate,
-        // so it must not leak into the fallback profile.
-        spec.semantic_weight_ppm = 0;
-        assert!(
-            fusion_profile(&spec, true)
-                .expect("lexical-only fusion profile")
-                .minimum_calibrated_feature_micros
-                .is_empty()
+            evaluated_diversity_policy().expect("diversity").per_file,
+            Some(2)
         );
     }
 
@@ -2331,32 +1580,11 @@ pub(crate) mod tests {
         let profile = workload.profile_matrix.first().expect("profile");
         let digest = compute_profile_material_digest(profile).expect("digest");
         let mut changed = profile.clone();
-        changed.semantic_weight_ppm = changed.semantic_weight_ppm.saturating_add(1);
+        changed.graph_weight_ppm = changed.graph_weight_ppm.saturating_add(1);
 
         assert_ne!(
             digest,
             compute_profile_material_digest(&changed).expect("changed digest")
-        );
-    }
-
-    #[test]
-    fn native_stage_completes_only_when_every_query_has_real_evidence() {
-        let complete = SemanticNativeStageResultV1::Complete(());
-        let pending = SemanticNativeStageResultV1::<()>::Pending {
-            reason: SemanticNativePendingReasonV1::SemanticGenerationUnavailable,
-        };
-
-        assert_eq!(
-            aggregate_native_stage(true, [&complete, &complete].into_iter()).expect("complete"),
-            OptionalStageMeasurementV1::Complete
-        );
-        assert_eq!(
-            aggregate_native_stage(true, [&complete, &pending].into_iter()).expect("pending"),
-            OptionalStageMeasurementV1::Pending
-        );
-        assert!(
-            aggregate_native_stage(false, [&complete].into_iter()).is_err(),
-            "unrequested execution must fail closed"
         );
     }
 
@@ -2382,10 +1610,9 @@ pub(crate) mod tests {
 
     #[test]
     fn historical_candidates_require_product_repository_identity() {
-        let fixture = authenticated_repo_fixture();
-        let workload = load_candidate_workload(&fixture.root.join(WORKLOAD_RELATIVE))
-            .expect("markerless workload");
-        let published = publish_corpus(&fixture.root, &workload, no_admitted_corpus_scope)
+        let fixture = packaged_fixture();
+        let workload = workload();
+        let published = publish_corpus(fixture.root(), &workload, no_admitted_corpus_scope)
             .expect("markerless corpus");
         let query = workload
             .queries
@@ -2474,7 +1701,8 @@ pub(crate) mod tests {
     #[test]
     fn direct_workload_rejects_duplicate_profile_ids_and_empty_partitions() {
         let mut duplicate = workload();
-        duplicate.profile_matrix[1].profile_id = duplicate.profile_matrix[0].profile_id.clone();
+        let copy = duplicate.profile_matrix[0].clone();
+        duplicate.profile_matrix.push(copy);
         let error = validate_workload_for_tuning(&duplicate).expect_err("duplicate profile id");
         assert!(error.to_string().contains("duplicate profile_id"));
 
@@ -2517,8 +1745,9 @@ pub(crate) mod tests {
 
     #[test]
     fn candidate_generation_rejects_partially_unknown_profile_selection() {
+        let fixture = packaged_fixture();
         let error = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: fixture.root(),
             admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned(), "unknown-profile".to_owned()]),
@@ -2529,8 +1758,8 @@ pub(crate) mod tests {
 
     #[test]
     fn direct_outputs_cover_train_and_validation() {
-        let fixture = authenticated_repo_fixture();
-        let fixture_root = &fixture.root;
+        let fixture = packaged_fixture();
+        let fixture_root = fixture.root();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
@@ -2629,16 +1858,16 @@ pub(crate) mod tests {
 
     #[test]
     fn published_corpus_maps_production_source_occurrences() {
-        let fixture = authenticated_repo_fixture();
+        let fixture = packaged_fixture();
         let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
+        let published = publish_corpus(fixture.root(), &workload, fixture_admitted_scope)
             .expect("publish corpus");
 
         for chunk in published.generation.chunks().chunks() {
             assert_eq!(
                 chunk.chunker_revision.as_str(),
                 DAEMON_CODE_INDEX_CHUNKER_REVISION,
-                "native evaluation corpus must use the current daemon chunker identity"
+                "evaluation corpus must use the current daemon chunker identity"
             );
             let chunk_occurrence = format!("code-chunk:{}", chunk.id.as_str());
             assert!(
@@ -2732,69 +1961,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn complete_optional_stage_status_requires_native_evidence_at_validation() {
-        let stages = serde_json::from_value::<OptionalStageMeasurementsV1>(serde_json::json!({
-            "semantic": "complete",
-            "rerank": "not_requested"
-        }))
-        .expect("complete is an evidence-bearing native state");
-        assert_eq!(stages.semantic, OptionalStageMeasurementV1::Complete);
-    }
-
-    #[test]
-    fn native_query_stages_and_late_hydration_emit_raw_measurements() {
-        let fixture = authenticated_repo_fixture();
-        let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
-            .expect("published corpus");
-        let profile = workload
-            .profile_matrix
-            .iter()
-            .find(|profile| profile.profile_id == "query-fallback")
-            .expect("fallback profile");
-        let query = workload.queries.first().expect("query");
-        let prepared =
-            prepare_production_query(&published, profile, query).expect("prepared query");
-        let fusion = fusion_profile(profile, true).expect("fusion");
-        let mut native = evaluate_native_query(SemanticNativeQueryInputV1 {
-            profile_spec: profile,
-            fusion_profile: &fusion,
-            diversity_policy: &prepared.diversity,
-            kernel: &prepared.kernel,
-            fallback_lanes: &prepared.fallback_lanes,
-            query_measurements: prepared.query_measurements,
-            semantic: None,
-            fallback: &prepared.fallback,
-            rerank: None,
-        })
-        .expect("native query evaluation");
-        let ranked = native.rerank.off.clone();
-        native.measurements.hydration = Some(
-            measure_late_hydration(&published, &prepared.request, &ranked, &retrieval_budget())
-                .expect("late hydration"),
-        );
-
-        assert_eq!(
-            native.measurements.query.lexical.output_candidates,
-            prepared
-                .fallback_lanes
-                .iter()
-                .find(|lane| lane.lane == RetrieverKind::Lexical)
-                .map(|lane| retriever_outcome_candidate_count(&lane.outcome))
-                .expect("lexical lane")
-        );
-        assert!(native.ablations.iter().all(|ablation| {
-            ablation.measurement.output_candidates == ablation.ranked_candidates.len() as u64
-        }));
-        let hydration = native
-            .measurements
-            .hydration
-            .expect("hydration measurement");
-        assert_eq!(hydration.source_fetches, hydration.receipts);
-        assert!(hydration.receipts <= hydration.selected_candidates);
-    }
-
-    #[test]
     fn distinct_ten_x_corpus_produces_measured_resource_evidence() {
         const CHILD_ENV: &str = "TRACEDECAY_RESOURCE_EVIDENCE_TEST_CHILD";
         if std::env::var_os(CHILD_ENV).is_some() {
@@ -2822,8 +1988,8 @@ pub(crate) mod tests {
     }
 
     fn assert_distinct_ten_x_corpus_produces_measured_resource_evidence() {
-        let fixture = authenticated_repo_fixture();
-        let fixture_root = &fixture.root;
+        let fixture = packaged_fixture();
+        let fixture_root = fixture.root();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
@@ -2904,17 +2070,6 @@ pub(crate) mod tests {
             ten_x.eligible_chunks,
             current.eligible_chunks.saturating_mul(10)
         );
-        for published in [&current, &ten_x] {
-            let no_op = &published.no_op_generation.projection().request().changes;
-            assert!(no_op.added_or_changed.is_empty());
-            assert!(no_op.deleted.is_empty());
-            let deletion = &published.deletion_generation.projection().request().changes;
-            assert!(!deletion.deleted.is_empty());
-            assert_eq!(
-                deletion.from_generation.as_ref(),
-                Some(&published.no_op_generation.manifest().generation_id)
-            );
-        }
 
         let mut missing_resource = result.clone();
         missing_resource.outputs[0].resources.remove("10x");
@@ -2928,14 +2083,14 @@ pub(crate) mod tests {
 
         let mut duplicate_query = result.clone();
         duplicate_query.outputs[0].queries[1] = duplicate_query.outputs[0].queries[0].clone();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &duplicate_query)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &duplicate_query)
             .expect_err("duplicate query row");
         assert!(error.to_string().contains("duplicate query row"));
 
         let mut duplicate_profile_partition = result.clone();
         duplicate_profile_partition.outputs[1] = duplicate_profile_partition.outputs[0].clone();
         let error = crate::evaluate_generated_outputs(
-            &repo_root(),
+            fixture_root,
             &workload,
             &duplicate_profile_partition,
         )
@@ -2944,32 +2099,32 @@ pub(crate) mod tests {
 
         let mut forged = result;
         forged.outputs[0].production_boundary = "lookalike".to_owned();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("forged production boundary");
         assert!(error.to_string().contains("production boundary"));
 
         forged.outputs[0].production_boundary = PRODUCTION_BOUNDARY.to_owned();
         forged.outputs[0].fixture_source_commit = "forged".to_owned();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("forged source commit");
         assert!(error.to_string().contains("source commit"));
 
         forged.outputs[0].fixture_source_commit = workload.source_repository_commit.clone();
         forged.outputs[0].corpus_digest = canonical_sha256(&"forged corpus").expect("digest");
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("forged corpus digest");
         assert!(error.to_string().contains("byte-exact corpus"));
 
         forged.outputs[0].corpus_digest =
-            compute_corpus_digest(&repo_root(), &workload).expect("corpus digest");
+            compute_corpus_digest(fixture_root, &workload).expect("corpus digest");
         forged.outputs[0].toolchain.clear();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("missing environment");
         assert!(error.to_string().contains("environment summary"));
 
         forged.outputs[0].toolchain = "rustc:test".to_owned();
         forged.outputs[0].queries[0].abstained = !forged.outputs[0].queries[0].ranked.is_empty();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("inconsistent abstention");
         assert!(error.to_string().contains("inconsistent abstention"));
     }
@@ -3076,27 +2231,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn evaluation_rejects_optional_stage_status_that_disagrees_with_profile() {
-        let fixture = authenticated_repo_fixture();
-        let workload = workload();
-        let mut result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &fixture.root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["hybrid-reranked".to_owned()]),
-        })
-        .expect("generate");
-        result.outputs[0].optional_stages.semantic = OptionalStageMeasurementV1::NotRequested;
-
-        let error = crate::evaluate_generated_outputs(&fixture.root, &workload, &result)
-            .expect_err("configured semantic stage cannot be reported as not requested");
-        assert!(error.to_string().contains("optional stage status"));
-    }
-
-    #[test]
     fn resource_evidence_enforces_state_and_exact_catalog_without_size_caps() {
-        let fixture = authenticated_repo_fixture();
-        let fixture_root = &fixture.root;
+        let fixture = packaged_fixture();
+        let fixture_root = fixture.root();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
@@ -3177,10 +2314,10 @@ pub(crate) mod tests {
 
     #[test]
     fn candidate_bytes_match_direct_production_calls() {
-        let fixture = authenticated_repo_fixture();
+        let fixture = packaged_fixture();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &fixture.root,
+            repo_root: fixture.root(),
             admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned()]),
@@ -3193,7 +2330,7 @@ pub(crate) mod tests {
             .expect("train output");
         let probe = train.queries.first().expect("at least one train query");
         let direct = retrieve_partition_query_bytes(
-            &fixture.root,
+            fixture.root(),
             &workload,
             "query-fallback",
             &probe.query_id,
@@ -3209,11 +2346,11 @@ pub(crate) mod tests {
 
     #[test]
     fn query_phrase_and_historical_queries_reach_their_checked_in_anchors() {
-        let fixture = authenticated_repo_fixture();
+        let fixture = packaged_fixture();
         let workload = workload();
         let retrieve = |query_id: &str| {
             let bytes = retrieve_partition_query_bytes(
-                &fixture.root,
+                fixture.root(),
                 &workload,
                 "query-fallback",
                 query_id,
@@ -3271,182 +2408,42 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn published_corpus_precomputes_semantic_allowed_chunks_per_scope() {
-        let fixture = authenticated_repo_fixture();
-        let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
-            .expect("published corpus");
-        let distinct_scopes = workload
-            .queries
-            .iter()
-            .map(|query| canonical_scope_key(&query.allowed_scopes))
-            .collect::<BTreeSet<_>>();
-
-        assert_eq!(
-            published.semantic_allowed_chunks.len(),
-            distinct_scopes.len()
-        );
-        for query in &workload.queries {
-            let expected = published
-                .generation
-                .chunks()
-                .chunks()
-                .iter()
-                .filter(|chunk| {
-                    published
-                        .occurrence_map
-                        .get(&format!("code-chunk:{}", chunk.id.as_str()))
-                        .is_some_and(|entry| query.allowed_scopes.contains(&entry.scope))
-                })
-                .map(|chunk| chunk.id.clone())
-                .collect::<BTreeSet<_>>();
-            assert_eq!(
-                published
-                    .semantic_allowed_chunks
-                    .get(&canonical_scope_key(&query.allowed_scopes)),
-                Some(&expected)
-            );
-        }
-    }
-
     /// A file in one scope must land in every scope set admitting that scope
     /// and in no other; overlapping sets are the path a singleton workload
     /// never exercises.
     #[test]
     fn scoped_projections_partition_chunks_into_every_admitting_scope_set_only() {
-        let fixture = authenticated_repo_fixture();
-        let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
+        let fixture = packaged_fixture();
+        let mut workload = workload();
+        let profile = workload.profile_matrix[0].clone();
+        let mut probe = |query_id: &str, scopes: &[&str]| {
+            let mut query = workload.queries[0].clone();
+            query.query_id = query_id.to_owned();
+            query.query = "repository watermark".to_owned();
+            query.allowed_scopes = scopes.iter().map(|scope| (*scope).to_owned()).collect();
+            workload.queries.push(query.clone());
+            query
+        };
+        let research = probe("probe-research", &["research"]);
+        let project = probe("probe-project", &["project"]);
+        let overlapping = probe("probe-overlap", &["research", "project", "research"]);
+        let published = publish_corpus(fixture.root(), &workload, fixture_admitted_scope)
             .expect("published corpus");
-        let file_scopes = published
-            .generation
-            .chunks()
-            .chunks()
-            .iter()
-            .map(|chunk| {
-                let entry = published
-                    .occurrence_map
-                    .get(&format!("code-chunk:{}", chunk.id.as_str()))
-                    .expect("every chunk maps to a corpus document");
-                (
-                    chunk.anchor.file_occurrence_id.as_str().to_owned(),
-                    entry.scope.clone(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let qualified_names = Arc::new(
-            published
-                .generation
-                .symbols()
-                .symbols
-                .iter()
-                .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
-                .collect::<BTreeMap<_, _>>(),
-        );
-        let mut queries = workload.queries.clone();
-        let mut overlapping = queries[0].clone();
-        overlapping.allowed_scopes = vec![
-            "research".to_owned(),
-            "project".to_owned(),
-            "research".to_owned(),
-        ];
-        queries.push(overlapping);
+        let scopes = |query: &WorkloadQueryV1| {
+            let output = compose_production_query(&published, &profile, query)
+                .expect("scoped query composes");
+            map_ranked_candidates(&published, &output)
+                .expect("ranked candidates map")
+                .into_iter()
+                .map(|candidate| candidate.scope)
+                .collect::<BTreeSet<_>>()
+        };
 
-        let (lexical, graph, semantic) = build_query_projections(
-            &published.generation,
-            &file_scopes,
-            qualified_names,
-            &queries,
-        )
-        .expect("scoped projections");
-
-        let expected_keys = queries
-            .iter()
-            .map(|query| canonical_scope_key(&query.allowed_scopes))
-            .collect::<BTreeSet<_>>();
+        assert_eq!(scopes(&research), BTreeSet::from(["research".to_owned()]));
+        assert_eq!(scopes(&project), BTreeSet::from(["project".to_owned()]));
         assert_eq!(
-            lexical.keys().cloned().collect::<BTreeSet<_>>(),
-            expected_keys
+            scopes(&overlapping),
+            BTreeSet::from(["project".to_owned(), "research".to_owned()])
         );
-        assert_eq!(
-            graph.keys().cloned().collect::<BTreeSet<_>>(),
-            expected_keys
-        );
-        assert_eq!(
-            semantic.keys().cloned().collect::<BTreeSet<_>>(),
-            expected_keys
-        );
-        for (scope_key, chunks) in &semantic {
-            let expected = published
-                .generation
-                .chunks()
-                .chunks()
-                .iter()
-                .filter(|chunk| {
-                    scope_key.contains(&file_scopes[chunk.anchor.file_occurrence_id.as_str()])
-                })
-                .map(|chunk| chunk.id.clone())
-                .collect::<BTreeSet<_>>();
-            assert_eq!(chunks, &expected, "scope set {scope_key:?}");
-        }
-        let union = semantic[&vec!["project".to_owned()]]
-            .union(&semantic[&vec!["research".to_owned()]])
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            semantic[&vec!["project".to_owned(), "research".to_owned()]],
-            union
-        );
-        assert!(
-            semantic[&vec!["project".to_owned()]]
-                .is_disjoint(&semantic[&vec!["research".to_owned()]])
-        );
-    }
-
-    #[test]
-    fn semantic_profiles_do_not_claim_a_comparison_when_only_fallback_ran() {
-        let fixture = authenticated_repo_fixture();
-        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &fixture.root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["hybrid-conservative".to_owned()]),
-        })
-        .expect("generate");
-
-        for output in result.outputs {
-            assert_eq!(
-                output.optional_stages.semantic,
-                OptionalStageMeasurementV1::Pending
-            );
-            assert_eq!(
-                output.optional_stages.rerank,
-                OptionalStageMeasurementV1::NotRequested
-            );
-        }
-    }
-
-    #[test]
-    fn rerank_profiles_remain_pending_when_no_rerank_measurement_ran() {
-        let fixture = authenticated_repo_fixture();
-        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &fixture.root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["hybrid-reranked".to_owned()]),
-        })
-        .expect("generate");
-
-        for output in result.outputs {
-            assert_eq!(
-                output.optional_stages.semantic,
-                OptionalStageMeasurementV1::Pending
-            );
-            assert_eq!(
-                output.optional_stages.rerank,
-                OptionalStageMeasurementV1::Pending
-            );
-        }
     }
 }

@@ -1,4 +1,4 @@
-//! Store telemetry sampling and semantic-vector retention progress.
+//! Store telemetry sampling and retention progress.
 //!
 //! Shared by the daemon maintenance loop and diagnostic projections. The
 //! registry is a concrete owner, not a port.
@@ -24,7 +24,6 @@ use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::tick::MaintenanceTickOutcome;
-use tracedecay_runtime_core::logging::log_daemon_event;
 
 const STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 const STORAGE_TELEMETRY_CAPABILITY: &str = "capability.application.storage.telemetry";
@@ -303,31 +302,15 @@ struct CachedStoreTelemetryPort {
 #[derive(Clone, Default)]
 pub struct StoreTelemetrySamplingRegistry {
     ports: Arc<std::sync::Mutex<HashMap<PathBuf, CachedStoreTelemetryPort>>>,
-    semantic_vector_retention:
-        Arc<std::sync::Mutex<HashMap<PathBuf, SemanticVectorRetentionProgressV1>>>,
     graph_replay_release: Arc<std::sync::Mutex<HashMap<PathBuf, GraphReplayReleaseProgressV1>>>,
     graph_staging_release:
         Arc<std::sync::Mutex<HashMap<PathBuf, tracedecay_store::GraphProjectionIdentityV1>>>,
-    /// Last by-design retention operator line per lane and project. A
-    /// persistent unavailable-by-design condition logs once, then counts on
-    /// [`daemon.git.maintenance.retention_quiet_total`]; a state change or a
-    /// genuine anomaly emits again.
-    retention_operator_log: Arc<std::sync::Mutex<HashMap<RetentionOperatorLogKeyV1, String>>>,
+    /// Whether the by-design quiet `retry` tick line has already been written.
+    /// A persistent quiet retry logs once, then counts on
+    /// [`daemon.git.maintenance.retention_quiet_total`]; a loud anomaly or an
+    /// outcome change emits again.
+    quiet_retry_tick_logged: Arc<AtomicBool>,
     loud_retention_this_tick: Arc<AtomicBool>,
-}
-
-/// Operator-log lane for the once-then-quiet retention pin.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RetentionOperatorLogLaneV1 {
-    Semantic,
-    CodeGeneration,
-    Tick,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RetentionOperatorLogKeyV1 {
-    lane: RetentionOperatorLogLaneV1,
-    scope: PathBuf,
 }
 
 /// Longest run of short-cadence ticks a project's graph-replay release
@@ -356,79 +339,6 @@ struct GraphReplayReleaseProgressV1 {
 pub struct StoreTelemetrySamplingOutcome {
     pub observed: u64,
     pub unavailable: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SemanticVectorRetentionBacklogV1 {
-    pub pending: u64,
-    pub ready: u64,
-    pub published: u64,
-    pub cancelled: u64,
-}
-
-impl SemanticVectorRetentionBacklogV1 {
-    pub fn from_receipt(receipt: &tracedecay_store::SemanticVectorProjectCensusReceipt) -> Self {
-        Self {
-            pending: receipt.counts.pending,
-            ready: receipt.counts.ready,
-            published: receipt.counts.published,
-            cancelled: receipt.counts.cancelled,
-        }
-    }
-}
-
-/// Result of recording one semantic-vector retention census page.
-///
-/// Rejected variants stay fail-closed: progress resets and no receipt is
-/// accepted. `CensusCountOverflow` is the only true u64-sum overflow
-/// (`receipt.validate()`); other rejects name the actual page defect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SemanticVectorRetentionCensusOutcome {
-    Accepted,
-    InconsistentPage,
-    IncompleteTerminalPage,
-    CensusCountOverflow,
-    ReceiptIdentityMismatch,
-}
-
-impl SemanticVectorRetentionCensusOutcome {
-    #[hotpath::skip]
-    pub const fn as_failure_label(self) -> Option<&'static str> {
-        match self {
-            Self::Accepted => None,
-            Self::InconsistentPage => Some("inconsistent_page"),
-            Self::IncompleteTerminalPage => Some("incomplete_terminal_page"),
-            Self::CensusCountOverflow => Some("census_count_overflow"),
-            Self::ReceiptIdentityMismatch => Some("receipt_identity_mismatch"),
-        }
-    }
-}
-
-// `Observed` is matched by field-destructuring across several call sites
-// (doctor_kernel, git_watch/store_maintenance); boxing the receipt would
-// ripple through all of them for a cold, infrequently-read maintenance
-// status.
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SemanticVectorRetentionReadV1 {
-    Unknown,
-    /// The semantic runtime is not seated for this daemon, so no vector
-    /// census will ever start, let alone complete. This is the ordinary
-    /// default-off state, distinct from [`Self::Unknown`] (a census that has
-    /// not run yet or was reset by a failure or mutation).
-    SemanticUnseated,
-    Scanning,
-    Observed {
-        receipt: tracedecay_store::SemanticVectorProjectCensusReceipt,
-    },
-}
-
-#[derive(Clone, Debug, Default)]
-struct SemanticVectorRetentionProgressV1 {
-    cursor: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
-    observed: Option<tracedecay_store::SemanticVectorProjectCensusReceipt>,
-    scanning: bool,
-    semantic_unseated: bool,
 }
 
 impl StoreTelemetrySamplingRegistry {
@@ -495,18 +405,10 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(path);
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(path);
         self.graph_replay_release
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(path);
-        self.retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|key, _| key.scope != path);
     }
 
     pub fn release_retained_handles_for_shutdown(&self) {
@@ -514,38 +416,16 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
         self.graph_replay_release
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
-        self.retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        self.quiet_retry_tick_logged.store(false, Ordering::Release);
         self.loud_retention_this_tick
             .store(false, Ordering::Release);
     }
 
-    pub fn semantic_vector_retention_cursor(
-        &self,
-        project_root: &Path,
-    ) -> Option<tracedecay_store::SemanticVectorStageCensusCursor> {
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(project_root)
-            .and_then(|progress| progress.cursor.clone())
-    }
-
     pub fn retain_project_maintenance_state(&self, active_projects: &BTreeSet<PathBuf>) {
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|project, _| active_projects.contains(project));
         self.graph_replay_release
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -554,12 +434,6 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|project, _| active_projects.contains(project));
-        self.retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|key, _| {
-                key.scope.as_os_str().is_empty() || active_projects.contains(&key.scope)
-            });
     }
 
     /// Whether this tick may attempt the graph-replay release reconcile.
@@ -682,210 +556,21 @@ impl StoreTelemetrySamplingRegistry {
         self.loud_retention_this_tick.store(true, Ordering::Release);
     }
 
-    /// Whether this (lane, scope, detail) pair should emit an operator line.
-    ///
-    /// Identical repeats of a persistent by-design condition increment
-    /// `daemon.git.maintenance.retention_quiet_total` and stay silent. A
-    /// changed detail logs again.
-    pub fn admit_by_design_retention_log(
-        &self,
-        lane: RetentionOperatorLogLaneV1,
-        scope: &Path,
-        detail: &str,
-    ) -> bool {
-        let key = RetentionOperatorLogKeyV1 {
-            lane,
-            scope: scope.to_path_buf(),
-        };
-        let mut states = self
-            .retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if states.get(&key).map(String::as_str) == Some(detail) {
-            hotpath::gauge!("daemon.git.maintenance.retention_quiet_total").inc(1_u64);
-            return false;
-        }
-        states.insert(key, detail.to_owned());
-        true
-    }
-
-    pub fn clear_by_design_retention_log(&self, lane: RetentionOperatorLogLaneV1, scope: &Path) {
-        let key = RetentionOperatorLogKeyV1 {
-            lane,
-            scope: scope.to_path_buf(),
-        };
-        self.retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&key);
-    }
-
-    /// Emit `retention_degraded` once per by-design state, or every time for
-    /// a genuine anomaly. Repeat by-design ticks count on the quiet gauge.
-    pub fn emit_retention_degraded(&self, project_root: &Path, pass: &'static str, failure: &str) {
-        let lane = match pass {
-            "semantic_vector_generations" => RetentionOperatorLogLaneV1::Semantic,
-            "code_generations" => RetentionOperatorLogLaneV1::CodeGeneration,
-            _ => {
-                self.mark_loud_retention_log();
-                log_daemon_event(
-                    "retention_degraded",
-                    &[("pass", pass.to_owned()), ("failure", failure.to_owned())],
-                );
-                return;
-            }
-        };
-        if retention_failure_is_by_design(lane, failure) {
-            if !self.admit_by_design_retention_log(lane, project_root, failure) {
-                return;
-            }
-        } else {
-            self.mark_loud_retention_log();
-            self.clear_by_design_retention_log(lane, project_root);
-        }
-        log_daemon_event(
-            "retention_degraded",
-            &[("pass", pass.to_owned()), ("failure", failure.to_owned())],
-        );
-    }
-
     /// Whether the tick summary line should be written. Repeated by-design
-    /// `retry` ticks stay quiet; a loud anomaly or an outcome change logs.
+    /// `retry` ticks stay quiet and count on
+    /// `daemon.git.maintenance.retention_quiet_total`; a loud anomaly or an
+    /// outcome change logs.
     pub fn admit_retention_tick_log(&self, outcome: MaintenanceTickOutcome) -> bool {
-        let detail = format!("{}:{}", outcome.succeeded(), outcome.label());
         let loud = self.loud_retention_this_tick.load(Ordering::Acquire);
         if matches!(outcome, MaintenanceTickOutcome::Retry) && !loud {
-            return self.admit_by_design_retention_log(
-                RetentionOperatorLogLaneV1::Tick,
-                Path::new(""),
-                &detail,
-            );
+            if self.quiet_retry_tick_logged.swap(true, Ordering::AcqRel) {
+                hotpath::gauge!("daemon.git.maintenance.retention_quiet_total").inc(1_u64);
+                return false;
+            }
+            return true;
         }
-        self.clear_by_design_retention_log(RetentionOperatorLogLaneV1::Tick, Path::new(""));
+        self.quiet_retry_tick_logged.store(false, Ordering::Release);
         true
-    }
-
-    pub fn record_semantic_vector_retention_failure(&self, project_root: &Path) {
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                project_root.to_path_buf(),
-                SemanticVectorRetentionProgressV1::default(),
-            );
-    }
-
-    /// Pin the project's census read to [`SemanticVectorRetentionReadV1::SemanticUnseated`].
-    ///
-    /// The vector retention pass records this when the daemon has no seated
-    /// semantic runtime, so downstream passes can distinguish "no census will
-    /// ever exist" from a census that merely has not completed yet.
-    pub fn record_semantic_vector_retention_unseated(&self, project_root: &Path) {
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                project_root.to_path_buf(),
-                SemanticVectorRetentionProgressV1 {
-                    semantic_unseated: true,
-                    ..SemanticVectorRetentionProgressV1::default()
-                },
-            );
-    }
-
-    pub fn record_semantic_vector_retention_census(
-        &self,
-        project_root: &Path,
-        census: &tracedecay_graph_db::SemanticVectorRetentionCensus,
-    ) -> SemanticVectorRetentionCensusOutcome {
-        use tracedecay_graph_db::SemanticVectorRetentionAction;
-
-        let mut retention = self
-            .semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let progress = retention.entry(project_root.to_path_buf()).or_default();
-        // A census page can only come from a seated semantic runtime.
-        progress.semantic_unseated = false;
-        if matches!(
-            census.action,
-            SemanticVectorRetentionAction::Retired(_)
-                | SemanticVectorRetentionAction::Finalized(_)
-                | SemanticVectorRetentionAction::CancelledRemoved(_)
-        ) {
-            // The returned page describes the pre-action state. Restart from
-            // the beginning on the next tick instead of publishing stale sums.
-            *progress = SemanticVectorRetentionProgressV1::default();
-            return SemanticVectorRetentionCensusOutcome::Accepted;
-        }
-        progress.cursor.clone_from(&census.continuation);
-        if census.continuation.is_some() {
-            if census.complete_receipt.is_some() {
-                *progress = SemanticVectorRetentionProgressV1::default();
-                return SemanticVectorRetentionCensusOutcome::InconsistentPage;
-            }
-            progress.scanning = true;
-            progress.observed = None;
-        } else {
-            let Some(receipt) = census.complete_receipt.clone() else {
-                *progress = SemanticVectorRetentionProgressV1::default();
-                return SemanticVectorRetentionCensusOutcome::IncompleteTerminalPage;
-            };
-            if receipt.validate().is_err() {
-                *progress = SemanticVectorRetentionProgressV1::default();
-                return SemanticVectorRetentionCensusOutcome::CensusCountOverflow;
-            }
-            if receipt.shard_id != census.shard_id || receipt.revision != census.revision {
-                *progress = SemanticVectorRetentionProgressV1::default();
-                return SemanticVectorRetentionCensusOutcome::ReceiptIdentityMismatch;
-            }
-            progress.observed = Some(receipt);
-            progress.cursor = None;
-            progress.scanning = false;
-        }
-        SemanticVectorRetentionCensusOutcome::Accepted
-    }
-
-    pub fn semantic_vector_retention_read(
-        &self,
-        project_root: &Path,
-    ) -> SemanticVectorRetentionReadV1 {
-        let retention = self
-            .semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(progress) = retention.get(project_root) else {
-            return SemanticVectorRetentionReadV1::Unknown;
-        };
-        if progress.semantic_unseated {
-            return SemanticVectorRetentionReadV1::SemanticUnseated;
-        }
-        if progress.scanning {
-            return SemanticVectorRetentionReadV1::Scanning;
-        }
-        progress
-            .observed
-            .clone()
-            .map_or(SemanticVectorRetentionReadV1::Unknown, |receipt| {
-                SemanticVectorRetentionReadV1::Observed { receipt }
-            })
-    }
-
-    pub fn semantic_vector_scope_collection_ready(&self, project_root: &Path) -> bool {
-        matches!(
-            self.semantic_vector_retention_read(project_root),
-            SemanticVectorRetentionReadV1::Observed {
-                receipt: tracedecay_store::SemanticVectorProjectCensusReceipt {
-                    counts: tracedecay_store::SemanticVectorStageCensusCounts {
-                        pending: 0,
-                        ready: 0,
-                        published: _,
-                        cancelled: 0,
-                    },
-                    ..
-                },
-            }
-        )
     }
 
     #[hotpath::measure(label = "daemon.maintenance.sample_store_telemetry", future = true)]
@@ -925,20 +610,6 @@ impl StoreTelemetrySamplingRegistry {
             }
         }
         outcome
-    }
-}
-
-/// Persistent by-design retention conditions log once, then count on gauges.
-/// Corrupt, reset, denied, and cancelled failures stay loud every attempt.
-pub fn retention_failure_is_by_design(lane: RetentionOperatorLogLaneV1, failure: &str) -> bool {
-    match lane {
-        RetentionOperatorLogLaneV1::Semantic => {
-            failure == "configuration_inventory_unavailable" || failure.starts_with("unavailable:")
-        }
-        RetentionOperatorLogLaneV1::CodeGeneration => {
-            failure.starts_with("vector_inventory_offline:")
-        }
-        RetentionOperatorLogLaneV1::Tick => false,
     }
 }
 
@@ -989,4 +660,36 @@ fn storage_telemetry_request_context(
         Deadline::new(expires_at)?,
         CancellationContext::active(format!("cancel.daemon.storage-telemetry.{suffix}"))?,
     )
+}
+
+#[cfg(test)]
+mod retention_tick_log_tests {
+    use super::StoreTelemetrySamplingRegistry;
+    use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
+
+    #[test]
+    fn quiet_retry_ticks_log_once_until_a_loud_anomaly_or_outcome_change() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        registry.begin_retention_tick_log_window();
+        assert!(registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+        assert!(!registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+        assert!(!registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+
+        registry.mark_loud_retention_log();
+        assert!(registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+        registry.begin_retention_tick_log_window();
+        assert!(registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+        assert!(!registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+
+        assert!(
+            registry.admit_retention_tick_log(MaintenanceTickOutcome::Continue(
+                MaintenanceContinuation::CodeGenerationRetention,
+            ))
+        );
+        assert!(registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+        assert!(!registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+
+        registry.release_retained_handles_for_shutdown();
+        assert!(registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));
+    }
 }

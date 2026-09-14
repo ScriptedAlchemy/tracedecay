@@ -338,7 +338,6 @@ pub struct ContextScoutSuggestionEnvelopeV1 {
 pub enum ContextScoutEvidenceSourceKindV1 {
     Query,
     Lcm,
-    Semantic,
     Code,
     Git,
 }

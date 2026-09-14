@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-pub use tracedecay_application::config::retrieval;
 pub use tracedecay_configuration::RetentionConfig;
 pub use tracedecay_configuration::config::*;
 

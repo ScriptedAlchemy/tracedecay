@@ -13,9 +13,7 @@ use thiserror::Error;
 use crate::canonical_text::{
     CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within, validated_string_newtype,
 };
-use crate::code_intelligence::{
-    CodeGenerationId, ProjectionKeyV1, SemanticSearchIndexKeyV1, VectorGenerationIdV1,
-};
+use crate::code_intelligence::CodeGenerationId;
 use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId, digest_id};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
@@ -68,7 +66,6 @@ validated_string_newtype!(
     CalibrationProfileId,
     FusionProfileId,
     DiversityPolicyId,
-    RerankPolicyId,
     ComponentRevision,
     ExactAdmissionRuleRevision,
     AuthorizationRevision,
@@ -217,7 +214,6 @@ pub enum RetrievalContractError {
 pub enum RetrieverKind {
     ExactLiteral,
     Lexical,
-    Semantic,
     Graph,
     Temporal,
     TaskSession,
@@ -225,10 +221,9 @@ pub enum RetrieverKind {
 }
 
 impl RetrieverKind {
-    pub const ALL_LANES: [Self; 7] = [
+    pub const ALL_LANES: [Self; 6] = [
         Self::ExactLiteral,
         Self::Lexical,
-        Self::Semantic,
         Self::Graph,
         Self::Temporal,
         Self::TaskSession,
@@ -242,7 +237,6 @@ impl RetrieverKind {
         match self {
             Self::ExactLiteral => "exact_literal",
             Self::Lexical => "lexical",
-            Self::Semantic => "semantic",
             Self::Graph => "graph",
             Self::Temporal => "temporal",
             Self::TaskSession => "task_session",
@@ -480,15 +474,6 @@ pub struct RetrievalBudgetUsage {
     pub hydrated_results: u64,
     pub hydration_bytes: u64,
     pub elapsed_micros: u64,
-}
-
-/// Public, sanitized budget usage: no lane-identifying counts. Public bytes
-/// must not distinguish denied from absent evidence.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SanitizedBudgetUsage {
-    pub elapsed_micros: u64,
-    pub truncated: bool,
 }
 
 /// Typed lane failure. Denial is never surfaced as a distinct public state.
@@ -996,7 +981,6 @@ pub enum RankingDecisionKind {
     ContradictionPreservation,
     DiversityCap,
     ComparatorProvenance,
-    RerankAdmission,
     Fallback,
 }
 
@@ -1015,7 +999,6 @@ pub struct FusionProfile {
     pub minimum_calibrated_feature_micros: BTreeMap<RetrieverKind, u32>,
     pub weights_micros: BTreeMap<RetrieverKind, u32>,
     pub diversity_policy_id: DiversityPolicyId,
-    pub rerank_policy_id: Option<RerankPolicyId>,
     pub retrieval_budget: RetrievalBudget,
 }
 
@@ -1036,33 +1019,6 @@ pub struct DiversityPolicy {
     pub per_evidence_role: Option<u32>,
 }
 
-/// Optional bounded rerank contract. Exact tiers bypass the reranker;
-/// failure returns the exact pre-rerank order with a typed reason.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RerankPolicy {
-    pub policy_id: RerankPolicyId,
-    pub evaluation_result_anchor: RetrievalAnchorId,
-    pub max_candidates: u32,
-    pub max_input_bytes: u64,
-    pub max_input_tokens: u64,
-    pub max_work_units: u64,
-    pub max_model_invocations: u32,
-    pub deadline_micros: Option<u64>,
-}
-
-/// Ephemeral authorized rerank view: only approved source-local text or
-/// token features, never cached or persisted.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AuthorizedRerankView {
-    pub anchor_id: RetrievalAnchorId,
-    pub snapshot_digest: CandidateSetDigest,
-    pub privacy_domain: PrivacyDomainId,
-    pub compatibility: FreshnessCompatibilityV1,
-    pub approved_features: Vec<u8>,
-}
-
 /// Per-anchor hydration receipt. Every contribution and hydration receipt
 /// keys back to one `OccurrenceProvenance`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1076,76 +1032,13 @@ pub struct HydrationReceipt {
     pub freshness: SourceFreshness,
 }
 
-/// Authenticated retrieval cursor. Binds the query snapshot, profile ID,
-/// authorized freshness digest, authorization revision, ordered candidate
-/// set digest, sanitized lane statuses, and lane checkpoints; resume uses
-/// the bound set or rejects, it never recomputes.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticRetrievalContinuationV1 {
-    pub profile_id: FusionProfileId,
-    pub profile_digest: ManifestDigest,
-    pub code_generation: CodeGenerationId,
-    pub vector_generation: VectorGenerationIdV1,
-    pub projection_key: ProjectionKeyV1,
-    pub search_index_key: SemanticSearchIndexKeyV1,
-    pub candidate_set_digest: CandidateSetDigest,
-    pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
-    pub lane_checkpoints: Vec<RetrieverContinuation>,
-    pub ranking_revision: RankingRevision,
-    pub rerank: OptionalStagePublicStatus,
-    pub ordered_candidate_anchors: Vec<RetrievalAnchorId>,
-    pub next_ordinal: u32,
-}
-
-impl SemanticRetrievalContinuationV1 {
-    pub fn validate(&self) -> Result<(), RetrievalContractError> {
-        self.search_index_key.validate().map_err(|_| {
-            RetrievalContractError::InvalidCursorBinding {
-                field: "semantic search index key",
-            }
-        })?;
-        if !self
-            .public_lane_statuses
-            .contains_key(&RetrieverKind::Semantic)
-        {
-            return Err(RetrievalContractError::InvalidCursorBinding {
-                field: "semantic lane status",
-            });
-        }
-        if self
-            .lane_checkpoints
-            .iter()
-            .any(|checkpoint| !self.public_lane_statuses.contains_key(&checkpoint.lane))
-        {
-            return Err(RetrievalContractError::InvalidCursorBinding {
-                field: "semantic lane checkpoint without admitted lane status",
-            });
-        }
-        let unique_anchors = self
-            .ordered_candidate_anchors
-            .iter()
-            .collect::<BTreeSet<_>>();
-        if unique_anchors.len() != self.ordered_candidate_anchors.len()
-            || usize::try_from(self.next_ordinal)
-                .ok()
-                .is_none_or(|next| next > self.ordered_candidate_anchors.len())
-        {
-            return Err(RetrievalContractError::InvalidCursorBinding {
-                field: "semantic frozen candidate order",
-            });
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSourceCursorBindingV1 {
     pub reference: crate::research::id::RefId,
     pub commit: crate::GitOidV1,
     pub tree: crate::GitOidV1,
-    pub generation: crate::code_intelligence::CodeGenerationId,
+    pub generation: CodeGenerationId,
 }
 
 impl CodeSourceCursorBindingV1 {
@@ -1158,6 +1051,10 @@ impl CodeSourceCursorBindingV1 {
     }
 }
 
+/// Authenticated retrieval cursor. Binds the query snapshot, profile ID,
+/// authorized freshness digest, authorization revision, ordered candidate
+/// set digest, sanitized lane statuses, and lane checkpoints; resume uses
+/// the bound set or rejects, it never recomputes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalCursor {
@@ -1175,10 +1072,6 @@ pub struct RetrievalCursor {
     pub ranking_revision: RankingRevision,
     /// First final ordinal in the next page of the frozen candidate set.
     pub next_ordinal: u32,
-    /// Optional semantic continuation authenticated by the same query cursor key.
-    /// Its absence preserves the canonical query cursor bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic: Option<SemanticRetrievalContinuationV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_source: Option<CodeSourceCursorBindingV1>,
     pub expiry: UtcMicros,
@@ -1209,9 +1102,6 @@ impl RetrievalCursor {
                 field: "lane checkpoint without admitted lane status",
             });
         }
-        if let Some(semantic) = &self.semantic {
-            semantic.validate()?;
-        }
         Ok(())
     }
 }
@@ -1227,38 +1117,12 @@ pub enum PublicRetrieverStatus {
     Stale,
 }
 
-/// Public status of an optional stage. Deliberately no denied variant —
-/// denied and absent coalesce through the same sanitized unavailable shape.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status", content = "detail", rename_all = "snake_case")]
-pub enum OptionalStagePublicStatus {
-    NotRequested,
-    Complete,
-    Unavailable(SanitizedStageFailure),
-    Rejected(SanitizedStageFailure),
-    Cancelled,
-    BudgetExceeded(SanitizedBudgetUsage),
-}
-
-/// Sanitized optional-stage failure: class only, no internal detail.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum SanitizedStageFailure {
-    AuthorityUnavailable,
-    Incompatible,
-    Stale,
-    Invalid,
-    Internal,
-}
-
 /// The typed, independently hashed query fallback subpayload. Canonical-encoded
 /// and hashed with
 /// [`QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN`]; the `digest` field is excluded
 /// from the hashed bytes. It contains the complete accepted
 /// exact+lexical+graph result — IDs, order, contributions, explanations,
-/// coverage, and cursor bytes. semantic must preserve it byte-for-byte whenever
-/// the semantic or rerank stage is disabled, unavailable, rejected, or
-/// cancelled.
+/// coverage, and cursor bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QueryFallbackSubpayload {
@@ -1512,7 +1376,7 @@ mod tests {
             .validate()
             .expect("query fallback lanes are admissible");
 
-        let lane = RetrieverKind::Semantic;
+        let lane = RetrieverKind::Temporal;
         let rejected = subpayload(&[lane]);
         assert_eq!(
             rejected.validate(),
@@ -1528,17 +1392,19 @@ mod tests {
             [
                 RetrieverKind::ExactLiteral,
                 RetrieverKind::Lexical,
-                RetrieverKind::Semantic,
                 RetrieverKind::Graph,
                 RetrieverKind::Temporal,
                 RetrieverKind::TaskSession,
                 RetrieverKind::Diagnostic,
             ],
         );
+        assert!(
+            serde_json::from_str::<RetrieverKind>("\"semantic\"").is_err(),
+            "the retired dense lane must not deserialize"
+        );
         for (wire, expected) in [
             ("exact_literal", RetrieverKind::ExactLiteral),
             ("lexical", RetrieverKind::Lexical),
-            ("semantic", RetrieverKind::Semantic),
             ("graph", RetrieverKind::Graph),
             ("temporal", RetrieverKind::Temporal),
             ("task_session", RetrieverKind::TaskSession),
@@ -1605,13 +1471,13 @@ mod tests {
                 exact_class: ExactClass::Approximate,
                 utility_micros: 1,
                 contributions: vec![CandidateContribution {
-                    retriever: RetrieverKind::Semantic,
-                    retriever_revision: id("retriever.semantic.v1"),
-                    source_occurrence_id: id("occurrence.semantic"),
+                    retriever: RetrieverKind::Temporal,
+                    retriever_revision: id("retriever.temporal.v1"),
+                    source_occurrence_id: id("occurrence.temporal"),
                     ordinal_rank: 0,
                     raw_score: FixedPointScore(1),
-                    score_domain: id("score.semantic.v1"),
-                    calibration_profile_id: id("calibration.semantic.v1"),
+                    score_domain: id("score.temporal.v1"),
+                    calibration_profile_id: id("calibration.temporal.v1"),
                     calibrated_feature_micros: 1,
                     weight_micros: 1,
                     weighted_contribution_micros: 1,

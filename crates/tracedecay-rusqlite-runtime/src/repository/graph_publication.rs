@@ -18,37 +18,8 @@ use tracedecay_store::{
 #[path = "graph_publication/exact.rs"]
 mod exact;
 pub use exact::GraphPublicationExactSqlStorage;
-pub(crate) use exact::append_replay_in_transaction;
 
 pub const GRAPH_PUBLICATION_SCHEMA_V1: &str = include_str!("graph_publication_schema.sql");
-
-pub(crate) fn authoritative_verified_head_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    projection: &GraphProjectionIdentityV1,
-) -> GraphPublicationStoreResultV1<Option<GraphVerifiedHeadV1>> {
-    exact::authoritative_verified_head_in_transaction(transaction, projection)
-}
-
-pub(crate) fn active_replay_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    key: &GraphPublicationKeyV1,
-) -> GraphPublicationStoreResultV1<Option<GraphPublicationReplayRecordV1>> {
-    exact::active_replay_in_transaction(transaction, key)
-}
-
-pub(crate) fn active_replay_in_snapshot(
-    snapshot: &crate::exact_sql::ExactSqlReadSnapshot,
-    key: &GraphPublicationKeyV1,
-) -> GraphPublicationStoreResultV1<Option<GraphPublicationReplayRecordV1>> {
-    exact::active_replay_in_snapshot(snapshot, key)
-}
-
-pub(crate) fn retire_replay_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    request: &GraphPublicationReplayRetirementV1,
-) -> GraphPublicationStoreResultV1<tracedecay_store::GraphReplayRetirementOutcomeV1> {
-    exact::retire_replay_in_transaction(transaction, request)
-}
 
 #[derive(Clone)]
 struct EncodedProjection {

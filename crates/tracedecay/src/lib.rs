@@ -63,6 +63,3 @@ mod serve;
 #[path = "../benches/session_temporal/harness.rs"]
 #[allow(clippy::too_many_lines)]
 pub mod session_temporal_benchmark;
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub mod vector_generation_test_support;

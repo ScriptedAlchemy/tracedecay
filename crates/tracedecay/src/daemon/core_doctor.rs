@@ -6,9 +6,6 @@ use std::path::{Path, PathBuf};
 use tokio::time::{Duration, timeout};
 
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use tracedecay_application::semantic_runtime::{
-    SemanticConfigurationPinV1, project_lifecycle_status,
-};
 use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};
 use tracedecay_daemon_service::shutdown::DaemonActivity;
 use tracedecay_domain::errors::Result;
@@ -156,8 +153,6 @@ fn doctor_runtime_unavailable(
             "status": "unavailable",
             "reason": "session_store_unavailable",
         },
-        "semantic_runtime": doctor_semantic_runtime_status(project_path, None),
-        "semantic_model": project_path.and_then(project_lifecycle_status),
     })
 }
 
@@ -505,31 +500,7 @@ async fn doctor_runtime_value_inner(
         });
         value["cursor_session_placeholder_paths"] = json!([]);
     }
-    let semantic_configuration = Box::pin(graph.configuration_runtime().client().current())
-        .await
-        .ok()
-        .and_then(|pinned| {
-            SemanticConfigurationPinV1::from_current(&pinned.into_current_state()).ok()
-        });
-    value["semantic_runtime"] =
-        doctor_semantic_runtime_status(Some(project_path), semantic_configuration);
-    // Model acquisition and loading are independent of serving-generation
-    // readiness; both observations come from this exact mounted project.
-    value["semantic_model"] = json!(project_lifecycle_status(project_path));
     value
-}
-
-fn doctor_semantic_runtime_status(
-    project_path: Option<&Path>,
-    configuration: Option<SemanticConfigurationPinV1>,
-) -> serde_json::Value {
-    serde_json::to_value(
-        tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
-            project_path,
-            configuration,
-        ),
-    )
-    .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
 
 #[cfg(test)]
@@ -656,7 +627,6 @@ mod doctor_runtime_route_tests {
     };
     use tracedecay_daemon_protocol::DaemonClientIdentity;
     use tracedecay_mcp::McpTransport;
-    use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -1037,22 +1007,6 @@ mod doctor_runtime_route_tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle.wait_for_idle())
             .await
             .expect("fallthrough activity drops with caller ownership");
-    }
-
-    #[test]
-    fn semantic_status_without_configuration_is_valid_unavailable() {
-        let value = super::doctor_semantic_runtime_status(None, None);
-        let status: tracedecay_application::semantic_runtime::SemanticRuntimeStatusV1 =
-            serde_json::from_value(value).expect("semantic runtime status");
-
-        assert_eq!(status.validate(), Ok(()));
-        assert!(status.configuration.is_none());
-        assert!(matches!(
-            status.state,
-            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
-                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
-            }
-        ));
     }
 
     #[cfg(unix)]

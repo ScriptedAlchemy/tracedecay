@@ -581,7 +581,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 let (database, convergence) =
                     RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
                         database,
-                        Arc::clone(&self.semantic_vector_operation_task_owner),
+                        Arc::clone(&self.operation_task_owner),
                     )
                     .await?;
                 (database, Some(convergence))
@@ -589,7 +589,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 (
                     RegisteredGlobalDbOwnerV1::admit_and_attach_with_operation_task_owner(
                         database,
-                        Arc::clone(&self.semantic_vector_operation_task_owner),
+                        Arc::clone(&self.operation_task_owner),
                     )
                     .await?,
                     None,

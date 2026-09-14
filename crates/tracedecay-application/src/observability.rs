@@ -65,9 +65,8 @@ pub use product_view_emit::{
 };
 pub use read::{observatory_read_model, observatory_unavailable_read_model};
 pub use retrieval_emit::{
-    AblationDimensionV1, RetrievalEmissionSummaryV1, emit_retrieval_pipeline,
-    observe_stage_ablation, record_analytics_consent, record_context_outcome,
-    record_retrieval_ablation, record_retrieval_planner, record_retrieval_source,
+    RetrievalEmissionSummaryV1, emit_retrieval_pipeline, record_analytics_consent,
+    record_context_outcome, record_retrieval_planner, record_retrieval_source,
     record_retrieval_synthesis, record_retriever,
 };
 pub use tracedecay_global_db::{

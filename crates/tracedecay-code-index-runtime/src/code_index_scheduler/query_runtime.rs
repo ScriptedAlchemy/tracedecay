@@ -1,8 +1,7 @@
 //! Production activation and execution for authenticated query search.
 //!
-//! Exact/lexical/graph search starts from the checked-in fallback workload and
-//! durable query/cursor keys. Optional-stage upgrades additionally require an
-//! accepted profile/evaluation from the configured authority port.
+//! Exact/lexical/graph search mounts the checked-in fallback policy and the
+//! durable query/cursor keys of the published generation's privacy domain.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -12,20 +11,21 @@ use std::time::Duration;
 use thiserror::Error;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_contracts::ResolvedScope;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, ComponentRevision, ConfigurationRevisionId,
-    DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile,
-    FusionProfileId, PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RelationEdgeKindV1,
-    RetrievalAnchorId, RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
+    AuthorizationRevision, CalibrationProfileId, CodeGenerationId, ComponentRevision,
+    DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile, PrincipalId,
+    QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget,
+    RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
 use super::CodeIndexSchedulerRegistryV1;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
 };
-use tracedecay_query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
+use tracedecay_query::retrieval::fusion::CompositionLaneInput;
 use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
 use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
@@ -33,72 +33,15 @@ use tracedecay_query::retrieval::lexical::{
 };
 use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::{
-    AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
+    AuthorizedQueryFallbackV1, QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1,
+    QUERY_LEXICAL_SCORE_DOMAIN_V1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
     RetrievalPortError, SanitizedRetrievalRequestV1,
 };
 
 const QUERY_FALLBACK_PROFILE_ID: &str = "query-fallback";
-const QUERY_FALLBACK_WORKLOAD_JSON: &str = include_str!(
-    "../../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
-);
-
-/// Immutable evidence that a configured authority accepted one exact query
-/// profile for one exact admitted scope.
-pub struct AcceptedQueryEvaluationV1 {
-    pub status: crate::query::search_quality::DirectEvaluationStatusV1,
-    pub scope_digest: tracedecay_domain::ManifestDigest,
-    pub profile_id: FusionProfileId,
-    pub evaluation_result_anchor: RetrievalAnchorId,
-}
-
-/// Provider-owned activation material. The keyring is already constructed by
-/// the configured durable key authority, so raw key bytes never cross
-/// this daemon orchestration boundary.
-pub struct QueryAuthorityMaterialV1 {
-    pub scope: ResolvedScope,
-    pub evaluation: AcceptedQueryEvaluationV1,
-    pub profile: FusionProfile,
-    pub diversity: DiversityPolicy,
-    pub ranking_revision: ComponentRevision,
-    pub keyring: Option<RetrievalCursorKeyringV1>,
-}
-
-#[derive(Debug, Error)]
-pub enum QueryAuthorityProviderErrorV1 {
-    #[error("configured query authority is unavailable: {0}")]
-    Unavailable(String),
-}
-
-/// Daemon-facing port over an existing configuration/key authority.
-///
-/// Returning a list is intentional: the daemon rejects zero or multiple
-/// candidates rather than selecting an arbitrary profile or key owner.
-pub trait QueryAuthorityProviderV1: Send + Sync {
-    fn accepted_authorities(
-        &self,
-        scope: &ResolvedScope,
-        privacy_domain: &PrivacyDomainId,
-    ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1>;
-}
 
 #[derive(Debug, Error)]
 pub enum QueryRuntimeMountErrorV1 {
-    #[error(transparent)]
-    Provider(#[from] QueryAuthorityProviderErrorV1),
-    #[error("no accepted query authority exists for the exact admitted scope")]
-    AuthorityMissing,
-    #[error("multiple query authorities match the exact admitted scope")]
-    AuthorityAmbiguous,
-    #[error("query authority scope does not exactly match the admitted scope")]
-    ScopeMismatch,
-    #[error("query evaluation is not PASS")]
-    EvaluationNotPassed,
-    #[error("query evaluation no longer binds the supplied profile")]
-    EvaluationStale,
-    #[error("durable query cursor key is unavailable")]
-    KeyUnavailable,
-    #[error("query/cursor key privacy domain does not match the published generation")]
-    PrivacyDomainMismatch,
     #[error("no complete current code generation exists for the exact admitted scope")]
     GenerationUnavailable,
     #[error("checked-in query fallback policy is invalid: {0}")]
@@ -111,9 +54,8 @@ pub enum QueryRuntimeMountErrorV1 {
     Mount(String),
 }
 
-/// Mount the checked-in exact/lexical/graph policy without claiming that an
-/// optional-stage evaluation passed. This authority remains callable while no
-/// semantic profile has been genuinely evaluated and published.
+/// Mount the checked-in exact/lexical/graph policy for one exact admitted
+/// scope.
 pub async fn mount_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -127,47 +69,6 @@ pub async fn mount_core_query_authority_on_project_open(
         .mount_query_authority(project_root, scope, authority)
         .await
         .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
-}
-
-/// Mount the core fallback without abandoning an in-progress committed
-/// semantic activation. The registry repeats the exact revision check under
-/// the same activation gate used by the final authority-pair publication.
-pub async fn mount_core_query_authority_for_committed_fallback_on_project_open(
-    registry: &CodeIndexSchedulerRegistryV1,
-    project_root: &Path,
-    scope: &ResolvedScope,
-    expected_revision: &ConfigurationRevisionId,
-    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
-) -> Result<(), QueryRuntimeMountErrorV1> {
-    let authority =
-        prepare_core_query_authority_on_project_open(registry, project_root, scope, cursor_keys)
-            .await?;
-    registry
-        .mount_query_authority_for_committed_fallback(
-            project_root,
-            scope,
-            expected_revision,
-            authority,
-        )
-        .await
-        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
-}
-
-/// Which project-open mount to retry once a generation exists.
-#[derive(Clone)]
-pub enum DeferredQueryAuthorityMountV1 {
-    /// The configured accepted authority (committed activation present).
-    Configured {
-        profile_id: tracedecay_domain::configuration::UserProfileId,
-    },
-    /// The checked-in core exact/lexical/graph fallback. When a committed
-    /// activation is warming, its exact revision keeps the retry inside that
-    /// fence; otherwise this is the ordinary standalone fallback. Cursor keys
-    /// are reloaded from the same durable store used at project open.
-    CoreFallback {
-        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-        committed_revision: Option<tracedecay_domain::configuration::ConfigurationRevisionId>,
-    },
 }
 
 /// One deferred mount attempt, terminal unless the generation is still
@@ -285,144 +186,94 @@ async fn prepare_core_query_authority_on_project_open(
     Ok(authority)
 }
 
-/// Reuse the checked-in policy identity only for byte-identical ranking material.
-/// Evaluation receipts remain owned by the accepted configuration; evaluating
-/// the same fallback again must not change its ranking decisions or cursors.
-pub fn canonical_query_policy(
-    profile: &FusionProfile,
-    diversity: &DiversityPolicy,
-) -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeMountErrorV1> {
-    let (core_profile, core_diversity) = core_query_policy()?;
-    let mut candidate_profile = profile.clone();
-    let mut candidate_diversity = diversity.clone();
-    candidate_profile.evaluation_result_anchor = core_profile.evaluation_result_anchor.clone();
-    candidate_diversity
-        .evaluation_result_anchor
-        .clone_from(&core_diversity.evaluation_result_anchor);
-    if diversity.evaluation_result_anchor.as_ref() == Some(&profile.evaluation_result_anchor)
-        && candidate_profile == core_profile
-        && candidate_diversity == core_diversity
-    {
-        Ok((core_profile, core_diversity))
-    } else {
-        Ok((profile.clone(), diversity.clone()))
-    }
+fn fallback_policy_id<T>(value: &str) -> Result<T, QueryRuntimeMountErrorV1>
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Display,
+{
+    T::try_from(value.to_owned())
+        .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))
 }
 
-fn core_query_policy() -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeMountErrorV1> {
-    let workload: crate::query::search_quality::CandidateWorkloadV1 =
-        serde_json::from_str(QUERY_FALLBACK_WORKLOAD_JSON)
-            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    let material = crate::query::search_quality::direct_evaluated_profile_material(
-        &workload,
-        QUERY_FALLBACK_PROFILE_ID,
-    )
-    .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    if material.rerank.is_some() {
-        return Err(QueryRuntimeMountErrorV1::InvalidFallbackPolicy(
-            "query fallback unexpectedly enables reranking".to_owned(),
-        ));
-    }
-    let workload_digest = crate::query::search_quality::compute_workload_digest(&workload)
-        .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    let policy_anchor = RetrievalAnchorId::new(format!(
-        "policy.query-fallback.workload.v1.{workload_digest}"
-    ))
-    .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    let profile = FusionProfile {
-        evaluation_result_anchor: policy_anchor.clone(),
-        ..material.profile
-    };
-    let diversity = DiversityPolicy {
-        evaluation_result_anchor: Some(policy_anchor),
-        ..material.diversity
-    };
-    Ok((profile, diversity))
-}
-
-/// Resolve and validate one exact accepted authority without mounting it.
+/// The checked-in exact/lexical/graph fusion policy.
 ///
-/// Kept separate from the async registry mutation so project-open callers can
-/// report precise configuration failures before changing mounted state.
-pub fn prepare_query_authority(
-    scope: &ResolvedScope,
-    privacy_domain: &PrivacyDomainId,
-    provider: &dyn QueryAuthorityProviderV1,
-) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
-    scope
-        .validate()
-        .map_err(|_| QueryRuntimeMountErrorV1::ScopeMismatch)?;
-    privacy_domain
-        .validate()
-        .map_err(|_| QueryRuntimeMountErrorV1::PrivacyDomainMismatch)?;
-    let mut candidates = provider.accepted_authorities(scope, privacy_domain)?;
-    if candidates.is_empty() {
-        return Err(QueryRuntimeMountErrorV1::AuthorityMissing);
+/// Its evaluation anchor is content-addressed over the ranking material, so a
+/// changed weight, budget, calibration, or diversity cap invalidates cursors
+/// signed under the previous policy instead of resuming them with different
+/// ranking.
+fn core_query_policy() -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeMountErrorV1> {
+    let lanes = [
+        (
+            RetrieverKind::ExactLiteral,
+            QUERY_EXACT_SCORE_DOMAIN_V1,
+            1_000_000,
+        ),
+        (
+            RetrieverKind::Lexical,
+            QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            1_000_000,
+        ),
+        (RetrieverKind::Graph, QUERY_GRAPH_SCORE_DOMAIN_V1, 250_000),
+    ];
+    let mut calibrations = BTreeMap::new();
+    let mut score_domain_calibrations = BTreeMap::new();
+    let mut weights_micros = BTreeMap::new();
+    for (lane, score_domain, weight_micros) in lanes {
+        let calibration_profile_id: CalibrationProfileId = fallback_policy_id(&format!(
+            "calibration.{}.{QUERY_FALLBACK_PROFILE_ID}",
+            lane.as_str()
+        ))?;
+        let score_domain: ScoreDomainId = fallback_policy_id(score_domain)?;
+        calibrations.insert(lane, calibration_profile_id.clone());
+        score_domain_calibrations.insert(
+            score_domain.clone(),
+            ScoreDomainCalibrationV1 {
+                calibration_profile_id,
+                score_domain,
+                raw_min_micros: 0,
+                raw_max_micros: 1_000_000,
+            },
+        );
+        weights_micros.insert(lane, weight_micros);
     }
-    if candidates.len() != 1 {
-        return Err(QueryRuntimeMountErrorV1::AuthorityAmbiguous);
-    }
-    let material = candidates
-        .pop()
-        .ok_or(QueryRuntimeMountErrorV1::AuthorityMissing)?;
-    material
-        .scope
-        .validate()
-        .map_err(|_| QueryRuntimeMountErrorV1::ScopeMismatch)?;
-    if material.scope != *scope {
-        return Err(QueryRuntimeMountErrorV1::ScopeMismatch);
-    }
-    if material.evaluation.scope_digest != scope.scope_digest {
-        return Err(QueryRuntimeMountErrorV1::EvaluationStale);
-    }
-    if material.evaluation.status != crate::query::search_quality::DirectEvaluationStatusV1::Pass {
-        return Err(QueryRuntimeMountErrorV1::EvaluationNotPassed);
-    }
-    if material.evaluation.profile_id != material.profile.profile_id
-        || material.evaluation.evaluation_result_anchor != material.profile.evaluation_result_anchor
-    {
-        return Err(QueryRuntimeMountErrorV1::EvaluationStale);
-    }
-    let keyring = material
-        .keyring
-        .ok_or(QueryRuntimeMountErrorV1::KeyUnavailable)?;
-    if keyring.privacy_domain() != privacy_domain {
-        return Err(QueryRuntimeMountErrorV1::PrivacyDomainMismatch);
-    }
-    let (profile, diversity) = canonical_query_policy(&material.profile, &material.diversity)?;
-    Ok(Arc::new(QueryAuthorityV1::new(
-        profile,
-        diversity,
-        material.ranking_revision,
-        keyring,
-    )?))
-}
-
-/// Callable project-open hook: resolve a configured accepted authority and
-/// mount it only for the same exact scope as the already-mounted worktree.
-pub async fn mount_query_authority_on_project_open(
-    registry: &CodeIndexSchedulerRegistryV1,
-    project_root: &Path,
-    scope: &ResolvedScope,
-    provider: &dyn QueryAuthorityProviderV1,
-) -> Result<(), QueryRuntimeMountErrorV1> {
-    let privacy_domain = if let Some(text) = registry.latest_text_serving_for_scope(scope).await {
-        text.metadata().manifest().privacy_domain.clone()
-    } else {
-        registry
-            .latest_complete_fresh_for_scope(scope)
-            .await
-            .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?
-            .generation
-            .manifest()
-            .privacy_domain
-            .clone()
+    let material_anchor: RetrievalAnchorId =
+        fallback_policy_id(&format!("policy.{QUERY_FALLBACK_PROFILE_ID}.v1"))?;
+    let mut profile = FusionProfile {
+        profile_id: fallback_policy_id(&format!("profile.{QUERY_FALLBACK_PROFILE_ID}"))?,
+        evaluation_result_anchor: material_anchor.clone(),
+        calibrations,
+        score_domain_calibrations,
+        minimum_calibrated_feature_micros: BTreeMap::new(),
+        weights_micros,
+        diversity_policy_id: fallback_policy_id("diversity.candidate.v1")?,
+        retrieval_budget: RetrievalBudget {
+            max_candidates_per_lane: 32,
+            max_fused_candidates: 32,
+            max_hydrated_results: 16,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        },
     };
-    let authority = prepare_query_authority(scope, &privacy_domain, provider)?;
-    registry
-        .mount_query_authority(project_root, scope, authority)
-        .await
-        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
+    let mut diversity = DiversityPolicy {
+        policy_id: profile.diversity_policy_id.clone(),
+        evaluation_result_anchor: Some(material_anchor),
+        per_source_namespace: None,
+        per_source_instance: None,
+        per_repository: None,
+        per_file: Some(2),
+        per_session_or_thread: None,
+        per_copy_cluster: None,
+        per_evidence_role: None,
+    };
+    let material = serde_json::to_vec(&(&profile, &diversity))
+        .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    let policy_anchor: RetrievalAnchorId = fallback_policy_id(&format!(
+        "policy.{QUERY_FALLBACK_PROFILE_ID}.v1.sha256:{}",
+        sha256_hex(&material)
+    ))?;
+    profile.evaluation_result_anchor = policy_anchor.clone();
+    diversity.evaluation_result_anchor = Some(policy_anchor);
+    Ok((profile, diversity))
 }
 
 /// Caller-owned, versioned lane policy for one raw query.
@@ -1087,287 +938,47 @@ fn graph_seeds_from_outcomes(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::collections::BTreeSet;
 
-    use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{
-        CalibrationProfileId, ComponentRevision, DiversityPolicy, FusionProfile, ManifestDigest,
-        PrivacyDomainId, RefId, RepositoryId, RetrievalAnchorId, RetrievalBudget,
-        RetrievalCursorKeyId, RetrieverKind, WorktreeId,
-    };
-
-    use super::{
-        AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
-        QueryAuthorityProviderV1, QueryRuntimeMountErrorV1, prepare_query_authority,
+        ComponentRevision, PrivacyDomainId, RetrievalCursorKeyId, RetrieverKind,
     };
     use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+    use tracedecay_query::retrieval::{QUERY_RANKING_REVISION_V1, QueryAuthorityV1};
 
     #[test]
-    fn canonical_query_policy_preserves_core_bytes_across_evaluation_receipts() {
+    fn checked_in_fallback_policy_mounts_as_a_fallback_query_authority() {
         let (profile, diversity) = super::core_query_policy().expect("checked-in core policy");
-        for receipt in ["search-eval:sha256:first", "search-eval:sha256:second"] {
-            let mut evaluated_profile = profile.clone();
-            let mut evaluated_diversity = diversity.clone();
-            evaluated_profile.evaluation_result_anchor = id(receipt);
-            evaluated_diversity.evaluation_result_anchor = Some(id(receipt));
-            assert_eq!(
-                super::canonical_query_policy(&evaluated_profile, &evaluated_diversity)
-                    .expect("canonical policy"),
-                (profile.clone(), diversity.clone()),
-            );
-
-            let scope = scope("reevaluated-core");
-            let mut accepted = material(scope.clone());
-            accepted.profile = evaluated_profile.clone();
-            accepted.diversity = evaluated_diversity.clone();
-            accepted.evaluation.profile_id = evaluated_profile.profile_id.clone();
-            accepted.evaluation.evaluation_result_anchor = id(receipt);
-            let provider = OneShotProvider {
-                candidates: Mutex::new(Some(vec![accepted])),
-            };
-            assert_eq!(
-                prepare_query_authority(&scope, &privacy_domain(), &provider)
-                    .expect("accepted core evaluation")
-                    .profile(),
-                &profile,
-                "reopen validates the real evaluation before retaining the core policy",
-            );
-
-            // A real policy change must retain its own accepted provenance,
-            // even if its profile identifier has not changed.
-            evaluated_profile.retrieval_budget.max_fused_candidates += 1;
-            assert_eq!(
-                super::canonical_query_policy(&evaluated_profile, &evaluated_diversity)
-                    .expect("changed budget"),
-                (evaluated_profile.clone(), evaluated_diversity.clone()),
-            );
-            evaluated_profile.retrieval_budget = profile.retrieval_budget;
-            evaluated_diversity.per_file = Some(1);
-            assert_eq!(
-                super::canonical_query_policy(&evaluated_profile, &evaluated_diversity)
-                    .expect("changed diversity"),
-                (evaluated_profile.clone(), evaluated_diversity.clone()),
-            );
-        }
-        let mut unbound = diversity.clone();
-        unbound.evaluation_result_anchor = None;
+        assert_eq!(profile.profile_id.as_str(), "profile.query-fallback");
         assert_eq!(
-            super::canonical_query_policy(&profile, &unbound).expect("unbound policy"),
-            (profile, unbound),
-            "normalization cannot manufacture a missing policy binding",
+            profile
+                .weights_micros
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            RetrieverKind::QUERY_FALLBACK_LANES.into_iter().collect(),
         );
-    }
+        assert_eq!(profile.weights_micros[&RetrieverKind::Graph], 250_000);
+        assert_eq!(diversity.per_file, Some(2));
+        assert!(
+            profile
+                .evaluation_result_anchor
+                .as_str()
+                .starts_with("policy.query-fallback.v1.sha256:")
+        );
 
-    struct OneShotProvider {
-        candidates: Mutex<Option<Vec<QueryAuthorityMaterialV1>>>,
-    }
-
-    impl QueryAuthorityProviderV1 for OneShotProvider {
-        fn accepted_authorities(
-            &self,
-            _scope: &ResolvedScope,
-            _privacy_domain: &PrivacyDomainId,
-        ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1> {
-            Ok(self
-                .candidates
-                .lock()
-                .expect("provider lock")
-                .take()
-                .expect("provider called once"))
-        }
-    }
-
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
-
-    fn scope(suffix: &str) -> ResolvedScope {
-        ResolvedScope::new(
-            id(&format!("project.{suffix}")),
-            id::<RepositoryId>(&format!("repository.{suffix}")),
-            id::<WorktreeId>(&format!("worktree.{suffix}")),
-            Some(id::<RefId>(&format!("refs/heads/{suffix}"))),
+        let privacy_domain = PrivacyDomainId::new("privacy.query.fixture").expect("privacy domain");
+        let keyring = RetrievalCursorKeyringV1::new(
+            privacy_domain,
+            RetrievalCursorKeyId::new("retrieval-key.query.fixture").expect("key id"),
+            1,
+            vec![7_u8; 32],
+            1_000_000,
         )
-        .expect("scope")
-    }
-
-    fn profile() -> FusionProfile {
-        FusionProfile {
-            profile_id: id("profile.query.accepted.v1"),
-            evaluation_result_anchor: id("evaluation.query.accepted.v1"),
-            calibrations: RetrieverKind::QUERY_FALLBACK_LANES
-                .into_iter()
-                .map(|lane| {
-                    (
-                        lane,
-                        id::<CalibrationProfileId>(&format!(
-                            "calibration.{}.accepted.v1",
-                            lane.as_str()
-                        )),
-                    )
-                })
-                .collect(),
-            score_domain_calibrations: BTreeMap::new(),
-            minimum_calibrated_feature_micros: BTreeMap::new(),
-            weights_micros: [
-                (RetrieverKind::ExactLiteral, 1_000_000),
-                (RetrieverKind::Lexical, 500_000),
-                (RetrieverKind::Graph, 250_000),
-            ]
-            .into_iter()
-            .collect(),
-            diversity_policy_id: id("diversity.query.accepted.v1"),
-            rerank_policy_id: None,
-            retrieval_budget: RetrievalBudget {
-                max_candidates_per_lane: 32,
-                max_fused_candidates: 16,
-                max_hydrated_results: 8,
-                max_hydration_bytes: 65_536,
-                deadline_micros: None,
-            },
-        }
-    }
-
-    fn privacy_domain() -> PrivacyDomainId {
-        id("privacy.query.fixture")
-    }
-
-    fn material(scope: ResolvedScope) -> QueryAuthorityMaterialV1 {
-        let profile = profile();
-        let evaluation = AcceptedQueryEvaluationV1 {
-            status: crate::query::search_quality::DirectEvaluationStatusV1::Pass,
-            scope_digest: scope.scope_digest.clone(),
-            profile_id: profile.profile_id.clone(),
-            evaluation_result_anchor: profile.evaluation_result_anchor.clone(),
-        };
-        QueryAuthorityMaterialV1 {
-            scope,
-            evaluation,
-            profile: profile.clone(),
-            diversity: DiversityPolicy {
-                policy_id: profile.diversity_policy_id,
-                evaluation_result_anchor: Some(profile.evaluation_result_anchor),
-                per_source_namespace: None,
-                per_source_instance: None,
-                per_repository: None,
-                per_file: None,
-                per_session_or_thread: None,
-                per_copy_cluster: None,
-                per_evidence_role: None,
-            },
-            ranking_revision: id::<ComponentRevision>("ranking.query.accepted.v1"),
-            keyring: Some(
-                RetrievalCursorKeyringV1::new(
-                    privacy_domain(),
-                    id::<RetrievalCursorKeyId>("retrieval-key.query.fixture"),
-                    1,
-                    vec![7_u8; 32],
-                    1_000_000,
-                )
-                .expect("keyring"),
-            ),
-        }
-    }
-
-    #[test]
-    fn missing_or_ambiguous_authority_fails_closed() {
-        let scope = scope("main");
-        let missing = OneShotProvider {
-            candidates: Mutex::new(Some(Vec::new())),
-        };
-        assert!(matches!(
-            prepare_query_authority(&scope, &privacy_domain(), &missing),
-            Err(QueryRuntimeMountErrorV1::AuthorityMissing)
-        ));
-
-        let ambiguous = OneShotProvider {
-            candidates: Mutex::new(Some(vec![material(scope.clone()), material(scope.clone())])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&scope, &privacy_domain(), &ambiguous),
-            Err(QueryRuntimeMountErrorV1::AuthorityAmbiguous)
-        ));
-    }
-
-    #[test]
-    fn non_pass_stale_scope_and_missing_key_fail_closed() {
-        let active_scope = scope("main");
-
-        let mut pending = material(active_scope.clone());
-        pending.evaluation.status = crate::query::search_quality::DirectEvaluationStatusV1::Pending;
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![pending])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::EvaluationNotPassed)
-        ));
-
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![material(scope("other"))])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::ScopeMismatch)
-        ));
-
-        let mut missing_key = material(active_scope.clone());
-        missing_key.keyring = None;
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![missing_key])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::KeyUnavailable)
-        ));
-    }
-
-    #[test]
-    fn profile_or_anchor_drift_is_rejected_as_stale() {
-        let scope = scope("main");
-        let mut stale = material(scope.clone());
-        stale.evaluation.evaluation_result_anchor =
-            id::<RetrievalAnchorId>("evaluation.query.superseded.v1");
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![stale])),
-        };
-
-        assert!(matches!(
-            prepare_query_authority(&scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::EvaluationStale)
-        ));
-
-        let mut stale_scope_evaluation = material(scope.clone());
-        stale_scope_evaluation.evaluation.scope_digest =
-            id::<ManifestDigest>(&format!("sha256:{}", "f".repeat(64)));
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![stale_scope_evaluation])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::EvaluationStale)
-        ));
-    }
-
-    #[test]
-    fn cursor_key_privacy_domain_must_match_published_generation() {
-        let scope = scope("main");
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![material(scope.clone())])),
-        };
-
-        assert!(matches!(
-            prepare_query_authority(
-                &scope,
-                &id::<PrivacyDomainId>("privacy.query.other"),
-                &provider,
-            ),
-            Err(QueryRuntimeMountErrorV1::PrivacyDomainMismatch)
-        ));
+        .expect("keyring");
+        let ranking_revision =
+            ComponentRevision::new(QUERY_RANKING_REVISION_V1).expect("ranking revision");
+        QueryAuthorityV1::new(profile, diversity, ranking_revision, keyring)
+            .expect("fallback policy is accepted by the fallback authority mode");
     }
 }

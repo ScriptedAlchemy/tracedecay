@@ -179,8 +179,6 @@ pub mod query_runtime;
 mod reconcile;
 mod reconcile_panic_guard;
 mod registry;
-pub mod semantic_query_runtime;
-pub mod semantic_vector_graph;
 mod serving;
 
 // The registry surface lives in `registry.rs`; re-export it so its public path
@@ -226,8 +224,8 @@ pub use publication_store::{
 #[cfg(test)]
 use reconcile::CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1;
 use reconcile::{
-    CapturedCandidateV1, CapturedSnapshotV1, FreshnessProbeVerdictV1, PendingHintsV1,
-    RetainedTextGenerationRestoreV1, cancelled_code_index_reconcile,
+    CapturedCandidateV1, CapturedSnapshotV1, PendingHintsV1, RetainedTextGenerationRestoreV1,
+    cancelled_code_index_reconcile,
 };
 pub use reconcile::{
     CodeIndexNoopEvidenceV1, CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1,
@@ -243,7 +241,6 @@ use serving::{
 pub use serving::{
     CodeIndexBuildProgressSlotStateV1, CodeIndexBuildProgressSlotV1, DaemonCodeTextArtifactStoreV1,
     LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
-    SemanticEvaluationCodeSnapshotV1,
 };
 #[cfg(test)]
 use serving::{

@@ -23,10 +23,6 @@ use tracedecay_agent_hosts::native_integration::{
 };
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::primitives::admitted_root_uri_for_project;
-use tracedecay_application::semantic_runtime::{
-    InitialSemanticActivationRestoreV1, ProjectSemanticActivationExt,
-    classify_initial_semantic_activation_restore,
-};
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_service::{
@@ -52,9 +48,7 @@ mod primitive_runtime;
 mod query_authority_upgrade;
 
 pub(crate) use advisory_runtime::ProjectOpenDependentOwnerState;
-pub(super) use advisory_runtime::{
-    register_project_open_dependent_owners, spawn_semantic_owner_registration,
-};
+pub(super) use advisory_runtime::register_project_open_dependent_owners;
 pub(crate) use automation_effect_recovery::reconcile_project_open_automation_effects;
 
 use primitive_runtime::open_and_register_project_primitive_runtime;
@@ -781,10 +775,6 @@ pub(super) async fn register_project_open_production_owners(
         .await;
     });
 
-    // Semantic restore can decode a large durable generation. Keep that
-    // capability-specific warm-up behind every independent production owner
-    // so diagnostics, tests, feedback, and LSP reads remain available while
-    // semantic retrieval truthfully reports generation_unavailable.
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -808,413 +798,55 @@ pub(super) async fn register_project_open_production_owners(
         }).await
 }
 
-#[hotpath::measure(label = "daemon.project.activate.semantic", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Semantic configuration owners are registered as one catalog-and-runtime bind."
-)]
-async fn register_semantic_configuration_owners(
+/// Mounts the checked-in exact/lexical/graph query authority for the admitted
+/// scope. A missing generation parks a deferred mount on the project owner;
+/// every other refusal leaves the non-search surfaces mounted.
+#[hotpath::measure(label = "daemon.project.activate.query_authority", future = true)]
+async fn register_project_query_authority(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     server: &McpServer,
-    graph: &Arc<crate::project::TraceDecay>,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
-    configuration: &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
-) -> Result<()> {
-    // Registration joins configuration and activation state; callers retain only its pending handle.
-    Box::pin(async move {
-    let configuration_pin =
-        tracedecay_application::semantic_runtime::SemanticConfigurationPinV1::from_current(
-            configuration,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic retrieval configuration pin failed: {error}"),
-        })?;
-    let configuration_store =
-        tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
-            graph.configuration_runtime().registered_database(),
-            scope.clone(),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic retrieval configuration store unavailable: {error}"),
-        })?;
-    let accepted_profiles = Arc::new(
-        tracedecay_application::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::new(
-            graph.configuration_runtime().registered_database(),
-        ),
-    );
-    let operation = Arc::new(
-        tracedecay_application::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
-            Arc::clone(graph.configuration_runtime()),
-            accepted_profiles,
-        ),
-    );
-    invocation
-        .configuration_runtime_registrar()
-        .install_semantic_operation(project_root, operation)
-        .await?;
-    let current_state = configuration_store
-        .current_state_if_present()
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic retrieval current state unavailable: {error}"),
-        })?;
-    let profile_id = session_db.binding().shard_id.profile_id.clone();
-    let observer = invocation.query_activation_registrar(project_root, session_db.clone());
-    if let Some(current_state) = current_state {
-        let mut activation_restore = InitialSemanticActivationRestoreV1::Mounted;
-        let mut deferred_activation_revision = None;
-        let initial_state_uses_core_fallback = current_state.audit().is_empty();
-        if initial_state_uses_core_fallback {
-            let cursor_keys = Arc::new(
-                session_db
-                    .load_session_cursor_key_provider_result()
-                    .await
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("query cursor key authority unavailable: {error}"),
-                    })?,
-            );
-            invocation
-                .restore_initial_query_authority_for_project(
-                    project_root,
-                    profile_id.clone(),
-                    scope.clone(),
-                    current_state,
-                    cursor_keys,
-                )
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("evaluated query initial authority restore failed: {error}"),
-                })?;
-        } else {
-            let committed = configuration_store
-                .current_committed_state()
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("semantic retrieval committed state unavailable: {error}"),
-                })?
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "semantic retrieval state has no current committed transition"
-                        .to_owned(),
-                })?;
-            let committed_revision = committed.state.configuration_revision().clone();
-            deferred_activation_revision = Some(committed_revision.clone());
-            activation_restore = classify_initial_semantic_activation_restore(
-                observer.activation_committed(committed).await,
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("semantic retrieval activation restore failed: {error}"),
-            })?;
-            if activation_restore == InitialSemanticActivationRestoreV1::Deferred {
-                hotpath::gauge!("daemon.semantic.activation_restore.deferred_total").inc(1_u64);
-                tracing::info!(
-                    event = "semantic_activation_restore",
-                    outcome = "deferred",
-                    project_id = %scope.project_id,
-                    "committed semantic activation will be retried after runtime readiness"
-                );
-            }
-        }
-        let mut core_fallback_selected = initial_state_uses_core_fallback
-            || activation_restore == InitialSemanticActivationRestoreV1::Deferred;
-        let query_mount = if core_fallback_selected {
-            match (
-                session_db.load_session_cursor_key_provider_result().await,
-                deferred_activation_revision.as_ref(),
-            ) {
-                (Ok(cursor_keys), Some(expected_revision)) => {
-                    invocation
-                        .mount_core_query_authority_for_committed_fallback(
-                            project_root,
-                            &scope,
-                            expected_revision,
-                            &cursor_keys,
-                        )
-                        .await
-                }
-                (Ok(cursor_keys), None) if initial_state_uses_core_fallback => {
-                    invocation
-                        .mount_core_query_authority_for_project(
-                            project_root,
-                            &scope,
-                            &cursor_keys,
-                        )
-                        .await
-                }
-                (Ok(_), None) => Err(tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
-                    QueryRuntimeMountErrorV1::Mount(
-                        "deferred semantic activation has no committed revision".to_owned(),
-                    )),
-                (Err(error), _) => {
-                    tracing::debug!(
-                        event = "query_authority_mount",
-                        outcome = "unavailable",
-                        project_id = %scope.project_id,
-                        reason = %error,
-                        "durable query cursor key is unavailable; project admission continues"
-                    );
-                    Err(tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::KeyUnavailable)
-                }
-            }
-        } else {
-            let configured = invocation
-                .mount_query_authority_for_project(project_root, &profile_id, &scope)
-                .await;
-            match configured {
-                Err(
-                    tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
-                        QueryRuntimeMountErrorV1::Provider(_)
-                    | tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
-                        QueryRuntimeMountErrorV1::AuthorityMissing
-                    | tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
-                        QueryRuntimeMountErrorV1::Authority(
-                            tracedecay_query::retrieval::QueryAuthorityErrorV1::
-                                AuthorityUnavailable,
-                        ),
-                ) => {
-                    core_fallback_selected = true;
-                    match session_db.load_session_cursor_key_provider_result().await {
-                        Ok(cursor_keys) => match deferred_activation_revision.as_ref() {
-                            Some(expected_revision) => {
-                                invocation
-                                    .mount_core_query_authority_for_committed_fallback(
-                                        project_root,
-                                        &scope,
-                                        expected_revision,
-                                        &cursor_keys,
-                                    )
-                                    .await
-                            }
-                            None => {
-                                invocation
-                                    .mount_core_query_authority_for_project(
-                                        project_root,
-                                        &scope,
-                                        &cursor_keys,
-                                    )
-                                    .await
-                            }
-                        },
-                        Err(_) => Err(
-                            tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
-                                QueryRuntimeMountErrorV1::KeyUnavailable,
-                        ),
-                    }
-                }
-                outcome => outcome,
-            }
-        };
-        if let Err(error) = query_mount {
+) {
+    let cursor_keys = match session_db.load_session_cursor_key_provider_result().await {
+        Ok(cursor_keys) => cursor_keys,
+        Err(error) => {
             tracing::debug!(
                 event = "query_authority_mount",
                 outcome = "unavailable",
                 project_id = %scope.project_id,
                 reason = %error,
-                "query search authority unavailable; non-search project surfaces remain mounted"
+                "durable query cursor key is unavailable; project admission continues"
             );
-            if matches!(
-                error,
-                tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
-            ) {
-                query_authority_upgrade::spawn_deferred_query_authority_mount(
-                    server,
-                    invocation.clone(),
-                    project_root.to_path_buf(),
-                    scope.clone(),
-                    if core_fallback_selected {
-                        query_authority_upgrade::DeferredQueryAuthorityMountV1::CoreFallback {
-                            session_db: session_db.clone(),
-                            committed_revision: deferred_activation_revision.clone(),
-                        }
-                    } else {
-                        query_authority_upgrade::DeferredQueryAuthorityMountV1::Configured {
-                            profile_id,
-                        }
-                    },
-                );
-            }
+            return;
         }
-        if let Err(error) = tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::
-            mount_current_semantic_query_authority_on_project_open(
-                &invocation.code_index_schedulers,
-                project_root,
-                &scope,
-                &configuration_store,
-                &configuration_pin,
-            )
-            .await
-        {
-            tracing::debug!(
-                event = "semantic_query_authority_mount",
-                outcome = "unavailable",
-                project_id = %scope.project_id,
-                reason = %error,
-                "semantic query authority unavailable; project surfaces remain mounted"
-            );
-        }
-    } else {
-        let core_query_available = match session_db.load_session_cursor_key_provider_result().await
-        {
-            Ok(cursor_keys) => {
-                if let Err(error) = invocation
-                    .mount_core_query_authority_for_project(project_root, &scope, &cursor_keys)
-                    .await
-                {
-                    tracing::debug!(
-                        event = "query_authority_mount",
-                        outcome = "unavailable",
-                        project_id = %scope.project_id,
-                        reason = %error,
-                        "core query fallback is unavailable; project admission continues"
-                    );
-                    if matches!(
-                        error,
-                        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
-                    ) {
-                        query_authority_upgrade::spawn_deferred_query_authority_mount(
-                            server,
-                            invocation.clone(),
-                            project_root.to_path_buf(),
-                            scope.clone(),
-                            query_authority_upgrade::DeferredQueryAuthorityMountV1::CoreFallback {
-                                session_db: session_db.clone(),
-                                committed_revision: None,
-                            },
-                        );
-                    }
-                    false
-                } else {
-                    true
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    event = "query_authority_mount",
-                    outcome = "unavailable",
-                    project_id = %scope.project_id,
-                    reason = %error,
-                    "durable query cursor key is unavailable; project admission continues"
-                );
-                false
-            }
-        };
-        // A project with no published retrieval-profile state retains no
-        // vector generation. Seat that as the known-empty retention authority
-        // here, at the same point in project open where a published profile
-        // commits its own: leaving the record absent makes retention and
-        // Doctor read `None`, which is the "project not mounted" answer, for a
-        // project this call is in the middle of mounting. It installs no
-        // activation authority and no Ready receipt, and never replaces an
-        // existing record.
-        let retention_roots_seated =
-            tracedecay_application::semantic_runtime::commit_project_absent_semantic_roots(
-                project_root.to_path_buf(),
-                configuration_pin.revision_id.clone(),
-            );
-        tracing::debug!(
-            event = "semantic_activation_registration",
-            outcome = "unavailable",
-            project_id = %scope.project_id,
-            core_query_available,
-            retention_roots_seated,
-            "no genuinely evaluated optional-stage profile is published"
+    };
+    let Err(error) = invocation
+        .mount_core_query_authority_for_project(project_root, &scope, &cursor_keys)
+        .await
+    else {
+        return;
+    };
+    tracing::debug!(
+        event = "query_authority_mount",
+        outcome = "unavailable",
+        project_id = %scope.project_id,
+        reason = %error,
+        "query search authority unavailable; non-search project surfaces remain mounted"
+    );
+    if matches!(
+        error,
+        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
+    ) {
+        query_authority_upgrade::spawn_deferred_query_authority_mount(
+            server,
+            invocation.clone(),
+            project_root.to_path_buf(),
+            scope,
+            session_db,
         );
     }
-    Ok(())
-    }).await
-}
-
-pub(super) struct SemanticOwnerInstallFailureV1 {
-    reason: tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1,
-    detail: String,
-}
-
-impl SemanticOwnerInstallFailureV1 {
-    fn new(
-        reason: tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1,
-        detail: String,
-    ) -> Self {
-        Self { reason, detail }
-    }
-
-    pub(super) fn into_state(self) -> tracedecay_contracts::doctor::SemanticOwnerStateV1 {
-        tracedecay_contracts::doctor::SemanticOwnerStateV1::Degraded {
-            reason: self.reason,
-            detail: self.detail,
-        }
-    }
-}
-
-/// Complete activation ownership after the production semantic runtime and
-/// canonical configuration runtime are both registered.
-#[hotpath::measure(label = "daemon.project.activate.semantic_runtime", future = true)]
-pub(super) async fn install_semantic_activation_runtime_owner(
-    invocation: &DaemonInvocationState,
-    project_root: &Path,
-    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
-    scope: ResolvedScope,
-) -> std::result::Result<bool, SemanticOwnerInstallFailureV1> {
-    let Some(inspector) =
-        tracedecay_application::semantic_runtime::project_semantic_production_runtime(project_root)
-    else {
-        return Ok(false);
-    };
-    let configuration_store =
-        tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
-            configuration_runtime.registered_database(),
-            scope,
-        )
-        .map_err(|error| {
-            SemanticOwnerInstallFailureV1::new(
-                tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1::ConfigurationStoreUnavailable,
-                format!("semantic retrieval configuration store unavailable: {error}"),
-            )
-        })?;
-    let observer = invocation
-        .query_activation_registrar(project_root, configuration_runtime.registered_database());
-    let lifecycle_events = inspector.verified_ready_events();
-    let candidate = Arc::new(
-        tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
-            configuration_store,
-            configuration_runtime.configuration_store(),
-            inspector,
-            observer,
-        ),
-    );
-    let owner = invocation
-        .configuration_runtime_registrar()
-        .install_semantic_activation_owner(
-            project_root,
-            Arc::clone(&candidate),
-            lifecycle_events,
-        )
-        .await
-        .map_err(|error| {
-            SemanticOwnerInstallFailureV1::new(
-                tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1::ActivationOwnerRegistrationRefused,
-                error.to_string(),
-            )
-        })?;
-    if let Err(error) = configuration_runtime.install_semantic_runtime(Arc::clone(&owner)) {
-        if Arc::ptr_eq(&owner, &candidate)
-            && !invocation
-                .configuration_runtime_registrar()
-                .remove_semantic_activation_owner_if_current(project_root, &candidate)
-                .await
-        {
-            return Err(SemanticOwnerInstallFailureV1::new(
-                tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1::PartialRegistrationCleanupFailed,
-                format!(
-                    "semantic activation coordinator installation failed and its partial owner could not be removed: {error}"
-                ),
-            ));
-        }
-        return Err(SemanticOwnerInstallFailureV1::new(
-            tracedecay_contracts::doctor::SemanticOwnerDegradedReasonV1::ConfigurationRuntimeInstallationRefused,
-            error.to_string(),
-        ));
-    }
-    Ok(true)
 }
 
 #[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]

@@ -68,7 +68,6 @@ const SOURCE_LABELS = {
   code_graph: 'Code graph',
   sessions: 'Sessions',
   knowledge: 'Knowledge',
-  semantic: 'Semantic',
 } as const;
 
 type SourceId = keyof typeof SOURCE_LABELS;
@@ -109,35 +108,11 @@ function source(sourceId: SourceId, rows: Record<string, unknown>[], total: numb
   };
 }
 
-/** The live semantic source today: not activated, a typed absence carrying
- * the complete accounting of an empty domain. */
-function semanticAbsent() {
-  const base = source('semantic', [], 0);
-  return {
-    ...base,
-    outcome: 'absent',
-    completed_units: 0,
-    total_units: 0,
-    coverage: {
-      ...base.coverage,
-      eligible: 0,
-      examined: 0,
-      matched: 0,
-      denominator: 0,
-      unit: 'indexed vectors',
-    },
-    error_code: 'semantic_not_activated',
-    message: 'semantic search is not activated for this project',
-    page: null,
-  };
-}
-
 function plannerEnvelope(
   sources: unknown[] = [
     source('code_graph', [CODE_ROW], 1),
     source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
     source('knowledge', [FACT_ROW], null),
-    semanticAbsent(),
   ],
   state: 'partial' | 'completed' = 'partial',
   query = 'graph',
@@ -174,7 +149,7 @@ function plannerEnvelope(
       request_revision: 'explorer-query-request-v1',
       plan_revision: 'explorer-query-plan-v1',
       merge_revision: 'source-local-no-merge-v1',
-      required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
+      required_source_ids: ['code_graph', 'sessions', 'knowledge'],
       ordering_policy: 'source_local_no_cross_source_merge',
       explanation:
         'Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source own order and coverage.',
@@ -311,7 +286,6 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
             source('code_graph', [CODE_ROW], 1),
             source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
             unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
-            semanticAbsent(),
           ],
           'partial',
         ),
@@ -322,10 +296,10 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     await user.keyboard('{Enter}');
     await screen.findByRole('button', { name: /graph_search/ });
 
-    // Three rows arrived, but only two of the four memories answered with
+    // Three rows arrived, but only two of the three memories answered with
     // rows. The caption must not present the result set as spanning them all.
-    expect(screen.queryByText(/across four memories/)).toBeNull();
-    expect(screen.getByText(/across 2 of 4 memories/)).toBeTruthy();
+    expect(screen.queryByText(/across 3 memories/)).toBeNull();
+    expect(screen.getByText(/across 2 of 3 memories/)).toBeTruthy();
   });
 
   it('renders a field the row omitted as absent rather than as a zero', async () => {
@@ -343,7 +317,6 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
           source('code_graph', [rowWithoutDegree], 1),
           source('sessions', [], 0),
           source('knowledge', [], 0),
-          semanticAbsent(),
         ]),
       },
     });
@@ -458,7 +431,6 @@ describe('ExplorerPage', () => {
           source('code_graph', [{ ...CODE_ROW, degree: 0 }], 1),
           source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
           source('knowledge', [FACT_ROW], null),
-          semanticAbsent(),
         ]),
       },
     });

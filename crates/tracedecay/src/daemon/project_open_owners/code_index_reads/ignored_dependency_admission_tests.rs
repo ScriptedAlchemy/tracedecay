@@ -106,18 +106,16 @@ export function generationAnchor() { return 1; }
                     project_id(),
                     root.path(),
                     store.path().to_path_buf(),
-                    None,
                     runtime.code_graph_seat_port(),
                     database,
                     CodeGraphActivationPolicyV1::Enabled,
-                    None,
                 )
                 .await
                 .expect("mount persistent graph-backed scheduler");
             Some(scope)
         } else {
             registry
-                .mount_worktree(project_id(), root.path(), store.path().to_path_buf(), None)
+                .mount_worktree(project_id(), root.path(), store.path().to_path_buf())
                 .await
                 .expect("mount code-index scheduler");
             None

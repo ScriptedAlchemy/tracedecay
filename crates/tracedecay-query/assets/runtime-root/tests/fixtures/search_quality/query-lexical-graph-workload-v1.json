@@ -2,7 +2,6 @@
   "execution_contract": {
     "cache_state": "cold_empty_in_memory_publication",
     "concurrency": {
-      "projection_workers": 1,
       "query_execution": "serial_exact_workload_order",
       "query_workers": 1
     },
@@ -11,15 +10,7 @@
     "exact_eligible_chunks_current": 1993,
     "exact_file_count": 15,
     "exact_query_count": 65,
-    "fusion_revision": "CompositionKernel::compose",
-    "model_revision": "JinaEmbeddingsV2BaseCode@516f4baf13dec4ddddda8631e019b5737c8bc250",
-    "projection_revision": "retriever.semantic-flat.evaluation.v1",
-    "runtime_revision": "semantic.fastembed.production.v1"
-  },
-  "incremental_fixture": {
-    "after_path": "tests/fixtures/search_quality/incremental/time-after.rs",
-    "after_sha256": "bf947193450322fb7d706c0cf46ca55fa68ddf4ffdb2bb4c5735fa43cd93e2dd",
-    "document_id": "time"
+    "fusion_revision": "CompositionKernel::compose"
   },
   "corpus": [
     {
@@ -154,37 +145,9 @@
   },
   "profile_matrix": [
     {
-      "calibration_threshold_ppm": 0,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
-      "profile_id": "query-fallback",
-      "rerank_weight_ppm": 0,
-      "semantic_weight_ppm": 0
-    },
-    {
-      "calibration_threshold_ppm": 635000,
-      "graph_weight_ppm": 250000,
-      "lexical_weight_ppm": 1000000,
-      "profile_id": "hybrid-conservative",
-      "rerank_weight_ppm": 0,
-      "semantic_weight_ppm": 250000
-    },
-    {
-      "calibration_threshold_ppm": 635000,
-      "graph_weight_ppm": 250000,
-      "lexical_weight_ppm": 1000000,
-      "profile_id": "hybrid-reranked",
-      "rerank_policy": {
-        "deadline_micros": 5000000,
-        "max_candidates": 16,
-        "max_input_bytes": 1048576,
-        "max_input_tokens": 262144,
-        "max_model_invocations": 16,
-        "max_work_units": 16,
-        "policy_id": "rerank.hybrid-reranked.v1"
-      },
-      "rerank_weight_ppm": 125000,
-      "semantic_weight_ppm": 250000
+      "profile_id": "query-fallback"
     }
   ],
   "queries": [
@@ -1615,29 +1578,5 @@
   "schema_version": 1,
   "source_repository_commit": "8312618fee8109b16be09e65f45118b4e550fa14",
   "source_repository_tree": "587aed48f162f74765da3a35fc41850523ea377d",
-  "workload_id": "query-semantic-production-candidate-workload-v1",
-  "qualification_methodology": {
-    "methodology_version": 2,
-    "effect_metric": "ndcg_at_10_ppm",
-    "effect_stratum": "natural_language",
-    "tuning_partition": "train",
-    "held_out_partition": "validation",
-    "minimum_effect_queries_per_partition": 20,
-    "practical_effect_threshold_ppm": 20000,
-    "confidence_level_ppm": 950000,
-    "baseline_profile_id": "query-fallback",
-    "candidate_profile_ids": [
-      "hybrid-conservative",
-      "hybrid-reranked"
-    ],
-    "policy_freeze": {
-      "frozen_at_commit": "a2e7694c513750ba00611edb370a3ea0bb9e6d74",
-      "frozen_profile_material_digests": {
-        "query-fallback": "sha256:8c91b0df01b4c8ef57a6dd8590259f5371d901fd95dc7762896c9f828d3648eb",
-        "hybrid-conservative": "sha256:bc477c0b02cb9afd7bb737413864f514cff835f2ba8379b05ae7ede6da519bb1",
-        "hybrid-reranked": "sha256:865b7bba8bbd633b9399476b5b8eb48bf1a369150f3c59cc79fef55813cbb854"
-      },
-      "rationale": "Threshold, confidence level, partitions, and every profile's tuning material were fixed at this commit before the held-out partition was measured under this methodology, so the decision rule cannot be adjusted to fit the result it produces."
-    }
-  }
+  "workload_id": "query-lexical-graph-workload-v1"
 }
