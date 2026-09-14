@@ -3,8 +3,7 @@
 //! This module is the production side of the retrieval half of Plan 26
 //! ("Retrieval, planner, and context measurement" and "Adoption analytics and
 //! retention"): planner admission, per-retriever accounting, fusion synthesis,
-//! source census, context-outcome linkage, frozen ablations, and the analytics
-//! consent receipt. [`super::export`] projects each of them into the
+//! source census, context-outcome linkage, and the analytics consent receipt. [`super::export`] projects each of them into the
 //! aggregate-share rollup.
 //!
 //! Three disciplines are deliberately repeated per family:
@@ -31,6 +30,8 @@
 //! share one sequence.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::OnceLock;
 
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
@@ -62,6 +63,21 @@ const CONFIGURATION_REVISION: &str = "registered-project-session.v1";
 const ANALYTICS_POLICY_REVISION: &str = "adoption-analytics.v1";
 #[cfg(test)]
 const ANALYTICS_CONSENT_PRODUCER_REVISION_V1: &str = "analytics-consent-observer.v1";
+
+/// One process-wide identity for this producer lane, distinct from
+/// [`super::emit`]'s so the two totally ordered streams never interleave
+/// sequence numbers under a shared boot id.
+#[cfg(test)]
+fn boot_id() -> &'static str {
+    static BOOT: OnceLock<String> = OnceLock::new();
+    BOOT.get_or_init(|| {
+        format!(
+            "retrieval-observability-{}-{}",
+            std::process::id(),
+            now_micros().0
+        )
+    })
+}
 
 fn next_sequence() -> u64 {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
