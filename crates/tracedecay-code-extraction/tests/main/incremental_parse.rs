@@ -95,6 +95,7 @@ fn assert_artifact_rows_match_fresh_parse(
     );
     assert_eq!(incremental_result.errors, fresh_result.errors);
     assert_eq!(incremental.imports, fresh.imports);
+    assert_eq!(incremental.clone_bodies, fresh.clone_bodies);
 }
 
 #[test]

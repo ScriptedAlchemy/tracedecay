@@ -354,6 +354,7 @@ impl SqlExtractor {
                 duration_ms: start.elapsed().as_millis() as u64,
             },
             imports: Vec::new(),
+            clone_bodies: Vec::new(),
             schema_evidence: Some(ExtractedSchemaEvidenceV1 {
                 logical_path: state.file_path,
                 language: SchemaEvidenceLanguageV1::Sql,

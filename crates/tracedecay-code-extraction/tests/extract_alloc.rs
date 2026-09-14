@@ -309,9 +309,13 @@ fn extract_both_and_compare(
         })
         .min()
         .expect("at least one timed walk");
-    println!(
-        "{file_path}: source={} bytes, extract_parsed walk allocated {walk_bytes} bytes, best walk {best_walk_time:?}",
-        source.len()
+    measure_clone_delta(
+        extractor,
+        file_path,
+        source,
+        &tree,
+        walk_bytes,
+        best_walk_time,
     );
     assert!(
         parsed.result.errors.is_empty(),
@@ -324,6 +328,51 @@ fn extract_both_and_compare(
         "extract and extract_parsed must emit identical signature strings"
     );
     (parsed, walk_bytes)
+}
+
+fn measure_clone_delta(
+    extractor: &dyn LanguageExtractor,
+    file_path: &str,
+    source: &str,
+    tree: &Tree,
+    graph_bytes: usize,
+    graph_time: std::time::Duration,
+) {
+    let (with_clones, clone_bytes) = measure_allocation(|| {
+        extractor.extract_parsed_artifact(
+            file_path,
+            source,
+            source,
+            tree,
+            ParsedExtractionScope::FullDocument,
+        )
+    });
+    assert!(
+        !with_clones.artifact.clone_bodies.is_empty(),
+        "{file_path} must emit clone bodies"
+    );
+    let best_clone_walk_time = (0..10)
+        .map(|_| {
+            let started = Instant::now();
+            let repeat = extractor.extract_parsed_artifact(
+                file_path,
+                source,
+                source,
+                tree,
+                ParsedExtractionScope::FullDocument,
+            );
+            let elapsed = started.elapsed();
+            assert!(repeat.artifact.result.errors.is_empty());
+            elapsed
+        })
+        .min()
+        .expect("at least one timed clone walk");
+    println!(
+        "{file_path}: source={} bytes, graph walk allocated {graph_bytes} bytes in {graph_time:?}; graph+clone walk allocated {clone_bytes} bytes in {best_clone_walk_time:?}; clone delta={} bytes/{:?}",
+        source.len(),
+        clone_bytes.saturating_sub(graph_bytes),
+        best_clone_walk_time.saturating_sub(graph_time),
+    );
 }
 
 #[test]
