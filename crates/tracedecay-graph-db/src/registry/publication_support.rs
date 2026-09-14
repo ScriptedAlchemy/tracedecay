@@ -491,13 +491,6 @@ pub(super) fn validate_exact_dependency_closure(
     Ok(())
 }
 
-pub(super) fn require_publication_binding(
-    registration: &GraphDbRegistration,
-    key: &GraphPublicationKeyV1,
-) -> Result<(), GraphDbError> {
-    require_projection_binding(registration, &key.projection)
-}
-
 pub(super) fn require_projection_binding(
     registration: &GraphDbRegistration,
     projection: &GraphProjectionIdentityV1,

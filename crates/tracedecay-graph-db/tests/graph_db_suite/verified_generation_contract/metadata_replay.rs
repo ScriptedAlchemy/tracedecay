@@ -1,26 +1,22 @@
 use std::sync::Arc;
 
-use tracedecay_graph_db::{GraphVector, VectorMetric};
-
 use super::*;
 
 #[test]
-fn omits_vectors_and_recovers_only_persisted_native_rows() {
+fn omits_native_rows_and_recovers_only_persisted_native_rows() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
-    let identity = projection("metadata", "vectors");
-    let mut vector_manifest = manifest(identity, "vector-g1", "secret-marker", vec![], vec![]);
-    vector_manifest.entities[0].properties.insert(
+    let identity = projection("metadata", "rows");
+    let mut row_manifest = manifest(identity, "rows-g1", "secret-marker", vec![], vec![]);
+    row_manifest.entities[0].properties.insert(
         GraphPropertyName::new("embedding").unwrap(),
-        GraphProperty::Vector(
-            GraphVector::new(vec![0.125, 0.875], 2, VectorMetric::Cosine).unwrap(),
-        ),
+        GraphProperty::F64(0.125),
     );
-    let replay = vector_manifest
+    let replay = row_manifest
         .relational_metadata_replay(
             registered.binding.shard_id.clone(),
-            GraphIdempotencyKey::new("publish:vector-g1").unwrap(),
+            GraphIdempotencyKey::new("publish:rows-g1").unwrap(),
             digest('7'),
             None,
             &|| Ok(()),
@@ -58,7 +54,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             .is_none()
     );
 
-    let mut mismatched_manifest = vector_manifest.clone();
+    let mut mismatched_manifest = row_manifest.clone();
     mismatched_manifest.entities[0].properties.insert(
         GraphPropertyName::new("unexpected").unwrap(),
         GraphProperty::String("different-digest".to_owned()),
@@ -81,7 +77,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             &mut authority,
             &context,
             &record.publication.key,
-            Some(Arc::new(vector_manifest.clone())),
+            Some(Arc::new(row_manifest.clone())),
         )
         .unwrap();
     assert_eq!(
@@ -89,8 +85,8 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             .snapshot
             .entity(
                 &GraphEntityRef::new(
-                    vector_manifest.projection.clone(),
-                    vector_manifest.entities[0].identity.clone(),
+                    row_manifest.projection.clone(),
+                    row_manifest.entities[0].identity.clone(),
                 ),
                 Arc::new(TestCancellation),
             )
@@ -98,7 +94,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             .unwrap()
             .properties
             .get(&GraphPropertyName::new("embedding").unwrap()),
-        vector_manifest.entities[0]
+        row_manifest.entities[0]
             .properties
             .get(&GraphPropertyName::new("embedding").unwrap())
     );
@@ -115,7 +111,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             &mut authority,
             &replay_context,
             &record.publication.key,
-            Some(Arc::new(vector_manifest)),
+            Some(Arc::new(row_manifest)),
         )
         .unwrap();
     assert_eq!(exact_replay.head, expected_head);

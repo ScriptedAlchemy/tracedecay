@@ -45,10 +45,11 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 ///
 /// Code topology lives only in the verified Grafeo generation. Exact memory
 /// content, provenance, trust, retention, and feedback live only in the
-/// canonical `memory_v2_*` tables; derived vectors are re-created from that
-/// content. A current-stamped store containing a retired projection fails
-/// closed before interpretation.
-pub const SCHEMA_VERSION: u32 = 35;
+/// canonical `memory_v2_*` tables; holographic memory vectors are re-derived
+/// from that content and never persisted. v36 dropped the semantic-vector
+/// staging family (`semantic_vector_*`) with dense code retrieval. A store
+/// containing a retired projection fails closed before interpretation.
+pub const SCHEMA_VERSION: u32 = 36;
 
 /// Verifies that a rusqlite connection sees the final relational shape this
 /// binary admits, including the one shipped-v35 trigger shape it repairs on a
@@ -57,12 +58,16 @@ pub fn verify_admissible_final_shape_rusqlite(conn: &rusqlite::Connection) -> Re
     final_shape::require_admissible_final_shape_rusqlite(conn)
 }
 
-/// The one prior shape this binary steps forward in place: v34 is v35 minus
-/// the persisted payload-digest objects (#834). Every other stamp is still
-/// refused with the fresh-start remedy.
+/// The one prior stamp this binary steps forward in place, and only when the
+/// store's inventory is the current shape minus the persisted payload-digest
+/// objects (#834). Every released v34 store also carries the retired
+/// `semantic_vector_*` staging family, which has no forward path, so it is
+/// refused before the step writes anything. Every other stamp is refused with
+/// the fresh-start remedy.
 pub const PAYLOAD_DIGEST_STEP_SOURCE_VERSION: u32 = 34;
 
-/// Metadata key journaling the v34 -> v35 backfill receipt.
+/// Metadata key journaling the payload-digest backfill receipt the v34 step
+/// writes; named for the stamp that introduced the digests.
 pub const PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY: &str = "memory_v2.payload_digest_backfill.v35";
 
 /// Payload rows fingerprinted per short backfill write.
@@ -207,12 +212,6 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("failed to create graph publication schema: {e}"),
-            operation: "create_schema".to_string(),
-        })?;
-    conn.execute_batch(tracedecay_rusqlite_runtime::repository::SEMANTIC_VECTOR_STAGING_SCHEMA)
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to create semantic vector staging schema: {e}"),
             operation: "create_schema".to_string(),
         })?;
     conn.execute_batch(tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1)
@@ -397,6 +396,7 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
                    )
                    OR name GLOB 'nodes_fts*'
                    OR name GLOB 'memory_facts_fts*'
+                   OR name GLOB 'semantic_vector_*'
                )
              ORDER BY name
              LIMIT 1",
@@ -423,6 +423,24 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
             message: format!("failed to decode retired SQLite projection object name: {error}"),
             operation: "ensure_schema_current".to_owned(),
         })
+}
+
+/// Refuses a store that still carries an object of a retired `SQLite`
+/// projection, whatever its stamp. None of those objects has a forward path,
+/// so this runs before any stamp-specific step may write.
+async fn require_no_retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<()> {
+    let Some(object) = retired_sqlite_projection_object(conn).await? else {
+        return Ok(());
+    };
+    let current = get_version(conn).await?;
+    Err(TraceDecayError::reset_required(
+        "SQLite store",
+        format!(
+            "database schema v{current} still contains retired SQLite projection object \
+             '{object}'; remove the store directory and let this binary create the exact \
+             relational shape"
+        ),
+    ))
 }
 
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
@@ -849,6 +867,7 @@ fn payload_content_digest(content: &str) -> String {
 /// binary accepts. This query-only authority intentionally cannot initialize a
 /// fresh file, so read-only mounts cannot change persisted state.
 pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) -> Result<()> {
+    require_no_retired_sqlite_projection_object(conn).await?;
     let current = get_version(conn).await?;
     if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
         // A read-only mount may not step the store; the message names the
@@ -864,16 +883,6 @@ pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) ->
     }
     if current != SCHEMA_VERSION {
         return Err(unsupported_schema_version(current));
-    }
-    if let Some(object) = retired_sqlite_projection_object(conn).await? {
-        return Err(TraceDecayError::reset_required(
-            "SQLite store",
-            format!(
-                "database schema v{current} still contains retired SQLite projection object \
-                 '{object}'; remove the store directory and let this binary create the exact \
-                 relational shape"
-            ),
-        ));
     }
     final_shape::require_exact_final_shape(conn).await?;
     Ok(())

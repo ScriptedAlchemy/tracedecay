@@ -8316,7 +8316,7 @@
         },
         {
           "const": "semantic_index",
-          "description": "Semantic search / index runtime state (indexing, stale, unavailable).",
+          "description": "Code index mount state (mounted, indexing, stale, unmounted,\nincompatible, parked). The wire label stays `semantic_index`.",
           "type": "string"
         },
         {
@@ -9718,8 +9718,8 @@
           "items": {
             "$ref": "#/$defs/ExplorerSourceIdV1"
           },
-          "maxItems": 4,
-          "minItems": 4,
+          "maxItems": 3,
+          "minItems": 3,
           "type": "array"
         },
         "run_id": {
@@ -9933,23 +9933,19 @@
       "enum": [
         "code_graph",
         "sessions",
-        "knowledge",
-        "semantic"
+        "knowledge"
       ],
       "type": "string"
     },
     "ExplorerSourceOutcomeV1": {
-      "description": "What one source truthfully concluded for this run. Every member has a real\nproducer; none is speculative:\n- `Partial`: the source answered with rows but its own read reported\n  omitted records (LCM temporal reads).\n- `Indexing`: the provider is acquiring its model or projecting vectors\n  (semantic runtime acquisition/indexing states).\n- `Stale`: the source's store exists but does not match the current\n  generation (verified graph stale reads, LCM stale projections, semantic\n  generation staleness).\n- `TimedOut`: the source's own read exceeded the admitted deadline.\n- `Unsupported`: this dashboard surface cannot consult the source at all\n  (no daemon authority attached, or the provider state cannot be consumed\n  on this surface yet).\n- `Absent`: the source's store does not exist for this project — a typed\n  absence, not a failure (semantic search not activated).",
+      "description": "What one source truthfully concluded for this run. Every member has a real\nproducer; none is speculative:\n- `Partial`: the source answered with rows but its own read reported\n  omitted records (LCM temporal reads).\n- `Stale`: the source's store exists but does not match the current\n  generation (verified graph stale reads, LCM stale projections).\n- `TimedOut`: the source's own read exceeded the admitted deadline.",
       "enum": [
         "pending",
         "ready",
         "partial",
-        "indexing",
         "stale",
         "timed_out",
         "unavailable",
-        "unsupported",
-        "absent",
         "error",
         "cancelled"
       ],

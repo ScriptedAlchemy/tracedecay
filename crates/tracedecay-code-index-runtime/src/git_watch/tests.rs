@@ -655,7 +655,6 @@ async fn metadata_frontier_routes_to_the_mounted_canonical_scheduler() {
                 .expect("valid project identity"),
             repo.path(),
             store.path().to_path_buf(),
-            None,
         )
         .await
         .expect("mount canonical scheduler");

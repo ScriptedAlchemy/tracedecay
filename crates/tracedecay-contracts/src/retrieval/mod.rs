@@ -104,12 +104,11 @@ pub use primitive_surface::{
     PortTargetOnlySymbolV1, PortUnmatchedSymbolV1, PrimitiveFreshnessStateV1,
     PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1,
     PrimitiveNotFoundV1, PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
-    PrimitiveSemanticModeV1, PrimitiveSymbolLocationV1, PrimitiveUnavailableEvidenceV1,
-    PrimitiveUnavailableStatusV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
-    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
-    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
-    SimilarResultV1, SimilarSurfaceRequestV1, SimilarSymbolV1, TodoMarkerV1, TodosResultV1,
-    TodosSurfaceRequestV1,
+    PrimitiveSymbolLocationV1, PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
+    RedundancySurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1,
+    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
+    RenamePreviewTextOnlyMatchV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarSymbolV1,
+    TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

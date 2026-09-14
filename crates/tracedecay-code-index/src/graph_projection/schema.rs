@@ -95,10 +95,7 @@ where
     let bytes = match property {
         GraphProperty::String(text) => text.as_bytes(),
         GraphProperty::Bytes(bytes) => bytes.as_slice(),
-        GraphProperty::Bool(_)
-        | GraphProperty::I64(_)
-        | GraphProperty::F64(_)
-        | GraphProperty::Vector(_) => {
+        GraphProperty::Bool(_) | GraphProperty::I64(_) | GraphProperty::F64(_) => {
             return Err(CodeGraphProjectionError::Corrupt(format!(
                 "code graph entity {name} has the wrong type"
             )));

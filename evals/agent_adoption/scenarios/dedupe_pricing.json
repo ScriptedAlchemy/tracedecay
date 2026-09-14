@@ -6,11 +6,10 @@
     "codex"
   ],
   "fixture": "main",
-  "status": "active",
+  "status": "deferred",
   "prompt": "Is there any duplicated or redundant logic in the pricing module? Point me at it.",
   "expected_tools": {
     "required_first": [
-      "tracedecay_redundancy",
       "tracedecay_similar",
       "tracedecay_context",
       "tracedecay_search"
@@ -40,5 +39,5 @@
     "compute_grand_total"
   ],
   "max_tool_calls": 6,
-  "notes": "compute_total and compute_grand_total are byte-identical bodies."
+  "notes": "DEFERRED: compute_total and compute_grand_total are byte-identical bodies. Request-time redundancy detection was retired with dense retrieval (#1261); re-activate when #1269 ships source-bound shared-code detection."
 }

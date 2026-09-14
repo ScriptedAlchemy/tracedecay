@@ -18,7 +18,6 @@ version = "0.1.0-beta.34"
 
 [dependencies]
 tracedecay-code-index = { version = "0.1.0" }
-tracedecay-semantic = { version = "0.1.0" }
 tracedecay-application = { version = "0.1.0" }
 
 [features]
@@ -33,11 +32,6 @@ lang-dart = ["tracedecay-code-index/lang-dart"]
 lang-markdown = ["tracedecay-code-index/lang-markdown"]
 token-counting = []
 test-transport = []
-semantic-fastembed = [
-    "tracedecay-semantic/semantic-fastembed",
-    "tracedecay-application/semantic-fastembed",
-    "tracedecay-code-index-runtime/semantic-fastembed",
-]
 """
 
 CODE_INDEX_MANIFEST = """[package]
@@ -109,25 +103,6 @@ pub fn language() -> Language {
 }
 """
 
-SEMANTIC_MANIFEST = """[package]
-name = "tracedecay-semantic"
-version = "0.1.0"
-
-[dependencies]
-hf-hub = { version = "0.5", optional = true, default-features = false }
-
-[target.'cfg(not(windows))'.dependencies]
-fastembed = { version = "=5.17.3", optional = true, default-features = false }
-
-[features]
-semantic-fastembed = [
-    "dep:fastembed",
-    "dep:hf-hub",
-    "fastembed/ort-download-binaries-rustls-tls",
-    "fastembed/hf-hub-rustls-tls",
-]
-"""
-
 CLI_MANIFEST = """[package]
 name = "tracedecay-cli"
 version = "0.1.0"
@@ -175,8 +150,6 @@ def run_fixture(
     code_index_packaged: str = CODE_INDEX_MANIFEST,
     extraction_source: str = EXTRACTION_MANIFEST,
     extraction_packaged: str = EXTRACTION_MANIFEST,
-    semantic_source: str = SEMANTIC_MANIFEST,
-    semantic_packaged: str = SEMANTIC_MANIFEST,
     cli_source: str = CLI_MANIFEST,
     cli_packaged: str = CLI_MANIFEST,
     extraction_build_manifest: str | None = None,
@@ -190,8 +163,6 @@ def run_fixture(
             "code-index-packaged.toml": code_index_packaged,
             "extraction-source.toml": extraction_source,
             "extraction-packaged.toml": extraction_packaged,
-            "semantic-source.toml": semantic_source,
-            "semantic-packaged.toml": semantic_packaged,
             "cli-source.toml": cli_source,
             "cli-packaged.toml": cli_packaged,
         }
@@ -212,10 +183,6 @@ def run_fixture(
             str(root / "extraction-source.toml"),
             "--extraction-packaged",
             str(root / "extraction-packaged.toml"),
-            "--semantic-source",
-            str(root / "semantic-source.toml"),
-            "--semantic-packaged",
-            str(root / "semantic-packaged.toml"),
             "--cli-source",
             str(root / "cli-source.toml"),
             "--cli-packaged",
@@ -329,50 +296,6 @@ def main() -> int:
         raise SystemExit("new extraction language without public aliases was accepted")
     if "root language features differ" not in unforwarded_language.stderr:
         raise SystemExit("unforwarded language failed for an unexpected reason")
-
-    semantic_without_runtime = SEMANTIC_MANIFEST.replace(
-        '    "fastembed/ort-download-binaries-rustls-tls",\n', ""
-    )
-    missing_runtime = run_fixture(
-        semantic_source=semantic_without_runtime,
-        semantic_packaged=semantic_without_runtime,
-    )
-    if missing_runtime.returncode == 0:
-        raise SystemExit("semantic owner without the bundled ORT feature was accepted")
-    if "tracedecay-semantic semantic-fastembed must enable" not in missing_runtime.stderr:
-        raise SystemExit("missing semantic runtime failed for an unexpected reason")
-
-    root_with_shadow_owner = ROOT_MANIFEST.replace(
-        "[dependencies]\n",
-        "[dependencies]\nfastembed = { version = \"=5.17.3\", optional = true }\n",
-    ).replace(
-        'semantic-fastembed = [\n',
-        'semantic-fastembed = [\n    "dep:fastembed",\n',
-    )
-    root_shadow_owner = run_fixture(
-        root_source=root_with_shadow_owner,
-        root_packaged=root_with_shadow_owner,
-    )
-    if root_shadow_owner.returncode == 0:
-        raise SystemExit("root package retaining shadow FastEmbed ownership was accepted")
-    if "root package must not own fastembed" not in root_shadow_owner.stderr:
-        raise SystemExit("root shadow ownership failed for an unexpected reason")
-
-    root_with_aliased_shadow_owner = ROOT_MANIFEST.replace(
-        "[dependencies]\n",
-        "[dependencies]\nfastembed-shadow = { package = \"fastembed\", version = \"=5.17.3\", optional = true }\n",
-    ).replace(
-        "[features]\n",
-        '[features]\nshadow-fastembed = ["dep:fastembed-shadow"]\n',
-    )
-    root_aliased_shadow_owner = run_fixture(
-        root_source=root_with_aliased_shadow_owner,
-        root_packaged=root_with_aliased_shadow_owner,
-    )
-    if root_aliased_shadow_owner.returncode == 0:
-        raise SystemExit("renamed root FastEmbed dependency was accepted")
-    if "root package must not own fastembed" not in root_aliased_shadow_owner.stderr:
-        raise SystemExit("renamed root ownership failed for an unexpected reason")
 
     isolated_languages = run_fixture(
         extraction_build_manifest=EXTRACTION_BUILD_MANIFEST

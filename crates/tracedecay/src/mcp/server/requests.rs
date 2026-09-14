@@ -297,11 +297,6 @@ Unique constraint: `(source, target, kind, COALESCE(line, -1))`. Indexes on `sou
 ### `metadata` — key/value store
 Common keys: `tokens_saved`, schema-version markers.
 
-### `node_fingerprints` — redundancy cache
-- `node_id` PRIMARY KEY FK → `nodes.id`
-- `ast_hash`, `cfg_hash`, `call_seq_hash`, `shingles`
-- `body_tokens`, `source_hash`
-
 ### `read_cache` — rendered `tracedecay_read` responses
 - primary key: `(project_id, session_id, file_path, mode, args_hash)`
 - stores `mtime_ns`, `digest`, rendered `body` BLOB, token count, and `created_at`

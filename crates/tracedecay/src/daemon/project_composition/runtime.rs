@@ -20,7 +20,7 @@ use super::{DaemonHandshake, ProjectServerKey, StoreAdministration};
 /// still warming, so the bound proxy is the deferred-activation route: it
 /// resolves the runtime at use time, answering typed-unavailable until
 /// activation publishes the runtime and recovering every dependent surface
-/// (Work topology, workflow recovery, semantic evaluation) within that
+/// (Work topology, workflow recovery) within that
 /// activation. A missing runtime is therefore never reported as success, and
 /// no rebind retry is required.
 #[hotpath::measure(label = "daemon.project.compose.bind_graph", future = true)]
@@ -40,10 +40,7 @@ pub(in crate::daemon) enum ProductionProjectCompositionRuntime {
     #[cfg(unix)]
     Unix(Box<DaemonEngine>),
     #[cfg(any(not(unix), test, feature = "test-transport"))]
-    Portable {
-        semantic_auto_download: bool,
-        startup_catch_up: bool,
-    },
+    Portable { startup_catch_up: bool },
 }
 
 impl ProductionProjectCompositionRuntime {
@@ -99,19 +96,6 @@ impl ProductionProjectCompositionRuntime {
     }
 
     #[hotpath::skip]
-    pub(super) const fn semantic_auto_download(&self) -> bool {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(_) => true,
-            #[cfg(any(not(unix), test, feature = "test-transport"))]
-            Self::Portable {
-                semantic_auto_download,
-                ..
-            } => *semantic_auto_download,
-        }
-    }
-
-    #[hotpath::skip]
     pub(super) const fn startup_catch_up(&self) -> bool {
         match self {
             #[cfg(unix)]
@@ -120,26 +104,6 @@ impl ProductionProjectCompositionRuntime {
             Self::Portable {
                 startup_catch_up, ..
             } => *startup_catch_up,
-        }
-    }
-
-    pub(super) fn resident_memory_admission_limit_bytes(&self) -> u64 {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(engine) => {
-                engine
-                    .invocation
-                    .code_index_schedulers
-                    .process_resident_memory()
-                    .snapshot()
-                    .limit_bytes
-            }
-            #[cfg(any(not(unix), test, feature = "test-transport"))]
-            Self::Portable { .. } => {
-                tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(
-                )
-                .get()
-            }
         }
     }
 }

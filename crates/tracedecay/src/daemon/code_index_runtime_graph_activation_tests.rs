@@ -224,11 +224,9 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
             project_id,
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             graph_runtime.code_graph_seat_port(),
             read_only_project_database,
             CodeGraphActivationPolicyV1::Enabled,
-            None,
         )
         .await
         .expect("mount retained generation");
@@ -504,11 +502,9 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
             project_id,
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             graph_runtime.code_graph_seat_port(),
             Arc::clone(&project_database),
             CodeGraphActivationPolicyV1::Enabled,
-            None,
         )
         .await
         .expect("mount persistent generation A");
@@ -886,11 +882,9 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             project_id,
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
-            None,
         )
         .await
         .expect("mount persistent graph generation");
@@ -1355,11 +1349,9 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
             project_id,
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
-            None,
         )
         .await
         .expect("mount restarted retained generation");

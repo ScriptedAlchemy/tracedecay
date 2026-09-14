@@ -213,7 +213,7 @@ pub(super) fn synthetic_prompt_cases() -> Vec<HintEval> {
             "duplicate-helper-question",
             "is there duplicate logic or a similar helper before I add another classifier?",
             Some(HintCategory::TypeOrientation),
-            &["tracedecay_redundancy"],
+            &["tracedecay_constructors", "tracedecay_field_sites"],
         ),
         prompt_eval(
             "type-hierarchy-question",

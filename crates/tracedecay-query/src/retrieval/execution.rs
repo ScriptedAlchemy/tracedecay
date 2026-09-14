@@ -8,15 +8,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkId, CompactCandidate, ExactTechnicalTermKindV1,
-    FileOccurrenceId, FixedPointScore, RetrievalBudgetUsage, RetrievalFailure, RetrieverBatch,
-    RetrieverCoverage, RetrieverOutcome, SourceFreshness, SourceSpan, SymbolOccurrenceId,
+    FileOccurrenceId, RetrievalBudgetUsage, RetrievalFailure, RetrieverBatch, RetrieverCoverage,
+    RetrieverOutcome, SourceFreshness, SourceSpan, SymbolOccurrenceId,
 };
 
 use super::exact::ExactLaneEvidence;
 use super::graph::GraphLaneEvidence;
 use super::lexical::LexicalLaneEvidence;
 use super::ports::CodeCandidateBindingV1;
-use super::semantic::CodeSemanticEvidenceV1;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryExecutionContractErrorV1 {
@@ -88,14 +87,6 @@ pub struct NativeGraphRecordV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct NativeSemanticRecordV1 {
-    pub occurrence: NativeCodeOccurrenceV1,
-    pub distance_micros: i64,
-    pub score: FixedPointScore,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct NativeLanePageV1<T> {
     pub generation: CodeGenerationId,
     pub items: Vec<T>,
@@ -131,11 +122,6 @@ pub trait NativeRecordReadPortV1 {
     fn occurrence(
         &self,
         binding: &CodeCandidateBindingV1,
-    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1>;
-
-    fn occurrence_by_chunk(
-        &self,
-        chunk: &CodeSearchChunkId,
     ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1>;
 
     fn symbol(
@@ -175,9 +161,9 @@ where
         &self.generation
     }
 
-    // PERF: the four lane translators below each issue one
-    // `NativeRecordReadPortV1` lookup per candidate (`occurrence` /
-    // `occurrence_by_chunk` / `symbol`). That per-row shape is deliberate:
+    // PERF: the three lane translators below each issue one
+    // `NativeRecordReadPortV1` lookup per candidate (`occurrence` / `symbol`).
+    // That per-row shape is deliberate:
     // every lookup is interleaved with per-record validation
     // (`validate_occurrence`, `RecordIdentityMismatch`, `path_admitted`), so
     // batching at this loop would not be a low-risk change.
@@ -286,31 +272,6 @@ where
                         symbol: record,
                         edge_kind: evidence.path.last().map(|edge| edge.edge_kind),
                         depth: evidence.path.len() as u32,
-                    });
-                }
-            }
-            Ok(items)
-        })
-    }
-
-    pub fn semantic(
-        &self,
-        outcome: RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>,
-        path_admitted: impl Fn(&str) -> bool,
-    ) -> Result<NativeLaneOutcomeV1<NativeSemanticRecordV1>, QueryExecutionContractErrorV1> {
-        self.translate(outcome, |batch| {
-            let mut items = Vec::new();
-            for candidate in &batch.candidates {
-                let evidence = lane_evidence(batch, candidate)?;
-                let occurrence = self.records.occurrence_by_chunk(&evidence.chunk_id)?;
-                if occurrence.chunk.as_ref() != Some(&evidence.chunk_id) {
-                    return Err(QueryExecutionContractErrorV1::RecordIdentityMismatch);
-                }
-                if path_admitted(&occurrence.path) {
-                    items.push(NativeSemanticRecordV1 {
-                        occurrence,
-                        distance_micros: evidence.distance.micros(),
-                        score: candidate.raw_score,
                     });
                 }
             }

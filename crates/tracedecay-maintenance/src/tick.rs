@@ -5,26 +5,8 @@ use std::time::Duration;
 /// Resume a bounded maintenance phase over the normal graph window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceContinuation {
-    /// Resume the bounded semantic-vector phase over the normal graph window.
-    SemanticVectorRetention,
     /// Resume bounded code-generation retention over the normal graph window.
     CodeGenerationRetention,
-}
-
-impl MaintenanceContinuation {
-    /// Two phases asking to continue collapse to the one whose continuation
-    /// tick still advances both.
-    #[must_use]
-    pub fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::CodeGenerationRetention, _) | (_, Self::CodeGenerationRetention) => {
-                Self::CodeGenerationRetention
-            }
-            (Self::SemanticVectorRetention, Self::SemanticVectorRetention) => {
-                Self::SemanticVectorRetention
-            }
-        }
-    }
 }
 
 /// Outcome of one maintenance tick or per-store unit.
@@ -58,9 +40,6 @@ impl MaintenanceTickOutcome {
     pub fn label(self) -> &'static str {
         match self {
             Self::Complete => "complete",
-            Self::Continue(MaintenanceContinuation::SemanticVectorRetention) => {
-                "semantic_vector_progress"
-            }
             Self::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
                 "code_generation_progress"
             }
@@ -74,8 +53,7 @@ impl MaintenanceTickOutcome {
     pub fn combine(self, other: Self) -> Self {
         match (self, other) {
             (Self::Retry, _) | (_, Self::Retry) => Self::Retry,
-            (Self::Continue(left), Self::Continue(right)) => Self::Continue(left.combine(right)),
-            (Self::Continue(continuation), Self::Complete)
+            (Self::Continue(continuation), Self::Continue(_) | Self::Complete)
             | (Self::Complete, Self::Continue(continuation)) => Self::Continue(continuation),
             (Self::Complete, Self::Complete) => Self::Complete,
         }

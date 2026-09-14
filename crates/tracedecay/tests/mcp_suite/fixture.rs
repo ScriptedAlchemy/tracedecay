@@ -411,8 +411,12 @@ fn sole_subdir(dir: &Path) -> io::Result<PathBuf> {
 }
 
 /// Recursively copies `src` into `dest`, preserving file mtimes.
+///
+/// Destination directories go through [`PrivateStoreIo`] so seeded hook spool
+/// roots stay owner-private under a group umask; plain `create_dir_all` would
+/// leave them `0775` and fail closed at Hook capture admission.
 fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
-    fs::create_dir_all(dest)?;
+    PrivateStoreIo::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();

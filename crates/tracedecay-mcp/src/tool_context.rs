@@ -34,7 +34,6 @@ use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReader,
 };
-use tracedecay_contracts::doctor::SemanticOwnerStateV1;
 use tracedecay_contracts::{CancellationSignal, Deadline, ResolvedScope};
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -333,20 +332,6 @@ impl std::fmt::Debug for McpAdmittedProjectV1 {
     }
 }
 
-/// Semantic-owner snapshot the root computed for this request.
-///
-/// One state, not an `Option` plus a flag: a caller cannot claim the daemon
-/// service was both attached and unattached.
-#[derive(Clone, Copy, Default)]
-pub enum McpSemanticOwnerV1<'a> {
-    /// No daemon invocation service was attached to this call.
-    #[default]
-    NotAttached,
-    /// The service was attached and the owner task has no registered state.
-    AttachedAbsent,
-    Attached(&'a SemanticOwnerStateV1),
-}
-
 /// Doctor-report snapshot the root computed for this request.
 ///
 /// One state, not an `Option` plus a flag: a caller cannot claim the reader
@@ -363,8 +348,8 @@ pub enum McpDoctorReportV1<'a> {
 
 /// Per-request snapshots and admitted executors a moved handler family may read.
 ///
-/// Snapshots, not readers: the root computes freshness, census, semantic-owner,
-/// and doctor report once per call and passes the values. Absence is typed.
+/// Snapshots, not readers: the root computes freshness, census, and doctor
+/// report once per call and passes the values. Absence is typed.
 #[derive(Clone, Copy, Default)]
 pub struct McpRequestAuthoritiesV1<'a> {
     pub controls: RequestControls<'a>,
@@ -373,7 +358,6 @@ pub struct McpRequestAuthoritiesV1<'a> {
     /// Search and context call it after the lanes settle.
     pub freshness: Option<&'a CodeIndexFreshnessReader>,
     pub generation_census: Option<&'a GenerationCensusSnapshot>,
-    pub semantic_owner: McpSemanticOwnerV1<'a>,
     pub doctor_report: McpDoctorReportV1<'a>,
 }
 
@@ -510,11 +494,6 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
-    pub fn semantic_owner(&self) -> McpSemanticOwnerV1<'a> {
-        self.request.semantic_owner
-    }
-
-    #[must_use]
     pub fn doctor_report(&self) -> McpDoctorReportV1<'a> {
         self.request.doctor_report
     }
@@ -617,10 +596,6 @@ impl std::fmt::Debug for McpToolContext<'_> {
             .field(
                 "has_generation_census",
                 &self.request.generation_census.is_some(),
-            )
-            .field(
-                "semantic_owner",
-                &matches!(self.request.semantic_owner, McpSemanticOwnerV1::Attached(_)),
             )
             .field(
                 "doctor_report",
@@ -1327,10 +1302,6 @@ pub(crate) mod tests {
         assert!(
             bound.generation_census().is_none(),
             "census absence must stay None"
-        );
-        assert!(
-            matches!(bound.semantic_owner(), McpSemanticOwnerV1::NotAttached),
-            "semantic-owner absence must stay NotAttached"
         );
         assert!(
             bound.request().freshness.is_none(),

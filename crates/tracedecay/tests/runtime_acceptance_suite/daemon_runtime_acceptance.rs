@@ -279,14 +279,14 @@ async fn authentic_callback_to_all_delivery_surfaces() {
 }
 
 #[tokio::test]
-async fn exact_search_does_not_wait_for_semantic_projection() {
+async fn exact_search_is_ready_within_the_startup_deadline() {
     const STARTUP_DEADLINE: Duration = Duration::from_secs(5);
 
     let (environment, project) = common::IsolatedEnv::acquire().await;
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
-        "pub fn semantic_startup_probe() -> &'static str { \"exact\" }\n",
+        "pub fn exact_startup_probe() -> &'static str { \"exact\" }\n",
     )
     .unwrap();
     let git = std::process::Command::new(common::git_program())
@@ -320,7 +320,7 @@ async fn exact_search_does_not_wait_for_semantic_projection() {
                 "tool",
                 "search",
                 "--args",
-                r#"{"query":"semantic_startup_probe","limit":8}"#,
+                r#"{"query":"exact_startup_probe","limit":8}"#,
             ])
             .current_dir(&project)
             .stdin(Stdio::null())
@@ -328,12 +328,12 @@ async fn exact_search_does_not_wait_for_semantic_projection() {
             .expect("run exact search through daemon");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if output.status.success() && stdout.contains("semantic_startup_probe") {
+        if output.status.success() && stdout.contains("exact_startup_probe") {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "exact search did not become ready before the semantic-independent startup deadline:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            "exact search did not become ready before the startup deadline:\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
         std::thread::sleep(Duration::from_millis(25));
     }

@@ -39,7 +39,7 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
         assert_eq!(accepted["payload"]["state"], "pending");
         assert_eq!(
             accepted["payload"]["required_source_ids"],
-            json!(["code_graph", "sessions", "knowledge", "semantic"])
+            json!(["code_graph", "sessions", "knowledge"])
         );
         assert_eq!(
             accepted["payload"]["ordering_policy"],
@@ -50,13 +50,16 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
             .unwrap_or_else(|| panic!("accepted query needs a run id: {accepted}"));
 
         let completed = wait_for_query(&agent, &fixture.base_url, run_id);
-        assert_eq!(completed["domain_state"], "partial");
+        // Every source answers, but the canonical temporal search carries no
+        // denominator, so the run truthfully stays partial rather than
+        // claiming complete coverage it cannot account for.
+        assert_eq!(completed["domain_state"], "partial", "{completed}");
         assert_eq!(completed["payload"]["state"], "partial");
         assert_eq!(completed["payload"]["finality"], "partial");
         let sources = completed["payload"]["sources"]
             .as_array()
             .unwrap_or_else(|| panic!("query sources missing: {completed}"));
-        assert_eq!(sources.len(), 4);
+        assert_eq!(sources.len(), 3);
         for source_id in ["code_graph", "sessions", "knowledge"] {
             let source = sources
                 .iter()
@@ -72,23 +75,14 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
                 "{source_id} must expose its real source-local page: {source}"
             );
         }
-        let semantic = sources
-            .iter()
-            .find(|source| source["source_id"] == "semantic")
-            .unwrap_or_else(|| panic!("missing semantic source: {completed}"));
-        assert_eq!(semantic["phase"], "completed");
-        assert_eq!(
-            semantic["outcome"], "unsupported",
-            "unattached semantic reader must stay typed unsupported: {semantic}"
-        );
-        assert_eq!(
-            semantic["error_code"], "semantic_status_unattached",
-            "unattached semantic reader must name the missing authority: {semantic}"
-        );
         let sessions = sources
             .iter()
             .find(|source| source["source_id"] == "sessions")
             .expect("sessions source");
+        assert_eq!(
+            sessions["coverage"]["completeness"], "unknown",
+            "the temporal search is the only source without a denominator: {sessions}"
+        );
         assert!(
             sessions["page"]["rows"]
                 .as_array()

@@ -1,18 +1,18 @@
-#[cfg(unix)]
-use super::document_paths::{open_project_file, validated_document_path};
+use super::document_paths::validated_document_path;
 use std::io::Read;
 use std::path::{Component, Path};
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use tempfile::TempDir;
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 use url::Url;
 
 // The symlink-escape test that exercises open_project_file is unix-only.
 #[cfg(unix)]
-use std::os::unix::fs::symlink;
+use super::document_paths::open_project_file;
 #[cfg(unix)]
-use tracedecay_runtime_core::path_safety::canonical_root_identity;
+use std::os::unix::fs::symlink;
 
 fn admitted_root() -> (TempDir, std::path::PathBuf, Url, Dir) {
     let temp = TempDir::new().expect("temporary directory");

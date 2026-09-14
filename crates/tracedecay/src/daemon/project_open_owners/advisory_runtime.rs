@@ -73,7 +73,7 @@ use tracedecay_lsp::{
 };
 use tracedecay_session_memory::context::MonotonicDeadline;
 
-use super::{DaemonInvocationState, POLICY_REVISION_V1, register_semantic_configuration_owners};
+use super::{DaemonInvocationState, POLICY_REVISION_V1, register_project_query_authority};
 use crate::mcp::McpServer;
 use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
 use tracedecay_agent_hosts::agents::context_scout::ports::{
@@ -103,7 +103,6 @@ use tracedecay_mcp::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 
 mod deferred;
 mod model;
-pub(in crate::daemon) use deferred::spawn_semantic_owner_registration;
 pub(crate) use model::ProjectOpenDependentOwnerState;
 use model::advisory_monotonic_deadline;
 #[cfg(test)]
@@ -1190,16 +1189,14 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         .head(),
         Ok(GitHeadStateV1::Attached { .. })
     ) {
-        register_semantic_configuration_owners(
+        register_project_query_authority(
             invocation,
             project_root,
             server,
-            &state.graph,
             state.session_db.clone(),
             state.scope,
-            &state.scout_configuration,
         )
-        .await?;
+        .await;
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
@@ -1230,16 +1227,14 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
                 reason = %error,
                 "initial advisory mount raced its generation authority"
             );
-            register_semantic_configuration_owners(
+            register_project_query_authority(
                 invocation,
                 project_root,
                 server,
-                &state.graph,
                 state.session_db.clone(),
                 state.scope.clone(),
-                &state.scout_configuration,
             )
-            .await?;
+            .await;
             let _deferred_advisory_admitted = deferred::spawn(
                 server,
                 invocation.clone(),
@@ -1253,42 +1248,38 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
             project = %project_root.display(),
             phase = "feedback_advisory_registered",
         );
-        let semantic_configuration_started = Instant::now();
-        register_semantic_configuration_owners(
+        let query_authority_started = Instant::now();
+        register_project_query_authority(
             invocation,
             project_root,
             server,
-            &state.graph,
             state.session_db.clone(),
             state.scope.clone(),
-            &state.scout_configuration,
         )
-        .await?;
+        .await;
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
-            phase = "semantic_configuration_resolved",
-            elapsed_ms = semantic_configuration_started.elapsed().as_millis(),
+            phase = "query_authority_resolved",
+            elapsed_ms = query_authority_started.elapsed().as_millis(),
         );
         return Ok(());
     }
 
-    let semantic_configuration_started = Instant::now();
-    register_semantic_configuration_owners(
+    let query_authority_started = Instant::now();
+    register_project_query_authority(
         invocation,
         project_root,
         server,
-        &state.graph,
         state.session_db.clone(),
         state.scope.clone(),
-        &state.scout_configuration,
     )
-    .await?;
+    .await;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
-        phase = "semantic_configuration_resolved",
-        elapsed_ms = semantic_configuration_started.elapsed().as_millis(),
+        phase = "query_authority_resolved",
+        elapsed_ms = query_authority_started.elapsed().as_millis(),
     );
     tracing::info!(
         event = "project_open_owner_phase",

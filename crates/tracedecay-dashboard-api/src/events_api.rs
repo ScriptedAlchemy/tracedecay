@@ -974,7 +974,6 @@ pub(crate) async fn dashboard_state_fixture(
         savings_db_path: String::new(),
         project_root,
         code_index_freshness_reader: None,
-        explorer_semantic_reader: None,
         feedback_status_reader: None,
         pr_autotrack_reader: None,
         storage_mode: "profile_sharded".to_owned(),

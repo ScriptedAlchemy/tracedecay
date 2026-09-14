@@ -969,7 +969,7 @@ fn typed_unavailable_coverage_inside_a_successful_result_stays_exit_zero() {
             "type": "text",
             "text": "### Coverage\nPartial recall — some retrieval lanes did not answer:\n\
                      - exact: unavailable (generation_rebuilding)\n\
-                     - semantic: unavailable (generation_rebuilding)"
+                     - graph: unavailable (generation_rebuilding)"
         }]
     });
     let warming_json = json!({

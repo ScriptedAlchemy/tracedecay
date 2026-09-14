@@ -15,8 +15,8 @@ use std::thread::ThreadId;
 
 use tracedecay_contracts::CancellationSignal;
 use tracedecay_query::code_search::{
-    CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor, CodeIndexSearchModeV1,
-    CodeIndexSearchOutcomeV1, CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
+    CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor, CodeIndexSearchOutcomeV1,
+    CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
 };
 
 use crate::code_index_executor::code_index_search_executor;
@@ -154,7 +154,6 @@ fn search_request(
         source_reference: None,
         limit: 8,
         cursor: None,
-        mode: CodeIndexSearchModeV1::FallbackAllowed,
         lexical_routing: LexicalRoutingV1::query_only(),
         authority: None,
         deadline: None,

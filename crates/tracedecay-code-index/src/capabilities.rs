@@ -17,8 +17,8 @@ use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeGenerationSourceCommitmentsV1,
     CodeIndexCapabilityManifestV1, CodeSearchChunkGrainV1, CoverageSummaryV1, DomainError,
     EdgeAuthorityV1, ExactTechnicalTermKindV1, ExtractorRevision, GrammarRevision, LanguageId,
-    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, ProjectionKeyV1, ProjectionKindV1,
-    SanitizationReceiptId, SanitizerRevision, canonical_sha256,
+    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, SanitizationReceiptId,
+    SanitizerRevision, canonical_sha256,
 };
 
 use super::languages::LanguageRegistry;
@@ -333,23 +333,16 @@ impl Default for BaseCapabilityValidator {
 }
 
 impl BaseCapabilityValidator {
-    /// Validate that `manifest` authorizes candidate production under
-    /// `projection` for `generation`: reject missing, incompatible,
-    /// mixed-generation, or unauthorized manifests before candidate production.
+    /// Validate that `manifest` authorizes candidate production for
+    /// `generation`: reject missing, incompatible, mixed-generation, or
+    /// unauthorized manifests before candidate production.
     pub fn validate_for_candidates(
         &self,
         generation: &CodeGenerationId,
-        projection: &ProjectionKeyV1,
         manifest: &CodeIndexCapabilityManifestV1,
     ) -> Result<(), CapabilityEmissionErrorV1> {
         if &manifest.generation_id != generation {
             return Err(CapabilityEmissionErrorV1::MixedGeneration);
-        }
-        if projection.kind == ProjectionKindV1::Embedding {
-            // The base manifest alone never authorizes embedding projections.
-            return Err(CapabilityEmissionErrorV1::Contract(
-                "embedding projections require the semantic capability manifest".to_owned(),
-            ));
         }
         // Structural and digest validation (including the recomputed
         // manifest digest) is owned by the domain contract.
@@ -454,14 +447,6 @@ mod tests {
         BaseCapabilityEmitter::new(StaticLanguageRegistry::new(), coverage(), receipts())
     }
 
-    fn projection(kind: ProjectionKindV1) -> ProjectionKeyV1 {
-        ProjectionKeyV1 {
-            kind,
-            schema_revision: "projection.v1".to_owned(),
-            profile_digest: digest('e'),
-        }
-    }
-
     #[test]
     fn emit_rejects_unsealed_and_mixed_generations() {
         let mut unsealed = generation_manifest();
@@ -493,52 +478,27 @@ mod tests {
 
         let other = CodeGenerationId::new("generation.other").expect("valid id");
         assert_eq!(
-            validator.validate_for_candidates(
-                &other,
-                &projection(ProjectionKindV1::Lexical),
-                &manifest
-            ),
+            validator.validate_for_candidates(&other, &manifest),
             Err(CapabilityEmissionErrorV1::MixedGeneration)
         );
 
         let mut tampered = manifest.clone();
         tampered.source_coverage.files_eligible = 11;
         assert!(matches!(
-            validator.validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Lexical),
-                &tampered,
-            ),
-            Err(CapabilityEmissionErrorV1::Contract(_))
-        ));
-
-        assert!(matches!(
-            validator.validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Embedding),
-                &manifest,
-            ),
+            validator.validate_for_candidates(&generation.generation_id, &tampered,),
             Err(CapabilityEmissionErrorV1::Contract(_))
         ));
 
         let no_domains = BaseCapabilityValidator::new();
         assert_eq!(
-            no_domains.validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Lexical),
-                &manifest,
-            ),
+            no_domains.validate_for_candidates(&generation.generation_id, &manifest,),
             Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain)
         );
 
         let stale_epoch =
             BaseCapabilityValidator::new().authorize_privacy_domain(&generation.privacy_domain, 6);
         assert_eq!(
-            stale_epoch.validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Lexical),
-                &manifest,
-            ),
+            stale_epoch.validate_for_candidates(&generation.generation_id, &manifest,),
             Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain)
         );
     }

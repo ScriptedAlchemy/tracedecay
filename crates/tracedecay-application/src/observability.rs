@@ -63,10 +63,7 @@ pub use product_view_emit::{
     record_terminal_attempt_product_views,
 };
 pub use read::{observatory_read_model, observatory_unavailable_read_model};
-pub use retrieval_emit::{
-    AblationDimensionV1, RetrievalEmissionSummaryV1, emit_retrieval_pipeline,
-    observe_stage_ablation,
-};
+pub use retrieval_emit::{RetrievalEmissionSummaryV1, emit_retrieval_pipeline};
 pub use tracedecay_global_db::{
     DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
     PendingDeliverySourceReceiptV1,

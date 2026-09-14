@@ -436,10 +436,10 @@ fn saturated_scores_preserve_retriever_strength_before_identity_ties() {
 
     // At identical primary utility, different lane mixes use the recorded
     // retriever tag order, not a magnitude comparison across score scales.
-    weaker.contributions[0].retriever = RetrieverKind::Semantic;
-    weaker.contributions[0].score_domain = id("score.semantic");
+    weaker.contributions[0].retriever = RetrieverKind::Graph;
+    weaker.contributions[0].score_domain = id("score.graph");
     assert_eq!(
         compare_fused(&stronger, &weaker),
-        RetrieverKind::Lexical.cmp(&RetrieverKind::Semantic)
+        RetrieverKind::Lexical.cmp(&RetrieverKind::Graph)
     );
 }

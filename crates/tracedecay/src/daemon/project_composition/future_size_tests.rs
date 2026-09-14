@@ -114,10 +114,6 @@ fn awaited_sizes() -> Vec<(&'static str, usize)> {
             future_size(crate::mcp::McpServer::shutdown),
         ),
         (
-            "spawn_semantic_owner_registration",
-            future_size(project_open_owners::spawn_semantic_owner_registration),
-        ),
-        (
             "StoreAdministration::registered_project_session_database",
             future_size(StoreAdministration::registered_project_session_database),
         ),
@@ -158,8 +154,8 @@ const COMPOSITION_ENTRY_CEILING: usize = 4 * 1024;
 /// time. Measured maxima: 21,200 B (`mount_full_server_owners`, ordinary
 /// build) and 175,424 B (the same phase under `--features hotpath`). The
 /// next-widest phases are `construct_full_server` (7,208 B) and `open_graph`
-/// (6,200 B); the semantic lifecycle registry read and the background-CPU
-/// authority handle each cost their phase well under 128 B.
+/// (6,200 B); the background-CPU authority handle costs its phase well under
+/// 128 B.
 const PHASE_CEILING: usize = if cfg!(feature = "hotpath") {
     256 * 1024
 } else {
@@ -195,7 +191,6 @@ fn shared_owner_futures_stay_below_large_future_threshold() {
         ("invocation admission", future_size(tracedecay_daemon_service::DaemonInvocationService::invoke_with_project_admission)),
         ("Work dispatch", future_size(tracedecay_daemon_service::invocation::execute_work_application)),
         ("observation persistence", future_size(<tracedecay_global_db::GlobalDbObservationStore as tracedecay_store::ObservationStore>::persist_observation)),
-        ("vector retirement", future_size(tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation)),
     ];
     for (name, size) in owners {
         eprintln!("{size:>10} B  {name}");

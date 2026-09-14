@@ -869,7 +869,6 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_test_map"
         || n == "tracedecay_gini"
         || n == "tracedecay_dependency_depth"
-        || n == "tracedecay_redundancy"
     {
         "health"
     } else if n == "tracedecay_callers"

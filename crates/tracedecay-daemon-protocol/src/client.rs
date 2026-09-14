@@ -16,8 +16,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
     ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
-    ApplicationResponse, CancellationContext, CancellationSignal, CancellationStage, Deadline,
-    InvocationError, InvocationTarget, PageRequest, RequestId, RetryDirective, SafeDiagnostic,
+    ApplicationResponse, CancellationSignal, CancellationStage, Deadline, InvocationError,
+    InvocationTarget, PageRequest, RequestId, SafeDiagnostic,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -601,19 +601,6 @@ pub struct DaemonInvocationDelivery {
     connection: crate::connection::DaemonConnection,
 }
 
-/// Client-owned dispatch ceiling for native `FastEmbed` current+10x evaluation.
-///
-/// The daemon honors this deadline on `semantic_evaluate_and_publish`; it is
-/// not a journey-harness timeout. Sized from a quieter-host measurement of
-/// 625s for the pinned 1x+10x `FastEmbed` workload (load 23→18 on 96 cores,
-/// isolated `CARGO_TARGET_DIR=/tmp/semantic-rerun-target`) plus margin.
-pub const SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS: i64 = 900_000_000;
-
-/// Isolated 10x measurement plus paged incremental copies. Production
-/// `evaluate_and_publish_semantic_profile` stays at 900s; eval-direct sizes
-/// this from the 906s deadline miss after reused paging.
-pub const SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS: i64 = 1_800_000_000;
-
 impl DaemonInvocationClient {
     pub fn new(
         connection: crate::connection::DaemonConnection,
@@ -934,247 +921,6 @@ impl DaemonInvocationClient {
     }
 
     #[hotpath::skip]
-    pub async fn evaluate_and_publish_semantic_profile(
-        &self,
-        evaluated_profile_id: &str,
-    ) -> tracedecay_domain::errors::Result<SemanticEvaluationPublicationResultV1> {
-        self.evaluate_and_publish_semantic_profile_until(
-            evaluated_profile_id,
-            SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
-        )
-        .await
-    }
-
-    /// Run the composed activation journey: evaluate the profile natively,
-    /// publish the accepted evaluation, and compare-and-swap it into
-    /// `active_profile`. The daemon owns every stage; the evaluation phase
-    /// dominates the deadline.
-    #[hotpath::skip]
-    pub async fn activate_semantic_profile(
-        &self,
-        evaluated_profile_id: &str,
-        set_rollback: bool,
-    ) -> tracedecay_domain::errors::Result<SemanticActivationResultV1> {
-        self.activate_semantic_profile_until(
-            evaluated_profile_id,
-            set_rollback,
-            SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
-        )
-        .await
-    }
-
-    #[hotpath::skip]
-    pub async fn activate_semantic_profile_until(
-        &self,
-        evaluated_profile_id: &str,
-        set_rollback: bool,
-        deadline_micros: i64,
-    ) -> tracedecay_domain::errors::Result<SemanticActivationResultV1> {
-        let request_id =
-            mint_global_request_id(GlobalRequestSurface::SemanticEvaluation).map_err(|error| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: error.to_string(),
-                }
-            })?;
-        let observed_at = current_system_micros().ok_or_else(|| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: "semantic activation clock is unavailable".to_owned(),
-            }
-        })?;
-        let deadline = Deadline::new(UtcMicros(
-            observed_at.0.checked_add(deadline_micros).ok_or_else(|| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "semantic activation deadline is unavailable".to_owned(),
-                }
-            })?,
-        ))
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        let cancellation = CancellationContext::active(format!(
-            "cancellation.semantic-activation.{}",
-            request_id.as_str()
-        ))
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        let response = self
-            .invoke(crate::contract::DaemonInvocationRequest::semantic_activate(
-                request_id.as_str(),
-                evaluated_profile_id.to_owned(),
-                set_rollback,
-                observed_at,
-                deadline,
-                cancellation,
-            ))
-            .await?;
-        match response.outcome {
-            crate::contract::DaemonInvocationOutcome::SemanticProfileActivated {
-                scope,
-                profile_digest,
-                report_digest,
-                configuration_revision,
-                rollback_profile_id,
-                runtime_state,
-            } => Ok(SemanticActivationResultV1 {
-                project_id: scope.project_id.as_str().to_owned(),
-                profile_digest: profile_digest.as_str().to_owned(),
-                report_digest: report_digest.as_str().to_owned(),
-                configuration_revision: configuration_revision.to_string(),
-                rollback_profile_id,
-                runtime_state,
-            }),
-            crate::contract::DaemonInvocationOutcome::Problem { problem } => {
-                Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("semantic activation rejected: {problem:?}"),
-                })
-            }
-            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
-                Err(semantic_activation_application_problem(problem))
-            }
-            _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon returned an invalid semantic activation response".to_owned(),
-            }),
-        }
-    }
-
-    #[hotpath::skip]
-    pub async fn evaluate_and_publish_semantic_profile_until(
-        &self,
-        evaluated_profile_id: &str,
-        deadline_micros: i64,
-    ) -> tracedecay_domain::errors::Result<SemanticEvaluationPublicationResultV1> {
-        let request_id =
-            mint_global_request_id(GlobalRequestSurface::SemanticEvaluation).map_err(|error| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: error.to_string(),
-                }
-            })?;
-        let observed_at = current_system_micros().ok_or_else(|| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: "semantic evaluation clock is unavailable".to_owned(),
-            }
-        })?;
-        let deadline = Deadline::new(UtcMicros(
-            observed_at.0.checked_add(deadline_micros).ok_or_else(|| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "semantic evaluation deadline is unavailable".to_owned(),
-                }
-            })?,
-        ))
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        let cancellation = CancellationContext::active(format!(
-            "cancellation.semantic-evaluation.{}",
-            request_id.as_str()
-        ))
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        let response = self
-            .invoke(
-                crate::contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
-                    request_id.as_str(),
-                    evaluated_profile_id.to_owned(),
-                    observed_at,
-                    deadline,
-                    cancellation,
-                ),
-            )
-            .await?;
-        match response.outcome {
-            crate::contract::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
-                scope,
-                profile_digest,
-                report_digest,
-                report,
-                source_generation,
-                snapshot_digest,
-            } => Ok(SemanticEvaluationPublicationResultV1 {
-                project_id: scope.project_id.as_str().to_owned(),
-                profile_digest: profile_digest.as_str().to_owned(),
-                report_digest: report_digest.as_str().to_owned(),
-                report,
-                source_generation: source_generation.as_str().to_owned(),
-                snapshot_digest: snapshot_digest.as_str().to_owned(),
-            }),
-            crate::contract::DaemonInvocationOutcome::Problem { problem } => {
-                Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("semantic evaluation publication rejected: {problem:?}"),
-                })
-            }
-            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
-                Err(semantic_evaluation_application_problem(problem))
-            }
-            _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon returned an invalid semantic evaluation response".to_owned(),
-            }),
-        }
-    }
-
-    #[hotpath::skip]
-    pub async fn qualify_semantic_profile_until(
-        &self,
-        evaluated_profile_id: &str,
-        deadline_micros: i64,
-        cancellation: CancellationSignal,
-    ) -> tracedecay_domain::errors::Result<SemanticEvaluationQualificationResultV1> {
-        let request_id = mint_global_request_id(GlobalRequestSurface::SemanticQualification)
-            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: error.to_string(),
-            })?;
-        let observed_at = current_system_micros().ok_or_else(|| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: "semantic qualification clock is unavailable".to_owned(),
-            }
-        })?;
-        let deadline = Deadline::new(UtcMicros(
-            observed_at.0.checked_add(deadline_micros).ok_or_else(|| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "semantic qualification deadline is unavailable".to_owned(),
-                }
-            })?,
-        ))
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        let response = self
-            .invoke_controlled(
-                crate::contract::DaemonInvocationRequest::semantic_qualify(
-                    request_id.as_str(),
-                    evaluated_profile_id.to_owned(),
-                    observed_at,
-                    deadline.clone(),
-                    cancellation.context(),
-                ),
-                deadline,
-                cancellation,
-                InvocationCancellationPolicy::ReadOnly,
-            )
-            .await
-            .map_err(|error| {
-                semantic_qualification_application_problem(error.into_application_problem())
-            })?;
-        match response.outcome {
-            crate::contract::DaemonInvocationOutcome::SemanticEvaluatedProfileQualified {
-                qualification,
-            } => Ok(SemanticEvaluationQualificationResultV1 {
-                qualification_bytes: qualification.into_bytes(),
-            }),
-            crate::contract::DaemonInvocationOutcome::Problem { problem } => {
-                Err(semantic_qualification_daemon_problem(problem))
-            }
-            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
-                Err(semantic_qualification_application_problem(problem))
-            }
-            _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon returned an invalid semantic qualification response".to_owned(),
-            }),
-        }
-    }
-
-    #[hotpath::skip]
     async fn cancel_invocation(
         &self,
         target_request_id: &str,
@@ -1484,96 +1230,6 @@ fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationErro
     }
 }
 
-fn semantic_evaluation_application_problem(
-    problem: ApplicationProblem,
-) -> tracedecay_domain::errors::TraceDecayError {
-    let retryable = problem.retry() != RetryDirective::Never;
-    match problem.kind() {
-        ApplicationProblemKind::Cancelled => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_evaluation_cancelled",
-                retryable,
-                "Semantic evaluation was cancelled",
-            )
-        }
-        ApplicationProblemKind::TimedOut => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_evaluation_deadline_exceeded",
-                retryable,
-                "Semantic evaluation exceeded its deadline",
-            )
-        }
-        ApplicationProblemKind::Unavailable | ApplicationProblemKind::Saturated => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_evaluation_unavailable",
-                retryable,
-                "Semantic evaluation publication is unavailable",
-            )
-        }
-        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_evaluation_conflict",
-                retryable,
-                "Semantic evaluation publication conflicted with newer state",
-            )
-        }
-        ApplicationProblemKind::PartialEffect => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_evaluation_partial_effect",
-                retryable,
-                problem.diagnostic().map_or(
-                    "Semantic evaluation publication committed only part of its required effect",
-                    |diagnostic| diagnostic.message.as_str(),
-                ),
-            )
-        }
-        ApplicationProblemKind::ExecutionFailed => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_evaluation_execution_failed",
-                false,
-                "Semantic evaluation execution failed",
-            )
-        }
-        ApplicationProblemKind::ResetRequired => {
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                "semantic evaluation publication",
-                problem.diagnostic().map_or(
-                    "the semantic evaluation authority requires reset",
-                    |diagnostic| diagnostic.message.as_str(),
-                ),
-            )
-        }
-        ApplicationProblemKind::NotFoundOrNotAuthorized => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_evaluation_denied",
-                retryable,
-                "Semantic evaluation publication was not found or not authorized",
-            )
-        }
-        ApplicationProblemKind::InvalidRequest | ApplicationProblemKind::Unsupported => {
-            if let Some(diagnostic) = problem
-                .diagnostic()
-                .filter(|diagnostic| diagnostic.code.starts_with("semantic_qualification."))
-            {
-                return tracedecay_domain::errors::TraceDecayError::project_route(
-                    diagnostic.code.replace('.', "_"),
-                    false,
-                    diagnostic.message.clone(),
-                );
-            }
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "semantic evaluation publication rejected: {}",
-                    problem.diagnostic().map_or_else(
-                        || format!("{problem:?}"),
-                        |diagnostic| diagnostic.message.clone(),
-                    )
-                ),
-            }
-        }
-    }
-}
-
 /// A daemon that could not serve this client's handshake refused before any
 /// request ran; name the refusal, both versions, and the action.
 pub fn handshake_refusal_error(
@@ -1652,238 +1308,6 @@ fn with_daemon_version_skew_context(
     )
 }
 
-/// Map a typed activation-journey problem onto the client error surface.
-///
-/// The stage that refused is carried by the diagnostic the daemon attached
-/// (evaluation problems come from the semantic evaluation route,
-/// configuration problems from the mutation route); this mapping preserves
-/// that detail instead of flattening it into a generic message.
-fn semantic_activation_application_problem(
-    problem: ApplicationProblem,
-) -> tracedecay_domain::errors::TraceDecayError {
-    let retryable = problem.retry() != RetryDirective::Never;
-    let detail = problem
-        .diagnostic()
-        .map(|diagnostic| format!(" ({}: {})", diagnostic.code, diagnostic.message))
-        .unwrap_or_default();
-    match problem.kind() {
-        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_activation_conflict",
-                retryable,
-                format!(
-                    "Semantic activation lost its configuration compare-and-swap; \
-                     the configuration changed while the profile evaluated — re-run \
-                     the activation{detail}"
-                ),
-            )
-        }
-        ApplicationProblemKind::Cancelled => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_activation_cancelled",
-                retryable,
-                format!("Semantic activation was cancelled{detail}"),
-            )
-        }
-        ApplicationProblemKind::TimedOut => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_activation_deadline_exceeded",
-                retryable,
-                format!("Semantic activation exceeded its deadline{detail}"),
-            )
-        }
-        ApplicationProblemKind::Unavailable | ApplicationProblemKind::Saturated => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_activation_unavailable",
-                retryable,
-                format!("Semantic activation is unavailable{detail}"),
-            )
-        }
-        ApplicationProblemKind::PartialEffect => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_activation_partial_effect",
-                retryable,
-                format!("Semantic activation committed only part of its effect{detail}"),
-            )
-        }
-        ApplicationProblemKind::ExecutionFailed => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_activation_execution_failed",
-                false,
-                format!("Semantic activation execution failed{detail}"),
-            )
-        }
-        ApplicationProblemKind::ResetRequired => {
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                "semantic activation",
-                problem.diagnostic().map_or(
-                    "the semantic activation authority requires reset",
-                    |diagnostic| diagnostic.message.as_str(),
-                ),
-            )
-        }
-        ApplicationProblemKind::NotFoundOrNotAuthorized => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_activation_denied",
-                retryable,
-                format!("Semantic activation was not found or not authorized{detail}"),
-            )
-        }
-        ApplicationProblemKind::InvalidRequest | ApplicationProblemKind::Unsupported => {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "semantic activation rejected: {}",
-                    problem.diagnostic().map_or_else(
-                        || format!("{problem:?}"),
-                        |diagnostic| diagnostic.message.clone(),
-                    )
-                ),
-            }
-        }
-    }
-}
-
-fn semantic_qualification_daemon_problem(
-    problem: crate::contract::DaemonInvocationProblem,
-) -> tracedecay_domain::errors::TraceDecayError {
-    match problem {
-        crate::contract::DaemonInvocationProblem::InvalidRequest
-        | crate::contract::DaemonInvocationProblem::UnsupportedRevision => {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("semantic qualification rejected: {problem:?}"),
-            }
-        }
-        crate::contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_denied",
-                false,
-                "Semantic qualification was not found or not authorized",
-            )
-        }
-        crate::contract::DaemonInvocationProblem::ResetRequired => {
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                "semantic qualification",
-                "the semantic qualification authority requires reset",
-            )
-        }
-        crate::contract::DaemonInvocationProblem::ApplicationContractViolation
-        | crate::contract::DaemonInvocationProblem::Unavailable => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_unavailable",
-                false,
-                "Semantic qualification is unavailable",
-            )
-        }
-    }
-}
-
-fn semantic_qualification_application_problem(
-    problem: ApplicationProblem,
-) -> tracedecay_domain::errors::TraceDecayError {
-    let retryable = problem.retry() != RetryDirective::Never;
-    match problem.kind() {
-        ApplicationProblemKind::Cancelled => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_cancelled",
-                retryable,
-                "Semantic qualification was cancelled",
-            )
-        }
-        ApplicationProblemKind::TimedOut => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_deadline_exceeded",
-                retryable,
-                "Semantic qualification exceeded its deadline",
-            )
-        }
-        ApplicationProblemKind::Unavailable | ApplicationProblemKind::Saturated => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_unavailable",
-                retryable,
-                "Semantic qualification is unavailable",
-            )
-        }
-        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_stale",
-                retryable,
-                "Semantic qualification became stale",
-            )
-        }
-        ApplicationProblemKind::PartialEffect => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_partial_result",
-                retryable,
-                problem.diagnostic().map_or(
-                    "Semantic qualification returned only a partial result",
-                    |diagnostic| diagnostic.message.as_str(),
-                ),
-            )
-        }
-        ApplicationProblemKind::ExecutionFailed => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_execution_failed",
-                false,
-                "Semantic qualification execution failed",
-            )
-        }
-        ApplicationProblemKind::ResetRequired => {
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                "semantic qualification",
-                problem.diagnostic().map_or(
-                    "the semantic qualification authority requires reset",
-                    |diagnostic| diagnostic.message.as_str(),
-                ),
-            )
-        }
-        ApplicationProblemKind::NotFoundOrNotAuthorized => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "semantic_qualification_denied",
-                retryable,
-                "Semantic qualification was not found or not authorized",
-            )
-        }
-        ApplicationProblemKind::InvalidRequest | ApplicationProblemKind::Unsupported => {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "semantic qualification rejected: {}",
-                    problem.diagnostic().map_or_else(
-                        || format!("{problem:?}"),
-                        |diagnostic| diagnostic.message.clone(),
-                    )
-                ),
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
-pub struct SemanticEvaluationPublicationResultV1 {
-    pub project_id: String,
-    pub profile_digest: String,
-    pub report_digest: String,
-    pub report: serde_json::Value,
-    pub source_generation: String,
-    pub snapshot_digest: String,
-}
-
-/// Terminal receipt of the composed semantic activation journey.
-/// `runtime_state` is the daemon-serialized `SemanticRuntimeStateV1`.
-#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
-pub struct SemanticActivationResultV1 {
-    pub project_id: String,
-    pub profile_digest: String,
-    pub report_digest: String,
-    pub configuration_revision: String,
-    pub rollback_profile_id: Option<String>,
-    pub runtime_state: serde_json::Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SemanticEvaluationQualificationResultV1 {
-    pub qualification_bytes: Vec<u8>,
-}
-
 pub fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
     let now = current_system_micros().map_or(i64::MAX, |now| now.0);
     let remaining = deadline.expires_at.0.checked_sub(now)?;
@@ -1914,13 +1338,13 @@ mod controlled_invocation_tests;
 mod tests {
     use super::{
         DaemonInvocationError, application_response, configuration_request_from_surface_payload,
-        feedback_handle_from_surface_payload, semantic_evaluation_application_problem,
-        semantic_qualification_application_problem,
+        feedback_handle_from_surface_payload, invocation_now_micros,
     };
     use tracedecay_contracts::{
-        ApplicationProblem, ApplicationProblemKind, CancellationStage, ConfigurationWireRequestV1,
-        InvocationError, RequestId, ResultContractRef,
+        ApplicationProblemKind, CancellationContext, CancellationStage, ConfigurationWireRequestV1,
+        Deadline, InvocationError, RequestId, ResultContractRef,
     };
+    use tracedecay_domain::UtcMicros;
     use tracedecay_tool_catalog::ApplicationSurfaceOperation;
     use tracedecay_tool_catalog::SchemaId;
 
@@ -1967,27 +1391,6 @@ mod tests {
             panic!("reset-required must remain an authoritative typed problem");
         };
         assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
-    }
-
-    #[test]
-    fn semantic_evaluation_client_maps_typed_application_problems() {
-        for (problem, expected_reason) in [
-            (
-                ApplicationProblem::cancelled_before_admission(),
-                "semantic_evaluation_cancelled",
-            ),
-            (
-                ApplicationProblem::timed_out_before_admission(),
-                "semantic_evaluation_deadline_exceeded",
-            ),
-        ] {
-            let error = semantic_evaluation_application_problem(problem);
-            let (reason, retryable, _) = error
-                .project_route_context()
-                .expect("typed semantic evaluation error");
-            assert_eq!(reason, expected_reason);
-            assert!(!retryable);
-        }
     }
 
     fn unused_test_endpoint() -> crate::transport::DaemonEndpoint {
@@ -2123,10 +1526,18 @@ mod tests {
             handshake,
         );
 
+        let observed_at = invocation_now_micros();
         let error = client
-            .evaluate_and_publish_semantic_profile("hybrid-conservative")
+            .invoke(crate::contract::DaemonInvocationRequest::feedback(
+                "request.refused-handshake",
+                ApplicationSurfaceOperation::FeedbackList,
+                "feedback.refused-handshake".to_owned(),
+                observed_at,
+                Deadline::new(UtcMicros(observed_at.0 + 5_000_000)).expect("deadline"),
+                CancellationContext::active("cancel.refused-handshake").expect("cancellation"),
+            ))
             .await
-            .expect_err("a refused handshake must not look like a published profile");
+            .expect_err("a refused handshake must not look like an answered request");
         let (code, _, _) = error
             .project_route_context()
             .expect("the refusal must surface as a typed revision skew");
@@ -2154,27 +1565,6 @@ mod tests {
             tool_list_changed_capable: false,
             catalog_version: String::new(),
             moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
-        }
-    }
-
-    #[test]
-    fn semantic_qualification_client_maps_typed_application_problems() {
-        for (problem, expected_reason) in [
-            (
-                ApplicationProblem::cancelled_before_admission(),
-                "semantic_qualification_cancelled",
-            ),
-            (
-                ApplicationProblem::timed_out_before_admission(),
-                "semantic_qualification_deadline_exceeded",
-            ),
-        ] {
-            let error = semantic_qualification_application_problem(problem);
-            let (reason, retryable, _) = error
-                .project_route_context()
-                .expect("typed semantic qualification error");
-            assert_eq!(reason, expected_reason);
-            assert!(!retryable);
         }
     }
 

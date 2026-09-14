@@ -67,70 +67,28 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        for platform, binary_name in [("x86_64-windows", "tracedecay.exe")]:
+        for platform, (_, binary_name) in sorted(MODULE.PLATFORMS.items()):
             binary = root / platform / binary_name
             binary.parent.mkdir()
-            binary.write_bytes(b"nonempty-binary")
+            payload = f"nonempty-{platform}-binary".encode()
+            binary.write_bytes(payload)
             output = root / f"tracedecay-v0.0.67-{platform}.mcpb"
 
             MODULE.build_bundle(binary, output, "0.0.67", platform)
             MODULE.verify_bundle(output, "0.0.67", platform)
 
-            assert output.stat().st_size > len(b"nonempty-binary")
+            assert output.stat().st_size > len(payload)
             with zipfile.ZipFile(output) as archive:
                 assert set(archive.namelist()) == {
                     "manifest.json",
                     f"server/{binary_name}",
                 }
+                assert archive.read(f"server/{binary_name}") == payload
                 manifest = json.loads(archive.read("manifest.json"))
                 assert manifest["server"]["type"] == "binary"
                 assert manifest["server"]["entry_point"] == f"server/{binary_name}"
                 assert manifest["server"]["mcp_config"]["args"] == ["serve"]
                 assert manifest["tools_generated"] is True
-
-        runtime_library = root / "libonnxruntime.so.1.24.2"
-        runtime_library.write_bytes(b"portable-linux-runtime")
-        runtime_license = root / "onnxruntime-LICENSE"
-        runtime_license.write_bytes(b"onnxruntime-license")
-        runtime_notices = root / "onnxruntime-ThirdPartyNotices.txt"
-        runtime_notices.write_bytes(b"onnxruntime-third-party-notices")
-        for platform in ["aarch64-linux", "x86_64-linux"]:
-            binary = root / platform / "tracedecay"
-            binary.parent.mkdir()
-            binary.write_bytes(f"nonempty-{platform}-binary".encode())
-            output = root / f"tracedecay-v0.0.67-{platform}.mcpb"
-
-            MODULE.build_bundle(
-                binary,
-                output,
-                "0.0.67",
-                platform,
-                runtime_library,
-                runtime_license,
-                runtime_notices,
-            )
-            MODULE.verify_bundle(output, "0.0.67", platform)
-
-            with zipfile.ZipFile(output) as archive:
-                assert set(archive.namelist()) == {
-                    "manifest.json",
-                    "server/tracedecay",
-                    "server/libonnxruntime.so.1",
-                    "licenses/onnxruntime-LICENSE",
-                    "licenses/onnxruntime-ThirdPartyNotices.txt",
-                }
-                assert (
-                    archive.read("server/libonnxruntime.so.1")
-                    == b"portable-linux-runtime"
-                )
-                assert (
-                    archive.read("licenses/onnxruntime-LICENSE")
-                    == b"onnxruntime-license"
-                )
-                assert (
-                    archive.read("licenses/onnxruntime-ThirdPartyNotices.txt")
-                    == b"onnxruntime-third-party-notices"
-                )
 
     print("MCPB build acceptance passed")
 

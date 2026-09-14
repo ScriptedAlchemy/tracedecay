@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tracedecay_query::search_quality::{
     DirectEvaluationReportV1, QUERY_BASELINE_PROFILE, compute_profile_material_digest,
-    evaluate_generated_outputs, load_candidate_workload,
+    evaluate_generated_outputs,
 };
 
 use crate::{GenerateCandidateOutputsOptions, generate_candidate_outputs};
@@ -23,31 +23,23 @@ fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_contracts::Resol
 
 #[test]
 fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
-    // The workload pins historical commits that survive only as unreachable
-    // objects on the integration branch; the fixture clone backfills the
-    // checked-in evaluator pack so the historical query resolves here as it
-    // does in the daemon.
-    let fixture = crate::candidate_output::tests::authenticated_repo_fixture();
-    let repo_root = fixture.root.clone();
-    let workload = load_candidate_workload(
-        &repo_root.join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
-    )
-    .expect("checked-in workload");
+    // The packaged root carries the checked-in evaluator object pack, so the
+    // historical query resolves here as it does in the daemon.
+    let fixture = crate::candidate_output::tests::packaged_fixture();
+    let repo_root = fixture.root();
+    let workload = fixture.workload();
     let profile_ids = vec![QUERY_BASELINE_PROFILE.to_owned()];
     let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-        repo_root: &repo_root,
+        repo_root,
         workload_path: None,
         profile_ids: Some(&profile_ids),
         admitted_scope: direct_fixture_scope,
     })
     .expect("generate direct fixture outputs");
-    let report = evaluate_generated_outputs(&repo_root, &workload, &generated)
+    let report = evaluate_generated_outputs(repo_root, workload, &generated)
         .expect("evaluate direct fixture outputs");
-    // Semantic activation refuses any report whose query fallback drifted from
-    // the checked-in pin, and the operator journey that would notice is skipped
-    // without the FastEmbed distribution fixture. Gate the pin here, where the
-    // ordinary lane always runs it: production retrieval changes must land with
-    // a re-pinned workload or they silently break `semantic activate`.
+    // Production retrieval changes must land with a re-pinned workload; the
+    // pin is what turns a silent ranking change into a visible one.
     for profile in &report.profiles {
         let observed = generated
             .outputs
@@ -66,20 +58,18 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
             profile.fallback_matches_expected,
             "{}:{} query fallback digest drifted from \
              `expected_query_fallback_digests.{}` in \
-             tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json \
+             tests/fixtures/search_quality/query-lexical-graph-workload-v1.json \
              ({observed}). Confirm the new query results are intended, then re-pin \
-             both workload copies, packaged::WORKLOAD_SHA256, the workload digest \
-             pins, and regenerate the packaged native qualification.",
+             the packaged workload, packaged::WORKLOAD_SHA256, and the workload digest pins.",
             profile.profile_id, profile.partition, profile.partition
         );
     }
-    // The lexical baseline deliberately retains independently selected
-    // conceptual misses so the native semantic profile has measurable
-    // headroom. Exact/protected retrieval must remain complete.
+    // Exact/protected retrieval is complete; the lexical lanes miss a fixed
+    // set of conceptual needs, so the baseline report is a truthful `Fail`.
     assert_eq!(
         report.status,
         crate::DirectEvaluationStatusV1::Fail,
-        "the query-fallback baseline must retain conceptual headroom"
+        "the query-fallback baseline must report its conceptual misses"
     );
     let failed_queries = report
         .profiles
@@ -89,11 +79,9 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
         .map(|query| query.query_id.as_str())
         .collect::<Vec<_>>();
     // Naming every miss keeps the characterization falsifiable: a retrieval
-    // regression changes this list rather than hiding inside a count. Sixteen
-    // of the natural-language needs added for the paired-effect stratum fall
-    // here, which is what "measurable headroom" means — the needs were
-    // authored from corpus prose, not selected because the baseline fails
-    // them, and the remaining twenty-four the baseline answers.
+    // regression changes this list rather than hiding inside a count. The
+    // needs were authored from corpus prose, not selected because the
+    // baseline fails them, and the remaining twenty-four the baseline answers.
     assert_eq!(
         failed_queries,
         [
@@ -202,56 +190,40 @@ fn baseline_report_is_self_validating_and_refuses_conceptual_misses() {
         .expect("run baseline report in a dedicated process");
         assert!(
             output.status.success(),
-            "dedicated baseline report failed:\\nstdout:\\n{}\\nstderr:\\n{}",
+            "dedicated baseline report failed:\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         return;
     }
 
-    // The workload pins historical commits that survive only as unreachable
-    // objects on the integration branch; the fixture clone backfills the
-    // checked-in evaluator pack so the historical query resolves here as it
-    // does in the daemon.
-    let fixture = crate::candidate_output::tests::authenticated_repo_fixture();
-    let repo_root = fixture.root.clone();
-    let workload = load_candidate_workload(
-        &repo_root.join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
-    )
-    .expect("checked-in workload");
+    let fixture = crate::candidate_output::tests::packaged_fixture();
+    let repo_root = fixture.root();
+    let workload = fixture.workload();
     let profile_ids = vec![QUERY_BASELINE_PROFILE.to_owned()];
     let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-        repo_root: &repo_root,
+        repo_root,
         workload_path: None,
         profile_ids: Some(&profile_ids),
         admitted_scope: direct_fixture_scope,
     })
     .expect("generate direct fixture outputs");
-    let report = evaluate_generated_outputs(&repo_root, &workload, &generated)
+    let report = evaluate_generated_outputs(repo_root, workload, &generated)
         .expect("evaluate direct fixture outputs");
 
     report
-        .validate_against(&repo_root, &workload)
+        .validate_against(repo_root, workload)
         .expect("baseline evidence remains self-validating");
     assert_eq!(
         report.status,
         crate::DirectEvaluationStatusV1::Fail,
         "the independently selected conceptual queries must retain lexical headroom"
     );
-    let activation_error = report
-        .validate_for_activation(&repo_root, &workload)
-        .expect_err("a failing lexical baseline cannot become activation evidence");
-    assert!(
-        activation_error
-            .to_string()
-            .contains("query-fallback:train query train-015 failed"),
-        "activation must refuse the measured quality failure: {activation_error}"
-    );
 
     let mut tampered = report.clone();
     tampered.raw_output_digest = "sha256:tampered".to_owned();
     let raw_error = tampered
-        .validate_against(&repo_root, &workload)
+        .validate_against(repo_root, workload)
         .expect_err("raw output digest must bind the retained outputs");
     assert!(raw_error.to_string().contains("raw output digest"));
 

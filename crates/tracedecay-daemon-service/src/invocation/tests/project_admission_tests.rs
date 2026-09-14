@@ -26,7 +26,7 @@ fn retained_pre_reservation_admission_preserves_cancellation_and_timeout() {
 }
 
 #[tokio::test]
-async fn project_quiescence_denies_semantic_and_git_cached_routes() {
+async fn project_quiescence_denies_git_cached_routes() {
     let service = DaemonInvocationService::default();
     let project_root = PathBuf::from("/project-quiescence-dispatch");
     DaemonLspOwnerRegistrar::new(&service)
@@ -46,55 +46,33 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
     let now = current_micros();
     let deadline = Deadline::new(UtcMicros(now.0.saturating_add(30_000_000))).expect("deadline");
-    let requests = [
-        DaemonInvocationRequest::semantic_evaluate_and_publish(
-            "request.quiesced-semantic",
-            "query-fallback".to_owned(),
-            now,
-            deadline.clone(),
-            CancellationContext::active("cancel.quiesced-semantic").expect("cancellation"),
-        ),
-        // Activation refuses at the same admission gate before any lifecycle
-        // read, evaluation work, or configuration effect.
-        DaemonInvocationRequest::semantic_activate(
-            "request.quiesced-semantic-activate",
-            "query-fallback".to_owned(),
-            true,
-            now,
-            deadline.clone(),
-            CancellationContext::active("cancel.quiesced-semantic-activate").expect("cancellation"),
-        ),
-        DaemonInvocationRequest {
-            protocol: tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL.to_owned(),
-            revision: tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
-            request_id: "request.quiesced-git".to_owned(),
-            delivery_route: None,
-            payload: DaemonInvocationPayload::GitRead {
-                surface_operation: ApplicationSurfaceOperation::GitStatus,
-                request: GitReadSurfaceRequest {
-                    request: tracedecay_contracts::git::GitReadRequestV1::Status,
-                    max_entries: tracedecay_contracts::GIT_QUERY_DEFAULT_MAX_ENTRIES,
-                    max_bytes: tracedecay_contracts::GIT_QUERY_DEFAULT_MAX_BYTES,
-                },
-                observed_at: now,
-                deadline,
-                cancellation: CancellationContext::active("cancel.quiesced-git")
-                    .expect("cancellation"),
+    let request = DaemonInvocationRequest {
+        protocol: tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL.to_owned(),
+        revision: tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
+        request_id: "request.quiesced-git".to_owned(),
+        delivery_route: None,
+        payload: DaemonInvocationPayload::GitRead {
+            surface_operation: ApplicationSurfaceOperation::GitStatus,
+            request: GitReadSurfaceRequest {
+                request: tracedecay_contracts::git::GitReadRequestV1::Status,
+                max_entries: tracedecay_contracts::GIT_QUERY_DEFAULT_MAX_ENTRIES,
+                max_bytes: tracedecay_contracts::GIT_QUERY_DEFAULT_MAX_BYTES,
             },
+            observed_at: now,
+            deadline,
+            cancellation: CancellationContext::active("cancel.quiesced-git").expect("cancellation"),
         },
-    ];
+    };
 
-    for request in requests {
-        let response = service
-            .invoke(&registry, Some(&project_root), None, None, None, request)
-            .await;
-        assert!(matches!(
-            response.outcome,
-            DaemonInvocationOutcome::Problem {
-                problem: DaemonInvocationProblem::Unavailable
-            }
-        ));
-    }
+    let response = service
+        .invoke(&registry, Some(&project_root), None, None, None, request)
+        .await;
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable
+        }
+    ));
 
     drop(quiescence);
 }

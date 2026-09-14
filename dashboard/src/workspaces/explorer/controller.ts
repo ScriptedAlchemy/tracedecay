@@ -27,7 +27,6 @@ import { absenceVerdict, type AbsenceVerdict } from './absence.ts';
 import {
   browseLane,
   laneAnswered,
-  laneConcluded,
   laneHits,
   lanePending,
   runIsTerminal,
@@ -315,9 +314,7 @@ export function useExplorerController(): ExplorerController {
     visibleLanes,
     hits,
     anyPending: lanes.some((lane) => lanePending(lane)),
-    // A typed-absent lane concluded truthfully ("this store does not exist"),
-    // so it is neither unanswered nor a reason to withhold zero-result claims.
-    unansweredLanes: lanes.filter((lane) => !laneConcluded(lane) && !lanePending(lane)),
+    unansweredLanes: lanes.filter((lane) => !laneAnswered(lane) && !lanePending(lane)),
     answeredLaneCount: lanes.filter((lane) => laneAnswered(lane)).length,
     // A confirmed global absence is a claim about the whole index, so it is
     // re-derived from the coordinator's own unit accounting rather than

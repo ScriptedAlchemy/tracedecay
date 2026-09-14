@@ -490,7 +490,7 @@ async fn mount(
         .expect("repository parent")
         .join("native-code-index");
     schedulers
-        .mount_worktree(project_id.clone(), &repository_root, index_store, None)
+        .mount_worktree(project_id.clone(), &repository_root, index_store)
         .await
         .expect("mount canonical code-index scheduler");
     tokio::time::timeout(Duration::from_secs(5), async {

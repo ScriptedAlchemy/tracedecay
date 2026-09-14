@@ -14,7 +14,6 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
-use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use tracedecay_application::work::{
@@ -24,10 +23,8 @@ use tracedecay_daemon_service::{
     DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar, DaemonInvocationOutcome,
     DaemonInvocationProblem, DaemonInvocationService, DaemonLspOwnerRegistrar,
-    DaemonPrimitiveRuntimeRegistrar, DaemonRetainedRuntimeRegistrar,
-    DaemonSemanticOwnerRuntimeRegistrar, DaemonSemanticRuntimeRegistrar,
-    DaemonWorkRuntimeRegistrar, ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1,
-    WorkApplicationInvocationV1,
+    DaemonPrimitiveRuntimeRegistrar, DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
+    ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1, WorkApplicationInvocationV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_store_runtime::ShutdownStatus;
@@ -49,10 +46,7 @@ pub(crate) struct DaemonInvocationState {
     pub(super) github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    query_authority_provider: tracedecay_daemon_service::DaemonQueryAuthorityProviderV1,
     work_federated_query_authority: Arc<dyn WorkFederatedQueryAuthorityPortV1>,
-    semantic_projection_scheduler:
-        tracedecay_application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
 
 impl Default for DaemonInvocationState {
@@ -75,24 +69,16 @@ impl DaemonInvocationState {
         );
         let service =
             DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
-        let query_authority_provider =
-            tracedecay_daemon_service::DaemonQueryAuthorityProviderV1::default();
         let work_federated_query_authority = Arc::new(DaemonWorkFederatedQueryAuthorityV1 {
             schedulers: code_index_schedulers.clone(),
-            provider: query_authority_provider.clone(),
         });
         Self {
-            lsp_session_registry: Arc::new(tokio::sync::Mutex::new(
-                LspSessionRegistry::default(),
-            )),
+            lsp_session_registry: Arc::new(tokio::sync::Mutex::new(LspSessionRegistry::default())),
             service,
             github_credential_lifecycle:
                 github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
             code_index_schedulers,
-            query_authority_provider,
             work_federated_query_authority,
-            semantic_projection_scheduler:
-                tracedecay_application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1::default(),
         }
     }
 
@@ -228,12 +214,6 @@ impl DaemonInvocationState {
         } else {
             "remote-deleted"
         };
-        self.query_authority_provider
-            .retire_project(profile_id, project_id);
-        let worktree_ids = project_roots
-            .iter()
-            .filter_map(|root| code_index_scheduler::identity::worktree_id_for(root).ok())
-            .collect::<std::collections::BTreeSet<_>>();
         if !self
             .code_index_schedulers
             .retire_project_roots(project_roots)
@@ -247,13 +227,6 @@ impl DaemonInvocationState {
                 ),
             });
         }
-        let semantic_projection_retirements = worktree_ids
-            .iter()
-            .map(|worktree_id| {
-                self.semantic_projection_scheduler
-                    .begin_worktree_retirement(worktree_id)
-            })
-            .collect::<Vec<_>>();
         let runtime_quiescence = if reopenable {
             Some(
                 self.service
@@ -296,28 +269,6 @@ impl DaemonInvocationState {
             }
             None
         };
-        let semantic_projection_deadline =
-            tokio::time::Instant::now() + super::DAEMON_TASK_ABORT_DEADLINE;
-        for retirement in semantic_projection_retirements {
-            if !retirement.wait_until(semantic_projection_deadline).await {
-                hotpath::gauge!("daemon.invocation_state.drain.semantic_refused_total").inc(1_u64);
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "semantic projection work for {retirement_kind} project '{}' did not drain",
-                        project_id.as_str()
-                    ),
-                });
-            }
-        }
-        for root in project_roots {
-            // Upstream also unregistered the redundancy authority separately.
-            // At this tip `unregister_project_semantic_runtime` already drops
-            // the project's retained generation, redundancy state, and
-            // activation gate, so one call is the whole teardown.
-            drop(
-                tracedecay_application::semantic_runtime::unregister_project_semantic_runtime(root),
-            );
-        }
         Ok(runtime_quiescence)
     }
 
@@ -367,36 +318,8 @@ impl DaemonInvocationState {
         DaemonRetainedRuntimeRegistrar::new(&self.service)
     }
 
-    pub(super) fn semantic_runtime_registrar(&self) -> DaemonSemanticRuntimeRegistrar {
-        DaemonSemanticRuntimeRegistrar::new(&self.service)
-    }
-
-    pub(super) fn semantic_owner_runtime_registrar(&self) -> DaemonSemanticOwnerRuntimeRegistrar {
-        DaemonSemanticOwnerRuntimeRegistrar::new(&self.service)
-    }
-
     pub(super) fn lsp_owner_registrar(&self) -> DaemonLspOwnerRegistrar {
         DaemonLspOwnerRegistrar::new(&self.service)
-    }
-
-    #[hotpath::skip]
-    pub(super) async fn mount_query_authority_for_project(
-        &self,
-        project_root: &Path,
-        profile_id: &tracedecay_domain::configuration::UserProfileId,
-        scope: &tracedecay_contracts::ResolvedScope,
-    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
-    {
-        let provider = self
-            .query_authority_provider
-            .for_profile(profile_id.clone());
-        code_index_scheduler::query_runtime::mount_query_authority_on_project_open(
-            &self.code_index_schedulers,
-            project_root,
-            scope,
-            &provider,
-        )
-        .await
     }
 
     #[hotpath::skip]
@@ -416,91 +339,18 @@ impl DaemonInvocationState {
         .await
     }
 
-    #[hotpath::skip]
-    pub(super) async fn mount_core_query_authority_for_committed_fallback(
-        &self,
-        project_root: &Path,
-        scope: &tracedecay_contracts::ResolvedScope,
-        expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
-        cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
-    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
-    {
-        code_index_scheduler::query_runtime::
-            mount_core_query_authority_for_committed_fallback_on_project_open(
-                &self.code_index_schedulers,
-                project_root,
-                scope,
-                expected_revision,
-                cursor_keys,
-            )
-            .await
-    }
-
     pub(super) fn work_federated_query_authority(
         &self,
     ) -> Arc<dyn WorkFederatedQueryAuthorityPortV1> {
         Arc::clone(&self.work_federated_query_authority)
     }
 
-    pub(super) fn restore_initial_query_authority_for_project(
-        &self,
-        project_root: &Path,
-        profile_id: tracedecay_domain::configuration::UserProfileId,
-        scope: tracedecay_contracts::ResolvedScope,
-        state: crate::config::retrieval::RetrievalProfileStateV1,
-        cursor_keys: Arc<tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider>,
-    ) -> std::result::Result<
-        tracedecay_daemon_service::QueryAuthorityProviderStatusV1,
-        tracedecay_daemon_service::QueryAuthorityUpdateErrorV1,
-    > {
-        let status = self
-            .query_authority_provider
-            .install_evaluated_initial_state(profile_id, scope, state.clone(), cursor_keys)?;
-        if !tracedecay_application::semantic_runtime::commit_project_initial_semantic_roots(
-            project_root.to_path_buf(),
-            &state,
-        ) {
-            return Err(
-                tracedecay_daemon_service::QueryAuthorityUpdateErrorV1::ActivationNotCurrent,
-            );
-        }
-        Ok(status)
-    }
-
-    pub(super) fn query_activation_registrar(
-        &self,
-        project_root: &Path,
-        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    ) -> Arc<dyn tracedecay_application::semantic_runtime::RetrievalProfileActivationObserverV1>
-    {
-        Arc::new(
-            tracedecay_daemon_service::DaemonQueryActivationRegistrarV1::new(
-                self.query_authority_provider.clone(),
-                self.code_index_schedulers.clone(),
-                project_root.to_path_buf(),
-                session_db,
-            ),
-        )
-    }
-
     #[hotpath::measure(label = "daemon.invocation_state.code_index_mount", future = true)]
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "Mount composition binds project identity, store, semantic lifetime and graph publication owners explicitly."
-    )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Code-index mount is one generation-bind and scheduler-attach sequence."
-    )]
     pub(super) async fn mount_code_index(
         &self,
         project_id: tracedecay_domain::ProjectId,
         project_root: &Path,
         store_root: PathBuf,
-        semantic_runtime: Option<&tracedecay_semantic::DaemonSemanticRuntimeHandleV1>,
-        semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-        semantic_resources: Option<SemanticResourceCeilings>,
-        semantic_document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1,
         native_graph_activation: bool,
         graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
@@ -525,70 +375,16 @@ impl DaemonInvocationState {
         let canonical_project_root = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
-        let scoped_code_index_store_root = code_index_scheduler::scoped_code_index_store_root(
-            &store_root,
-            &canonical_project_root,
-        );
-        // The vector graph provider is registered unconditionally: retention
-        // and Doctor must resolve published vectors through the mounted code
-        // graph even when the semantic runtime itself is not configured.
-        let vector_graph: Arc<
-            dyn tracedecay_application::semantic_runtime::SemanticVectorGraphProviderV1,
-        > = Arc::new(
-            code_index_scheduler::semantic_vector_graph::DaemonSemanticVectorGraphProviderV1::new(
-                project_id.clone(),
-                canonical_project_root.clone(),
-                self.code_index_schedulers.clone(),
-                graph_runtime.code_graph_seat_port(),
-                Arc::clone(&graph_publication_database),
-                graph_runtime.semantic_vector_operation_task_owner(),
-            ),
-        );
-        let semantic_schedule = semantic_runtime
-            .zip(semantic_lifecycle.clone())
-            .zip(semantic_resources)
-            .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
-            .and_then(|(((handle, lifecycle), resources), worktree_id)| {
-                let graph = Arc::clone(&vector_graph);
-                tracedecay_application::semantic_runtime::production_saved_generation_schedule_hook(
-                    tracedecay_application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
-                        project_root: project_root.to_path_buf(),
-                        code_index_store_root: scoped_code_index_store_root.clone(),
-                        worktree_id,
-                        handle: handle.clone(),
-                        graph,
-                        lifecycle,
-                        resources,
-                        document_composition: semantic_document_composition,
-                        fair_scheduler: self.semantic_projection_scheduler.clone(),
-                    },
-                )
-                // Composition resolves the resident ceiling against this host
-                // before the runtime is offered, so this refusal means the
-                // worktree mounts with no semantic scheduling at all rather
-                // than with a fabricated memory budget.
-                .inspect_err(|error| {
-                    tracing::warn!(
-                        event = "semantic_projection_schedule",
-                        outcome = "hook_unavailable",
-                        error = ?error,
-                        "semantic projection hook could not be built for this worktree"
-                    );
-                })
-                .ok()
-            });
         self.code_index_schedulers
             .mount_worktree_with_graph_runtime(
                 project_id,
                 project_root,
                 store_root,
-                semantic_schedule,
                 graph_runtime.code_graph_seat_port(),
                 graph_publication_database,
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
                 ),
-                semantic_lifecycle,
             )
             .await
             .map_err(|error| {
@@ -597,16 +393,6 @@ impl DaemonInvocationState {
                     message: format!("code-index scheduler could not be mounted: {error}"),
                 }
             })?;
-        if !self
-            .code_index_schedulers
-            .install_semantic_vector_graph_provider(&canonical_project_root, vector_graph)
-            .await
-        {
-            hotpath::gauge!("daemon.invocation_state.code_index_mount.failed_total").inc(1_u64);
-            return Err(TraceDecayError::Config {
-                message: "semantic vector graph provider could not be installed in the mounted code-index authority".to_owned(),
-            });
-        }
         // The deferred code-index mount runs after the project-open delivery
         // mount that owns the producer; an absent producer leaves the
         // observability lane uninstalled and nothing records.
@@ -1374,10 +1160,12 @@ fn parse_multi_root_operation(
     }
 }
 
+/// Work evidence reads through the exact/lexical/graph authority mounted for
+/// the scope; an unmounted scope is the typed `None`, not a fabricated
+/// authority.
 #[derive(Clone)]
 struct DaemonWorkFederatedQueryAuthorityV1 {
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    provider: tracedecay_daemon_service::DaemonQueryAuthorityProviderV1,
 }
 
 impl WorkFederatedQueryAuthorityPortV1 for DaemonWorkFederatedQueryAuthorityV1 {
@@ -1385,12 +1173,7 @@ impl WorkFederatedQueryAuthorityPortV1 for DaemonWorkFederatedQueryAuthorityV1 {
         &'a self,
         scope: &'a tracedecay_contracts::ResolvedScope,
     ) -> WorkFederatedQueryAuthorityFutureV1<'a> {
-        Box::pin(async move {
-            let mounted = self.schedulers.query_authority_for_scope(scope).await?;
-            self.provider
-                .federated_authority_for(scope, mounted.privacy_domain())
-                .ok()
-        })
+        Box::pin(self.schedulers.query_authority_for_scope(scope))
     }
 }
 

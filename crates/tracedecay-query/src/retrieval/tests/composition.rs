@@ -36,7 +36,7 @@ fn receipt(
 }
 
 #[test]
-fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
+fn an_optional_lane_budget_miss_does_not_take_down_exact_lexical_or_graph() {
     let exact = exact_candidate("exact", 1);
     let lexical = candidate(RetrieverKind::Lexical, "lexical", 900_000, 0);
     let graph = candidate(RetrieverKind::Graph, "graph", 800_000, 0);
@@ -54,7 +54,7 @@ fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
             RetrieverOutcome::Complete(batch(vec![graph], "graph evidence")),
         ),
         (
-            RetrieverKind::Semantic,
+            RetrieverKind::Temporal,
             RetrieverOutcome::BudgetExceeded(RetrievalBudgetUsage::default()),
         ),
     ];
@@ -66,10 +66,10 @@ fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
             },
             &no_caps(),
         )
-        .expect("semantic budget miss must not fail composition");
+        .expect("an optional lane budget miss must not fail composition");
 
     assert_eq!(
-        composition.public_lane_statuses[&RetrieverKind::Semantic],
+        composition.public_lane_statuses[&RetrieverKind::Temporal],
         PublicRetrieverStatus::Partial
     );
     assert_eq!(
@@ -93,7 +93,7 @@ fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
             .candidate
             .contributions
             .iter()
-            .all(|contribution| contribution.retriever != RetrieverKind::Semantic)
+            .all(|contribution| contribution.retriever != RetrieverKind::Temporal)
     }));
 }
 

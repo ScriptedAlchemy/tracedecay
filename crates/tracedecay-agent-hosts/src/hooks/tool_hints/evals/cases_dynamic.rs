@@ -213,7 +213,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::EditRedundancy),
-            &["tracedecay_redundancy", "tracedecay_similar"],
+            &["tracedecay_search", "tracedecay_similar"],
         ),
         input_eval(
             "small-edit-does-not-nudge-redundancy",
@@ -250,7 +250,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::EditRedundancy),
-            &["tracedecay_redundancy", "tracedecay_similar"],
+            &["tracedecay_search", "tracedecay_similar"],
         ),
     ]
 }

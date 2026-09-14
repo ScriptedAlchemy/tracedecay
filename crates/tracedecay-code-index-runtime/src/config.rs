@@ -2,11 +2,9 @@
 //! `crate::config` module (another effort is splitting that module).
 //!
 //! Path primitives and generated-segment classification already live in
-//! runtime-core / domain. Semantic and retrieval types live in global-db and
-//! usecases. The watcher-only sync knobs are constructor-injected as
-//! [`crate::ports::GitWatchSyncConfigV1`].
+//! runtime-core / domain. The watcher-only sync knobs are constructor-injected
+//! as [`crate::ports::GitWatchSyncConfigV1`].
 
-pub use tracedecay_application::config::retrieval;
 pub use tracedecay_domain::source_path_policy::is_generated_dir_segment;
 #[cfg(test)]
 pub use tracedecay_global_db::configuration::{registry, resolver};

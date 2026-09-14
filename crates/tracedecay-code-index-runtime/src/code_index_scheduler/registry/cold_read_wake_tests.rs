@@ -31,12 +31,7 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
         .await
         .expect("hold background worker at its dequeue point");
     registry
-        .mount_worktree(
-            project_id.clone(),
-            &project,
-            fixture.path().join("store"),
-            None,
-        )
+        .mount_worktree(project_id.clone(), &project, fixture.path().join("store"))
         .await
         .expect("mount scheduler");
     let canonical_project = project.canonicalize().expect("canonical project");

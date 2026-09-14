@@ -19,12 +19,10 @@ use super::super::{
 };
 use super::scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 use super::{
-    CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1,
-    CodeIndexSemanticEvaluationPublicationLeaseV1, CodeIndexServingScopeV1,
+    CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1, CodeIndexServingScopeV1,
     MountedCodeIndexWorktreeV1, PendingWakeClaimV1, ReadyProbeServingPartsV1,
-    SemanticEvaluationGenerationRefusalV1, dashboard_code_graph_serving,
-    dashboard_freshness_identity, dashboard_generation_is_ready, dashboard_text_freshness_identity,
-    record_semantic_candidate_refusal, unique_mounted_for_scope,
+    dashboard_code_graph_serving, dashboard_freshness_identity, dashboard_generation_is_ready,
+    dashboard_text_freshness_identity, unique_mounted_for_scope,
 };
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -104,8 +102,8 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Mounted scope identity plus the currently serving generation for one
     /// project. Daemon authorities that must retain this scope's code-graph
-    /// runtime (semantic vectors, generation retention) resolve through this
-    /// read instead of re-deriving repository/worktree identity themselves.
+    /// runtime (generation retention) resolve through this read instead of
+    /// re-deriving repository/worktree identity themselves.
     pub async fn serving_code_scope(&self, project_root: &Path) -> Option<CodeIndexServingScopeV1> {
         let project_root = project_root.canonicalize().ok()?;
         let (repository_id, worktree_id, shutting_down, serving) = {
@@ -241,17 +239,6 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|latest| latest.metadata().manifest().generation_id.clone())
     }
 
-    /// Re-offer the exact serving generation to its installed semantic hook.
-    ///
-    /// Model selection is deliberately background work and can settle after
-    /// text/graph publication first offered this generation. That first offer
-    /// truthfully refuses while the artifact is unavailable; selection
-    /// completion calls this bounded retry so an unchanged repository does
-    /// not need another source reconciliation before vector indexing starts.
-    #[hotpath::measure(
-        label = "daemon.code_index.semantic_generation_reschedule",
-        future = true
-    )]
     /// Exact bounded dashboard projection for one mounted worktree.
     ///
     /// This is a status read, not a query-admission boundary: it reports the
@@ -589,8 +576,8 @@ impl CodeIndexSchedulerRegistryV1 {
             // mean paying for the rebuild. `ensure_fresh_for_query` reconciles
             // inline, and that reconcile is O(store) with no bound of its own —
             // a live `tracedecay_context` call sat on this exact line for 900
-            // seconds while the daemon ground a failing semantic publish loop,
-            // and only the client's own timeout ended it. The ladder's checks
+            // seconds while the daemon ground a failing publish loop, and only
+            // the client's own timeout ended it. The ladder's checks
             // are cheap; its remedy belongs to the background worker.
             //
             // The git authority is still proven inline, because serving
@@ -1546,163 +1533,5 @@ impl CodeIndexSchedulerRegistryV1 {
         );
         wake_claim.settle();
         true
-    }
-
-    /// Resolve the current canonical generation for semantic evaluation.
-    ///
-    /// A partitioned restart deliberately restores text and graph through
-    /// lightweight owners without installing the decoded serving seat. Native
-    /// evaluation still needs the immutable full generation, so it opens the
-    /// active publication through the scheduler's shared decode cache after
-    /// proving the exact mounted scope and source-freshness witness. This never
-    /// seats graph serving or promotes a retained generation on its own.
-    pub async fn semantic_evaluation_generation_for_scope(
-        &self,
-        project_root: &Path,
-        scope: &tracedecay_contracts::ResolvedScope,
-    ) -> Result<
-        (
-            super::super::SemanticEvaluationCodeSnapshotV1,
-            Arc<CodeIndexPublishedGenerationV1>,
-        ),
-        SemanticEvaluationGenerationRefusalV1,
-    > {
-        let requested_root = project_root;
-        let project_root = project_root
-            .canonicalize()
-            .map_err(|_| SemanticEvaluationGenerationRefusalV1::ProjectRootCanonicalizationFailed);
-        let project_root = match project_root {
-            Ok(project_root) => project_root,
-            Err(reason) => {
-                record_semantic_candidate_refusal(requested_root, reason);
-                return Err(reason);
-            }
-        };
-        let (scheduler, source_freshness, shutting_down, wake, pending_wake) = {
-            let mounted = self.mounted.lock().await;
-            let Some(worktree) = mounted.get(&project_root) else {
-                let reason = SemanticEvaluationGenerationRefusalV1::ProjectRootNotMounted;
-                record_semantic_candidate_refusal(&project_root, reason);
-                return Err(reason);
-            };
-            if worktree.repository_id != scope.repository_id
-                || worktree.worktree_id != scope.worktree_id
-            {
-                let reason = SemanticEvaluationGenerationRefusalV1::ScopeIdentityMismatch;
-                record_semantic_candidate_refusal(&project_root, reason);
-                return Err(reason);
-            }
-            (
-                Arc::clone(&worktree.scheduler),
-                worktree.source_freshness.clone(),
-                Arc::clone(&worktree.shutting_down),
-                Arc::clone(&worktree.wake),
-                Arc::clone(&worktree.pending_wake),
-            )
-        };
-        let scope = scope.clone();
-        let task_shutting_down = Arc::clone(&shutting_down);
-        let result = tokio::task::spawn_blocking(move || {
-            if task_shutting_down.load(Ordering::Acquire) {
-                return Err(SemanticEvaluationGenerationRefusalV1::SchedulerUnavailable);
-            }
-            if source_freshness.source_change_pending() {
-                return Err(SemanticEvaluationGenerationRefusalV1::SourceChanged);
-            }
-            let mut scheduler =
-                Self::lock_scheduler_unless_shutting_down(&scheduler, &task_shutting_down)
-                    .map_err(|_| SemanticEvaluationGenerationRefusalV1::SchedulerUnavailable)?;
-            if !scheduler.git_authority_available() {
-                return Err(SemanticEvaluationGenerationRefusalV1::GitAuthorityUnavailable);
-            }
-            match scheduler.freshness_probe_verdict() {
-                super::super::FreshnessProbeVerdictV1::Current => {}
-                super::super::FreshnessProbeVerdictV1::Unverified => {
-                    return Err(SemanticEvaluationGenerationRefusalV1::SourceUnverified);
-                }
-                super::super::FreshnessProbeVerdictV1::Moved => {
-                    return Err(SemanticEvaluationGenerationRefusalV1::SourceChanged);
-                }
-            }
-            let latest = scheduler
-                .latest_complete()
-                .ok_or(SemanticEvaluationGenerationRefusalV1::GenerationUnavailable)?;
-            if source_freshness.source_change_pending() {
-                return Err(SemanticEvaluationGenerationRefusalV1::SourceChanged);
-            }
-            match scheduler.freshness_probe_verdict() {
-                super::super::FreshnessProbeVerdictV1::Current => {}
-                super::super::FreshnessProbeVerdictV1::Unverified => {
-                    return Err(SemanticEvaluationGenerationRefusalV1::SourceUnverified);
-                }
-                super::super::FreshnessProbeVerdictV1::Moved => {
-                    return Err(SemanticEvaluationGenerationRefusalV1::SourceChanged);
-                }
-            }
-            if !latest_matches_scope_identity(&latest, &scope) {
-                return Err(SemanticEvaluationGenerationRefusalV1::GenerationScopeMismatch);
-            }
-            Ok((
-                latest.semantic_evaluation_snapshot(),
-                latest.generation_handle(),
-            ))
-        })
-        .await
-        .map_err(|_| SemanticEvaluationGenerationRefusalV1::WorkerJoinFailed)
-        .and_then(|result| result);
-        if result.is_err() && !shutting_down.load(Ordering::Acquire) {
-            Self::note_wake_if_idle(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
-        }
-        if let Err(reason) = result.as_ref() {
-            record_semantic_candidate_refusal(&project_root, *reason);
-        }
-        result
-    }
-
-    pub async fn semantic_evaluation_snapshot_for_scope(
-        &self,
-        scope: &tracedecay_contracts::ResolvedScope,
-    ) -> Option<super::super::SemanticEvaluationCodeSnapshotV1> {
-        let root = {
-            let mounted = self.mounted.lock().await;
-            unique_mounted_for_scope(&mounted, scope)
-                .unique()?
-                .0
-                .clone()
-        };
-        self.semantic_evaluation_generation_for_scope(&root, scope)
-            .await
-            .ok()
-            .map(|(snapshot, _)| snapshot)
-    }
-
-    pub async fn acquire_semantic_evaluation_publication_lease(
-        &self,
-        scope: &tracedecay_contracts::ResolvedScope,
-        expected: &super::super::SemanticEvaluationCodeSnapshotV1,
-    ) -> Option<CodeIndexSemanticEvaluationPublicationLeaseV1> {
-        let gate = {
-            let mounted = self.mounted.lock().await;
-            Arc::clone(
-                &unique_mounted_for_scope(&mounted, scope)
-                    .unique()?
-                    .1
-                    .semantic_evaluation_publication_gate,
-            )
-        };
-        let guard = gate.lock_owned().await;
-        if self
-            .semantic_evaluation_snapshot_for_scope(scope)
-            .await
-            .as_ref()
-            != Some(expected)
-        {
-            return None;
-        }
-        Some(CodeIndexSemanticEvaluationPublicationLeaseV1 { _guard: guard })
     }
 }

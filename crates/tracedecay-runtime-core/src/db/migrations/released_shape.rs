@@ -1,4 +1,5 @@
-//! Convergence for the one canonical project-store shape every release wrote.
+//! Convergence for a v34-stamped project store whose inventory is free of
+//! retired projections.
 //!
 //! Every release from v0.1.0-beta.25 through v0.1.0-beta.37 created one
 //! byte-identical `tracedecay.db` stamped `user_version` 34 — the exact SQL
@@ -7,13 +8,12 @@
 //! objects that hold no data of their own (two absent indexes, a renamed
 //! external-source mutation family, the runtime-writer ledger) and in two
 //! diagnostics tables that gained a `publication_revision` column and a wider
-//! primary key.
+//! primary key. Those differences are convergeable and are converged here.
 //!
-//! Those differences are all convergeable, so a released store is migrated
-//! here rather than refused: the alternative is asking an operator to discard
-//! the durable memory, retrieval anchors, and diagnostics their store holds.
-//! Shapes no release ever wrote remain reset-required in
-//! [`super::final_shape`].
+//! Every released store also carries the `semantic_vector_*` staging family
+//! that v36 retired with dense code retrieval. That family has no forward
+//! path, so a store carrying it is refused before this module writes anything,
+//! the same way [`super::final_shape`] refuses shapes no release ever wrote.
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -50,51 +50,28 @@ struct ReleasedRebuildGroup {
 }
 
 /// Diagnostics rows published before revisions existed are the first revision
-/// of their generation. The staging table only had a chunk-count ceiling
-/// relaxed, so its rows move across unchanged.
-const RELEASED_V34_REBUILDS: &[ReleasedRebuildGroup] = &[
-    ReleasedRebuildGroup {
-        canonical: tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL,
-        tables: &[
-            ReleasedTableRebuild {
-                table: "diagnostic_generation_publications",
-                released_columns: "generation_id, record_state, state_generation, published_at",
-                added_column: Some(("publication_revision", "1")),
-            },
-            ReleasedTableRebuild {
-                table: "generation_diagnostics",
-                released_columns: "diagnostic_anchor, generation_id, repository, worktree, \
-                                   reference, source_revision, file_occurrence_id, \
-                                   content_digest, symbol_occurrence_id, span_start, span_end, \
-                                   code, severity, message, message_digest, producer_kind, \
-                                   producer, analyzer_revision, configuration_revision, \
-                                   sanitization_receipt, evidence_class, collected_at, \
-                                   record_state, state_generation, persisted_at",
-                added_column: Some(("publication_revision", "1")),
-            },
-        ],
-    },
-    ReleasedRebuildGroup {
-        canonical: tracedecay_rusqlite_runtime::repository::SEMANTIC_VECTOR_STAGING_SCHEMA,
-        tables: &[ReleasedTableRebuild {
-            table: "semantic_vector_stages",
-            released_columns: "stage_id, shard_id, namespace, projection, build_id, plan_digest, \
-                               semantic_generation_id, base_generation, publication_generation, \
-                               publication_idempotency_key, source_scope, source_generation, \
-                               source_dependency, source_manifest_digest, \
-                               embedding_projection_digest, embedding_dimension, \
-                               model_artifact_digest, projection_manifest_digest, \
-                               privacy_domain_digest, privacy_key_epoch, \
-                               expected_chunk_manifest_digest, expected_chunk_count, \
-                               expected_prior_verified_head, writer_binding, code_scope_hash, \
-                               plan_json, state, next_ordinal, checkpoint_digest, \
-                               recorded_chunk_count, applied_ordinal, applied_receipt_digest, \
-                               applied_checkpoint_digest, applied_graph_batch_digest, \
-                               expected_recovered_digest, publication_intent_digest",
-            added_column: None,
-        }],
-    },
-];
+/// of their generation.
+const RELEASED_V34_REBUILDS: &[ReleasedRebuildGroup] = &[ReleasedRebuildGroup {
+    canonical: tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL,
+    tables: &[
+        ReleasedTableRebuild {
+            table: "diagnostic_generation_publications",
+            released_columns: "generation_id, record_state, state_generation, published_at",
+            added_column: Some(("publication_revision", "1")),
+        },
+        ReleasedTableRebuild {
+            table: "generation_diagnostics",
+            released_columns: "diagnostic_anchor, generation_id, repository, worktree, \
+                               reference, source_revision, file_occurrence_id, \
+                               content_digest, symbol_occurrence_id, span_start, span_end, \
+                               code, severity, message, message_digest, producer_kind, \
+                               producer, analyzer_revision, configuration_revision, \
+                               sanitization_receipt, evidence_class, collected_at, \
+                               record_state, state_generation, persisted_at",
+            added_column: Some(("publication_revision", "1")),
+        },
+    ],
+}];
 
 fn failure(message: String) -> TraceDecayError {
     TraceDecayError::Database {
@@ -106,6 +83,8 @@ fn failure(message: String) -> TraceDecayError {
 /// Converges a store stamped with the released version to the shape this
 /// binary creates, carrying every row forward.
 ///
+/// A store still carrying a retired projection is refused first, inside the
+/// caller's transaction, so the refusal leaves the store byte-identical.
 /// Runs before the payload-digest step, whose own admission check requires the
 /// current shape everywhere but the digest objects. Idempotent by
 /// construction: the rebuilds are selected by the released column being
@@ -113,6 +92,7 @@ fn failure(message: String) -> TraceDecayError {
 /// moves are the same resumable statements the registered stores converge
 /// with.
 pub(super) async fn converge_released_project_schema(conn: &(impl Executor + Sync)) -> Result<()> {
+    super::require_no_retired_sqlite_projection_object(conn).await?;
     for group in RELEASED_V34_REBUILDS {
         rebuild_released_group(conn, group).await?;
     }

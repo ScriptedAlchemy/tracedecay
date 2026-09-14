@@ -196,9 +196,7 @@ use tracedecay_code_index_runtime::code_index_executor::{
     code_index_search_display_binding, mcp_search_request_termination,
 };
 #[cfg(test)]
-use tracedecay_code_index_runtime::code_index_task_support::{
-    code_index_scope_unavailable, code_index_search_hydration_budget,
-};
+use tracedecay_code_index_runtime::code_index_task_support::code_index_scope_unavailable;
 mod connection_serving;
 #[cfg(feature = "rmcp-benchmark")]
 #[doc(hidden)]

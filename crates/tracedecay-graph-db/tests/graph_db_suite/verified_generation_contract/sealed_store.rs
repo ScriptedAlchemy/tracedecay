@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use tracedecay_graph_db::{GraphTraversalDirection, GraphVector, TraversalRequest, VectorMetric};
+use tracedecay_graph_db::{GraphTraversalDirection, TraversalRequest};
 
 use super::*;
 
@@ -718,72 +718,6 @@ fn bytes_rows_seal_compact_and_read_exactly() {
             .get(&GraphPropertyName::new("record").unwrap()),
         Some(&GraphProperty::Bytes(payload)),
     );
-}
-
-/// Rows carrying Vector properties seal in compact form and read back
-/// exactly, even when one property name carries two dimensions across the
-/// generation: the native vector key embeds the dimension, so each column
-/// holds one dimension and the `Float32Vector` codec round-trips every value.
-#[test]
-fn vector_rows_seal_compact_and_read_exactly() {
-    let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
-    let mut authority = RelationalAuthority::default();
-    let identity = projection("sealed-store:vectors", "code");
-
-    let mut g1 = rich_manifest(identity.clone(), "vectors-g1", "payload");
-    let vector = GraphVector::new(vec![0.25_f32, -0.5, 0.75], 3, VectorMetric::Cosine).unwrap();
-    let wider = GraphVector::new(vec![1.0_f32, 2.0, 3.0, 4.0], 4, VectorMetric::Cosine).unwrap();
-    for entity in &mut g1.entities {
-        let embedding = if entity.identity.as_str() == "entity:b" {
-            vector.clone()
-        } else {
-            wider.clone()
-        };
-        entity.properties.insert(
-            GraphPropertyName::new("embedding").unwrap(),
-            GraphProperty::Vector(embedding),
-        );
-    }
-    let record = stage_manifest(
-        &mut authority,
-        &registered.binding,
-        &g1,
-        "publish:vectors-g1",
-        None,
-        '4',
-    );
-    let commit = publish(
-        &registered,
-        temp.path(),
-        &mut authority,
-        &record.publication.key,
-    );
-    assert!(commit.snapshot.serves_from_sealed_store());
-    let receipt = receipt_for_generation(temp.path(), "vectors-g1")
-        .expect("seal must write the artifact receipt");
-    assert!(
-        receipt.contains("\"form\": \"compact\""),
-        "every sealed generation is a compact artifact: {receipt}"
-    );
-    assert_snapshot_reads(&commit.snapshot, &identity, "payload");
-    for (id, expected) in [("entity:b", vector), ("entity:a", wider)] {
-        let entity = commit
-            .snapshot
-            .entity(
-                &GraphEntityRef::new(identity.clone(), GraphEntityId::new(id).unwrap()),
-                Arc::new(TestCancellation),
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            entity
-                .properties
-                .get(&GraphPropertyName::new("embedding").unwrap()),
-            Some(&GraphProperty::Vector(expected)),
-            "{id}"
-        );
-    }
 }
 
 /// A restage of the same generation identity with different content is

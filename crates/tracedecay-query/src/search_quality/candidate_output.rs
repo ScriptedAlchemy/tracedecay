@@ -13,43 +13,27 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_code_index::chunks::content_digest;
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_contracts::historical_query::HistoricalGitReadUnavailableReasonV1;
 use tracedecay_contracts::is_canonical_repository_relative_path;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
-    CalibrationProfileId, CodeGenerationId, CodeSearchChunkId, DiversityPolicy, DiversityPolicyId,
-    EphemeralSanitizedQueryViewV1, FusionProfile, FusionProfileId, ManifestDigest, RerankPolicy,
-    RetrievalAnchorId, RetrievalBudget, RetrievalRequest, RetrieverKind, ScoreDomainCalibrationV1,
-    ScoreDomainId, VectorGenerationIdV1,
+    CalibrationProfileId, DiversityPolicy, DiversityPolicyId, FusionProfile, FusionProfileId,
+    RetrievalAnchorId, RetrievalBudget, RetrieverKind, ScoreDomainCalibrationV1, ScoreDomainId,
 };
 
-use super::semantic_native::{
-    SemanticNativeQueryOutputV1, SemanticNativeRerankInputV1, SemanticNativeResourceEvidenceV1,
-    SemanticNativeResourceSampleV1, SemanticNativeSemanticInputV1, SemanticNativeStageResultV1,
-    SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1,
-};
 pub const WORKLOAD_RELATIVE: &str =
-    "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
+    "tests/fixtures/search_quality/query-lexical-graph-workload-v1.json";
 pub const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
-pub const EVALUATION_MODEL_REVISION: &str =
-    "JinaEmbeddingsV2BaseCode@516f4baf13dec4ddddda8631e019b5737c8bc250";
-pub const EVALUATION_PROJECTION_REVISION: &str = "retriever.semantic-flat.evaluation.v1";
-pub const EVALUATION_RUNTIME_REVISION: &str = "semantic.fastembed.production.v1";
 pub const REQUIRED_CANCELLATION: &str = "bounded_typed_cancelled";
 pub const REQUIRED_OFFLINE: &str = "no_network_and_query_fallback_available";
 pub const EVALUATION_SEED: &str = "not_applicable_deterministic_no_rng";
 pub const EVALUATION_CACHE_STATE: &str = "cold_empty_in_memory_publication";
-/// Qualification methodology this build implements.
-///
-/// Version 1 required a one-part-per-million gain in the natural-language
-/// stratum *mean*, on a stratum two queries wide. Version 2 requires a
-/// predeclared practical effect plus a paired confidence interval whose lower
-/// bound clears zero, over a floor of independently sourced needs. Bump this
-/// whenever the decision rule changes so retained evidence cannot be reread
-/// under a rule it was never scored against.
-pub const QUALIFICATION_METHODOLOGY_VERSION: u32 = 2;
+/// The stratum whose queries are conceptual needs rather than technical
+/// lookups. Every query in it must document where the need came from and
+/// which corpus symbols answer it, so a relevance judgment is never an
+/// unsourced assertion.
+pub const NEED_STRATUM: &str = "natural_language";
 const CORPUS_DIGEST_DOMAIN: &str = "tracedecay.search-eval.corpus-content.v1";
 
 #[derive(Debug, Error)]
@@ -81,58 +65,11 @@ pub struct CandidateWorkloadV1 {
     pub source_repository_commit: String,
     pub source_repository_tree: String,
     pub execution_contract: EvaluationExecutionContractV1,
-    pub incremental_fixture: IncrementalFixtureV1,
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
     pub decision_policy: DecisionPolicySliceV1,
-    pub qualification_methodology: QualificationMethodologyV1,
     pub expected_query_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
-}
-
-/// Predeclared decision rule for semantic qualification.
-///
-/// Every parameter that decides whether a candidate profile qualifies lives
-/// here, inside the digest-bound workload, so the rule is fixed before the
-/// held-out partition is measured. [`QUALIFICATION_METHODOLOGY_VERSION`] is the
-/// build's own version: a workload declaring anything else is refused rather
-/// than scored under a rule this binary does not implement.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct QualificationMethodologyV1 {
-    pub methodology_version: u32,
-    /// Per-query metric whose paired difference carries the effect.
-    pub effect_metric: String,
-    /// Stratum the effect is measured on.
-    pub effect_stratum: String,
-    /// Partition that decides qualification. Never used for tuning.
-    pub held_out_partition: String,
-    /// Partition available for tuning before the freeze.
-    pub tuning_partition: String,
-    /// Floor on independently sourced needs per partition. A floor is workload
-    /// fitness, not statistical proof: the interval below still decides.
-    pub minimum_effect_queries_per_partition: u64,
-    /// Smallest mean paired difference that counts as a practical effect.
-    pub practical_effect_threshold_ppm: u32,
-    /// Two-sided confidence level for the paired interval.
-    pub confidence_level_ppm: u32,
-    pub baseline_profile_id: String,
-    pub candidate_profile_ids: Vec<String>,
-    pub policy_freeze: QualificationPolicyFreezeV1,
-}
-
-/// Evidence that the policy and profile material were fixed before the
-/// held-out partition was measured.
-///
-/// Retuning any profile changes its canonical material digest, so a candidate
-/// tuned after the freeze cannot be scored until the freeze is re-declared in
-/// its own visible change.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct QualificationPolicyFreezeV1 {
-    pub frozen_at_commit: String,
-    pub frozen_profile_material_digests: BTreeMap<String, String>,
-    pub rationale: String,
 }
 
 /// Where one natural-language need came from, and why its labelled targets
@@ -168,10 +105,7 @@ pub struct EvaluationExecutionContractV1 {
     pub exact_eligible_chunks_current: u64,
     pub exact_eligible_chunks_10x: u64,
     pub exact_query_count: u64,
-    pub model_revision: String,
-    pub projection_revision: String,
     pub fusion_revision: String,
-    pub runtime_revision: String,
     pub cache_state: String,
     pub concurrency: EvaluationConcurrencyContractV1,
 }
@@ -180,16 +114,7 @@ pub struct EvaluationExecutionContractV1 {
 #[serde(deny_unknown_fields)]
 pub struct EvaluationConcurrencyContractV1 {
     pub query_workers: u32,
-    pub projection_workers: u32,
     pub query_execution: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct IncrementalFixtureV1 {
-    pub document_id: String,
-    pub after_path: String,
-    pub after_sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -220,75 +145,10 @@ struct CorpusContentBindingV1<'a> {
 #[serde(deny_unknown_fields)]
 pub struct ProfileSpecV1 {
     pub profile_id: String,
+    /// Lexical lane weight in parts per million; the exact lane is always
+    /// weighted at one million.
     pub lexical_weight_ppm: u32,
     pub graph_weight_ppm: u32,
-    pub semantic_weight_ppm: u32,
-    pub rerank_weight_ppm: u32,
-    /// Per-profile semantic acceptance cut-off, expressed as a minimum
-    /// nonnegative cosine similarity in parts per million. This is not the
-    /// former shifted `[-1, 1]` calibration domain.
-    ///
-    /// # This value is in force
-    ///
-    /// It becomes `FusionProfile::minimum_calibrated_feature_micros[Semantic]`
-    /// (see `fusion_profile` below), it is carried through
-    /// `DirectEvaluatedProfileMaterialV1` into the daemon candidate builder,
-    /// and `crate::retrieval::fusion` drops every semantic
-    /// contribution whose calibrated feature falls under it. Editing this
-    /// number changes production retrieval, not just the evaluation fixture.
-    ///
-    /// An earlier revision of this comment claimed the opposite — that the
-    /// field was documentation only — after the wiring had already landed. The
-    /// claim survived long enough for the value to be re-tuned five times in
-    /// one day (`700000` → `690000` → `700000` → `400000` → `635000`) as a way
-    /// to move a failing activation gate. Keep `calibration_threshold_ppm_is_in_force`
-    /// green so the claim cannot come back.
-    ///
-    /// # It is a second cut on an already-measured quantity
-    ///
-    /// The semantic lane *also* abstains on
-    /// `SemanticCalibrationProfileV1::maximum_distance_micros`, which
-    /// `tracedecay_application::semantic_runtime::measure_acceptance_calibration`
-    /// measures from the committed generation's own vectors — deliberately,
-    /// because a cosine cut-off is a property of the model and corpus rather
-    /// than of a checked-in profile. This field therefore imposes a *second*,
-    /// tighter, unmeasured cut on the same cosine score after the measured one
-    /// has already run.
-    ///
-    /// That gap is real and is documented in `acceptance_calibration`: the
-    /// measured bound is a code↔code background distribution, while this gate
-    /// decides natural-language↔code queries, which sit in a different score
-    /// regime. A hand-picked constant is not the fix. The workload already
-    /// carries the labelled data the honest fix needs — relevant anchors and
-    /// `no_answer` negatives, split into `train` and `validation` — so the cut
-    /// must be derived from the train partition's measured positive/negative
-    /// separation and then hold on validation. Until that derivation exists,
-    /// do not move this number to make a gate pass.
-    pub calibration_threshold_ppm: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rerank_policy: Option<EvaluationRerankPolicyV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct EvaluationRerankPolicyV1 {
-    pub policy_id: String,
-    pub max_candidates: u32,
-    pub max_input_bytes: u64,
-    pub max_input_tokens: u64,
-    pub max_work_units: u64,
-    pub max_model_invocations: u32,
-    pub deadline_micros: Option<u64>,
-}
-
-/// Exact domain material exercised by the direct evaluator for one checked-in
-/// profile. Evaluation anchors are placeholders until a passing report is
-/// derived and must be replaced by the publishing operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DirectEvaluatedProfileMaterialV1 {
-    pub profile: FusionProfile,
-    pub diversity: DiversityPolicy,
-    pub rerank: Option<RerankPolicy>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,8 +171,8 @@ pub struct WorkloadQueryV1 {
     pub historical_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<serde_json::Value>,
-    /// Required on every query in the effect stratum: the measured effect is
-    /// only as good as the needs it is measured on.
+    /// Required on every query in [`NEED_STRATUM`]: a measured quality is only
+    /// as good as the needs it is measured on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub need_provenance: Option<NeedProvenanceV1>,
 }
@@ -334,8 +194,6 @@ pub struct QueryCandidateRowV1 {
     pub ranked: Vec<RankedCandidateRowV1>,
     pub abstained: bool,
     pub historical: HistoricalQueryExecutionV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native: Option<SemanticNativeQueryOutputV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -344,25 +202,6 @@ pub enum HistoricalQueryExecutionV1 {
     NotRequested,
     Complete,
     Unavailable(HistoricalGitReadUnavailableReasonV1),
-}
-
-/// Truthful execution state for an optional evaluated retrieval stage.
-///
-/// Candidate generation records optional stages only when a real stage ran.
-/// A configured profile without such a run remains `Pending`.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OptionalStageMeasurementV1 {
-    NotRequested,
-    Pending,
-    Complete,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct OptionalStageMeasurementsV1 {
-    pub semantic: OptionalStageMeasurementV1,
-    pub rerank: OptionalStageMeasurementV1,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -407,10 +246,7 @@ pub struct ProductionCandidateOutputV1 {
     pub query_fallback_matches_expected: bool,
     pub cancellation: String,
     pub offline: String,
-    pub optional_stages: OptionalStageMeasurementsV1,
     pub resources: BTreeMap<String, ResourceSampleV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_resources: Option<SemanticNativeResourceEvidenceV1>,
     pub queries: Vec<QueryCandidateRowV1>,
 }
 
@@ -420,95 +256,7 @@ pub struct GenerateCandidateOutputsResultV1 {
     pub outputs: Vec<ProductionCandidateOutputV1>,
 }
 
-pub struct ProductionCandidateNativeQueryContextV1<'a> {
-    pub profile: &'a ProfileSpecV1,
-    pub query: &'a WorkloadQueryV1,
-    pub request: &'a RetrievalRequest,
-    pub query_view: &'a EphemeralSanitizedQueryViewV1,
-    pub code: &'a CodeIndexPublishedGenerationV1,
-    pub code_generation: &'a CodeGenerationId,
-    pub semantic_allowed_chunks: &'a BTreeSet<CodeSearchChunkId>,
-    pub rerank_policy: Option<&'a RerankPolicy>,
-}
-
-/// Genuine optional runtime inputs borrowed only for the evaluator call.
-pub struct ProductionCandidateNativeQueryInputsV1<'a> {
-    pub semantic: Option<SemanticNativeSemanticInputV1<'a>>,
-    pub rerank: Option<SemanticNativeRerankInputV1<'a>>,
-}
-
-/// Genuine code generations used as canonical inputs to the production
-/// semantic projector/store case matrix. Replay, cancellation, and
-/// incompatibility are store operations over these exact generations.
-pub struct ProductionCandidateSemanticProjectionSourcesV1<'a> {
-    pub one_symbol: &'a CodeIndexPublishedGenerationV1,
-    pub deletion: &'a CodeIndexPublishedGenerationV1,
-    pub no_op: &'a CodeIndexPublishedGenerationV1,
-}
-
-/// Exact immutable generation whose resource use must be measured.
-pub struct ProductionCandidateNativeResourceContextV1<'a> {
-    pub profile: &'a ProfileSpecV1,
-    pub queries: &'a [&'a WorkloadQueryV1],
-    pub code: &'a CodeIndexPublishedGenerationV1,
-    pub incremental_code: &'a CodeIndexPublishedGenerationV1,
-    pub incremental_before_content_digest: &'a str,
-    pub incremental_after_content_digest: &'a str,
-    pub code_generation: &'a CodeGenerationId,
-    pub workload_digest: &'a str,
-    pub corpus_digest: &'a str,
-    pub scale: &'a str,
-    pub eligible_chunks: u64,
-    pub semantic_projection_sources: ProductionCandidateSemanticProjectionSourcesV1<'a>,
-}
-
-/// Production-observed generation resources. Candidate generation supplies
-/// query latency/CPU/RSS and rejects any mismatched returned identity.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProductionCandidateNativeGenerationResourcesV1 {
-    pub source_generation: CodeGenerationId,
-    pub source_manifest_digest: ManifestDigest,
-    pub incremental_source_generation: CodeGenerationId,
-    pub incremental_source_manifest_digest: ManifestDigest,
-    pub vector_generation: Option<VectorGenerationIdV1>,
-    pub artifact_digest: Option<ManifestDigest>,
-    pub model_bytes: u64,
-    pub tokenizer_bytes: u64,
-    pub threads: u32,
-    pub max_concurrent_sessions: u32,
-    pub batch_size: u32,
-    pub sequence_length: u32,
-    pub load_deadline_ms: u64,
-    pub cold_model_load_micros: u64,
-    pub vector_bytes: u64,
-    pub index_bytes: u64,
-    pub cache_bytes: u64,
-    pub clean_projection_build_micros: u64,
-    pub incremental_rebuild_micros: u64,
-    pub projection_cases: BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
-}
-
-/// Production authority that supplies admitted semantic/rerank runtimes.
-///
-/// The callback is the only way to produce a query result: candidate
-/// generation invokes `semantic_native::evaluate_native_query` inside it.
-pub trait ProductionCandidateNativeExecutionAuthorityV1: Send + Sync {
-    fn with_query_inputs(
-        &self,
-        context: ProductionCandidateNativeQueryContextV1<'_>,
-        evaluate: &mut dyn for<'inputs> FnMut(
-            ProductionCandidateNativeQueryInputsV1<'inputs>,
-        ) -> Result<(), CandidateOutputError>,
-    ) -> Result<(), CandidateOutputError>;
-
-    fn measure_resources(
-        &self,
-        context: ProductionCandidateNativeResourceContextV1<'_>,
-        execute_queries: &mut dyn FnMut() -> Result<Vec<u64>, CandidateOutputError>,
-    ) -> Result<SemanticNativeStageResultV1<SemanticNativeResourceSampleV1>, CandidateOutputError>;
-}
-
-/// Load the checked-in query/semantic direct-evaluation workload.
+/// Load the checked-in exact/lexical/graph direct-evaluation workload.
 pub fn load_candidate_workload(path: &Path) -> Result<CandidateWorkloadV1, CandidateOutputError> {
     let bytes = fs::read(path).map_err(|source| CandidateOutputError::Read {
         path: path.to_path_buf(),
@@ -555,28 +303,7 @@ pub fn compute_corpus_digest(
     })
 }
 
-/// Compute the corpus identity from the package's embedded authoritative
-/// bytes. Unlike [`compute_corpus_digest`], this validates no filesystem or
-/// Git state and therefore cannot materialize the evaluator fixture.
-pub fn compute_corpus_digest_from_embedded_bytes(
-    workload: &CandidateWorkloadV1,
-    files: &[(&str, &[u8])],
-) -> Result<String, CandidateOutputError> {
-    compute_corpus_digest_from_document_bytes(workload, |document| {
-        files
-            .iter()
-            .find_map(|(path, bytes)| (*path == document.path).then_some(*bytes))
-            .map(Cow::Borrowed)
-            .ok_or_else(|| {
-                CandidateOutputError::Contract(format!(
-                    "packaged evaluator corpus is missing {}",
-                    document.path
-                ))
-            })
-    })
-}
-
-/// Verify every effect-stratum need's provenance quote against the corpus bytes
+/// Verify every documented need's provenance quote against the corpus bytes
 /// this build carries.
 ///
 /// Provenance that cannot be found in the document it cites is not provenance,
@@ -587,11 +314,7 @@ pub fn validate_need_provenance_against_embedded_corpus(
     workload: &CandidateWorkloadV1,
     files: &[(&str, &[u8])],
 ) -> Result<(), CandidateOutputError> {
-    let stratum = workload.qualification_methodology.effect_stratum.as_str();
     for query in &workload.queries {
-        if !query.strata.iter().any(|name| name == stratum) {
-            continue;
-        }
         let Some(provenance) = &query.need_provenance else {
             continue;
         };
@@ -796,30 +519,13 @@ pub fn validate_workload_for_tuning(
                         "evaluation current chunk count overflows 10x".to_owned(),
                     )
                 })?
-        || contract.model_revision != EVALUATION_MODEL_REVISION
-        || contract.projection_revision != EVALUATION_PROJECTION_REVISION
         || contract.fusion_revision != PRODUCTION_BOUNDARY
-        || contract.runtime_revision != EVALUATION_RUNTIME_REVISION
         || contract.cache_state != EVALUATION_CACHE_STATE
         || contract.concurrency.query_workers != 1
-        || contract.concurrency.projection_workers != 1
         || contract.concurrency.query_execution != "serial_exact_workload_order"
     {
         return Err(CandidateOutputError::Contract(
             "evaluation execution contract does not match the production workload".to_owned(),
-        ));
-    }
-    if workload.incremental_fixture.document_id.trim().is_empty()
-        || !is_canonical_repository_relative_path(&workload.incremental_fixture.after_path)
-        || workload.incremental_fixture.after_sha256.len() != 64
-        || !workload
-            .incremental_fixture
-            .after_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(CandidateOutputError::Contract(
-            "incremental fixture identity/path/digest is invalid".to_owned(),
         ));
     }
     let mut document_ids = BTreeSet::new();
@@ -871,11 +577,6 @@ pub fn validate_workload_for_tuning(
             "corpus must not be empty".to_owned(),
         ));
     }
-    if !document_ids.contains(workload.incremental_fixture.document_id.as_str()) {
-        return Err(CandidateOutputError::Contract(
-            "incremental fixture document_id is absent from the corpus".to_owned(),
-        ));
-    }
     let mut profile_ids = BTreeSet::new();
     for profile in &workload.profile_matrix {
         if profile.profile_id.trim().is_empty() {
@@ -886,31 +587,6 @@ pub fn validate_workload_for_tuning(
         if !profile_ids.insert(profile.profile_id.as_str()) {
             return Err(CandidateOutputError::Contract(format!(
                 "duplicate profile_id {}",
-                profile.profile_id
-            )));
-        }
-        if profile.calibration_threshold_ppm > 1_000_000 {
-            return Err(CandidateOutputError::Contract(format!(
-                "profile {} calibration threshold exceeds one million ppm",
-                profile.profile_id
-            )));
-        }
-        if (profile.rerank_weight_ppm == 0) != profile.rerank_policy.is_none() {
-            return Err(CandidateOutputError::Contract(format!(
-                "profile {} must bind rerank weight and policy together",
-                profile.profile_id
-            )));
-        }
-        if let Some(policy) = &profile.rerank_policy
-            && (policy.policy_id.trim().is_empty()
-                || policy.max_candidates == 0
-                || policy.max_input_bytes == 0
-                || policy.max_input_tokens == 0
-                || policy.max_work_units == 0
-                || policy.max_model_invocations == 0)
-        {
-            return Err(CandidateOutputError::Contract(format!(
-                "profile {} has an invalid bounded rerank policy",
                 profile.profile_id
             )));
         }
@@ -985,8 +661,7 @@ pub fn validate_workload_for_tuning(
             "expected query fallback digest is not canonical".to_owned(),
         ));
     }
-    validate_qualification_methodology(workload)?;
-    Ok(())
+    validate_need_provenance(workload)
 }
 
 fn is_canonical_sha256(digest: &str) -> bool {
@@ -997,231 +672,66 @@ fn is_canonical_sha256(digest: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Refuse a workload whose predeclared decision rule this build does not
-/// implement, whose effect stratum is too thin to measure, whose needs carry no
-/// provenance, or whose profile material has moved since the freeze.
-fn validate_qualification_methodology(
-    workload: &CandidateWorkloadV1,
-) -> Result<(), CandidateOutputError> {
-    let methodology = &workload.qualification_methodology;
-    if methodology.methodology_version != QUALIFICATION_METHODOLOGY_VERSION {
-        return Err(CandidateOutputError::Contract(format!(
-            "qualification methodology version {} is not the version {QUALIFICATION_METHODOLOGY_VERSION} this build implements",
-            methodology.methodology_version
-        )));
-    }
-    if methodology.effect_metric != "ndcg_at_10_ppm" {
-        return Err(CandidateOutputError::Contract(format!(
-            "qualification methodology effect metric {} is not measured per query",
-            methodology.effect_metric
-        )));
-    }
-    if methodology.held_out_partition == methodology.tuning_partition {
-        return Err(CandidateOutputError::Contract(
-            "qualification methodology must hold out a partition it does not tune on".to_owned(),
-        ));
-    }
-    for partition in [
-        methodology.held_out_partition.as_str(),
-        methodology.tuning_partition.as_str(),
-    ] {
-        if partition != "train" && partition != "validation" {
-            return Err(CandidateOutputError::Contract(format!(
-                "qualification methodology names unknown partition {partition}"
-            )));
-        }
-    }
-    if methodology.practical_effect_threshold_ppm == 0 {
-        return Err(CandidateOutputError::Contract(
-            "qualification methodology must predeclare a nonzero practical effect".to_owned(),
-        ));
-    }
-    if methodology.confidence_level_ppm != 950_000 {
-        return Err(CandidateOutputError::Contract(format!(
-            "qualification methodology confidence level {} ppm is not the two-sided 95% interval this build computes",
-            methodology.confidence_level_ppm
-        )));
-    }
-    if methodology.baseline_profile_id != super::evaluate::QUERY_BASELINE_PROFILE
-        || methodology.candidate_profile_ids
-            != [
-                super::evaluate::SEMANTIC_PROFILE,
-                super::evaluate::RERANK_PROFILE,
-            ]
-    {
-        return Err(CandidateOutputError::Contract(
-            "qualification methodology does not name the checked-in baseline and candidate profiles"
-                .to_owned(),
-        ));
-    }
-    validate_policy_freeze(workload)?;
-    validate_effect_stratum_fitness(workload)
-}
-
-fn validate_policy_freeze(workload: &CandidateWorkloadV1) -> Result<(), CandidateOutputError> {
-    let freeze = &workload.qualification_methodology.policy_freeze;
-    if freeze.frozen_at_commit.len() != 40
-        || !freeze
-            .frozen_at_commit
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(CandidateOutputError::Contract(
-            "policy freeze must name the commit it was declared at".to_owned(),
-        ));
-    }
-    if freeze.rationale.trim().is_empty() {
-        return Err(CandidateOutputError::Contract(
-            "policy freeze must record why the policy was frozen".to_owned(),
-        ));
-    }
-    if freeze.frozen_profile_material_digests.len() != workload.profile_matrix.len() {
-        return Err(CandidateOutputError::Contract(
-            "policy freeze must pin every profile in the matrix".to_owned(),
-        ));
-    }
-    for profile in &workload.profile_matrix {
-        let frozen = freeze
-            .frozen_profile_material_digests
-            .get(&profile.profile_id)
-            .ok_or_else(|| {
-                CandidateOutputError::Contract(format!(
-                    "policy freeze does not pin profile {}",
-                    profile.profile_id
-                ))
-            })?;
-        let observed = compute_profile_material_digest(profile)?;
-        if *frozen != observed {
-            return Err(CandidateOutputError::Contract(format!(
-                "profile {} was retuned after the policy freeze: frozen {frozen}, observed {observed}",
-                profile.profile_id
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// The effect stratum must carry at least the declared floor of needs in both
-/// partitions, and every one of those needs must document where it came from.
-fn validate_effect_stratum_fitness(
-    workload: &CandidateWorkloadV1,
-) -> Result<(), CandidateOutputError> {
-    let methodology = &workload.qualification_methodology;
-    let stratum = methodology.effect_stratum.as_str();
-    for partition in ["train", "validation"] {
-        let needs = workload
-            .queries
-            .iter()
-            .filter(|query| {
-                query.partition == partition && query.strata.iter().any(|name| name == stratum)
-            })
-            .collect::<Vec<_>>();
-        if (needs.len() as u64) < methodology.minimum_effect_queries_per_partition {
-            return Err(CandidateOutputError::Contract(format!(
-                "partition {partition} carries {} {stratum} needs, below the declared floor of {}",
-                needs.len(),
-                methodology.minimum_effect_queries_per_partition
-            )));
-        }
-        for need in needs {
-            validate_need_fitness(workload, need, stratum)?;
-        }
-    }
-    Ok(())
-}
-
-/// One effect-stratum need must say where it came from and what answers it.
+/// Every [`NEED_STRATUM`] query must document its provenance, and every
+/// documented need must say where it came from and what answers it.
 ///
-/// A measured effect is only as good as the needs it is measured on, so a need
-/// without a verifiable source or a relevance judgment is refused rather than
-/// scored.
-fn validate_need_fitness(
-    workload: &CandidateWorkloadV1,
-    need: &WorkloadQueryV1,
-    stratum: &str,
-) -> Result<(), CandidateOutputError> {
-    let provenance = need.need_provenance.as_ref().ok_or_else(|| {
-        CandidateOutputError::Contract(format!(
-            "{stratum} need {} has no documented provenance",
-            need.query_id
-        ))
-    })?;
-    if provenance.source_quote.trim().is_empty() || provenance.judgment_rationale.trim().is_empty() {
-        return Err(CandidateOutputError::Contract(format!(
-            "{stratum} need {} has an empty provenance quote or rationale",
-            need.query_id
-        )));
-    }
-    if !workload
-        .corpus
-        .iter()
-        .any(|document| document.document_id == provenance.source_document_id)
-    {
-        return Err(CandidateOutputError::Contract(format!(
-            "{stratum} need {} cites document {} which is outside the corpus",
-            need.query_id, provenance.source_document_id
-        )));
-    }
-    let labelled_targets = need
-        .label
-        .as_ref()
-        .and_then(|label| label.get("anchors"))
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
-    if labelled_targets == 0 {
-        return Err(CandidateOutputError::Contract(format!(
-            "{stratum} need {} has no relevance judgment",
-            need.query_id
-        )));
+/// A measured quality is only as good as the needs it is measured on, so a
+/// need without a verifiable source or a relevance judgment is refused rather
+/// than scored.
+fn validate_need_provenance(workload: &CandidateWorkloadV1) -> Result<(), CandidateOutputError> {
+    for need in &workload.queries {
+        let in_need_stratum = need.strata.iter().any(|name| name == NEED_STRATUM);
+        let Some(provenance) = &need.need_provenance else {
+            if in_need_stratum {
+                return Err(CandidateOutputError::Contract(format!(
+                    "{NEED_STRATUM} need {} has no documented provenance",
+                    need.query_id
+                )));
+            }
+            continue;
+        };
+        if provenance.source_quote.trim().is_empty()
+            || provenance.judgment_rationale.trim().is_empty()
+        {
+            return Err(CandidateOutputError::Contract(format!(
+                "need {} has an empty provenance quote or rationale",
+                need.query_id
+            )));
+        }
+        if !workload
+            .corpus
+            .iter()
+            .any(|document| document.document_id == provenance.source_document_id)
+        {
+            return Err(CandidateOutputError::Contract(format!(
+                "need {} cites document {} which is outside the corpus",
+                need.query_id, provenance.source_document_id
+            )));
+        }
+        let labelled_targets = need
+            .label
+            .as_ref()
+            .and_then(|label| label.get("anchors"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        if labelled_targets == 0 {
+            return Err(CandidateOutputError::Contract(format!(
+                "need {} has no relevance judgment",
+                need.query_id
+            )));
+        }
     }
     Ok(())
 }
 
-pub fn load_direct_evaluated_profile_material(
-    repo_root: &Path,
-    workload_path: Option<&Path>,
-    profile_id: &str,
-) -> Result<DirectEvaluatedProfileMaterialV1, CandidateOutputError> {
-    let workload_path =
-        workload_path.map_or_else(|| repo_root.join(WORKLOAD_RELATIVE), Path::to_path_buf);
-    let workload = load_candidate_workload(&workload_path)?;
-    validate_workload_for_tuning(&workload)?;
-    direct_evaluated_profile_material(&workload, profile_id)
-}
-
-pub fn direct_evaluated_profile_material(
-    workload: &CandidateWorkloadV1,
-    profile_id: &str,
-) -> Result<DirectEvaluatedProfileMaterialV1, CandidateOutputError> {
-    validate_workload_for_tuning(workload)?;
-    let profile = workload
-        .profile_matrix
-        .iter()
-        .find(|profile| profile.profile_id == profile_id)
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(format!("unknown requested profile_id {profile_id}"))
-        })?;
-    Ok(DirectEvaluatedProfileMaterialV1 {
-        profile: fusion_profile(profile, true)?,
-        diversity: evaluated_diversity_policy()?,
-        rerank: evaluated_rerank_policy(profile)?,
-    })
-}
-
-pub fn fusion_profile(
-    profile: &ProfileSpecV1,
-    include_semantic: bool,
-) -> Result<FusionProfile, CandidateOutputError> {
-    let mut weights = BTreeMap::new();
-    weights.insert(RetrieverKind::ExactLiteral, 1_000_000);
-    weights.insert(RetrieverKind::Lexical, profile.lexical_weight_ppm);
-    weights.insert(RetrieverKind::Graph, profile.graph_weight_ppm);
-    if include_semantic && profile.semantic_weight_ppm > 0 {
-        weights.insert(RetrieverKind::Semantic, profile.semantic_weight_ppm);
-    }
-    let lanes: Vec<RetrieverKind> = weights.keys().copied().collect();
-    let calibrations = lanes
-        .iter()
+pub fn fusion_profile(profile: &ProfileSpecV1) -> Result<FusionProfile, CandidateOutputError> {
+    let weights = BTreeMap::from([
+        (RetrieverKind::ExactLiteral, 1_000_000),
+        (RetrieverKind::Lexical, profile.lexical_weight_ppm),
+        (RetrieverKind::Graph, profile.graph_weight_ppm),
+    ]);
+    let calibrations = weights
+        .keys()
         .copied()
         .map(|lane| {
             Ok((
@@ -1247,23 +757,10 @@ pub fn fusion_profile(
             RetrieverKind::Graph,
             crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
         ),
-        (
-            RetrieverKind::Semantic,
-            crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
-        ),
     ]
     .into_iter()
-    .filter(|(lane, _)| weights.contains_key(lane))
     .map(|(lane, domain)| {
         let score_domain = typed_id::<ScoreDomainId>(domain)?;
-        let (raw_min_micros, raw_max_micros) = if lane == RetrieverKind::Semantic {
-            (
-                crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1,
-                crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
-            )
-        } else {
-            (0, 1_000_000)
-        };
         Ok((
             score_domain.clone(),
             ScoreDomainCalibrationV1 {
@@ -1273,8 +770,8 @@ pub fn fusion_profile(
                     profile.profile_id
                 ))?,
                 score_domain,
-                raw_min_micros,
-                raw_max_micros,
+                raw_min_micros: 0,
+                raw_max_micros: 1_000_000,
             },
         ))
     })
@@ -1287,17 +784,9 @@ pub fn fusion_profile(
         ))?,
         calibrations,
         score_domain_calibrations,
-        minimum_calibrated_feature_micros: (include_semantic && profile.semantic_weight_ppm > 0)
-            .then_some((RetrieverKind::Semantic, profile.calibration_threshold_ppm))
-            .into_iter()
-            .collect(),
+        minimum_calibrated_feature_micros: BTreeMap::new(),
         weights_micros: weights,
         diversity_policy_id: typed_id::<DiversityPolicyId>("diversity.candidate.v1")?,
-        rerank_policy_id: profile
-            .rerank_policy
-            .as_ref()
-            .map(|policy| typed_id(&policy.policy_id))
-            .transpose()?,
         retrieval_budget: retrieval_budget(),
     })
 }
@@ -1312,19 +801,10 @@ pub fn retrieval_budget() -> RetrievalBudget {
     }
 }
 
-/// # `per_file` bounds what an optional lane can contribute at all
-///
 /// Exact-tier and contradiction evidence is cap-exempt in
 /// `crate::retrieval::diversity`, so `per_file` bounds only the *approximate*
-/// candidates one file may contribute. On this 13-file corpus that is a hard
-/// ceiling on optional-lane influence: `validation-006`'s three labelled
-/// targets all live in `repository.rs`, whose two approximate slots the
-/// lexical lane already fills, so an admitted semantic candidate can only
-/// enter that ranking by displacing one — which is how the last packaged
-/// qualification pushed a labelled target out of the result. The pairwise
-/// gate now refuses that displacement outright
-/// (`evaluate::dropped_relevant_label`); raising this cap instead would change
-/// production ranking for every query, so it needs its own measurement.
+/// candidates one file may contribute. Raising it changes production ranking
+/// for every query, so it needs its own measurement.
 pub fn evaluated_diversity_policy() -> Result<DiversityPolicy, CandidateOutputError> {
     Ok(DiversityPolicy {
         policy_id: typed_id("diversity.candidate.v1")?,
@@ -1337,29 +817,6 @@ pub fn evaluated_diversity_policy() -> Result<DiversityPolicy, CandidateOutputEr
         per_copy_cluster: None,
         per_evidence_role: None,
     })
-}
-
-pub fn evaluated_rerank_policy(
-    profile: &ProfileSpecV1,
-) -> Result<Option<RerankPolicy>, CandidateOutputError> {
-    let evaluation_result_anchor =
-        typed_id::<RetrievalAnchorId>(&format!("evaluation.{}", profile.profile_id))?;
-    profile
-        .rerank_policy
-        .as_ref()
-        .map(|policy| {
-            Ok(RerankPolicy {
-                policy_id: typed_id(&policy.policy_id)?,
-                evaluation_result_anchor,
-                max_candidates: policy.max_candidates,
-                max_input_bytes: policy.max_input_bytes,
-                max_input_tokens: policy.max_input_tokens,
-                max_work_units: policy.max_work_units,
-                max_model_invocations: policy.max_model_invocations,
-                deadline_micros: policy.deadline_micros,
-            })
-        })
-        .transpose()
 }
 
 pub fn typed_id<T>(value: &str) -> Result<T, CandidateOutputError>
@@ -1410,16 +867,15 @@ pub fn sort_value(value: serde_json::Value) -> serde_json::Value {
 }
 
 #[cfg(test)]
-mod qualification_methodology_tests {
+mod need_provenance_tests {
     use super::{
-        CandidateWorkloadV1, QUALIFICATION_METHODOLOGY_VERSION,
-        validate_need_provenance_against_embedded_corpus, validate_workload_for_tuning,
+        CandidateWorkloadV1, NEED_STRATUM, validate_need_provenance_against_embedded_corpus,
+        validate_workload_for_tuning,
     };
-    use crate::search_quality::evaluate::load_authoritative_default_workload_metadata;
     use crate::search_quality::packaged;
 
     fn workload() -> CandidateWorkloadV1 {
-        load_authoritative_default_workload_metadata().expect("authoritative workload")
+        packaged::load_workload().expect("packaged workload")
     }
 
     fn refusal(workload: &CandidateWorkloadV1) -> String {
@@ -1428,109 +884,35 @@ mod qualification_methodology_tests {
             .to_string()
     }
 
-    /// Positive control: the checked-in workload is the shape this build's
-    /// methodology requires, so every denial below is a real change and not a
-    /// pre-existing failure.
+    fn first_need(workload: &mut CandidateWorkloadV1) -> &mut super::WorkloadQueryV1 {
+        workload
+            .queries
+            .iter_mut()
+            .find(|query| query.strata.iter().any(|stratum| stratum == NEED_STRATUM))
+            .expect("a natural-language need")
+    }
+
+    /// Positive control: the packaged workload passes, so every denial below
+    /// is a real change and not a pre-existing failure.
     #[test]
-    fn checked_in_workload_satisfies_the_declared_methodology() {
+    fn checked_in_workload_is_fit() {
         let workload = workload();
 
         assert_eq!(
-            workload.qualification_methodology.methodology_version,
-            QUALIFICATION_METHODOLOGY_VERSION
+            validate_workload_for_tuning(&workload).map_err(|error| error.to_string()),
+            Ok(())
         );
-        assert_eq!(validate_workload_for_tuning(&workload).map_err(|error| error.to_string()), Ok(()));
-        for partition in ["train", "validation"] {
-            let needs = workload
-                .queries
-                .iter()
-                .filter(|query| {
-                    query.partition == partition
-                        && query.strata.iter().any(|stratum| stratum == "natural_language")
-                })
-                .count() as u64;
-            assert!(
-                needs >= workload
-                    .qualification_methodology
-                    .minimum_effect_queries_per_partition,
-                "{partition} carries {needs} needs"
-            );
-        }
-    }
-
-    #[test]
-    fn a_methodology_this_build_does_not_implement_is_refused() {
-        let mut workload = workload();
-        workload.qualification_methodology.methodology_version =
-            QUALIFICATION_METHODOLOGY_VERSION + 1;
-
-        assert!(
-            refusal(&workload).contains("is not the version"),
-            "{}",
-            refusal(&workload)
-        );
-    }
-
-    #[test]
-    fn a_zero_practical_effect_threshold_is_refused() {
-        let mut workload = workload();
-        workload
-            .qualification_methodology
-            .practical_effect_threshold_ppm = 0;
-
-        assert!(refusal(&workload).contains("nonzero practical effect"));
-    }
-
-    #[test]
-    fn a_confidence_level_this_build_does_not_compute_is_refused() {
-        let mut workload = workload();
-        workload.qualification_methodology.confidence_level_ppm = 900_000;
-
-        assert!(refusal(&workload).contains("two-sided 95% interval"));
-    }
-
-    #[test]
-    fn deciding_on_the_partition_the_profile_was_tuned_on_is_refused() {
-        let mut workload = workload();
-        workload.qualification_methodology.held_out_partition =
-            workload.qualification_methodology.tuning_partition.clone();
-
-        assert!(refusal(&workload).contains("must hold out a partition"));
-    }
-
-    #[test]
-    fn an_effect_stratum_below_the_declared_need_floor_is_refused() {
-        let mut workload = workload();
-        let held_out = workload.qualification_methodology.held_out_partition.clone();
-        let doomed = workload
-            .queries
-            .iter()
-            .find(|query| {
-                query.partition == held_out
-                    && query.strata.iter().any(|stratum| stratum == "natural_language")
-            })
-            .map(|query| query.query_id.clone())
-            .expect("a held-out need");
-        workload.queries.retain(|query| query.query_id != doomed);
-        workload.execution_contract.exact_query_count = workload.queries.len() as u64;
-
-        assert!(
-            refusal(&workload).contains("below the declared floor"),
-            "{}",
-            refusal(&workload)
+        assert_eq!(workload.profile_matrix.len(), 1);
+        assert_eq!(
+            workload.profile_matrix[0].profile_id,
+            crate::search_quality::evaluate::QUERY_BASELINE_PROFILE
         );
     }
 
     #[test]
     fn a_need_without_documented_provenance_is_refused() {
         let mut workload = workload();
-        let stratum = workload.qualification_methodology.effect_stratum.clone();
-        for query in &mut workload.queries {
-            if query.strata.contains(&stratum) {
-                query.need_provenance = None;
-                break;
-            }
-        }
+        first_need(&mut workload).need_provenance = None;
 
         assert!(refusal(&workload).contains("has no documented provenance"));
     }
@@ -1538,13 +920,7 @@ mod qualification_methodology_tests {
     #[test]
     fn a_need_without_a_relevance_judgment_is_refused() {
         let mut workload = workload();
-        let stratum = workload.qualification_methodology.effect_stratum.clone();
-        for query in &mut workload.queries {
-            if query.strata.contains(&stratum) {
-                query.label = Some(serde_json::json!({ "anchors": [] }));
-                break;
-            }
-        }
+        first_need(&mut workload).label = Some(serde_json::json!({ "anchors": [] }));
 
         assert!(refusal(&workload).contains("has no relevance judgment"));
     }
@@ -1552,15 +928,11 @@ mod qualification_methodology_tests {
     #[test]
     fn a_need_citing_a_document_outside_the_corpus_is_refused() {
         let mut workload = workload();
-        let stratum = workload.qualification_methodology.effect_stratum.clone();
-        for query in &mut workload.queries {
-            if query.strata.contains(&stratum)
-                && let Some(provenance) = &mut query.need_provenance
-            {
-                provenance.source_document_id = "not-in-the-corpus".to_owned();
-                break;
-            }
-        }
+        first_need(&mut workload)
+            .need_provenance
+            .as_mut()
+            .expect("checked-in provenance")
+            .source_document_id = "not-in-the-corpus".to_owned();
 
         assert!(refusal(&workload).contains("outside the corpus"));
     }
@@ -1570,15 +942,11 @@ mod qualification_methodology_tests {
     #[test]
     fn a_need_quoting_text_absent_from_its_document_is_refused() {
         let mut workload = workload();
-        let stratum = workload.qualification_methodology.effect_stratum.clone();
-        for query in &mut workload.queries {
-            if query.strata.contains(&stratum)
-                && let Some(provenance) = &mut query.need_provenance
-            {
-                provenance.source_quote = "text no corpus document contains".to_owned();
-                break;
-            }
-        }
+        first_need(&mut workload)
+            .need_provenance
+            .as_mut()
+            .expect("checked-in provenance")
+            .source_quote = "text no corpus document contains".to_owned();
 
         let error = validate_need_provenance_against_embedded_corpus(
             &workload,
@@ -1586,7 +954,10 @@ mod qualification_methodology_tests {
         )
         .expect_err("an unfounded quote is refused")
         .to_string();
-        assert!(error.contains("quotes text that does not appear in"), "{error}");
+        assert!(
+            error.contains("quotes text that does not appear in"),
+            "{error}"
+        );
     }
 
     /// Every checked-in quote resolves in the bytes the package actually ships,
@@ -1602,35 +973,5 @@ mod qualification_methodology_tests {
             .map_err(|error| error.to_string()),
             Ok(())
         );
-    }
-
-    /// A profile retuned after the freeze breaks the pin, so the policy cannot
-    /// be adjusted to fit the held-out result it produces.
-    #[test]
-    fn retuning_a_profile_after_the_policy_freeze_is_refused() {
-        let mut workload = workload();
-        let profile = workload
-            .profile_matrix
-            .iter_mut()
-            .find(|profile| profile.profile_id == "hybrid-conservative")
-            .expect("candidate profile");
-        profile.calibration_threshold_ppm = profile.calibration_threshold_ppm.saturating_sub(1);
-
-        assert!(
-            refusal(&workload).contains("was retuned after the policy freeze"),
-            "{}",
-            refusal(&workload)
-        );
-    }
-
-    #[test]
-    fn a_policy_freeze_without_a_commit_is_refused() {
-        let mut workload = workload();
-        workload
-            .qualification_methodology
-            .policy_freeze
-            .frozen_at_commit = "not-a-commit".to_owned();
-
-        assert!(refusal(&workload).contains("must name the commit"));
     }
 }

@@ -148,8 +148,6 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
-    pub(crate) dashboard_explorer_semantic_reader:
-        Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub(crate) dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     pub(crate) dashboard_pr_autotrack_reader:
@@ -279,7 +277,6 @@ impl McpServerConstructionContext {
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
-            dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
             dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
@@ -386,7 +383,6 @@ impl McpServerConstructionContext {
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
-            dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
             dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
@@ -454,7 +450,6 @@ impl McpServerConstructionContext {
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
-            dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
             dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
@@ -647,14 +642,6 @@ impl McpServerConstructionContext {
         self
     }
 
-    pub(crate) fn with_dashboard_explorer_semantic_reader(
-        mut self,
-        reader: tracedecay_dashboard_api::ExplorerSemanticReader,
-    ) -> Self {
-        self.dashboard_explorer_semantic_reader = Some(reader);
-        self
-    }
-
     pub(crate) fn with_dashboard_feedback_status_reader(
         mut self,
         reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
@@ -738,9 +725,6 @@ mod tests {
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
                         code_generation: None,
                         reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: "authority_unavailable",
-                        },
                         coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
                             "authority_unavailable",
                         ),

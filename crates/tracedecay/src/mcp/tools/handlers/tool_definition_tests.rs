@@ -35,7 +35,6 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
         ("rename_preview", "tracedecay_rename_preview", false),
         ("port_status", "tracedecay_port_status", false),
         ("port_order", "tracedecay_port_order", false),
-        ("redundancy", "tracedecay_redundancy", false),
         ("todos", "tracedecay_todos", false),
     ] {
         let operation_id = OperationId::new(format!("operation.application.{operation}"))

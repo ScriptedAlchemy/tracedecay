@@ -15,8 +15,8 @@ pub const MAX_VERIFIED_GENERATION_BATCH_MUTATIONS: usize = 4_096;
 /// transaction (identifiers, labels, endpoint identities, and properties).
 /// The mutation-count ceiling independently bounds fixed record overhead.
 pub const MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES: usize = 32 * 1024 * 1024;
-/// Native full-generation staging uses wider pages than incremental vector
-/// writes and retirement. Grafeo 0.5.42 recomputes whole-graph counts and
+/// Native full-generation staging uses wider pages than retirement paging.
+/// Grafeo 0.5.42 recomputes whole-graph counts and
 /// finalizes every visible version epoch on each transaction commit, so using
 /// the 4,096-mutation incremental ceiling here makes a large generation
 /// quadratic in its page count. The daemon's resident-memory admission owns
@@ -24,7 +24,6 @@ pub const MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES: usize = 32 * 1024 * 1024;
 /// and cancellation is observed before and after every durable page.
 pub(crate) const MAX_NATIVE_GENERATION_STAGE_MUTATIONS: usize = 65_536;
 pub(crate) const MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES: usize = 128 * 1024 * 1024;
-pub const MAX_GRAPH_VECTOR_DIMENSION: usize = 4_096;
 pub const MAX_GRAPH_IDENTIFIER_BYTES: usize = 1_024;
 pub const MAX_GRAPH_ENTITY_LABELS: usize = 128;
 pub const MAX_GRAPH_ENTITY_LABEL_BYTES: usize = 64 * 1024;
@@ -42,7 +41,6 @@ pub const MAX_GRAPH_PROPERTY_AGGREGATE_BYTES: usize = 8 * 1024 * 1024;
 /// published. Twice the sealed bound admits any sealed-admissible generation
 /// after escaping expansion while remaining a runaway-projection guard.
 pub const MAX_GRAPH_BATCH_CANONICAL_BYTES: usize = 4usize << 30;
-pub const MAX_SEMANTIC_VECTOR_GRAPH_BATCH_CANONICAL_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn require_generation_capacity(
     kind: &'static str,

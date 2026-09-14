@@ -177,12 +177,9 @@ const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
 /// The one form a sealed store is built in. Every value TraceDecay persists
-/// round-trips through the columnar codecs: scalars natively, Bytes through
-/// the dictionary's marked entries, and vectors through the `Float32Vector`
-/// codec — [`crate::schema::vector_property_key`] carries the dimension in
-/// the column name, so no column ever mixes dimensions, and
-/// [`crate::limits::MAX_GRAPH_VECTOR_DIMENSION`] sits inside the codec's
-/// `u16` stride. The post-reopen digest proof re-checks every row regardless.
+/// round-trips through the columnar codecs: scalars natively and Bytes through
+/// the dictionary's marked entries. The post-reopen digest proof re-checks
+/// every row regardless.
 const SEALED_STORE_FORM_COMPACT: &str = "compact";
 
 /// Receipt binding a sealed store directory to the exact generation and
@@ -2211,72 +2208,6 @@ mod build_tests {
             payload(&parallel_bytes) == payload(&direct_bytes),
             "parallel and serial direct builds must write the same sealed payload"
         );
-    }
-
-    /// Vector-carrying generations seal in compact form and reproduce their
-    /// recovered digest exactly: the vector property key carries the
-    /// dimension, so a column never mixes dimensions and the `Float32Vector`
-    /// codec round-trips every value.
-    #[test]
-    fn vector_carrying_generation_seals_compact_and_proves_its_digest() {
-        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
-        let temp = tempfile::tempdir().unwrap();
-        let database_path = temp.path().join("source.grafeo");
-        let database = open_source(&database_path);
-        let projection = GraphProjectionIdentity::new(
-            GraphNamespace::new("sealed-vectors").unwrap(),
-            GraphProjectionId::new("semantic").unwrap(),
-        );
-        let entity_rows = (0..600_usize)
-            .map(|index| {
-                let values: Vec<f32> = (0..8).map(|d| (index * 8 + d) as f32 * 0.25).collect();
-                let mut properties = BTreeMap::from([(
-                    GraphPropertyName::new("vector").unwrap(),
-                    GraphProperty::Vector(
-                        crate::GraphVector::new(values, 8, crate::VectorMetric::Cosine).unwrap(),
-                    ),
-                )]);
-                // Sparse scalar alongside the vector, on its own label set.
-                if index % 3 == 0 {
-                    properties.insert(
-                        GraphPropertyName::new("score").unwrap(),
-                        GraphProperty::F64(index as f64 / 7.0),
-                    );
-                }
-                let mut labels = BTreeSet::from([GraphLabel::new("chunk").unwrap()]);
-                if index % 3 == 0 {
-                    labels.insert(GraphLabel::new("scored").unwrap());
-                }
-                GraphEntity::new(entity_identity(index), labels, properties).unwrap()
-            })
-            .collect();
-        let manifest = GraphGenerationManifest::new(
-            projection,
-            GraphGenerationId::new("generation:vectors").unwrap(),
-            SourceGeneration::new("source:vectors").unwrap(),
-            GraphWatermark::new("watermark:vectors").unwrap(),
-            Vec::new(),
-            entity_rows,
-            Vec::new(),
-        )
-        .unwrap();
-        let identity = manifest.identity();
-        let expected = manifest.expected_recovered_digest(check).unwrap();
-        database
-            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
-            .unwrap();
-        let (store, staging_proof) = build_or_open_sealed_store(
-            SealedRowSource::Staging(&database),
-            &identity,
-            &expected,
-            &database_path,
-            check,
-        )
-        .unwrap();
-        assert!(staging_proof.is_some());
-        assert_eq!(store.recovered_digest(), expected.as_str());
-        assert_eq!(store.row_counts(), (600, 0));
-        let _ = store.database().close();
     }
 }
 

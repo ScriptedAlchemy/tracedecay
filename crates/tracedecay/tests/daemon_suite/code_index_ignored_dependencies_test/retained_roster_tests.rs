@@ -57,12 +57,7 @@ async fn restart_after_one_worker_pass(
         .await
         .expect("hold restart activation");
     registry
-        .mount_worktree(
-            project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-            None,
-        )
+        .mount_worktree(project_id(), fixture.path(), store.path().to_path_buf())
         .await
         .expect("remount retained ignored-source store");
     let scheduler = registry

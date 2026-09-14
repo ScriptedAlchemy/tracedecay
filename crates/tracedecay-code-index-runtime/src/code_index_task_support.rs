@@ -7,23 +7,20 @@ use crate::code_index_scheduler;
 pub fn code_index_search_unavailable_for_generation(
     code_generation: Option<String>,
     reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
-    semantic_reason: &'static str,
+    lane_reason: &'static str,
 ) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     code_search::CodeIndexSearchOutcomeV1::Unavailable(code_search::CodeIndexSearchUnavailableV1 {
         code_generation,
         reason,
-        semantic: code_search::CodeIndexSemanticStatusV1::Unavailable {
-            reason: semantic_reason,
-        },
-        coverage: code_search::CodeIndexSearchCoverageV1::unavailable(semantic_reason),
+        coverage: code_search::CodeIndexSearchCoverageV1::unavailable(lane_reason),
     })
 }
 
 pub fn code_index_search_unavailable(
     reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
-    semantic_reason: &'static str,
+    lane_reason: &'static str,
 ) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
-    code_index_search_unavailable_for_generation(None, reason, semantic_reason)
+    code_index_search_unavailable_for_generation(None, reason, lane_reason)
 }
 
 pub fn code_index_scope_unavailable() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
@@ -31,13 +28,6 @@ pub fn code_index_scope_unavailable() -> tracedecay_query::code_search::CodeInde
         tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
         "scope_unavailable",
     )
-}
-
-pub fn code_index_search_hydration_budget(
-    accepted_semantic_budget: Option<&tracedecay_domain::RetrievalBudget>,
-    query_budget: &tracedecay_domain::RetrievalBudget,
-) -> tracedecay_domain::RetrievalBudget {
-    accepted_semantic_budget.copied().unwrap_or(*query_budget)
 }
 
 pub async fn generation_for_hydration(
@@ -69,14 +59,11 @@ pub async fn generation_for_hydration(
             tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
             "generation_changed_before_hydration",
         )),
-        Err(reason) => {
-            let semantic_reason = reason.as_str();
-            Err(code_index_search_unavailable_for_generation(
-                Some(generation_id.as_str().to_owned()),
-                reason,
-                semantic_reason,
-            ))
-        }
+        Err(reason) => Err(code_index_search_unavailable_for_generation(
+            Some(generation_id.as_str().to_owned()),
+            reason,
+            reason.as_str(),
+        )),
     }
 }
 
@@ -119,21 +106,17 @@ pub async fn verify_exact_source_cursor(
     scope: &tracedecay_contracts::ResolvedScope,
     cursor: Option<&tracedecay_domain::RetrievalCursor>,
     source: &tracedecay_domain::CodeSourceCursorBindingV1,
-) -> Result<(), code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1> {
+) -> Result<(), code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1> {
     let Some(cursor) = cursor else {
         return Ok(());
     };
     let authority = schedulers.query_authority_for_scope(scope).await.ok_or(
-        code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-            code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::AuthorityUnavailable,
-        ),
+        code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::AuthorityUnavailable,
     )?;
     authority
         .verify_code_source_cursor(cursor, source)
         .map_err(|_| {
-            code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactCursorInvalid,
-            )
+            code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactCursorInvalid
         })
 }
 

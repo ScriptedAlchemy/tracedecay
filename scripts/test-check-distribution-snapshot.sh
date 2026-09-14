@@ -10,11 +10,9 @@ repo="$work/repo"
 bin="$work/bin"
 state="$work/state"
 mkdir -p -- \
-  "$repo/crates/tracedecay-semantic/src/model_lifecycle" \
   "$repo/crates/tracedecay" \
   "$repo/crates/tracedecay-cli" \
   "$repo/crates/tracedecay-hooks/fixtures/host_events" \
-  "$repo/tests/distribution/fastembed" \
   "$repo/tests/fixtures/packaged_host_events" \
   "$repo/.cargo" \
   "$repo/plugin" \
@@ -44,19 +42,6 @@ cat >"$repo/crates/tracedecay-cli/Cargo.toml" <<'TOML'
 name = "tracedecay-cli"
 version = "0.0.0"
 TOML
-cat >"$repo/crates/tracedecay-semantic/src/model_lifecycle.rs" <<'RS'
-#[cfg(all(test, feature = "semantic-fastembed"))]
-#[path = "model_lifecycle/distribution_acquisition_acceptance.rs"]
-mod distribution_acquisition_acceptance;
-RS
-cat >"$repo/crates/tracedecay-semantic/src/model_lifecycle/distribution_acquisition_acceptance.rs" <<'RS'
-#[test]
-#[ignore = "distribution gate owns this fixture"]
-fn fixture_is_acquired_by_distribution_gate() {}
-RS
-touch \
-  "$repo/tests/distribution/fastembed/prepare_fixture.py" \
-  "$repo/tests/distribution/fastembed/validate_fixture.py"
 
 for fixture in \
   claude.json \
@@ -130,17 +115,6 @@ case "${1:-}" in
       shift
     done
     printf 'profile=production\ncargo_features=production\n' >"$output"
-    ;;
-  */prepare_fixture.py)
-    fixture=${@: -1}
-    mkdir -p -- "$fixture"
-    for required in fixture.json model.onnx tokenizer.json config.json \
-      special_tokens_map.json tokenizer_config.json; do
-      printf 'fixture\n' >"$fixture/$required"
-    done
-    ;;
-  */validate_fixture.py)
-    printf '1\t1\n'
     ;;
   *)
     exec "$REAL_PYTHON" "$@"

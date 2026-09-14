@@ -5,30 +5,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::time::{Duration, timeout};
-use tracedecay_contracts::ResolvedScope;
-use tracedecay_domain::configuration::ConfigurationRevisionId;
-use tracedecay_query::retrieval::QueryAuthorityV1;
-
-/// Scheduler-facing view of a prepared query activation.
-pub struct PreparedQueryActivationViewV1 {
-    pub scope: ResolvedScope,
-    pub configuration_revision: ConfigurationRevisionId,
-    pub query_authority: Arc<QueryAuthorityV1>,
-}
-
-impl PreparedQueryActivationViewV1 {
-    pub fn scope(&self) -> &ResolvedScope {
-        &self.scope
-    }
-
-    pub fn configuration_revision(&self) -> &ConfigurationRevisionId {
-        &self.configuration_revision
-    }
-
-    pub fn query_authority(&self) -> &Arc<QueryAuthorityV1> {
-        &self.query_authority
-    }
-}
 
 /// Watcher knobs the git-metadata watcher needs from resolved sync config.
 ///

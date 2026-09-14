@@ -1,9 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use tracedecay_semantic_contracts::{
-    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
-};
 
 /// Any component exercises the registry the same way, so this test-only marker
 /// keeps generic registry checks independent of a production capability slot.
@@ -1326,92 +1323,6 @@ async fn retiring_exact_roots_fences_republication_without_closing_other_project
         .publish(retained.clone(), component(5))
         .await
         .expect("unrelated project remains open");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let retired = root("semantic-worker-retirement");
-    let semantic = tracedecay_semantic::DaemonSemanticRuntimeHandleV1::new(1, 1, 4096)
-        .expect("semantic runtime");
-    registry
-        .publish(retired.clone(), semantic.clone())
-        .await
-        .expect("publish semantic runtime");
-
-    let (started, worker_started) = tokio::sync::oneshot::channel();
-    let (cancelled, worker_cancelled) = tokio::sync::oneshot::channel();
-    let (release, worker_release) = tokio::sync::oneshot::channel();
-    assert!(
-        semantic.schedule(tracedecay_semantic::SemanticRuntimeWorkV1::new(
-            tracedecay_domain::CodeGenerationId::new("code-generation.targeted-retirement")
-                .expect("code generation"),
-            1,
-            move |cancellation| async move {
-                started.send(()).expect("worker-start receiver");
-                while !cancellation.cancelled() {
-                    tokio::task::yield_now().await;
-                }
-                cancelled.send(()).expect("worker-cancel receiver");
-                worker_release.await.expect("worker-release sender");
-                Err(SemanticRuntimeScheduleFailureV1::Cancelled)
-            },
-        ))
-    );
-    worker_started.await.expect("semantic worker started");
-
-    let retiring_registry = registry.clone();
-    let retirement = tokio::spawn(async move {
-        retiring_registry
-            .retire_roots(&BTreeSet::from([retired]))
-            .await
-    });
-    worker_cancelled
-        .await
-        .expect("targeted retirement cancels the semantic worker");
-    assert!(
-        !retirement.is_finished(),
-        "targeted retirement must join, not merely cancel, the semantic worker"
-    );
-    release.send(()).expect("semantic worker release receiver");
-    assert!(retirement.await.expect("retirement task"));
-    assert!(matches!(
-        semantic.status(),
-        SemanticRuntimeScheduleStatusV1::Failed {
-            reason: SemanticRuntimeScheduleFailureV1::Cancelled,
-            ..
-        }
-    ));
-}
-
-#[tokio::test]
-async fn semantic_owner_registration_task_is_cancelled_and_joined() {
-    let owner = RegisteredSemanticOwnerTaskV1::new();
-    let cancellation = owner.cancellation();
-    let (started, worker_started) = tokio::sync::oneshot::channel();
-    let (finished, worker_finished) = tokio::sync::oneshot::channel();
-    assert!(owner.spawn(async move {
-        started
-            .send(())
-            .expect("semantic owner task start receiver");
-        cancellation.cancelled().await;
-        finished
-            .send(())
-            .expect("semantic owner task finish receiver");
-    }));
-    worker_started
-        .await
-        .expect("semantic owner registration task started");
-
-    owner.cancel_and_join().await;
-
-    worker_finished
-        .await
-        .expect("semantic owner registration task finished");
-    assert!(
-        !owner.has_retained_task(),
-        "joining must release the task handle"
-    );
 }
 
 /// Test-only component whose drop parks until the test releases it: a stand-in

@@ -679,7 +679,6 @@ pub(super) async fn handle_dashboard(
     code_index_freshness_reader: Option<
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     >,
-    explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     feedback_status_reader: Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     pr_autotrack_reader: Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     code_diagnostics_broker: Option<
@@ -946,7 +945,6 @@ pub(super) async fn handle_dashboard(
                     doctor_report_reader,
                     remote_operational_status_reader: remote_operational_status,
                     code_index_freshness_reader,
-                    explorer_semantic_reader,
                     feedback_status_reader,
                     pr_autotrack_reader,
                     code_diagnostics_broker,

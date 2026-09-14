@@ -27,7 +27,6 @@ include = [
     "/tests/fixtures/packaged_host_events/**",
     "/tests/fixtures/provider_normalization/**",
     "/tests/fixtures/redundancy_eval_labeled.json",
-    "/tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json",
     "/tests/fixtures/transcript_golden/cline_like/**",
     "/benchmark_data/queries/default.toml",
     "/benchmark_data/claude-observation/**",
@@ -111,7 +110,6 @@ hotpath = [
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-sdk/hotpath",
     "tracedecay-search-eval/hotpath",
-    "tracedecay-semantic/hotpath",
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store-runtime/hotpath",
@@ -137,8 +135,6 @@ production = [
     "token-counting",
     "lite",
     "full",
-    "semantic-fastembed",
-    "semantic-model2vec",
 ]
 
 # Exact token counting for the Savings & Cost dashboard (tiktoken BPE).
@@ -254,37 +250,6 @@ rmcp-benchmark = [
     "rmcp/transport-async-rw",
 ]
 
-# SEMANTIC FastEmbed adapter (Plan 31). On non-Windows targets it bundles ORT
-# while leaving FastEmbed's image defaults disabled. Windows keeps the feature
-# alias but `tracedecay-semantic` resolves it to the typed unavailable backend.
-# The adapter itself lives in `tracedecay-semantic`, which owns the pins.
-semantic-fastembed = [
-    "tracedecay-semantic/semantic-fastembed",
-    "tracedecay-application/semantic-fastembed",
-    "tracedecay-code-index-runtime/semantic-fastembed",
-]
-# SEMANTIC Model2Vec static-embedding backend: a safetensors token table
-# mean-pooled in-process, no ONNX Runtime. Selected per model by the catalog
-# entry's declared backend; ships in `production` alongside FastEmbed so the
-# cataloged `PotionCode16MV2` selection is servable, not merely listed.
-semantic-model2vec = [
-    "tracedecay-semantic/semantic-model2vec",
-    "tracedecay-application/semantic-model2vec",
-    "tracedecay-code-index-runtime/semantic-model2vec",
-]
-# GPU execution providers for the FastEmbed/ORT runtime. CUDA and WebGPU are
-# explicit build choices in no release feature set; WebGPU's Linux
-# distribution requires the separate Dawn shared library. Compiled providers
-# are selected automatically unless the environment opts out.
-semantic-gpu-cuda = [
-    "tracedecay-semantic/semantic-gpu-cuda",
-    "tracedecay-application/semantic-gpu-cuda",
-]
-semantic-gpu-webgpu = [
-    "tracedecay-semantic/semantic-gpu-webgpu",
-    "tracedecay-application/semantic-gpu-webgpu",
-]
-
 [lib]
 name = "tracedecay"
 
@@ -347,8 +312,6 @@ tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37"
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
-tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
-tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
@@ -421,7 +384,6 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0", features =
 # defaults) and so the test graph matches the CLI lane plus `test-helpers`.
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers", "test-transport"] }
-tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
@@ -551,11 +513,6 @@ path = "tests/memory_suite/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "search_quality_suite"
-path = "tests/search_quality_suite/main.rs"
-required-features = ["test-helpers"]
-
-[[test]]
 name = "session_suite"
 path = "tests/session_suite/main.rs"
 required-features = ["test-helpers"]
@@ -592,9 +549,6 @@ name = "claude_observation_benchmark"
 path = "tests/claude_observation_benchmark/main.rs"
 required-features = ["test-helpers"]
 
-# Former standalone default-feature singles, compiled as modules of one binary.
-# `semantic_vector_generation_prep_test` reaches the gated
-# `vector_generation_test_support` surface.
 [[test]]
 name = "product_surface_suite"
 path = "tests/product_surface_suite/main.rs"

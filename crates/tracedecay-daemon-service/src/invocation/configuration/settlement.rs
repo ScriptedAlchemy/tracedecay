@@ -21,7 +21,7 @@ fn requires_daemon_restart(
     }))
 }
 
-pub(super) async fn refresh_live_configuration_runtime(
+async fn refresh_live_configuration_runtime(
     registered: &RegisteredConfigurationRuntime,
     current: tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
 ) -> Result<(), String> {

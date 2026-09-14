@@ -23,7 +23,6 @@ use tracedecay_global_db::configuration::{
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
-pub use tracedecay_application::config::retrieval;
 pub use tracedecay_global_db::configuration::{registry, resolver};
 
 /// Kernel-owned path primitives. The definitions live in
@@ -35,14 +34,6 @@ pub use tracedecay_runtime_core::config::{
     discover_project_root, get_project_db_path, get_tracedecay_dir, has_project_database,
     is_ambient_project_root, user_data_dir,
 };
-
-/// Atomic project-scoped semantic runtime selection.
-///
-/// The value is canonical JSON for [`SemanticConfig`]. Keeping the active
-/// profile, rollback profile, and local resource ceilings under one setting
-/// prevents a configuration revision from exposing a partially updated
-/// semantic selection.
-pub use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
 
 /// The shared generated/vendored segment list and its membership test moved
 /// into `tracedecay_runtime_core::config`: the extracted migration inventory

@@ -333,10 +333,8 @@ fn federated_roots_refuse_a_foreign_profile_store_locator() {
 
 /// The pairing between a workspace's factories and its authorized roots is on
 /// the exact scope digest (`8578e46eb`). Two roots that differ only by the
-/// reference their checkout has moved to are therefore two roots, not one: the
-/// checkout-identity relaxation the semantic source scope took is not applied
-/// to this authorization pairing, and a genuinely repeated exact root is a
-/// duplicate the set refuses outright.
+/// reference their checkout has moved to are therefore two roots, not one, and
+/// a genuinely repeated exact root is a duplicate the set refuses outright.
 #[test]
 fn scope_digests_separate_references_and_refuse_a_duplicate_exact_root() {
     let scope_at = |reference: &str| {

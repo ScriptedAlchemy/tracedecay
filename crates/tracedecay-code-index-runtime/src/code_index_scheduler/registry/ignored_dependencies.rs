@@ -102,9 +102,6 @@ fn clone_scheduler_error(error: &CodeIndexSchedulerErrorV1) -> CodeIndexSchedule
         CodeIndexSchedulerErrorV1::GraphActivationRefused(reason) => {
             CodeIndexSchedulerErrorV1::GraphActivationRefused(reason)
         }
-        CodeIndexSchedulerErrorV1::SemanticSchedule(error) => {
-            CodeIndexSchedulerErrorV1::SemanticSchedule(error.clone())
-        }
         CodeIndexSchedulerErrorV1::PublicationConflict(error) => {
             CodeIndexSchedulerErrorV1::PublicationConflict(error.clone())
         }
@@ -511,7 +508,6 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_generation_epoch,
             serving_generation_changed,
             graph_activation,
-            publication_gate,
             build_publication_lock,
             shutting_down,
             wake,
@@ -535,7 +531,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation_epoch),
                 worktree.serving_generation_changed.clone(),
                 worktree.graph_activation.clone(),
-                Arc::clone(&worktree.semantic_evaluation_publication_gate),
                 Arc::clone(&worktree.build_publication_lock),
                 Arc::clone(&worktree.shutting_down),
                 Arc::clone(&worktree.wake),
@@ -548,8 +543,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let _daemon_admission =
             acquire_daemon_admission(background_reconcile_admission, control, &shutting_down)
                 .await?;
-        let _publication =
-            acquire_publication_gate(publication_gate.as_ref(), control, &shutting_down).await?;
         let _build_publication =
             acquire_publication_gate(build_publication_lock.as_ref(), control, &shutting_down)
                 .await?;
@@ -683,7 +676,6 @@ impl CodeIndexSchedulerRegistryV1 {
             );
             drop(witness);
             drop(serving);
-            let _ = scheduler.schedule_semantic_generation(candidate.generation_handle());
             Ok::<_, CodeIndexSchedulerErrorV1>(())
         })
         .await;

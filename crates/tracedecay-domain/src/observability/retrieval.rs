@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::CoverageStateV1;
 use super::execution::validate_revision;
+use crate::retrieval::RetrieverKind;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RetrievalQueryObservedV1 {
@@ -252,7 +253,7 @@ impl AdoptionOutcomeLinkedV1 {
 }
 
 fn valid_retriever_lanes(lanes: &[String]) -> bool {
-    lanes.len() <= 7
+    lanes.len() <= RetrieverKind::ALL_LANES.len()
         && lanes.iter().all(|lane| valid_retriever_lane(lane))
         && lanes
             .iter()
@@ -261,16 +262,9 @@ fn valid_retriever_lanes(lanes: &[String]) -> bool {
 }
 
 fn valid_retriever_lane(lane: &str) -> bool {
-    matches!(
-        lane,
-        "exact_literal"
-            | "lexical"
-            | "semantic"
-            | "graph"
-            | "temporal"
-            | "task_session"
-            | "diagnostic"
-    )
+    RetrieverKind::ALL_LANES
+        .iter()
+        .any(|kind| kind.as_str() == lane)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

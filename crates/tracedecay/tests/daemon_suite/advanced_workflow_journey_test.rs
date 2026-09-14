@@ -394,7 +394,7 @@ pub(super) fn advance_provider_transcript_participant_generation(
 fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
     std::fs::create_dir_all(home).expect("home directory");
     std::fs::create_dir_all(project).expect("project directory");
-    task_session::seed_semantic_source(project);
+    task_session::seed_probe_source(project);
     std::fs::write(project.join("README.md"), "advanced workflow journey\n")
         .expect("fixture source");
     run(
@@ -450,15 +450,6 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let project = scratch.path().join("project");
     let (_commit_text, commit) = initialize_project(&home, &project);
     let project = project.canonicalize().expect("canonical project root");
-    let Some(semantic_fixture) = task_session::install_semantic_fixture(&home) else {
-        eprintln!(
-            "skipping the mounted fan-out Work journey; prepare the \
-             distribution-acceptance package and set \
-             TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE"
-        );
-        return;
-    };
-
     let mut daemon = spawn_project_daemon(&home, &project);
     run(
         common::tracedecay_command_with_home(&home)
@@ -1052,12 +1043,15 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     wait_until("post-recovery cancellation child", || {
         cancellation_started.exists().then_some(())
     });
-    let running = client
-        .execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
+    let running = wait_until("durably recovered workflow run", || {
+        match client.execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
             run_id: run_id.clone(),
-        })
-        .expect("durably recovered workflow run")
-        .result;
+        }) {
+            Ok(response) => Some(response.result),
+            Err(ClientError::Problem(problem)) if problem.kind == "unavailable" => None,
+            Err(error) => panic!("durably recovered workflow run: {error}"),
+        }
+    });
     assert_eq!(running.status(), WorkflowRunStatus::Running);
     let paused_workflow = client
         .execute::<WorkflowPauseRun>(&WorkflowRunPauseRequest {
@@ -1302,7 +1296,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     restarted
         .kill_and_wait()
         .expect("physically restart daemon after accepted synthesis settlement");
-    let mut restored_daemon = spawn_project_daemon(&home, &project);
+    let restored_daemon = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
     let _ = wait_for_application_mount(&client);
     wait_for_work_mount(&client);
@@ -1329,39 +1323,28 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             .contains(completed_synthesis.identity()),
         "the accepted-attempt relation must survive physical daemon restart"
     );
-    restored_daemon = task_session::configure_restart_and_activate_semantic_profile(
+    let evidence_scope = task_session::TaskSessionEvidenceScope {
+        selection: &product_selection,
+        task_id: &synthesis_task,
+        verified_version: restored_entry.verified_version(),
+        identity: completed_synthesis.identity(),
+    };
+    let (_restarted_daemon, client) = task_session::restart_and_wait_for_task_session(
         &home,
         &project,
         &client,
         &project_id,
         restored_daemon,
-        &product_selection,
-        &synthesis_task,
-        restored_entry.verified_version(),
-        completed_synthesis.identity(),
+        &evidence_scope,
         &sealed_receipt,
-        &semantic_fixture,
     );
-    restored_daemon
-        .kill_and_wait()
-        .expect("physically restart daemon after evaluated semantic activation");
-    let _activated_daemon = spawn_project_daemon(&home, &project);
-    let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
-    task_session::wait_for_evaluated_semantic_profile_current(&home, &project, &client);
     let dashboard = task_session::DashboardProcess::start(&home, &project);
     let _task_session = task_session::assert_available_over_sdk_mcp_and_dashboard(
         &home,
         &project,
         &client,
         &dashboard,
-        task_session::TaskSessionEvidenceScope {
-            selection: &product_selection,
-            task_id: &synthesis_task,
-            verified_version: restored_entry.verified_version(),
-            identity: completed_synthesis.identity(),
-        },
+        evidence_scope,
     );
 
     let handoff_scope = TaskHandoffScope::new(

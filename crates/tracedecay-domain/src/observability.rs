@@ -952,6 +952,44 @@ mod tests {
     }
 
     #[test]
+    fn retriever_observations_admit_only_runtime_lanes() {
+        let observed = |retriever_kind: &str| RetrieverObservedV1 {
+            retriever_kind: retriever_kind.into(),
+            profile_revision: "profile.v1".into(),
+            requested_candidates: 4,
+            consumed_candidates: 4,
+            eligible_candidates: 2,
+            returned_candidates: 2,
+            unique_contributions: 2,
+        };
+        assert_eq!(observed("graph").validate(), Ok(()));
+        assert_eq!(observed("semantic").validate(), Err("retriever_counts"));
+
+        let planner = |lanes: &[&str]| RetrievalPlannerObservedV1 {
+            planner_revision: "planner.v1".into(),
+            requested_lanes: lanes.iter().map(|lane| (*lane).into()).collect(),
+            admitted_lanes: vec![],
+            abstained: true,
+        };
+        assert_eq!(
+            planner(&[
+                "exact_literal",
+                "lexical",
+                "graph",
+                "temporal",
+                "task_session",
+                "diagnostic",
+            ])
+            .validate(),
+            Ok(())
+        );
+        assert_eq!(
+            planner(&["lexical", "semantic"]).validate(),
+            Err("retrieval_planner_lanes")
+        );
+    }
+
+    #[test]
     fn mcp_dispatch_telemetry_keeps_terminal_and_control_states_typed() {
         let payload = McpDispatchObservedV1 {
             route_admission_micros: 4,

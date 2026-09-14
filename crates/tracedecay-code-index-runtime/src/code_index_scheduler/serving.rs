@@ -455,16 +455,6 @@ impl std::ops::Deref for LatestCompleteCodeIndexV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SemanticEvaluationCodeSnapshotV1 {
-    pub source_generation: CodeGenerationId,
-    pub source_manifest_digest: ManifestDigest,
-    pub snapshot_digest: ManifestDigest,
-    /// The sealed capability authority that calibrates the live semantic
-    /// evaluation target; it is not inferred from an accepted profile.
-    pub capability_manifest_digest: ManifestDigest,
-}
-
 /// Production exact/lexical owners bound to one immutable published generation.
 #[derive(Clone)]
 pub struct ProductionCodeIndexQueryOwnersV1 {
@@ -513,30 +503,6 @@ impl ProductionCodeIndexQueryOwnersV1 {
     > {
         self.hydration
             .occurrence_by_binding(binding)
-            .map_err(|_| {
-                tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable
-            })?
-            .map(
-                |occurrence| tracedecay_query::retrieval::NativeCodeOccurrenceV1 {
-                    file: occurrence.file,
-                    symbol: occurrence.symbol,
-                    chunk: Some(occurrence.chunk),
-                    path: occurrence.logical_path,
-                    span: occurrence.source_span,
-                },
-            )
-            .ok_or(tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable)
-    }
-
-    pub(super) fn occurrence_by_chunk(
-        &self,
-        chunk: &tracedecay_domain::CodeSearchChunkId,
-    ) -> Result<
-        tracedecay_query::retrieval::NativeCodeOccurrenceV1,
-        tracedecay_query::retrieval::QueryExecutionContractErrorV1,
-    > {
-        self.hydration
-            .occurrence_by_chunk(chunk)
             .map_err(|_| {
                 tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable
             })?
@@ -1353,21 +1319,6 @@ impl LatestCodeTextGenerationV1 {
 }
 
 impl LatestCompleteCodeIndexV1 {
-    pub(super) fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
-        SemanticEvaluationCodeSnapshotV1 {
-            source_generation: self.generation.manifest().generation_id.clone(),
-            source_manifest_digest: self
-                .generation
-                .projection()
-                .request()
-                .changes
-                .manifest_digest
-                .clone(),
-            snapshot_digest: self.generation.manifest().snapshot_digest.clone(),
-            capability_manifest_digest: self.generation.capability().manifest_digest.clone(),
-        }
-    }
-
     pub fn test_attribution_authority(
         &self,
     ) -> Result<

@@ -6,8 +6,6 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
-#[cfg(test)]
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -42,8 +40,6 @@ use tracedecay_domain::{
     RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId,
     SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
 };
-#[cfg(test)]
-use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 use tracedecay_tool_catalog::SortContractId;
 
 use super::{
@@ -186,81 +182,15 @@ fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
     generation.as_str() == UNPINNED_LATEST_GENERATION_SENTINEL
 }
 
-#[cfg(test)]
-pub fn semantic_mcp_reason(
-    current_source: Option<&CodeGenerationId>,
-    latest_code_generation: &CodeGenerationId,
-    runtime_state: Option<&tracedecay_application::semantic_runtime::SemanticRuntimeStateV1>,
-) -> &'static str {
-    if let Some(source_generation) = current_source {
-        return if source_generation == latest_code_generation {
-            // A current vector generation alone cannot authorize influence
-            // without an accepted calibration authority.
-            "calibration_unavailable"
-        } else {
-            "semantic_generation_stale"
-        };
-    }
-    match runtime_state {
-        None => "semantic_runtime_unavailable",
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
-            reason,
-        }) => match reason {
-            SemanticFallbackReasonV1::ConfigurationUnavailable => {
-                "semantic_configuration_unavailable"
-            }
-            SemanticFallbackReasonV1::Downloading => "semantic_model_downloading",
-            SemanticFallbackReasonV1::Verifying => "semantic_model_verifying",
-            SemanticFallbackReasonV1::Loading => "semantic_model_loading",
-            SemanticFallbackReasonV1::SelectedNotDownloaded => "semantic_model_not_downloaded",
-            SemanticFallbackReasonV1::ModelFailed => "semantic_failed",
-            SemanticFallbackReasonV1::Indexing => "semantic_indexing",
-            _ => "semantic_runtime_unavailable",
-        },
-        Some(
-            tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::SelectedNotDownloaded {
-                ..
-            },
-        ) => "semantic_model_not_downloaded",
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Downloading {
-            ..
-        }) => "semantic_model_downloading",
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Verifying {
-            ..
-        }) => "semantic_model_verifying",
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Installed {
-            ..
-        }) => "semantic_model_installed",
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Loading { .. }) => {
-            "semantic_model_loading"
-        }
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
-            ..
-        }) => "semantic_indexing",
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Current { .. }) => {
-            "semantic_generation_incompatible"
-        }
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Degraded {
-            ..
-        }) => "semantic_degraded",
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Rollback {
-            ..
-        }) => "semantic_rollback",
-        Some(tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Failed { .. }) => {
-            "semantic_failed"
-        }
-    }
-}
-
 impl CodeIndexSchedulerRegistryV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn take_relation_symbol_hydrations(&self) -> u64 {
         self.relation_symbol_hydrations.swap(0, Ordering::Relaxed)
     }
 
-    /// Compose real exact/lexical/graph lane outcomes only through the
-    /// accepted profile and query/cursor key authority mounted for this exact
-    /// admitted scope.
+    /// Compose real exact/lexical/graph lane outcomes only through the query
+    /// profile and query/cursor key authority mounted for this exact admitted
+    /// scope.
     pub async fn compose_query_fallback(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -278,45 +208,6 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
             .ok_or(tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable)?;
         authority.compose(request, query_view, lanes, page_size, cursor)
-    }
-
-    /// Resolve strict-semantic availability against this project's freshest
-    /// complete code generation.
-    ///
-    /// No semantic query is constructed until an accepted calibration
-    /// authority exists. That keeps ordinary query fallback byte-stable and
-    /// makes a strict request fail with a typed reason instead of inventing a
-    /// score, profile, or candidate.
-    #[cfg(test)]
-    pub async fn semantic_mcp_abstention(
-        &self,
-        project_root: &Path,
-    ) -> code_search::CodeIndexSemanticAbstentionV1 {
-        let Some(latest) = self.latest_complete_fresh(project_root).await else {
-            return code_search::CodeIndexSemanticAbstentionV1 {
-                code_generation: None,
-                reason: "code_index_unavailable",
-            };
-        };
-        let code_generation = latest.generation.manifest().generation_id.clone();
-        let code_generation_display = Some(code_generation.as_str().to_owned());
-        let current_source =
-            tracedecay_application::semantic_runtime::project_semantic_source_generation(
-                project_root,
-            );
-        let status = tracedecay_application::semantic_runtime::project_semantic_application_status(
-            project_root,
-            None,
-        );
-        let reason = semantic_mcp_reason(
-            current_source.as_ref(),
-            &code_generation,
-            status.as_ref().map(|status| &status.state),
-        );
-        code_search::CodeIndexSemanticAbstentionV1 {
-            code_generation: code_generation_display,
-            reason,
-        }
     }
 
     pub async fn generation_for(
@@ -1211,28 +1102,6 @@ impl NativeRecordReadPortV1 for LatestCompleteCodeIndexV1 {
         })
     }
 
-    fn occurrence_by_chunk(
-        &self,
-        chunk_id: &CodeSearchChunkId,
-    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        let index = self.record_index();
-        let chunk = index
-            .chunk_position(chunk_id)
-            .map(|position| &self.generation.chunks().chunks()[position])
-            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
-        let file = index
-            .file_position(&chunk.anchor.file_occurrence_id)
-            .map(|position| &self.generation.snapshot().files[position])
-            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
-        Ok(NativeCodeOccurrenceV1 {
-            file: chunk.anchor.file_occurrence_id.clone(),
-            symbol: chunk.anchor.symbol_occurrence_id.clone(),
-            chunk: Some(chunk.id.clone()),
-            path: file.logical_path.clone(),
-            span: chunk.anchor.source_span,
-        })
-    }
-
     fn symbol(
         &self,
         symbol: &SymbolOccurrenceId,
@@ -1362,13 +1231,6 @@ impl NativeRecordReadPortV1 for GraphProjectionNativeRecordReadPortV1 {
         Err(QueryExecutionContractErrorV1::RecordUnavailable)
     }
 
-    fn occurrence_by_chunk(
-        &self,
-        _chunk_id: &CodeSearchChunkId,
-    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        Err(QueryExecutionContractErrorV1::RecordUnavailable)
-    }
-
     fn symbol(
         &self,
         symbol: &SymbolOccurrenceId,
@@ -1401,13 +1263,6 @@ impl NativeRecordReadPortV1 for TextArtifactNativeRecordReadPortV1 {
             return Err(QueryExecutionContractErrorV1::GenerationMismatch);
         }
         self.owners.occurrence_by_binding(binding)
-    }
-
-    fn occurrence_by_chunk(
-        &self,
-        chunk_id: &CodeSearchChunkId,
-    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        self.owners.occurrence_by_chunk(chunk_id)
     }
 
     fn symbol(

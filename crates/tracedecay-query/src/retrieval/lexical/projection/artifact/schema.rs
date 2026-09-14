@@ -523,10 +523,9 @@ pub(super) fn lookup_term_ids(
 mod tests {
     use super::{
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
-        CodeLexicalArtifactErrorV1,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13,
-        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14, LexicalArtifactLayoutV1, exact_field_code,
-        field_code, field_from_code,
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14, CodeLexicalArtifactErrorV1,
+        LexicalArtifactLayoutV1, exact_field_code, field_code, field_from_code,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
     use rusqlite::Connection;

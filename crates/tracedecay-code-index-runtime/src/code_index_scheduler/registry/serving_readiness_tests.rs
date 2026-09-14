@@ -84,7 +84,6 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             ProjectId::new("project.serving-readiness").expect("project identity"),
             &project,
             fixture.path().join("store"),
-            None,
         )
         .await
         .expect("mount worktree");

@@ -2,25 +2,6 @@ use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
 use tracedecay_configuration::{TraceDecayConfig, get_config_path, save_config_to_path};
-use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
-
-#[test]
-fn semantic_defaults_cover_the_cataloged_fastembed_model() {
-    let config = TraceDecayConfig::default();
-    let catalog = tracedecay_semantic::production_fastembed_catalog();
-    let model = catalog
-        .get(DEFAULT_FASTEMBED_MODEL_ID)
-        .expect("default semantic model is cataloged");
-    let model_bytes = model.members.get("model").expect("model member").length;
-    assert!(config.semantic.resources.max_model_bytes >= model_bytes);
-    // The shipped configuration pins no resident ceiling: composition derives
-    // it from the host's admitted process memory.
-    assert_eq!(config.semantic.resources.max_resident_bytes, None);
-    assert_eq!(
-        config.semantic.resources.max_concurrent_sessions,
-        tracedecay_semantic::embedding_parallelism::default_max_concurrent_sessions(),
-    );
-}
 
 #[tokio::test]
 async fn discover_project_root_with_identity_does_not_open_registry_only_store() {
@@ -524,7 +505,6 @@ mod runtime_configuration_cutover {
             ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
         assert!(!config.diagnostics_prewarm);
         assert_eq!(config.max_file_size, startup.config().max_file_size);
-        assert_eq!(config.semantic, startup.config().semantic);
 
         let cached_reads = || {
             let root_pin = cached_runtime_configuration(root.path()).expect("root cached read");

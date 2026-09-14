@@ -32,9 +32,6 @@ impl MaintenanceLifecycleInstrumentation {
             MaintenanceTickOutcome::Complete => {
                 hotpath::gauge!("daemon_maintenance_outcome_complete").inc(1.0);
             }
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::SemanticVectorRetention) => {
-                hotpath::gauge!("daemon_maintenance_outcome_semantic_vector_progress").inc(1.0);
-            }
             MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
                 hotpath::gauge!("daemon_maintenance_outcome_code_generation_progress").inc(1.0);
             }
@@ -65,9 +62,6 @@ struct MaintenancePhaseInstrumentation {
 impl MaintenancePhaseInstrumentation {
     fn new(continuation: Option<MaintenanceContinuation>) -> Self {
         match continuation {
-            Some(MaintenanceContinuation::SemanticVectorRetention) => {
-                hotpath::gauge!("daemon_maintenance_phase_semantic_vector_active").inc(1.0);
-            }
             Some(MaintenanceContinuation::CodeGenerationRetention) => {
                 hotpath::gauge!("daemon_maintenance_phase_code_generation_active").inc(1.0);
             }
@@ -82,9 +76,6 @@ impl MaintenancePhaseInstrumentation {
 impl Drop for MaintenancePhaseInstrumentation {
     fn drop(&mut self) {
         match self.continuation {
-            Some(MaintenanceContinuation::SemanticVectorRetention) => {
-                hotpath::gauge!("daemon_maintenance_phase_semantic_vector_active").inc(-1.0);
-            }
             Some(MaintenanceContinuation::CodeGenerationRetention) => {
                 hotpath::gauge!("daemon_maintenance_phase_code_generation_active").inc(-1.0);
             }

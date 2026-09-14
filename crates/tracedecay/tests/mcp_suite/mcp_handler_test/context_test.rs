@@ -171,8 +171,7 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     assert_eq!(payload["coverage"]["exact"], "complete");
     assert_eq!(payload["coverage"]["lexical"], "complete");
     assert_eq!(payload["coverage"]["graph"], "complete");
-    assert_eq!(payload["coverage"]["recall"], "partial");
-    assert_eq!(payload["coverage"]["semantic"]["status"], "unavailable");
+    assert_eq!(payload["coverage"]["recall"], "full");
     assert!(
         payload.get("index_coverage_hint").is_none(),
         "verified retrieval coverage must not fabricate legacy skipped-directory advice: {payload}"

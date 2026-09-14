@@ -100,7 +100,6 @@ fn unavailable_feedback_cycle(
     )
 }
 
-mod configuration_tests;
 mod dispatch_tests;
 mod feedback_tests;
 mod git_tests;

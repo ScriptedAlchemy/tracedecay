@@ -148,7 +148,7 @@ async fn mount(
 ) -> CodeIndexSchedulerRegistryV1 {
     let registry = CodeIndexSchedulerRegistryV1::new(capacity);
     registry
-        .mount_worktree(project_id(), fixture_root, store.path().to_path_buf(), None)
+        .mount_worktree(project_id(), fixture_root, store.path().to_path_buf())
         .await
         .expect("mount ignored-dependency fixture");
     wait_for_initial_generation(&registry, fixture_root).await;
@@ -367,11 +367,9 @@ export function GenerationAnchor() { return 1; }
             project_id(),
             fixture.path(),
             store.path().to_path_buf(),
-            None,
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
-            None,
         )
         .await
         .expect("mount persistent graph-backed scheduler");
@@ -964,7 +962,7 @@ async fn linked_worktree_owner_scope_is_refused_against_the_sibling_root() {
     let registry = CodeIndexSchedulerRegistryV1::new(2);
     for root in [fixture.path(), linked.as_path()] {
         registry
-            .mount_worktree(project_id(), root, store.path().to_path_buf(), None)
+            .mount_worktree(project_id(), root, store.path().to_path_buf())
             .await
             .expect("mount linked worktree");
         wait_for_initial_generation(&registry, root).await;
@@ -1026,7 +1024,7 @@ async fn linked_worktrees_keep_ignored_dependency_rosters_isolated() {
     let registry = CodeIndexSchedulerRegistryV1::new(2);
     for root in [fixture.path(), linked.as_path()] {
         registry
-            .mount_worktree(project_id(), root, store.path().to_path_buf(), None)
+            .mount_worktree(project_id(), root, store.path().to_path_buf())
             .await
             .expect("mount linked worktree");
         wait_for_initial_generation(&registry, root).await;

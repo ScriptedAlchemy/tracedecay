@@ -12,9 +12,8 @@ use crate::mcp_admission::{
     CodeIndexScopeResolverV1,
 };
 use code_index_task_support::{
-    code_index_scope_unavailable, code_index_search_hydration_budget,
-    code_index_search_unavailable, code_index_search_unavailable_for_generation,
-    generation_for_hydration,
+    code_index_scope_unavailable, code_index_search_unavailable,
+    code_index_search_unavailable_for_generation, generation_for_hydration,
 };
 
 const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
@@ -729,17 +728,8 @@ where
                         "exact_source_binding_required",
                     );
                 }
-                let mode = request.mode;
                 let deadline = request.deadline;
                 let cancellation = request.cancellation;
-                let semantic_mode = match mode {
-                    code_search::CodeIndexSearchModeV1::FallbackAllowed => {
-                        tracedecay_query::retrieval::semantic::SemanticQueryModeV1::FallbackAllowed
-                    }
-                    code_search::CodeIndexSearchModeV1::StrictSemantic => {
-                        tracedecay_query::retrieval::semantic::SemanticQueryModeV1::StrictSemantic
-                    }
-                };
                 let control = Arc::new(McpRetrievalExecutionControlV1 {
                     started: std::time::Instant::now(),
                     admission_provider: admission_provider.clone(),
@@ -760,7 +750,6 @@ where
                 };
                 let execution_result = {
                     let execution_schedulers = schedulers.clone();
-                    let execution_project_root = project_root.clone();
                     let execution_scope = scope.clone();
                     let execution_control = Arc::clone(&control);
                     let execution_source_revision = source_revision.clone();
@@ -780,24 +769,18 @@ where
                         let work = async move {
                         let Some(revision) = execution_source_revision else {
                             return execution_schedulers
-                                .execute_query_with_semantic(
-                                    &execution_project_root,
+                                .execute_controlled_query(
                                     &execution_scope,
                                     execution_request,
                                     execution_control.clone(),
-                                    semantic_mode,
                                 )
                                 .await;
                         };
                         let tree = execution_source_tree.ok_or(
-                            code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-                                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable,
-                            ),
+                            code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable,
                         )?;
                         let reference = execution_source_reference.ok_or(
-                            code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-                                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactCursorInvalid,
-                            ),
+                            code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactCursorInvalid,
                         )?;
                         let control = code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
                             deadline: execution_control.deadline.clone(),
@@ -815,11 +798,9 @@ where
                                 control,
                             )
                             .await
-                            .map_err(|reason| {
-                                code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-                                    code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactGenerationUnavailable(reason),
-                                )
-                            })?;
+                            .map_err(
+                                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactGenerationUnavailable,
+                            )?;
                         let exact_source = tracedecay_domain::CodeSourceCursorBindingV1 {
                             reference,
                             commit: revision,
@@ -838,7 +819,7 @@ where
                             &exact_source,
                         )
                         .await?;
-                        let query = execution_schedulers
+                        execution_schedulers
                             .execute_query_search_on_generation(
                                 &execution_scope,
                                 execution_request,
@@ -846,35 +827,6 @@ where
                                 execution_control.clone(),
                             )
                             .await
-                            .map_err(
-                                code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query,
-                            )?;
-                        let generation = query.generation.clone();
-                        let semantic = execution_schedulers
-                            .execute_semantic_after_query(
-                                &execution_project_root,
-                                &execution_scope,
-                                generations.head.generation(),
-                                query.sanitized.request(),
-                                query.sanitized.query_view(),
-                                &query.authorized,
-                                execution_control.as_ref(),
-                                semantic_mode,
-                            )
-                            .await
-                            .map_err(|error| match error {
-                                tracedecay_query::retrieval::semantic::SemanticQueryServiceError::StrictUnavailable(
-                                    abstention,
-                                ) => code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
-                                    generation,
-                                    abstention,
-                                },
-                                error => code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Semantic(error),
-                            })?;
-                        Ok(code_index_scheduler::semantic_query_runtime::ExecutedQuerySemanticSearchV1 {
-                            query,
-                            semantic,
-                        })
                         };
                         // The permit follows request settlement, not this
                         // work's natural completion. `work` is polled first, so
@@ -891,10 +843,8 @@ where
                             biased;
                             output = &mut work => output,
                             _ = settlement_control.settled() => Err(
-                                code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-                                    code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::Retrieval(
-                                        tracedecay_query::retrieval::RetrievalPortError::Cancelled,
-                                    ),
+                                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::Retrieval(
+                                    tracedecay_query::retrieval::RetrievalPortError::Cancelled,
                                 ),
                             ),
                         }
@@ -927,32 +877,17 @@ where
                     Ok(executed) => executed,
                     Err(error) => {
                         use code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1;
-                        use code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1;
                         tracing::warn!(
                             project_id = %project_id.as_str(),
                             error = %error,
                             "code_index_search_failed"
                         );
-                        if let QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
-                            generation,
-                            abstention,
-                        } = &error
-                        {
-                            return code_index_search_unavailable_for_generation(
-                            Some(generation.as_str().to_owned()),
-                            code_search::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
-                            code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(
-                                abstention,
-                            ),
-                        );
-                        }
                         // The lane reason travels with the failure so a caller can
                         // tell "this scope has no index" from "the index this
                         // scope already had is being rebuilt". Only the latter is
                         // worth retrying, and only the latter leaves the retained
                         // lexical lane able to answer.
                         let (reason, lane_reason) = match error {
-                        QuerySemanticSearchExecutionErrorV1::Query(error) => match error {
                         QuerySearchExecutionErrorV1::AuthorityUnavailable
                         | QuerySearchExecutionErrorV1::Authority(
                             tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable
@@ -1013,15 +948,6 @@ where
                             code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                             code_search::CodeIndexSearchUnavailableReasonV1::Internal.as_str(),
                         ),
-                        },
-                        QuerySemanticSearchExecutionErrorV1::Semantic(_) => (
-                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                            "semantic_unavailable",
-                        ),
-                        QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable { .. } => (
-                            code_search::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
-                            "semantic_unavailable",
-                        ),
                     };
                         return code_index_search_unavailable(reason, lane_reason);
                     }
@@ -1029,7 +955,7 @@ where
                 if let Some(outcome) = search_terminated(
                     &control,
                     &admission_provider,
-                    Some(executed.query.generation.as_str()),
+                    Some(executed.generation.as_str()),
                 ) {
                     return outcome;
                 }
@@ -1038,7 +964,7 @@ where
                         Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
                         _ => {
                             return code_index_search_unavailable_for_generation(
-                            Some(executed.query.generation.as_str().to_owned()),
+                            Some(executed.generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             "scope_changed_before_publication",
                         );
@@ -1048,7 +974,7 @@ where
                     Ok(admission) => admission,
                     Err(error) => {
                         return code_index_search_unavailable_for_generation(
-                            Some(executed.query.generation.as_str().to_owned()),
+                            Some(executed.generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             error.reason(),
                         );
@@ -1061,35 +987,13 @@ where
                         .is_err()
                 {
                     return code_index_search_unavailable_for_generation(
-                        Some(executed.query.generation.as_str().to_owned()),
+                        Some(executed.generation.as_str().to_owned()),
                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         "authorization_changed_before_publication",
                     );
                 }
-                let (semantic, ordered_candidates, mut next_cursor, accepted_semantic_budget) =
-                match &executed.semantic {
-                code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented(
-                    augmented,
-                ) => (
-                    code_search::CodeIndexSemanticStatusV1::Complete,
-                    augmented.composition.ranked_candidates.clone(),
-                    augmented.cursor.clone(),
-                    Some(&augmented.hydration_budget),
-                ),
-                code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
-                    abstention,
-                    fallback,
-                } => (
-                    code_search::CodeIndexSemanticStatusV1::Unavailable {
-                        reason: code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(
-                            abstention,
-                        ),
-                    },
-                    executed.query.authorized.fallback.ordered_candidates.clone(),
-                    fallback.cursor.clone(),
-                    None,
-                ),
-            };
+                let ordered_candidates = executed.authorized.fallback.ordered_candidates.clone();
+                let mut next_cursor = executed.authorized.fallback.cursor.clone();
                 let text_serving = match bounded_by_settlement(
                     control.deadline.as_ref(),
                     control.cancellation.as_ref(),
@@ -1098,7 +1002,7 @@ where
                 .await
                 {
                     Ok(text) => text.filter(|text| {
-                        text.metadata().manifest().generation_id == executed.query.generation
+                        text.metadata().manifest().generation_id == executed.generation
                     }),
                     Err(outcome) => return outcome,
                 };
@@ -1108,7 +1012,7 @@ where
                     let latest = match generation_for_hydration(
                         &schedulers,
                         &terminal_scope,
-                        &executed.query.generation,
+                        &executed.generation,
                         control.deadline.clone(),
                         control.cancellation.clone(),
                     )
@@ -1122,7 +1026,7 @@ where
                             Ok(paths) => paths,
                             Err(_) => {
                                 return code_index_search_unavailable_for_generation(
-                                    Some(executed.query.generation.as_str().to_owned()),
+                                    Some(executed.generation.as_str().to_owned()),
                                     code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                                     "display_path_index_unavailable",
                                 );
@@ -1130,12 +1034,8 @@ where
                         };
                     CodeIndexSearchDisplaySourceV1::Complete { latest, paths }
                 };
-                let mut hydration_request = executed.query.sanitized.request().clone();
-                let hydration_budget = code_index_search_hydration_budget(
-                    accepted_semantic_budget,
-                    &hydration_request.budget,
-                );
-                hydration_request.budget = hydration_budget;
+                let hydration_request = executed.sanitized.request().clone();
+                let hydration_budget = hydration_request.budget;
                 let authorize =
                     |request: &tracedecay_domain::RetrievalRequest,
                      _candidate: &tracedecay_domain::RankedCandidate| {
@@ -1178,7 +1078,7 @@ where
                             reference: reference.clone(),
                             commit: commit.clone(),
                             tree: tree.clone(),
-                            generation: executed.query.generation.clone(),
+                            generation: executed.generation.clone(),
                         }
                     });
                 let cursor_binding = match bounded_by_settlement(
@@ -1201,14 +1101,14 @@ where
                     return match error {
                     ExactCursorPublicationErrorV1::AuthorityUnavailable => {
                         code_index_search_unavailable_for_generation(
-                            Some(executed.query.generation.as_str().to_owned()),
+                            Some(executed.generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             "query_authority_unavailable",
                         )
                     }
                     ExactCursorPublicationErrorV1::BindingFailed => {
                         code_index_search_unavailable_for_generation(
-                            Some(executed.query.generation.as_str().to_owned()),
+                            Some(executed.generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                             "cursor_binding_failed",
                         )
@@ -1285,7 +1185,7 @@ where
                             "code_index_search_hydration_failed"
                         );
                         return code_index_search_unavailable_for_generation(
-                            Some(executed.query.generation.as_str().to_owned()),
+                            Some(executed.generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                             "late_hydration_failed",
                         );
@@ -1321,7 +1221,7 @@ where
                 let ordered_candidates = hydrated_candidates;
                 if let Some(reason) = control.request_termination() {
                     return code_index_search_unavailable_for_generation(
-                        Some(executed.query.generation.as_str().to_owned()),
+                        Some(executed.generation.as_str().to_owned()),
                         reason,
                         reason.as_str(),
                     );
@@ -1330,7 +1230,7 @@ where
                 // reason because the search already produced results by this point.
                 if !admission_provider.route_is_registered() {
                     return code_index_search_unavailable_for_generation(
-                        Some(executed.query.generation.as_str().to_owned()),
+                        Some(executed.generation.as_str().to_owned()),
                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         "route_revoked_before_publication",
                     );
@@ -1342,7 +1242,7 @@ where
                         }
                         _ => {
                             return code_index_search_unavailable_for_generation(
-                            Some(executed.query.generation.as_str().to_owned()),
+                            Some(executed.generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             "scope_changed_during_publication",
                         );
@@ -1353,7 +1253,7 @@ where
                         Ok(admission) => admission,
                         Err(error) => {
                             return code_index_search_unavailable_for_generation(
-                        Some(executed.query.generation.as_str().to_owned()),
+                        Some(executed.generation.as_str().to_owned()),
                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         error.reason(),
                     );
@@ -1366,7 +1266,7 @@ where
                         .is_err()
                 {
                     return code_index_search_unavailable_for_generation(
-                        Some(executed.query.generation.as_str().to_owned()),
+                        Some(executed.generation.as_str().to_owned()),
                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         "authorization_changed_during_publication",
                     );
@@ -1379,26 +1279,20 @@ where
                 // was admissible, the same lanes are reported stale against the
                 // generation that actually answered.
                 let coverage = code_search::CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
-                    &executed
-                        .query
-                        .authorized
-                        .fallback
-                        .public_fallback_lane_coverage,
-                    &executed.query.authorized.composition.internal_lane_outcomes,
-                    executed.query.generation.as_str(),
-                    executed.query.served_stale,
-                    &semantic,
+                    &executed.authorized.fallback.public_fallback_lane_coverage,
+                    &executed.authorized.composition.internal_lane_outcomes,
+                    executed.generation.as_str(),
+                    executed.served_stale,
                 );
                 code_search::CodeIndexSearchOutcomeV1::Complete(
                     code_search::CodeIndexSearchCompletedV1 {
-                        code_generation: executed.query.generation.as_str().to_owned(),
+                        code_generation: executed.generation.as_str().to_owned(),
                         ordered_candidates,
-                        query_fallback: executed.query.authorized.fallback,
+                        query_fallback: executed.authorized.fallback,
                         display_by_anchor,
-                        semantic,
                         next_cursor,
                         coverage,
-                        lexical_routes: executed.query.lexical_routes,
+                        lexical_routes: executed.lexical_routes,
                     },
                 )
             },
@@ -1416,8 +1310,8 @@ mod tests {
     use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{AuthorizationRevision, PrincipalId, ProjectId};
     use tracedecay_query::code_search::{
-        CodeIndexSearchAuthorityV1, CodeIndexSearchModeV1, CodeIndexSearchOutcomeV1,
-        CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
+        CodeIndexSearchAuthorityV1, CodeIndexSearchOutcomeV1, CodeIndexSearchRequestV1,
+        CodeIndexSearchUnavailableReasonV1,
     };
     use tracedecay_runtime_core::cancellation::CancellationToken;
 
@@ -1548,7 +1442,6 @@ mod tests {
             source_reference: None,
             limit: 10,
             cursor: None,
-            mode: CodeIndexSearchModeV1::FallbackAllowed,
             lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::query_only(),
             authority: None,
             deadline: None,
@@ -1562,12 +1455,6 @@ mod tests {
         assert_eq!(
             unavailable.reason,
             CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled
-        );
-        assert_eq!(
-            unavailable.semantic,
-            code_search::CodeIndexSemanticStatusV1::Unavailable {
-                reason: "linked_worktree_disabled"
-            }
         );
     }
 }

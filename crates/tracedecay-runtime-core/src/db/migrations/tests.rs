@@ -381,10 +381,19 @@ async fn a_shipped_v35_alias_trigger_with_another_incompatibility_is_refused_unc
 
 /// A store stamped with any other version was written by an incompatible
 /// binary. This binary has no ladder, so it refuses with the fresh-start
-/// remedy instead of upgrading in place.
+/// remedy instead of upgrading in place. `SCHEMA_VERSION - 1` is the shipped
+/// v35 dense stamp; the stamp one below the sanctioned step source stands in
+/// for every older release.
 #[tokio::test]
 async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy() {
-    for stamped in [1_u32, 18, 24, SCHEMA_VERSION - 2, SCHEMA_VERSION + 1] {
+    for stamped in [
+        1_u32,
+        18,
+        24,
+        PAYLOAD_DIGEST_STEP_SOURCE_VERSION - 1,
+        SCHEMA_VERSION - 1,
+        SCHEMA_VERSION + 1,
+    ] {
         let (conn, _dir) = create_schema_db().await;
         set_user_version(&conn, stamped).await;
 
@@ -540,6 +549,63 @@ async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_require
     }
 }
 
+/// v36 retired the semantic-vector staging family with dense code retrieval.
+/// A leftover object of that family is refused on the current stamp and on
+/// the shipped v35 stamp alike, by the writer ladder and by the read-only
+/// verifier, and the refusal names the object instead of the stamp.
+#[tokio::test]
+async fn a_retired_semantic_vector_staging_object_is_reset_required_on_every_stamp() {
+    for (retired, ddl) in [
+        (
+            "semantic_vector_stages",
+            "CREATE TABLE semantic_vector_stages (stage_id TEXT PRIMARY KEY);",
+        ),
+        (
+            "semantic_vector_replay_stage_identity_guard",
+            "CREATE TRIGGER semantic_vector_replay_stage_identity_guard
+             BEFORE INSERT ON graph_publication_replay_v1 BEGIN
+                 SELECT RAISE(ABORT, 'retired staging guard');
+             END;",
+        ),
+    ] {
+        for stamped in [SCHEMA_VERSION, SCHEMA_VERSION - 1] {
+            let (conn, _dir) = create_schema_db().await;
+            conn.execute_batch(ddl).await.unwrap();
+            set_user_version(&conn, stamped).await;
+
+            let writer_error = ensure_schema_current_connection(&conn)
+                .await
+                .expect_err("a retired staging object must not be admitted or repaired");
+            let read_only_error = verify_final_schema_connection(&conn)
+                .await
+                .expect_err("a read-only verifier must refuse a retired staging object");
+            for error in [writer_error, read_only_error] {
+                assert_eq!(
+                    error
+                        .reset_required_context()
+                        .map(|(authority, _reason)| authority),
+                    Some("SQLite store"),
+                    "v{stamped} {retired}: {error}"
+                );
+                assert!(
+                    error.to_string().contains(retired),
+                    "v{stamped} refusal must identify the retired object: {error}"
+                );
+            }
+            assert_eq!(
+                string_column(
+                    &conn,
+                    &format!("SELECT name FROM sqlite_master WHERE name = '{retired}'"),
+                )
+                .await,
+                [retired],
+                "refusal must leave the retired object in place"
+            );
+            assert_eq!(get_user_version(&conn).await, stamped);
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_current_stamp_with_retired_memory_projection_columns_is_reset_required() {
     for retired in ["source_label", "projection_state", "vector_watermark_json"] {
@@ -664,6 +730,8 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "memory_fact_relations",
         "memory_facts_fts",
         "memory_facts_fts_data",
+        "semantic_vector_stages",
+        "semantic_vector_stage_batches",
     ] {
         assert!(
             !table_exists(&conn, retired).await,
@@ -891,7 +959,7 @@ fn expected_digest_rows() -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn a_v34_store_is_stepped_to_v35_with_a_digest_for_every_payload() {
+async fn a_v34_store_is_stepped_to_the_current_stamp_with_a_digest_for_every_payload() {
     let (conn, _dir) = create_v34_db_with_payloads().await;
 
     ensure_schema_current_connection(&conn)

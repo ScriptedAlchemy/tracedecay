@@ -706,6 +706,20 @@ impl WorkProposalV1 {
         self.based_on_version
     }
 
+    /// Keep proposal identity and command replay, but retarget the graph
+    /// version the decision will apply against.
+    ///
+    /// Fan-out plans pin each child's `based_on_version` at plan time. After a
+    /// sibling accept advances the graph, recovery must rebase remaining
+    /// decisions onto the live version or `validate_proposal` rejects them as
+    /// `ProposalMismatch`.
+    pub fn rebased_onto(self, based_on_version: WorkGraphVersionV1) -> Self {
+        Self {
+            based_on_version,
+            ..self
+        }
+    }
+
     pub const fn route(&self) -> &WorkRouteDecisionV1 {
         &self.route
     }

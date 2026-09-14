@@ -282,7 +282,7 @@ When changing generated Hermes plugin or context-engine behavior, start with
 TraceDecay's read-only analysis tools before rebuilding or reinstalling
 anything: use `tracedecay_diff_context` to inspect modified symbols,
 dependencies, and affected tests; use `tracedecay_complexity`,
-`tracedecay_redundancy`, `tracedecay_dead_code`, and `tracedecay_coupling` for
+`tracedecay_dead_code`, and `tracedecay_coupling` for
 focused quality checks; `tracedecay_test_risk` for
 untested hot spots; `tracedecay_diagnostics` for structured compiler/type
 feedback; and `tracedecay_run_affected_tests` for the focused test set when test
