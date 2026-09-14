@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::{
     DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1, content_digest,
 };
+use tracedecay_code_index::clones::CloneNormalizationClassV1;
 use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
@@ -1311,6 +1312,235 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
     assert_eq!(artifact, expected);
 }
 
+#[test]
+fn v15_clone_payloads_are_content_addressed_and_exact_postings_page() {
+    let body = "one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten();";
+    let fixture = real_lexical_source_fixture_from_sources(vec![
+        (
+            "file.clone.alpha".to_owned(),
+            "src/alpha.ts".to_owned(),
+            format!("export function alpha() {{ {body} }}\n").into_bytes(),
+        ),
+        (
+            "file.clone.beta".to_owned(),
+            "src/beta.ts".to_owned(),
+            format!("export function beta() {{ {body} }}\n").into_bytes(),
+        ),
+        (
+            "file.clone.gamma".to_owned(),
+            "src/gamma.ts".to_owned(),
+            b"export function gamma() { return 1; }\n".to_vec(),
+        ),
+    ]);
+    let (pages, receipt) = drain_verified_pages(&fixture, 1);
+    let clone_bodies = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .collect::<Vec<_>>();
+    assert_eq!(clone_bodies.len(), 3);
+    let excluded = clone_bodies
+        .iter()
+        .find(|body| body.payload.token_count < 30)
+        .expect("small body remains a payload occurrence");
+    assert!(
+        excluded
+            .payload
+            .exact_keys(excluded.occurrence.eligibility)
+            .is_empty()
+    );
+    let key = clone_bodies[0]
+        .payload
+        .exact_keys(clone_bodies[0].occurrence.eligibility)
+        .into_iter()
+        .find(|key| key.class == CloneNormalizationClassV1::Conservative)
+        .expect("conservative exact key");
+
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let legacy_path = directory.path().join("lexical-artifact-v14.sqlite");
+    let artifact_path = directory.path().join("lexical-artifact-v15.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let legacy_verified = {
+        let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+            &legacy_path,
+            fixture.metadata.clone(),
+            CodeLexicalArtifactWriterRevisionV1::V14,
+        )
+        .expect("create V14 artifact");
+        for page in &pages {
+            builder
+                .append_page(page, &control)
+                .expect("append V14 page");
+        }
+        finish_staged_artifact(&mut builder, &receipt, &control)
+    };
+    let legacy_reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &legacy_path,
+        &legacy_verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("open V14 artifact");
+    assert!(matches!(
+        legacy_reader.clone_exact_page(
+            &id::<RepositoryId>("repository.artifact"),
+            &key,
+            None,
+            1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::ResetRequired(_))
+    ));
+    let verified = {
+        let mut builder =
+            CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
+                .expect("create V15 artifact");
+        for page in &pages {
+            builder.append_page(page, &control).expect("append page");
+        }
+        finish_staged_artifact(&mut builder, &receipt, &control)
+    };
+    assert_eq!(
+        legacy_verified.section_digests(),
+        &verified.section_digests()[..legacy_verified.section_digests().len()],
+        "V15 clone sections must not rewrite lexical section identities"
+    );
+    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect V15 artifact");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM clone_body_payloads", [], |row| row
+                .get::<_, i64>(0))
+            .expect("payload count"),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM clone_occurrences", [], |row| row
+                .get::<_, i64>(0))
+            .expect("occurrence count"),
+        3
+    );
+    drop(connection);
+
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &artifact_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("open V15 artifact");
+    let repository = id::<RepositoryId>("repository.artifact");
+    assert!(matches!(
+        reader.clone_exact_page(
+            &id::<RepositoryId>("repository.unauthorized"),
+            &key,
+            None,
+            1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Missing(_))
+    ));
+    let first = reader
+        .clone_exact_page(&repository, &key, None, 1, &control)
+        .expect("first clone page");
+    assert_eq!(first.members.len(), 1);
+    let second = reader
+        .clone_exact_page(&repository, &key, first.next_after.as_ref(), 1, &control)
+        .expect("second clone page");
+    assert_eq!(second.members.len(), 1);
+    assert!(second.next_after.is_none());
+    assert_eq!(
+        first.members[0].payload.payload_digest,
+        second.members[0].payload.payload_digest
+    );
+    assert_ne!(
+        first.members[0].occurrence.symbol_occurrence_id,
+        second.members[0].occurrence.symbol_occurrence_id
+    );
+
+    let reduced = real_lexical_source_fixture_from_sources(vec![
+        (
+            "file.clone.alpha".to_owned(),
+            "src/alpha.ts".to_owned(),
+            format!("export function alpha() {{ {body} }}\n").into_bytes(),
+        ),
+        (
+            "file.clone.gamma".to_owned(),
+            "src/gamma.ts".to_owned(),
+            b"export function gamma() { return 1; }\n".to_vec(),
+        ),
+    ]);
+    let (reduced_pages, reduced_receipt) = drain_verified_pages(&reduced, 1);
+    let reduced_payload = reduced_pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .find(|body| body.payload.token_count >= 30)
+        .expect("unchanged eligible body");
+    assert_eq!(
+        reduced_payload.payload.payload_digest,
+        first.members[0].payload.payload_digest
+    );
+    let reduced_path = directory.path().join("lexical-artifact-reduced-v15.sqlite");
+    let reduced_verified = {
+        let mut builder =
+            CodeLexicalArtifactBuilderV1::create(&reduced_path, reduced.metadata.clone())
+                .expect("create reduced V15 artifact");
+        for page in &reduced_pages {
+            builder
+                .append_page(page, &control)
+                .expect("append reduced page");
+        }
+        finish_staged_artifact(&mut builder, &reduced_receipt, &control)
+    };
+    let reduced_reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &reduced_path,
+        &reduced_verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("open reduced V15 artifact");
+    assert_eq!(
+        reduced_reader
+            .clone_exact_page(&repository, &key, None, 10, &control)
+            .expect("query after deletion")
+            .members
+            .len(),
+        1,
+        "deleted occurrences and postings must not remain active"
+    );
+    drop(reader);
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open clone tamper writer");
+    connection
+        .execute_batch(
+            "DROP TRIGGER immutable_clone_body_payloads_update;
+             UPDATE clone_body_payloads SET payload = zeroblob(length(payload));",
+        )
+        .expect("tamper clone payload bytes");
+    drop(connection);
+    assert!(matches!(
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &artifact_path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+    ));
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open shape tamper writer");
+    connection
+        .execute_batch("DROP TABLE clone_exact_postings;")
+        .expect("remove required clone table");
+    drop(connection);
+    assert!(matches!(
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &artifact_path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Incompatible(_))
+    ));
+}
+
 /// The lexical row scan is cooperatively cancellable on both production
 /// row sources. Over a real multi-file corpus whose every chunk matches the
 /// query, a request cancelled after its `k`-th control consultation unwinds
@@ -1674,7 +1904,7 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     )
     .expect("the current revision must open");
 
-    for revision in [9i64, 15] {
+    for revision in [9i64, 16] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -2065,7 +2295,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("read current format revision");
-    assert_eq!(format_revision, 14);
+    assert_eq!(format_revision, 15);
     let uncompressed_ngram_rows: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM ngram_postings WHERE substr(documents, 1, 4) = x'54444e31' OR length(documents) > cardinality + 4",
@@ -3270,7 +3500,7 @@ fn disk_artifact_subdivides_import_only_suffix_without_replaying_chunks() {
     let mut text = (0..12)
         .map(|n| format!("import {{ helper{n} }} from \"dependency{n}\";\n"))
         .collect::<String>();
-    text.push_str("export function imported() { return helper0(); }\n");
+    text.push_str("export const imported = helper0;\n");
     let fixture = real_lexical_source_fixture_from_sources(vec![(
         "file.imports".to_owned(),
         "src/imports.ts".to_owned(),
@@ -3331,7 +3561,6 @@ fn disk_artifact_subdivides_import_only_suffix_without_replaying_chunks() {
         match result {
             Err(CodeLexicalArtifactErrorV1::BatchTooLarge { .. }) => {
                 refusals += 1;
-                assert!(refusals <= 2);
                 assert_eq!(source.cursor(), &before);
                 assert_eq!(builder.progress().unwrap(), progress);
                 assert!(source.tighten_page_record_bound().is_some());

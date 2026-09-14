@@ -14,12 +14,14 @@ use rusqlite::StatementStatus;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
+use tracedecay_code_index::clones::{CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1,
-    FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
+    FixedPointScore, LogicalEvidenceId, ManifestDigest, RepositoryId, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
+    SymbolOccurrenceId,
 };
 use tracedecay_private_fs::open_private_file;
 
@@ -71,6 +73,18 @@ pub struct CodeLexicalArtifactReaderV1 {
     /// rows make a fresh `ORDER BY term` scan random I/O; share one load
     /// across clones and later queries on this reader.
     fuzzy_vocabulary: Arc<OnceLock<Arc<Vec<String>>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneExactArtifactMemberV1 {
+    pub payload: CloneBodyPayloadV1,
+    pub occurrence: CloneBodyOccurrenceV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneExactArtifactPageV1 {
+    pub members: Vec<CloneExactArtifactMemberV1>,
+    pub next_after: Option<SymbolOccurrenceId>,
 }
 
 type ArtifactConnectionMutex<T> = StdMutex<T>;
@@ -537,6 +551,107 @@ impl CodeLexicalArtifactReaderV1 {
         }
     }
 
+    pub fn clone_exact_page(
+        &self,
+        repository_id: &RepositoryId,
+        key: &CloneExactKeyV1,
+        after: Option<&SymbolOccurrenceId>,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CloneExactArtifactPageV1, CodeLexicalArtifactErrorV1> {
+        checkpoint(control)?;
+        if self.metadata.repository_id.as_ref() != Some(repository_id) {
+            return Err(CodeLexicalArtifactErrorV1::Missing(
+                "clone lookup repository is unavailable".to_owned(),
+            ));
+        }
+        if !self.layout.has_clone_index() {
+            return Err(CodeLexicalArtifactErrorV1::ResetRequired(
+                "clone lookup requires lexical artifact revision 15".to_owned(),
+            ));
+        }
+        if limit == 0 {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "clone exact page limit must be non-zero".to_owned(),
+            ));
+        }
+        let fetch = limit.checked_add(1).ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract("clone exact page limit overflowed".to_owned())
+        })?;
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT posting.symbol_occurrence_id, posting.payload_digest, occurrence.occurrence, payload.payload \
+                 FROM clone_exact_postings AS posting \
+                 LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id \
+                 LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest \
+                 WHERE posting.class = ?1 AND posting.normalization_revision = ?2 AND posting.digest = ?3 \
+                 AND posting.symbol_occurrence_id > ?4 \
+                 ORDER BY posting.symbol_occurrence_id LIMIT ?5",
+            )
+            .map_err(sqlite_error)?;
+        let after = after.map_or("", SymbolOccurrenceId::as_str);
+        let mut rows = statement
+            .query(rusqlite::params![
+                i64::from(key.class as u8),
+                i64::from(key.normalization_revision),
+                key.digest.as_str(),
+                after,
+                i64::try_from(fetch)
+                    .map_err(|error| { CodeLexicalArtifactErrorV1::Contract(error.to_string()) })?,
+            ])
+            .map_err(sqlite_error)?;
+        let mut members = Vec::with_capacity(fetch);
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            checkpoint(control)?;
+            let posting_occurrence: String = row.get(0).map_err(sqlite_error)?;
+            let posting_payload: String = row.get(1).map_err(sqlite_error)?;
+            let occurrence_bytes: Option<Vec<u8>> = row.get(2).map_err(sqlite_error)?;
+            let payload_bytes: Option<Vec<u8>> = row.get(3).map_err(sqlite_error)?;
+            let (Some(occurrence_bytes), Some(payload_bytes)) = (occurrence_bytes, payload_bytes)
+            else {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "clone exact posting is missing its occurrence or payload".to_owned(),
+                ));
+            };
+            let occurrence: CloneBodyOccurrenceV1 = serde_json::from_slice(&occurrence_bytes)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+            let payload: CloneBodyPayloadV1 = serde_json::from_slice(&payload_bytes)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+            if occurrence.symbol_occurrence_id.as_str() != posting_occurrence
+                || &occurrence.repository_id != repository_id
+                || occurrence.source_generation != self.metadata.generation
+                || occurrence.payload_digest.as_str() != posting_payload
+                || occurrence.payload_digest != payload.payload_digest
+                || payload.validate().is_err()
+                || !payload
+                    .exact_keys(occurrence.eligibility)
+                    .iter()
+                    .any(|candidate| candidate == key)
+            {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "clone exact posting does not match its payload and occurrence".to_owned(),
+                ));
+            }
+            members.push(CloneExactArtifactMemberV1 {
+                payload,
+                occurrence,
+            });
+        }
+        let next_after = (members.len() > limit)
+            .then(|| {
+                members
+                    .get(limit - 1)
+                    .map(|member| member.occurrence.symbol_occurrence_id.clone())
+            })
+            .flatten();
+        members.truncate(limit);
+        Ok(CloneExactArtifactPageV1 {
+            members,
+            next_after,
+        })
+    }
+
     /// Reader queries serialize on this one connection; the wait span makes
     /// cross-query contention (concurrent searches, hydration reads during
     /// staging) attributable instead of vanishing into lane wall time.
@@ -962,7 +1077,8 @@ fn visit_lexical_rows(
             LexicalArtifactLayoutV1::V11
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
-            | LexicalArtifactLayoutV1::V14 => {
+            | LexicalArtifactLayoutV1::V14
+            | LexicalArtifactLayoutV1::V15 => {
                 lookup_term_ids(connection, terms).map_err(map_query_artifact_error)?
             }
         };
@@ -972,7 +1088,8 @@ fn visit_lexical_rows(
             LexicalArtifactLayoutV1::V11
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
-            | LexicalArtifactLayoutV1::V14 => v11_ids.len(),
+            | LexicalArtifactLayoutV1::V14
+            | LexicalArtifactLayoutV1::V15 => v11_ids.len(),
         };
         ensure_sqlite_bind_capacity(documents.parameters.len(), dynamic_binds)?;
         ensure_sqlite_bound_value_bytes(
@@ -988,6 +1105,7 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
+            | LexicalArtifactLayoutV1::V15
                 if v11_ids.is_empty() =>
             {
                 "'[]'".to_owned()
@@ -1007,7 +1125,8 @@ fn visit_lexical_rows(
             LexicalArtifactLayoutV1::V11
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
-            | LexicalArtifactLayoutV1::V14 => {
+            | LexicalArtifactLayoutV1::V14
+            | LexicalArtifactLayoutV1::V15 => {
                 let placeholders = std::iter::repeat_n("?", v11_ids.len())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -1068,7 +1187,8 @@ fn visit_lexical_rows(
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
-                | LexicalArtifactLayoutV1::V14 => {
+                | LexicalArtifactLayoutV1::V14
+                | LexicalArtifactLayoutV1::V15 => {
                     let encoded: Vec<(i64, String, i64)> =
                         serde_json::from_str(&encoded_frequencies).map_err(contract_error)?;
                     entries.reserve(encoded.len());
@@ -1809,7 +1929,8 @@ impl<'a> ArtifactQueryV1<'a> {
             LexicalArtifactLayoutV1::V11
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
-            | LexicalArtifactLayoutV1::V14 => {
+            | LexicalArtifactLayoutV1::V14
+            | LexicalArtifactLayoutV1::V15 => {
                 let subtoken_field = field_code(LexicalFieldV1::Subtoken);
                 for term in whole_terms {
                     if let Some(term_id) =
@@ -1885,7 +2006,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 }
                 LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
-                | LexicalArtifactLayoutV1::V14 => {
+                | LexicalArtifactLayoutV1::V14
+                | LexicalArtifactLayoutV1::V15 => {
                     sources.push(DocumentQueryV1::exact_id(
                         literal.field,
                         &literal.canonical_bytes,
@@ -2001,7 +2123,8 @@ impl<'a> ArtifactQueryV1<'a> {
             LexicalArtifactLayoutV1::V11
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
-            | LexicalArtifactLayoutV1::V14 => "SELECT term FROM vocabulary WHERE in_fuzzy = 1",
+            | LexicalArtifactLayoutV1::V14
+            | LexicalArtifactLayoutV1::V15 => "SELECT term FROM vocabulary WHERE in_fuzzy = 1",
         }
     }
 
@@ -2056,7 +2179,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
-                | LexicalArtifactLayoutV1::V14 => {
+                | LexicalArtifactLayoutV1::V14
+                | LexicalArtifactLayoutV1::V15 => {
                     field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
                         .map_err(map_query_artifact_error)?
                 }
@@ -2104,7 +2228,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
-                | LexicalArtifactLayoutV1::V14 => {
+                | LexicalArtifactLayoutV1::V14
+                | LexicalArtifactLayoutV1::V15 => {
                     let assigned = lookup_term_ids(self.connection, terms)
                         .map_err(map_query_artifact_error)?;
                     let term_ids = assigned.values().copied().collect::<Vec<_>>();
@@ -2917,7 +3042,10 @@ fn map_query_sql_error(error: rusqlite::Error) -> RetrievalPortError {
 fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
         CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
-        CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
+        CodeLexicalArtifactErrorV1::Incompatible(_)
+        | CodeLexicalArtifactErrorV1::ResetRequired(_) => {
+            RetrievalPortError::IncompatibleProjection
+        }
         CodeLexicalArtifactErrorV1::Contract(error) => RetrievalPortError::Contract(error),
         CodeLexicalArtifactErrorV1::Unreserved(_)
         | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,

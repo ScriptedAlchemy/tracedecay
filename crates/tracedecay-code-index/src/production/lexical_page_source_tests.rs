@@ -1013,8 +1013,9 @@ fn cancellation_during_staging_keeps_the_exact_pre_batch_cursor() {
 fn layout_scan_preserves_digest_and_file_boundaries_across_escaped_syntax() {
     let first_file = r#"{"payload":"escaped \\\" quote and { [ ] } syntax"}"#;
     let second_file = format!(r#"{{"payload":"{}"}}"#, "y".repeat(96 * 1024));
-    let generation =
-        format!(r#"{{"format_revision":6,"files":[{first_file},{second_file}],"tail":"done"}}"#);
+    let generation = format!(
+        r#"{{"format_revision":{MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION},"files":[{first_file},{second_file}],"tail":"done"}}"#
+    );
     let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
         .expect("synthetic generation digest is canonical");
     let sealed = format!(
@@ -1061,7 +1062,9 @@ fn layout_scan_preserves_digest_and_file_boundaries_across_escaped_syntax() {
 #[test]
 fn layout_scan_rejects_cancelled_and_corrupted_sources() {
     let file = format!(r#"{{"payload":"{}"}}"#, "z".repeat(512 * 1024));
-    let generation = format!(r#"{{"format_revision":6,"files":[{file}]}}"#);
+    let generation = format!(
+        r#"{{"format_revision":{MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION},"files":[{file}]}}"#
+    );
     let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
         .expect("synthetic generation digest is canonical");
     let sealed = format!(

@@ -27,7 +27,10 @@ pub use format::{
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
 };
 pub use prepared::PreparedCodeLexicalArtifactPageV1;
-pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
+pub use reader::{
+    CloneExactArtifactMemberV1, CloneExactArtifactPageV1, CodeExactLexicalArtifactReaderV1,
+    CodeLexicalArtifactReaderV1,
+};
 pub use schema::CodeLexicalArtifactWriterRevisionV1;
 
 /// Floor for the artifact build memory ledger.
@@ -51,7 +54,7 @@ pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1: usize = 16 * 1024 * 1
 ///
 /// Small hosts retain the established 1.5 GiB behavior. Larger hosts grant
 /// one eighth of the process resident authority, capped so one background
-/// artifact cannot crowd out graph, semantic, and serving residents.
+/// artifact cannot crowd out graph, shared-code, and serving residents.
 #[must_use]
 pub fn code_lexical_artifact_build_memory_budget_for(admitted_process_bytes: u64) -> usize {
     let floor = CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1 as u64;
@@ -105,6 +108,8 @@ pub enum CodeLexicalArtifactErrorV1 {
     Corrupt(String),
     #[error("lexical artifact is incompatible: {0}")]
     Incompatible(String),
+    #[error("lexical clone artifact reset is required: {0}")]
+    ResetRequired(String),
     #[error("lexical artifact I/O is unavailable: {0}")]
     Io(String),
     #[error("lexical artifact authority is missing: {0}")]

@@ -596,10 +596,17 @@ impl FileGenerationArtifactsV1 {
             if &self.extraction.extractor_revision != extractor_revision {
                 return Err(ChunkingFailureV1::GenerationMismatch);
             }
-            let artifacts = self.artifacts.rematerialize_for_generation(
+            let mut artifacts = self.artifacts.rematerialize_for_generation(
                 target.generation_id.clone(),
                 target.file.file_occurrence_id.clone(),
             )?;
+            for body in &mut artifacts.clone_bodies {
+                body.occurrence.project_id = file.authority().project_id.clone();
+                body.occurrence.repository_id = file.authority().repository_id.clone();
+                body.occurrence.worktree_id = file.authority().worktree_id.clone();
+                body.occurrence.snapshot_digest = target.snapshot_digest.clone();
+                body.occurrence.path = file.authority().logical_path.clone();
+            }
             let exact_authority = self
                 .exact_authority
                 .rematerialize_for_generation(&self.artifacts.chunks, &artifacts.chunks)?;
@@ -619,6 +626,7 @@ impl FileGenerationArtifactsV1 {
         config: &CodeIndexProductionConfigV1,
         scope: &CodeIndexGenerationScopeV1,
         generation_id: &CodeGenerationId,
+        snapshot_digest: &ManifestDigest,
         file: &SanitizedCodeFileV1,
         extractor_revision: &ExtractorRevision,
     ) -> Result<Self, ChunkingFailureV1> {
@@ -634,9 +642,17 @@ impl FileGenerationArtifactsV1 {
         {
             return Err(ChunkingFailureV1::GenerationMismatch);
         }
-        let artifacts = self
+        let mut artifacts = self
             .artifacts
             .rematerialize_for_generation(generation_id.clone(), file.file_occurrence_id.clone())?;
+        for body in &mut artifacts.clone_bodies {
+            body.occurrence.project_id = config.project_id.clone();
+            body.occurrence.repository_id = config.repository.clone();
+            body.occurrence.worktree_id = scope.worktree.clone();
+            body.occurrence.source_generation = generation_id.clone();
+            body.occurrence.snapshot_digest = snapshot_digest.clone();
+            body.occurrence.path = file.logical_path.clone();
+        }
         let exact_authority = self
             .exact_authority
             .rematerialize_for_generation(&self.artifacts.chunks, &artifacts.chunks)?;
@@ -2224,6 +2240,7 @@ where
                                 config,
                                 &scope,
                                 &manifest.generation_id,
+                                &capability.snapshot().intake_digest,
                                 current_file,
                                 &descriptor.extractor_revision,
                             )

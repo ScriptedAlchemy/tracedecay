@@ -17,6 +17,7 @@
 pub mod ast_grep_search;
 pub mod capabilities;
 pub mod chunks;
+pub mod clones;
 pub mod diagnostics;
 pub mod extract;
 pub mod generations;

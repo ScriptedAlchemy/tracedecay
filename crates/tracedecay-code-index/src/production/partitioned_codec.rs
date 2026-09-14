@@ -67,9 +67,13 @@ use super::*;
 /// [`PersistedFileGenerationArtifactsRefV2`]. Both decode, so a generation
 /// may reuse revision-1 segments from its parent beside revision-2 segments
 /// of its own.
+#[cfg(test)]
 const FILE_SEGMENT_FORMAT_REVISION_V1: u32 = 1;
+#[cfg(test)]
 const FILE_SEGMENT_FORMAT_REVISION_V2: u32 = 2;
+const FILE_SEGMENT_FORMAT_REVISION_V3: u32 = 3;
 const GENERATION_ID_MARKER: &str = "$tracedecay:g";
+const SNAPSHOT_DIGEST_MARKER: &str = "$tracedecay:snapshot";
 const FILE_OCCURRENCE_ID_MARKER: &str = "$tracedecay:f";
 const SYMBOL_OCCURRENCE_ID_MARKER_PREFIX: &str = "$tracedecay:s:";
 const CHUNK_ID_MARKER_PREFIX: &str = "$tracedecay:c:";
@@ -507,6 +511,7 @@ impl PartitionedCompactGenerationEvidenceV1 {
 enum IdentityFieldV1 {
     Other,
     Generation,
+    SnapshotDigest,
     FileOccurrence,
     SymbolOccurrence,
 }
@@ -534,7 +539,8 @@ impl SymbolOccurrenceOrderV1<'_> {
 
 fn identity_field(key: &str) -> IdentityFieldV1 {
     match key {
-        "generation_id" => IdentityFieldV1::Generation,
+        "generation_id" | "source_generation" => IdentityFieldV1::Generation,
+        "snapshot_digest" => IdentityFieldV1::SnapshotDigest,
         "file_occurrence_id" => IdentityFieldV1::FileOccurrence,
         "occurrence"
         | "from_occurrence"
@@ -552,6 +558,7 @@ fn identity_field(key: &str) -> IdentityFieldV1 {
 /// the serialized payload is rewritten (rules 1, 3, 4 and 5).
 struct FileSegmentEncodePolicyV1<'a> {
     generation_id: &'a str,
+    snapshot_digest: Option<&'a str>,
     file_occurrence_id: &'a str,
     symbol_keys: HashMap<&'a str, u32>,
     marker: String,
@@ -579,6 +586,10 @@ impl CanonicalPolicyV1 for FileSegmentEncodePolicyV1<'_> {
                 write_json_string(GENERATION_ID_MARKER, out)?;
                 Ok(true)
             }
+            IdentityFieldV1::SnapshotDigest if Some(value) == self.snapshot_digest => {
+                write_json_string(SNAPSHOT_DIGEST_MARKER, out)?;
+                Ok(true)
+            }
             IdentityFieldV1::FileOccurrence if value == self.file_occurrence_id => {
                 write_json_string(FILE_OCCURRENCE_ID_MARKER, out)?;
                 Ok(true)
@@ -596,6 +607,7 @@ impl CanonicalPolicyV1 for FileSegmentEncodePolicyV1<'_> {
             }
             IdentityFieldV1::Other
             | IdentityFieldV1::Generation
+            | IdentityFieldV1::SnapshotDigest
             | IdentityFieldV1::FileOccurrence => Ok(false),
         }
     }
@@ -621,6 +633,7 @@ impl CanonicalPolicyV1 for FileSegmentEncodePolicyV1<'_> {
 /// Restores a file segment's identities from its canonical markers.
 struct FileSegmentDecodePolicyV1<'a> {
     generation_id: &'a str,
+    snapshot_digest: &'a str,
     file_occurrence_id: &'a str,
     symbol_occurrences: &'a [SymbolOccurrenceId],
 }
@@ -647,6 +660,10 @@ impl CanonicalPolicyV1 for FileSegmentDecodePolicyV1<'_> {
                 write_json_string(self.generation_id, out)?;
                 Ok(true)
             }
+            IdentityFieldV1::SnapshotDigest if value == SNAPSHOT_DIGEST_MARKER => {
+                write_json_string(self.snapshot_digest, out)?;
+                Ok(true)
+            }
             IdentityFieldV1::FileOccurrence if value == FILE_OCCURRENCE_ID_MARKER => {
                 write_json_string(self.file_occurrence_id, out)?;
                 Ok(true)
@@ -669,6 +686,7 @@ impl CanonicalPolicyV1 for FileSegmentDecodePolicyV1<'_> {
             }
             IdentityFieldV1::Other
             | IdentityFieldV1::Generation
+            | IdentityFieldV1::SnapshotDigest
             | IdentityFieldV1::FileOccurrence
             | IdentityFieldV1::SymbolOccurrence => Ok(false),
         }
@@ -1142,8 +1160,12 @@ impl PartitionedSegmentEncoderV1 {
             ))
         })?;
         self.encode_serialized_file_segment(
-            FILE_SEGMENT_FORMAT_REVISION_V2,
+            FILE_SEGMENT_FORMAT_REVISION_V3,
             generation_id.as_str(),
+            file.artifacts
+                .clone_bodies
+                .first()
+                .map(|body| body.occurrence.snapshot_digest.as_str()),
             file.extraction.file_occurrence_id.clone(),
             file.artifacts
                 .symbols
@@ -1161,6 +1183,7 @@ impl PartitionedSegmentEncoderV1 {
         &mut self,
         format_revision: u32,
         generation_id: &str,
+        snapshot_digest: Option<&str>,
         file_occurrence_id: FileOccurrenceId,
         stable_symbols: impl Iterator<Item = (&'s str, &'s str)>,
         file_key: u32,
@@ -1216,6 +1239,7 @@ impl PartitionedSegmentEncoderV1 {
             .collect::<Result<HashMap<_, _>, _>>()?;
         let mut policy = FileSegmentEncodePolicyV1 {
             generation_id,
+            snapshot_digest,
             file_occurrence_id: file_occurrence_id.as_str(),
             symbol_keys,
             marker: String::new(),
@@ -1304,6 +1328,7 @@ fn verify_segment_identity(
 fn decode_file_segment(
     descriptor: &PartitionedFileSegmentDescriptorV1,
     generation_id: &CodeGenerationId,
+    snapshot_digest: &ManifestDigest,
     bytes: &[u8],
     restored: &mut Vec<u8>,
 ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
@@ -1320,7 +1345,7 @@ fn decode_file_segment(
     )?;
     hotpath::measure_block!(
         "code_index.restore.segment_decode",
-        decode_verified_file_segment(descriptor, generation_id, bytes, restored)
+        decode_verified_file_segment(descriptor, generation_id, snapshot_digest, bytes, restored,)
     )
 }
 
@@ -1328,6 +1353,7 @@ fn decode_file_segment(
 fn decode_verified_file_segment(
     descriptor: &PartitionedFileSegmentDescriptorV1,
     generation_id: &CodeGenerationId,
+    snapshot_digest: &ManifestDigest,
     bytes: &[u8],
     restored: &mut Vec<u8>,
 ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
@@ -1340,16 +1366,15 @@ fn decode_verified_file_segment(
             ))
         })
     )?;
-    if !matches!(
-        segment.format_revision,
-        FILE_SEGMENT_FORMAT_REVISION_V1 | FILE_SEGMENT_FORMAT_REVISION_V2
-    ) {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed file segment format revision is incompatible".to_owned(),
-        ));
+    if segment.format_revision != FILE_SEGMENT_FORMAT_REVISION_V3 {
+        return Err(CodeIndexProductionErrorV1::SealedRowContractRefused {
+            revision: segment.format_revision,
+            message: "sealed file segment predates clone body rows".to_owned(),
+        });
     }
     let mut policy = FileSegmentDecodePolicyV1 {
         generation_id: generation_id.as_str(),
+        snapshot_digest: snapshot_digest.as_str(),
         file_occurrence_id: descriptor.file_occurrence_id.as_str(),
         symbol_occurrences: &descriptor.symbol_occurrences,
     };
@@ -1376,13 +1401,9 @@ fn decode_verified_file_segment(
     };
     let mut file: PersistedFileGenerationArtifactsV1 = hotpath::measure_block!(
         "code_index.restore.segment_typed_deserialize_expand",
-        if segment.format_revision == FILE_SEGMENT_FORMAT_REVISION_V1 {
-            serde_json::from_slice(restored).map_err(payload_decoding_failed)
-        } else {
-            serde_json::from_slice::<PersistedFileGenerationArtifactsV2>(restored)
-                .map_err(payload_decoding_failed)
-                .and_then(PersistedFileGenerationArtifactsV2::expand)
-        }
+        serde_json::from_slice::<PersistedFileGenerationArtifactsV2>(restored)
+            .map_err(payload_decoding_failed)
+            .and_then(PersistedFileGenerationArtifactsV2::expand)
     )?;
     hotpath::measure_block!("code_index.restore.segment_artifact_sorts", {
         file.artifacts
@@ -2512,6 +2533,7 @@ type LexicalSegmentReaderV1 =
 
 pub(super) struct PartitionedLexicalFileSourceV1 {
     generation_id: CodeGenerationId,
+    snapshot_digest: ManifestDigest,
     descriptors: Vec<PartitionedFileSegmentDescriptorV1>,
     read_segment: Box<LexicalSegmentReaderV1>,
 }
@@ -2593,6 +2615,7 @@ impl PartitionedLexicalFileSourceV1 {
     ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
         let Self {
             generation_id,
+            snapshot_digest,
             descriptors,
             read_segment,
         } = self;
@@ -2625,6 +2648,7 @@ impl PartitionedLexicalFileSourceV1 {
             &descriptors[..read],
             &buffers[..read],
             generation_id,
+            snapshot_digest,
         )?)
     }
 }
@@ -2675,11 +2699,18 @@ fn decode_segment_window(
     descriptors: &[PartitionedFileSegmentDescriptorV1],
     segments: &[Vec<u8>],
     generation_id: &CodeGenerationId,
+    snapshot_digest: &ManifestDigest,
 ) -> Result<Vec<PersistedFileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
     let window = descriptors.iter().zip(segments).collect::<Vec<_>>();
     collect_bounded_ordered(&window, |(descriptor, segment), _worker| {
         let mut restored = Vec::new();
-        decode_file_segment(descriptor, generation_id, segment, &mut restored)
+        decode_file_segment(
+            descriptor,
+            generation_id,
+            snapshot_digest,
+            segment,
+            &mut restored,
+        )
     })
 }
 
@@ -2703,6 +2734,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         };
         let source = PartitionedLexicalFileSourceV1 {
             generation_id: generation.manifest.generation_id.clone(),
+            snapshot_digest: generation.manifest.snapshot_digest.clone(),
             descriptors: generation.file_segments,
             read_segment: Box::new(read_segment),
         };
@@ -3002,6 +3034,7 @@ impl CodeIndexPublishedGenerationV1 {
                 &pending[..read],
                 &buffers[..read],
                 &generation.manifest.generation_id,
+                &generation.manifest.snapshot_digest,
             )?);
         }
         let evidence = hotpath::measure_block!(
@@ -3416,6 +3449,7 @@ mod tests {
                     }
                     IdentityFieldV1::Other
                     | IdentityFieldV1::Generation
+                    | IdentityFieldV1::SnapshotDigest
                     | IdentityFieldV1::FileOccurrence => {}
                 },
                 Value::Array(values) => {
@@ -3695,6 +3729,7 @@ mod tests {
             .encode_serialized_file_segment(
                 FILE_SEGMENT_FORMAT_REVISION_V1,
                 FIXTURE_GENERATION,
+                None,
                 FileOccurrenceId::new(FIXTURE_FILE).expect("fixture file identity"),
                 stable
                     .iter()
@@ -3753,6 +3788,7 @@ mod tests {
     fn streaming_file_segment_decode_refuses_an_unknown_symbol_key() {
         let mut policy = FileSegmentDecodePolicyV1 {
             generation_id: FIXTURE_GENERATION,
+            snapshot_digest: "sha256:fixture",
             file_occurrence_id: FIXTURE_FILE,
             symbol_occurrences: &[],
         };
@@ -4235,13 +4271,9 @@ mod tests {
         );
     }
 
-    /// The historical writer's revision-1 file segments predate the required
-    /// symbol evidence (`docstring`, then `is_async` and `derives`). Older
-    /// sealed rows are never defaulted: the decoder refuses them with the
-    /// typed contract failure naming the first missing field so the
-    /// generation is rebuilt instead of being served as negative evidence.
+    /// Historical file segments predate clone-body rows and are rebuilt.
     #[test]
-    fn revision_one_historical_segments_are_refused_without_docstring_evidence() {
+    fn revision_one_historical_segments_are_refused_without_clone_evidence() {
         let fixture = historical_fixture_root();
         let generation = archival_segment_carrier();
         let mut refused_segments = 0;
@@ -4259,16 +4291,17 @@ mod tests {
             let error = decode_file_segment(
                 descriptor,
                 &generation.manifest.generation_id,
+                &generation.manifest.snapshot_digest,
                 &bytes,
                 &mut restored,
             )
-            .expect_err("historical rows without documentation evidence must be refused");
+            .expect_err("historical rows without clone evidence must be refused");
             assert!(
                 matches!(
                     &error,
                     CodeIndexProductionErrorV1::SealedRowContractRefused { revision, message }
                         if *revision == FILE_SEGMENT_FORMAT_REVISION_V1
-                            && message.contains("missing field `docstring`")
+                            && message.contains("predates clone body rows")
                 ),
                 "unexpected error: {error}"
             );
@@ -4277,77 +4310,37 @@ mod tests {
         assert!(refused_segments > 0);
     }
 
-    /// A revision-2 row that omits a per-file constant needs the file default
-    /// to carry it; a segment with neither is refused as a contract failure
-    /// rather than filled in. The historical revision-1 bytes are refused
-    /// before their chunk rows are reached (see the test above), so this test
-    /// supplies the symbol evidence those rows lack to obtain a typed record.
+    /// Revision two is refused before any of its now-incomplete rows decode.
     #[test]
-    fn revision_two_rows_without_defaults_are_refused() {
-        let fixture = historical_fixture_root();
+    fn revision_two_rows_are_refused_without_clone_evidence() {
         let generation = archival_segment_carrier();
-        let descriptor = &generation.file_segments[0];
-        let name = descriptor
-            .segment_digest
-            .hex_suffix()
-            .expect("sha256 segment digest");
-        let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
-            .expect("historical segment bytes");
-        let segment: PartitionedRawFileSegmentV1 =
-            serde_json::from_slice(&bytes).expect("historical segment envelope");
-        let mut policy = FileSegmentDecodePolicyV1 {
-            generation_id: generation.manifest.generation_id.as_str(),
-            file_occurrence_id: descriptor.file_occurrence_id.as_str(),
-            symbol_occurrences: &descriptor.symbol_occurrences,
+        let prior = &generation.file_segments[0];
+        let bytes = br#"{"format_revision":2,"file":{}}"#;
+        let descriptor = PartitionedFileSegmentDescriptorV1 {
+            file_key: prior.file_key,
+            segment_digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes))
+                .expect("segment digest"),
+            segment_size_bytes: u64::try_from(bytes.len()).expect("segment size"),
+            file_occurrence_id: prior.file_occurrence_id.clone(),
+            symbol_occurrences: prior.symbol_occurrences.clone(),
         };
         let mut restored = Vec::new();
-        canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, &mut restored)
-            .expect("historical payload canonicalizes");
-        let mut value: Value = serde_json::from_slice(&restored).expect("historical payload value");
-        for symbol in value["artifacts"]["symbols"]
-            .as_array_mut()
-            .expect("historical symbol rows")
-        {
-            symbol["docstring"] = Value::Null;
-            symbol["is_async"] = Value::Bool(false);
-            symbol["derives"] = Value::Array(Vec::new());
-        }
-        let file: PersistedFileGenerationArtifactsV1 =
-            serde_json::from_value(value).expect("payload with symbol evidence decodes");
-        let mut payload = serde_json::to_value(PersistedFileGenerationArtifactsRefV2::new(
-            &file.authority,
-            &file.extraction,
-            &file.artifacts,
-        ))
-        .expect("revision-2 payload value");
-        payload["artifacts"]["chunks"]
-            .as_object_mut()
-            .expect("chunk table")
-            .remove("chunk_defaults")
-            .expect("the row form hoists file defaults");
-        let mut encoder = PartitionedSegmentEncoderV1::default();
-        serde_json::to_writer(&mut encoder.payload, &payload).expect("payload serializes");
-        let reencoded = encoder
-            .encode_serialized_file_segment(
-                FILE_SEGMENT_FORMAT_REVISION_V2,
-                generation.manifest.generation_id.as_str(),
-                descriptor.file_occurrence_id.clone(),
-                file.artifacts
-                    .symbols
-                    .iter()
-                    .map(|symbol| (symbol.identity.as_str(), symbol.occurrence.as_str())),
-                descriptor.file_key,
-            )
-            .expect("segment encodes");
         let error = decode_file_segment(
-            &reencoded,
+            &descriptor,
             &generation.manifest.generation_id,
-            encoder.segment_bytes(),
+            &generation.manifest.snapshot_digest,
+            bytes,
             &mut restored,
         )
-        .expect_err("a row without its file default must be refused");
+        .expect_err("revision two must be refused");
         assert!(
-            error.to_string().contains("without a file default"),
+            matches!(
+                &error,
+                CodeIndexProductionErrorV1::SealedRowContractRefused {
+                    revision,
+                    ..
+                } if *revision == FILE_SEGMENT_FORMAT_REVISION_V2
+            ),
             "unexpected error: {error}"
         );
     }
