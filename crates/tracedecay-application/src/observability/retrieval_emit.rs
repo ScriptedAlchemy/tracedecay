@@ -30,17 +30,21 @@
 //! stays coherent per stream. Unifying them is safe only once both streams
 //! share one sequence.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::OnceLock;
 
-use tracedecay_contracts::{ApplicationContractError, now_micros};
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
-    AnalyticsConsentChangedV1, AnalyticsModeV1, ContextOutcomeObservedV1, CoverageStateV1,
-    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
-    ObservabilityTerminalResultV1, RetrievalAblationObservedV1, RetrievalPlannerObservedV1,
-    RetrievalSourceObservedV1, RetrievalSynthesisObservedV1, RetrieverObservedV1,
+    CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
+    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RetrievalAblationObservedV1,
+    RetrievalPlannerObservedV1, RetrievalSourceObservedV1, RetrievalSynthesisObservedV1,
+    RetrieverObservedV1,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
+#[cfg(test)]
+use tracedecay_domain::{
+    AnalyticsConsentChangedV1, AnalyticsModeV1, ContextOutcomeObservedV1,
+};
 use tracedecay_query::retrieval::observation::{
     ObservedWithCoverageV1, RetrievalPipelineObservationV1,
 };
@@ -49,18 +53,23 @@ use super::emit::{ObservabilityEnvelopeSpec, assemble_observability_envelope};
 use super::producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, ObservabilityProducerIdentityV1,
 };
-use tracedecay_session_memory::event_lane::record_observability;
 
 const SCHEMA_REVISION: u32 = 1;
-const CONFIGURATION_REVISION: &str = "registered-project-session.v1";
+#[cfg(test)]
 const RETRIEVAL_POLICY_REVISION: &str = "retrieval-measurement.v1";
+#[cfg(test)]
+const RETRIEVAL_PRODUCER_REVISION_V1: &str = "retrieval-observer.v1";
+#[cfg(test)]
+const CONFIGURATION_REVISION: &str = "registered-project-session.v1";
+#[cfg(test)]
 const ANALYTICS_POLICY_REVISION: &str = "adoption-analytics.v1";
-pub const RETRIEVAL_PRODUCER_REVISION_V1: &str = "retrieval-observer.v1";
-pub const ANALYTICS_CONSENT_PRODUCER_REVISION_V1: &str = "analytics-consent-observer.v1";
+#[cfg(test)]
+const ANALYTICS_CONSENT_PRODUCER_REVISION_V1: &str = "analytics-consent-observer.v1";
 
 /// One process-wide identity for this producer lane, distinct from
 /// [`super::emit`]'s so the two totally ordered streams never interleave
 /// sequence numbers under a shared boot id.
+#[cfg(test)]
 fn boot_id() -> &'static str {
     static BOOT: OnceLock<String> = OnceLock::new();
     BOOT.get_or_init(|| {
@@ -75,24 +84,6 @@ fn boot_id() -> &'static str {
 fn next_sequence() -> u64 {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     SEQUENCE.fetch_add(1, Ordering::Relaxed)
-}
-
-fn contract_error(reason: &'static str) -> ApplicationContractError {
-    ApplicationContractError::Domain(reason.to_owned())
-}
-
-/// Resolves the one project scope this database is bound to. A supplied id
-/// that disagrees with the binding is refused rather than silently
-/// reattributed.
-fn bound_project_id(db: &RegisteredGlobalDb) -> Result<String, ApplicationContractError> {
-    db.binding()
-        .shard_id
-        .scope
-        .project_id()
-        .map(|id| id.as_str().to_owned())
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "retrieval_observability_emit.project_scope",
-        })
 }
 
 /// Identity fields an envelope must carry to pass
@@ -114,6 +105,7 @@ impl<'a> LaneIdentity<'a> {
         }
     }
 
+    #[cfg(test)]
     const fn direct(
         scope_ref: &'a str,
         producer_revision: &'a str,
@@ -270,6 +262,7 @@ fn source_envelope(
     })
 }
 
+#[cfg(test)]
 fn context_outcome_envelope(
     identity: &LaneIdentity<'_>,
     boot: &str,
@@ -308,6 +301,7 @@ fn context_outcome_envelope(
     })
 }
 
+#[cfg(test)]
 fn ablation_envelope(
     identity: &LaneIdentity<'_>,
     boot: &str,
@@ -339,6 +333,7 @@ fn ablation_envelope(
     })
 }
 
+#[cfg(test)]
 fn consent_envelope(
     identity: &LaneIdentity<'_>,
     boot: &str,
@@ -457,181 +452,6 @@ pub fn emit_retrieval_pipeline(
         ));
     }
     summary
-}
-
-/// Records one planner admission decision through the project-bound
-/// observation authority.
-#[hotpath::measure(label = "usecases.observability.record_planner", future = true)]
-pub async fn record_retrieval_planner(
-    db: &RegisteredGlobalDb,
-    observation: ObservedWithCoverageV1<RetrievalPlannerObservedV1>,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let lane = LaneIdentity::direct(
-        &project_id,
-        RETRIEVAL_PRODUCER_REVISION_V1,
-        RETRIEVAL_POLICY_REVISION,
-    );
-    let envelope = planner_envelope(
-        &lane,
-        boot_id(),
-        next_sequence(),
-        now_micros().0,
-        observation,
-    )
-    .map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
-/// Records one lane's candidate accounting.
-#[hotpath::measure(label = "usecases.observability.record_retriever", future = true)]
-pub async fn record_retriever(
-    db: &RegisteredGlobalDb,
-    observation: ObservedWithCoverageV1<RetrieverObservedV1>,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let lane = LaneIdentity::direct(
-        &project_id,
-        RETRIEVAL_PRODUCER_REVISION_V1,
-        RETRIEVAL_POLICY_REVISION,
-    );
-    let envelope = retriever_envelope(
-        &lane,
-        boot_id(),
-        next_sequence(),
-        now_micros().0,
-        observation,
-    )
-    .map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
-/// Records one fusion-synthesis result.
-#[hotpath::measure(label = "usecases.observability.record_synthesis", future = true)]
-pub async fn record_retrieval_synthesis(
-    db: &RegisteredGlobalDb,
-    observation: ObservedWithCoverageV1<RetrievalSynthesisObservedV1>,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let lane = LaneIdentity::direct(
-        &project_id,
-        RETRIEVAL_PRODUCER_REVISION_V1,
-        RETRIEVAL_POLICY_REVISION,
-    );
-    let envelope = synthesis_envelope(
-        &lane,
-        boot_id(),
-        next_sequence(),
-        now_micros().0,
-        observation,
-    )
-    .map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
-/// Records one cataloged source's census for a query.
-#[hotpath::measure(label = "usecases.observability.record_source", future = true)]
-pub async fn record_retrieval_source(
-    db: &RegisteredGlobalDb,
-    observation: ObservedWithCoverageV1<RetrievalSourceObservedV1>,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let lane = LaneIdentity::direct(
-        &project_id,
-        RETRIEVAL_PRODUCER_REVISION_V1,
-        RETRIEVAL_POLICY_REVISION,
-    );
-    let envelope = source_envelope(
-        &lane,
-        boot_id(),
-        next_sequence(),
-        now_micros().0,
-        observation,
-    )
-    .map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
-/// Records one context packet's observed linkage to a downstream outcome.
-#[hotpath::measure(label = "usecases.observability.record_context_outcome", future = true)]
-pub async fn record_context_outcome(
-    db: &RegisteredGlobalDb,
-    observation: ObservedWithCoverageV1<ContextOutcomeObservedV1>,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let lane = LaneIdentity::direct(
-        &project_id,
-        RETRIEVAL_PRODUCER_REVISION_V1,
-        RETRIEVAL_POLICY_REVISION,
-    );
-    let envelope = context_outcome_envelope(
-        &lane,
-        boot_id(),
-        next_sequence(),
-        now_micros().0,
-        observation,
-    )
-    .map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
-/// Records one frozen baseline-versus-candidate retrieval ablation.
-#[hotpath::measure(label = "usecases.observability.record_ablation", future = true)]
-pub async fn record_retrieval_ablation(
-    db: &RegisteredGlobalDb,
-    observation: RetrievalAblationObservedV1,
-) -> Result<String, ApplicationContractError> {
-    let project_id = bound_project_id(db)?;
-    let lane = LaneIdentity::direct(
-        &project_id,
-        RETRIEVAL_PRODUCER_REVISION_V1,
-        RETRIEVAL_POLICY_REVISION,
-    );
-    let envelope = ablation_envelope(
-        &lane,
-        boot_id(),
-        next_sequence(),
-        now_micros().0,
-        observation,
-    )
-    .map_err(contract_error)?;
-    record_observability(db, envelope).await
-}
-
-/// Records one analytics consent transition.
-///
-/// `Ok(None)` means there was no transition to record: re-asserting the mode
-/// already in force is a configuration no-op, and minting a consent receipt for
-/// it would overstate how often consent actually changed.
-#[hotpath::measure(label = "usecases.observability.record_consent", future = true)]
-pub async fn record_analytics_consent(
-    db: &RegisteredGlobalDb,
-    previous: AnalyticsModeV1,
-    current: AnalyticsModeV1,
-    share_staging_age_seconds: Option<u64>,
-) -> Result<Option<String>, ApplicationContractError> {
-    if previous == current {
-        return Ok(None);
-    }
-    let project_id = bound_project_id(db)?;
-    let lane = LaneIdentity::direct(
-        &project_id,
-        ANALYTICS_CONSENT_PRODUCER_REVISION_V1,
-        ANALYTICS_POLICY_REVISION,
-    );
-    let envelope = consent_envelope(
-        &lane,
-        boot_id(),
-        next_sequence(),
-        now_micros().0,
-        AnalyticsConsentChangedV1 {
-            previous,
-            current,
-            share_staging_age_seconds,
-        },
-    )
-    .map_err(contract_error)?;
-    record_observability(db, envelope).await.map(Some)
 }
 
 /// The dimension a retrieval ablation compares two frozen profiles on.
