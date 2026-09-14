@@ -1,6 +1,11 @@
+#[cfg(feature = "lang-clojure")]
+use tracedecay_code_extraction::ClojureExtractor;
+#[cfg(feature = "lang-perl")]
+use tracedecay_code_extraction::PerlExtractor;
 use tracedecay_code_extraction::{
-    CloneBodyEligibilityV1, ConservativeCloneTokenV1, LanguageExtractor, PythonExtractor,
-    RustExtractor, TypeScriptExtractor,
+    CloneBodyEligibilityV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
+    ConservativeCloneTokenV1, LanguageExtractor, PythonExtractor, RustExtractor,
+    TypeScriptExtractor,
 };
 use tracedecay_domain::NodeKind;
 
@@ -95,6 +100,17 @@ fn syntax_tokens_keep_comment_markers_inside_literals_and_javascript_asi_boundar
         })
         .collect::<String>();
     assert!(literal_text.contains("https://example.test/*literal*/"));
+    let syntax_literals = tokens(
+        &TypeScriptExtractor,
+        "src/a.ts",
+        r#"function display(δ: string) { const pattern = /a\/b/; return `${δ}\n`; }"#,
+    );
+    let changed_regex = tokens(
+        &TypeScriptExtractor,
+        "src/a.ts",
+        r#"function display(δ: string) { const pattern = /a\/c/; return `${δ}\n`; }"#,
+    );
+    assert_ne!(syntax_literals, changed_regex);
 
     assert_ne!(
         tokens(
@@ -107,6 +123,59 @@ fn syntax_tokens_keep_comment_markers_inside_literals_and_javascript_asi_boundar
             "src/a.ts",
             "function value() { return\nobject; }",
         )
+    );
+}
+
+#[test]
+fn rust_macro_trailing_comma_remains_semantic_syntax() {
+    assert_ne!(
+        tokens(
+            &RustExtractor,
+            "src/lib.rs",
+            "fn choose(value: i32) { choose!(value); }",
+        ),
+        tokens(
+            &RustExtractor,
+            "src/lib.rs",
+            "fn choose(value: i32) { choose!(value,); }",
+        )
+    );
+}
+
+#[cfg(feature = "lang-perl")]
+#[test]
+fn perl_comments_are_parser_trivia() {
+    assert_eq!(
+        tokens(
+            &PerlExtractor,
+            "src/main.pl",
+            "sub work { my $value = 1; # first comment\n return $value; }",
+        ),
+        tokens(
+            &PerlExtractor,
+            "src/main.pl",
+            "sub work { my $value = 1; # changed comment\n return $value; }",
+        )
+    );
+}
+
+#[cfg(feature = "lang-clojure")]
+#[test]
+fn callable_without_a_body_field_is_typed_partial() {
+    let artifact =
+        ClojureExtractor.extract_artifact("src/core.clj", "(defn work [value] (+ value 1))");
+    let body = artifact.clone_bodies.first().expect("partial clone body");
+    assert_eq!(
+        body.tokenization_status,
+        CloneBodyTokenizationStatusV1::Partial
+    );
+    assert!(
+        body.tokenization_issues
+            .contains(&CloneBodyTokenizationIssueV1::BodyBoundaryUnavailable)
+    );
+    assert_eq!(
+        body.eligibility,
+        CloneBodyEligibilityV1::ExcludedIncompleteTokenization
     );
 }
 

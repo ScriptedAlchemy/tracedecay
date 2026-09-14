@@ -504,6 +504,7 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
         expected_kind: NodeKind,
         expected_name: &'static str,
         expected_signature: &'static str,
+        expected_clone_bodies: usize,
     }
     let cases = [
         Case {
@@ -515,6 +516,7 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
             expected_kind: NodeKind::Struct,
             expected_name: "Marker",
             expected_signature: "pub struct Marker;",
+            expected_clone_bodies: 0,
         },
         Case {
             extractor: &TypeScriptExtractor,
@@ -525,6 +527,7 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
             expected_kind: NodeKind::TypeAlias,
             expected_name: "MarkerAlias",
             expected_signature: "type MarkerAlias = number;",
+            expected_clone_bodies: 0,
         },
         Case {
             extractor: &PythonExtractor,
@@ -535,6 +538,7 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
             expected_kind: NodeKind::Class,
             expected_name: "Marker",
             expected_signature: "class Marker",
+            expected_clone_bodies: 1,
         },
     ];
 
@@ -542,15 +546,26 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
         let tree = parse_with_grammar(case.grammar_key, &case.source);
         let region = trailing_region(&case.source, case.needle);
         let regions = [region];
-        let (parsed, walk_bytes) = measure_allocation(|| {
-            extract_parsed(
-                case.extractor,
+        let (artifact, walk_bytes) = measure_allocation(|| {
+            case.extractor.extract_parsed_artifact(
                 case.file_path,
+                &case.source,
                 &case.source,
                 &tree,
                 ParsedExtractionScope::ChangedRegions(&regions),
             )
         });
+        assert_eq!(
+            artifact.artifact.clone_bodies.len(),
+            case.expected_clone_bodies,
+            "{}: clone emission must stay inside the selected region",
+            case.file_path,
+        );
+        let parsed = ParsedExtraction {
+            result: artifact.artifact.result,
+            disposition: artifact.disposition,
+            metrics: artifact.metrics,
+        };
         println!(
             "{}: incremental walk allocated {walk_bytes} bytes for a {} byte source",
             case.file_path,

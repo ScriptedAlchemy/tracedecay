@@ -1,12 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{NodeKind, SourceSpan};
-use tree_sitter::{Node as TreeSitterNode, Tree, TreeCursor};
+use tree_sitter::{Node as TreeSitterNode, Point, Tree, TreeCursor};
 
 use crate::ExtractionArtifactV1;
 
+mod rename;
+
 pub const CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
+pub const RENAME_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
 pub const MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 30;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -21,6 +24,7 @@ pub enum ConservativeCloneTokenV1 {
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CloneBodyEligibilityV1 {
     Eligible,
+    ExcludedIncompleteTokenization,
     ExcludedTooSmall { minimum_tokens: u32 },
 }
 
@@ -34,8 +38,24 @@ pub enum CloneBodyTokenizationStatusV1 {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum CloneBodyTokenizationIssueV1 {
+    BodyBoundaryUnavailable,
     InvalidSourceRange,
     ParseError,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneBodyRenameStatusV1 {
+    Complete,
+    Partial,
+    UnsupportedLanguage,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneBodyRenameIssueV1 {
+    DynamicBinding,
+    UnsupportedBindingSyntax,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -52,6 +72,21 @@ pub struct ExtractedCloneBodyV1 {
     pub tokenization_status: CloneBodyTokenizationStatusV1,
     pub tokenization_issues: Vec<CloneBodyTokenizationIssueV1>,
     pub conservative_tokens: Vec<ConservativeCloneTokenV1>,
+    pub rename_normalization_revision: Option<u16>,
+    pub rename_status: CloneBodyRenameStatusV1,
+    pub rename_issues: Vec<CloneBodyRenameIssueV1>,
+    pub rename_tokens: Option<Vec<ConservativeCloneTokenV1>>,
+}
+
+impl ExtractedCloneBodyV1 {
+    pub fn complete_rename_tokens(&self) -> Option<&[ConservativeCloneTokenV1]> {
+        if self.tokenization_status != CloneBodyTokenizationStatusV1::Complete
+            || self.rename_status != CloneBodyRenameStatusV1::Complete
+        {
+            return None;
+        }
+        self.rename_tokens.as_deref()
+    }
 }
 
 pub(crate) fn canonicalize_clone_body_order(rows: &mut [ExtractedCloneBodyV1]) {
@@ -67,6 +102,7 @@ pub(crate) fn canonicalize_clone_body_order(rows: &mut [ExtractedCloneBodyV1]) {
 struct CallableOccurrence {
     symbol_kind: NodeKind,
     symbol_occurrence_id: String,
+    syntax_span: SyntaxSpan,
 }
 
 type SyntaxSpan = (usize, usize, usize, usize);
@@ -78,54 +114,41 @@ pub(crate) fn attach_conservative_clone_bodies(
     language: &str,
     logical_path: &str,
 ) {
-    let mut callables = HashMap::<SyntaxSpan, Vec<CallableOccurrence>>::new();
+    let mut callables = Vec::new();
     for node in artifact
         .result
         .nodes
         .iter()
         .filter(|node| node.kind.is_callable_kind())
     {
-        callables
-            .entry((
+        callables.push(CallableOccurrence {
+            symbol_kind: node.kind.clone(),
+            symbol_occurrence_id: node.id.clone(),
+            syntax_span: (
                 node.start_line as usize,
                 node.start_column as usize,
                 node.end_line as usize,
                 node.end_column as usize,
-            ))
-            .or_default()
-            .push(CallableOccurrence {
-                symbol_kind: node.kind.clone(),
-                symbol_occurrence_id: node.id.clone(),
-            });
+            ),
+        });
     }
 
     let mut clone_bodies = Vec::with_capacity(callables.len());
-    let mut emitted = HashSet::with_capacity(callables.len());
-    for owner in SyntaxPreorder::new(tree.root_node()) {
-        let key = (
-            owner.start_position().row,
-            owner.start_position().column,
-            owner.end_position().row,
-            owner.end_position().column,
-        );
-        let Some(occurrences) = callables.get(&key) else {
+    let root = tree.root_node();
+    for occurrence in &callables {
+        let Some(owner) = syntax_owner(root, occurrence.syntax_span) else {
             continue;
         };
-        let Some(body) = callable_body(owner) else {
+        let Some(syntax) = callable_syntax(owner) else {
             continue;
         };
-        for occurrence in occurrences {
-            if !emitted.insert(occurrence.symbol_occurrence_id.as_str()) {
-                continue;
-            }
-            clone_bodies.push(extract_clone_body(
-                occurrence,
-                body,
-                source,
-                language,
-                logical_path,
-            ));
-        }
+        clone_bodies.push(extract_clone_body(
+            occurrence,
+            syntax,
+            source,
+            language,
+            logical_path,
+        ));
     }
     canonicalize_clone_body_order(&mut clone_bodies);
     artifact.clone_bodies = clone_bodies;
@@ -133,20 +156,63 @@ pub(crate) fn attach_conservative_clone_bodies(
 
 fn extract_clone_body(
     occurrence: &CallableOccurrence,
-    body: TreeSitterNode<'_>,
+    syntax: CallableSyntax<'_>,
     source: &str,
     language: &str,
     logical_path: &str,
 ) -> ExtractedCloneBodyV1 {
+    let conservative = conservative_fields(syntax, source, language);
+    let rename = rename_fields(syntax, source, language);
+    ExtractedCloneBodyV1 {
+        logical_path: logical_path.to_owned(),
+        language: language.to_owned(),
+        symbol_kind: occurrence.symbol_kind.clone(),
+        symbol_occurrence_id: occurrence.symbol_occurrence_id.clone(),
+        body_span: SourceSpan {
+            start_byte: syntax.body.start_byte() as u64,
+            end_byte: syntax.body.end_byte() as u64,
+        },
+        normalization_revision: CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1,
+        non_trivia_token_count: conservative.token_count,
+        eligibility: conservative.eligibility,
+        tokenization_status: conservative.status,
+        tokenization_issues: conservative.issues,
+        conservative_tokens: conservative.tokens,
+        rename_normalization_revision: rename.revision,
+        rename_status: rename.status,
+        rename_issues: rename.issues,
+        rename_tokens: rename.tokens,
+    }
+}
+
+struct ConservativeFields {
+    tokens: Vec<ConservativeCloneTokenV1>,
+    issues: Vec<CloneBodyTokenizationIssueV1>,
+    token_count: u32,
+    status: CloneBodyTokenizationStatusV1,
+    eligibility: CloneBodyEligibilityV1,
+}
+
+fn conservative_fields(
+    syntax: CallableSyntax<'_>,
+    source: &str,
+    language: &str,
+) -> ConservativeFields {
     let mut emitter = TokenEmitter {
         source: source.as_bytes(),
         language,
+        replacements: None,
         tokens: Vec::new(),
         issues: Vec::new(),
         token_count: 0,
     };
-    emitter.emit(body);
-    if body.has_error() {
+    emitter.emit(syntax.body);
+    if !syntax.body_boundary_complete {
+        emitter
+            .issues
+            .push(CloneBodyTokenizationIssueV1::BodyBoundaryUnavailable);
+    }
+    if syntax.body.has_error() {
         emitter
             .issues
             .push(CloneBodyTokenizationIssueV1::ParseError);
@@ -158,35 +224,68 @@ fn extract_clone_body(
     } else {
         CloneBodyTokenizationStatusV1::Partial
     };
-    let eligibility = if emitter.token_count < MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1 {
+    let eligibility = if tokenization_status == CloneBodyTokenizationStatusV1::Partial {
+        CloneBodyEligibilityV1::ExcludedIncompleteTokenization
+    } else if emitter.token_count < MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1 {
         CloneBodyEligibilityV1::ExcludedTooSmall {
             minimum_tokens: MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
         }
     } else {
         CloneBodyEligibilityV1::Eligible
     };
-
-    ExtractedCloneBodyV1 {
-        logical_path: logical_path.to_owned(),
-        language: language.to_owned(),
-        symbol_kind: occurrence.symbol_kind.clone(),
-        symbol_occurrence_id: occurrence.symbol_occurrence_id.clone(),
-        body_span: SourceSpan {
-            start_byte: body.start_byte() as u64,
-            end_byte: body.end_byte() as u64,
-        },
-        normalization_revision: CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1,
-        non_trivia_token_count: emitter.token_count,
+    ConservativeFields {
+        tokens: emitter.tokens,
+        issues: emitter.issues,
+        token_count: emitter.token_count,
+        status: tokenization_status,
         eligibility,
-        tokenization_status,
-        tokenization_issues: emitter.issues,
-        conservative_tokens: emitter.tokens,
     }
+}
+
+struct RenameFields {
+    revision: Option<u16>,
+    status: CloneBodyRenameStatusV1,
+    issues: Vec<CloneBodyRenameIssueV1>,
+    tokens: Option<Vec<ConservativeCloneTokenV1>>,
+}
+
+fn rename_fields(syntax: CallableSyntax<'_>, source: &str, language: &str) -> RenameFields {
+    let normalization = rename::normalize(syntax, source, language);
+    let tokens = normalization
+        .replacements
+        .as_ref()
+        .map(|replacements| rename_token_stream(syntax.body, source, language, replacements));
+    RenameFields {
+        revision: (normalization.status != CloneBodyRenameStatusV1::UnsupportedLanguage)
+            .then_some(RENAME_CLONE_NORMALIZATION_REVISION_V1),
+        status: normalization.status,
+        issues: normalization.issues,
+        tokens,
+    }
+}
+
+fn rename_token_stream(
+    body: TreeSitterNode<'_>,
+    source: &str,
+    language: &str,
+    replacements: &HashMap<(usize, usize), String>,
+) -> Vec<ConservativeCloneTokenV1> {
+    let mut emitter = TokenEmitter {
+        source: source.as_bytes(),
+        language,
+        replacements: Some(replacements),
+        tokens: Vec::new(),
+        issues: Vec::new(),
+        token_count: 0,
+    };
+    emitter.emit(body);
+    emitter.tokens
 }
 
 struct TokenEmitter<'a> {
     source: &'a [u8],
     language: &'a str,
+    replacements: Option<&'a HashMap<(usize, usize), String>>,
     tokens: Vec<ConservativeCloneTokenV1>,
     issues: Vec<CloneBodyTokenizationIssueV1>,
     token_count: u32,
@@ -237,18 +336,23 @@ impl<'a> TokenEmitter<'a> {
         }
         self.tokens.push(ConservativeCloneTokenV1::Syntax {
             syntax_kind: node.kind().to_owned(),
-            text: text.to_owned(),
+            text: self
+                .replacements
+                .and_then(|replacements| replacements.get(&(node.start_byte(), node.end_byte())))
+                .map_or_else(|| text.to_owned(), Clone::clone),
         });
         self.token_count = self.token_count.saturating_add(1);
     }
 }
 
 fn is_comment(kind: &str) -> bool {
-    kind == "comment" || kind.ends_with("_comment") || kind.starts_with("comment_")
+    matches!(kind, "comment" | "comments")
+        || kind.ends_with("_comment")
+        || kind.starts_with("comment_")
 }
 
 fn is_ignorable_trailing_comma(node: TreeSitterNode<'_>, source: &[u8]) -> bool {
-    if node.kind() != "," {
+    if node.kind() != "," || has_ancestor_kind(node, "token_tree") {
         return false;
     }
     let mut next = node.next_sibling();
@@ -264,22 +368,78 @@ fn is_ignorable_trailing_comma(node: TreeSitterNode<'_>, source: &[u8]) -> bool 
     false
 }
 
-fn callable_body(owner: TreeSitterNode<'_>) -> Option<TreeSitterNode<'_>> {
-    owner.child_by_field_name("body").or_else(|| {
-        SyntaxPreorder::new(owner)
-            .skip(1)
-            .find_map(|node| node.child_by_field_name("body"))
-    })
+fn has_ancestor_kind(node: TreeSitterNode<'_>, kind: &str) -> bool {
+    let mut parent = node.parent();
+    while let Some(candidate) = parent {
+        if candidate.kind() == kind {
+            return true;
+        }
+        parent = candidate.parent();
+    }
+    false
 }
 
-struct SyntaxPreorder<'tree> {
+#[derive(Clone, Copy)]
+pub(super) struct CallableSyntax<'tree> {
+    owner: TreeSitterNode<'tree>,
+    body: TreeSitterNode<'tree>,
+    body_boundary_complete: bool,
+}
+
+fn callable_syntax(owner: TreeSitterNode<'_>) -> Option<CallableSyntax<'_>> {
+    owner
+        .child_by_field_name("body")
+        .map(|body| CallableSyntax {
+            owner,
+            body,
+            body_boundary_complete: true,
+        })
+        .or_else(|| {
+            SyntaxPreorder::new(owner).skip(1).find_map(|candidate| {
+                candidate
+                    .child_by_field_name("body")
+                    .map(|body| CallableSyntax {
+                        owner: candidate,
+                        body,
+                        body_boundary_complete: true,
+                    })
+            })
+        })
+        .or(Some(CallableSyntax {
+            owner,
+            body: owner,
+            body_boundary_complete: false,
+        }))
+}
+
+fn syntax_owner(
+    root: TreeSitterNode<'_>,
+    (start_row, start_column, end_row, end_column): SyntaxSpan,
+) -> Option<TreeSitterNode<'_>> {
+    let mut candidate = root.descendant_for_point_range(
+        Point::new(start_row, start_column),
+        Point::new(end_row, end_column),
+    )?;
+    loop {
+        let start = candidate.start_position();
+        let end = candidate.end_position();
+        if (start.row, start.column, end.row, end.column)
+            == (start_row, start_column, end_row, end_column)
+        {
+            return Some(candidate);
+        }
+        candidate = candidate.parent()?;
+    }
+}
+
+pub(super) struct SyntaxPreorder<'tree> {
     cursor: TreeCursor<'tree>,
     started: bool,
     finished: bool,
 }
 
 impl<'tree> SyntaxPreorder<'tree> {
-    fn new(node: TreeSitterNode<'tree>) -> Self {
+    pub(super) fn new(node: TreeSitterNode<'tree>) -> Self {
         Self {
             cursor: node.walk(),
             started: false,
