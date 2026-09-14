@@ -33,7 +33,10 @@ use super::{
     intake::ReceiptBoundCodeFileV1,
     lineage::LineageSymbolRecordV1,
 };
-use crate::clones::{CloneBodyOccurrenceV1, CloneBodyPayloadV1, CodeIndexCloneBodyV1};
+use crate::clones::{
+    CloneBodyOccurrenceV1, ClonePayloadBuildContextV1, ClonePayloadBuildStatsV1,
+    CodeIndexCloneBodyV1,
+};
 use crate::extract::{ExtractionBatchV1, ParseOutcomeV1};
 
 mod artifacts;
@@ -631,6 +634,34 @@ impl DeterministicCodeChunker {
         sensitivity_level: SensitivityLevelV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<(CodeFileIndexArtifactsV1, ExactExtractionAuthorityV1), ChunkingFailureV1> {
+        let (artifacts, authority, _) = self.index_file_with_authority_from_extraction_reusing(
+            file,
+            extraction,
+            descriptor,
+            sensitivity_level,
+            cancellation,
+            None,
+        )?;
+        Ok((artifacts, authority))
+    }
+
+    pub(crate) fn index_file_with_authority_from_extraction_reusing(
+        &self,
+        file: &ReceiptBoundCodeFileV1,
+        extraction: &ExtractedCodeFileV1,
+        descriptor: &LanguageDescriptorV1,
+        sensitivity_level: SensitivityLevelV1,
+        cancellation: &dyn ExtractionCancellation,
+        prior_clone_bodies: Option<&[CodeIndexCloneBodyV1]>,
+    ) -> Result<
+        (
+            CodeFileIndexArtifactsV1,
+            ExactExtractionAuthorityV1,
+            ClonePayloadBuildStatsV1,
+        ),
+        ChunkingFailureV1,
+    > {
+        let mut clone_build = ClonePayloadBuildContextV1::new(prior_clone_bodies);
         let result = self.build_file_artifacts_with_parse(
             file,
             extraction.batch(),
@@ -638,12 +669,13 @@ impl DeterministicCodeChunker {
             Some(extraction.parse_artifact()),
             sensitivity_level,
             cancellation,
+            &mut clone_build,
         )?;
         let authority = hotpath::measure_block!(
             "code_index.chunk.mint_authority",
             ExactExtractionAuthorityV1::mint(&result.chunks.chunks)
         );
-        Ok((result, authority))
+        Ok((result, authority, clone_build.stats()))
     }
 
     /// Chunk one receipt-bound file and return the opaque capability required
@@ -796,6 +828,7 @@ fn bind_clone_bodies(
     file: &ValidatedCodeFileV1,
     authority: &crate::intake::ReceiptBoundCodeFileAuthorityV1,
     batch: &ExtractionBatchV1,
+    clone_build: &mut ClonePayloadBuildContextV1<'_>,
 ) -> Result<Vec<CodeIndexCloneBodyV1>, ChunkingFailureV1> {
     let mut occurrences = HashMap::with_capacity(symbols.len());
     for symbol in symbols {
@@ -808,35 +841,35 @@ fn bind_clone_bodies(
             ));
         }
     }
-    extracted
-        .iter()
-        .map(|body| {
-            let symbol_occurrence_id = occurrences
-                .get(body.symbol_occurrence_id.as_str())
-                .ok_or_else(|| {
-                    ChunkingFailureV1::NonCanonicalIdentity(
-                        "clone body is not bound to an indexed symbol".to_owned(),
-                    )
-                })?;
-            let payload = CloneBodyPayloadV1::from_extracted(body)
-                .map_err(ChunkingFailureV1::NonCanonicalIdentity)?;
-            Ok(CodeIndexCloneBodyV1 {
-                occurrence: CloneBodyOccurrenceV1 {
-                    project_id: authority.project_id.clone(),
-                    repository_id: authority.repository_id.clone(),
-                    worktree_id: authority.worktree_id.clone(),
-                    source_generation: batch.generation_id.clone(),
-                    snapshot_digest: file.snapshot_digest.clone(),
-                    symbol_occurrence_id: (*symbol_occurrence_id).clone(),
-                    path: body.logical_path.clone(),
-                    body_span: body.body_span,
-                    payload_digest: payload.payload_digest.clone(),
-                    eligibility: body.eligibility,
-                },
-                payload,
-            })
-        })
-        .collect()
+    let mut bound = Vec::with_capacity(extracted.len());
+    for body in extracted {
+        let symbol_occurrence_id = occurrences
+            .get(body.symbol_occurrence_id.as_str())
+            .ok_or_else(|| {
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body is not bound to an indexed symbol".to_owned(),
+                )
+            })?;
+        let payload = clone_build
+            .payload(body)
+            .map_err(ChunkingFailureV1::NonCanonicalIdentity)?;
+        bound.push(CodeIndexCloneBodyV1 {
+            occurrence: CloneBodyOccurrenceV1 {
+                project_id: authority.project_id.clone(),
+                repository_id: authority.repository_id.clone(),
+                worktree_id: authority.worktree_id.clone(),
+                source_generation: batch.generation_id.clone(),
+                snapshot_digest: file.snapshot_digest.clone(),
+                symbol_occurrence_id: (*symbol_occurrence_id).clone(),
+                path: body.logical_path.clone(),
+                body_span: body.body_span,
+                payload_digest: payload.payload_digest.clone(),
+                eligibility: body.eligibility,
+            },
+            payload,
+        });
+    }
+    Ok(bound)
 }
 
 /// Byte offset of one line start for every line in the source.
@@ -1120,6 +1153,7 @@ impl DeterministicCodeChunker {
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
+        let mut clone_build = ClonePayloadBuildContextV1::new(None);
         self.build_file_artifacts_with_parse(
             file,
             batch,
@@ -1127,6 +1161,7 @@ impl DeterministicCodeChunker {
             None,
             self.sensitivity_level,
             cancellation,
+            &mut clone_build,
         )
     }
 
@@ -1139,6 +1174,7 @@ impl DeterministicCodeChunker {
         parse_artifact: Option<&ExtractionArtifactV1>,
         sensitivity_level: SensitivityLevelV1,
         cancellation: &dyn ExtractionCancellation,
+        clone_build: &mut ClonePayloadBuildContextV1<'_>,
     ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
         if cancellation.is_cancelled() {
             return Err(ChunkingFailureV1::Cancelled);
@@ -1175,6 +1211,7 @@ impl DeterministicCodeChunker {
                     sensitivity_level,
                     cancellation,
                     reason.clone(),
+                    clone_build,
                 );
             }
             ParseOutcomeV1::TimedOut => {
@@ -1212,6 +1249,7 @@ impl DeterministicCodeChunker {
             sensitivity_level,
             cancellation,
             String::new(),
+            clone_build,
         )
     }
 
@@ -1228,6 +1266,7 @@ impl DeterministicCodeChunker {
         sensitivity_level: SensitivityLevelV1,
         cancellation: &dyn ExtractionCancellation,
         partial_reason: String,
+        clone_build: &mut ClonePayloadBuildContextV1<'_>,
     ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
         let full_source = std::str::from_utf8(&file.sanitized_bytes).map_err(|error| {
             ChunkingFailureV1::NonCanonicalIdentity(format!(
@@ -1318,8 +1357,14 @@ impl DeterministicCodeChunker {
                 &published_symbol_spans(chunks.iter()),
             )
         })?;
-        let clone_bodies =
-            bind_clone_bodies(&artifact.clone_bodies, &symbol_rows, file, authority, batch)?;
+        let clone_bodies = bind_clone_bodies(
+            &artifact.clone_bodies,
+            &symbol_rows,
+            file,
+            authority,
+            batch,
+            clone_build,
+        )?;
         let (mut edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
         let (same_file_edges, unresolved_references) =
             resolve_file_references(source, &offsets, &result.unresolved_refs, &symbol_rows);

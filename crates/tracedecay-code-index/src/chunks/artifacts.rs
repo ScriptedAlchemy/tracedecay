@@ -295,9 +295,20 @@ impl CodeFileIndexArtifactsV1 {
     /// the persisted extraction batch through
     /// [`Self::validate_generation_import_authority`].
     pub fn validate(&self) -> Result<(), ChunkingFailureV1> {
+        self.validate_with_clone_payloads(true)
+    }
+
+    fn validate_reusing_clone_payloads(&self) -> Result<(), ChunkingFailureV1> {
+        self.validate_with_clone_payloads(false)
+    }
+
+    fn validate_with_clone_payloads(
+        &self,
+        validate_clone_payloads: bool,
+    ) -> Result<(), ChunkingFailureV1> {
         self.chunks.validate()?;
         self.validate_imports()?;
-        self.validate_clone_bodies()?;
+        self.validate_clone_bodies(validate_clone_payloads)?;
         self.validate_schema_evidence()?;
         if self
             .symbols
@@ -360,7 +371,7 @@ impl CodeFileIndexArtifactsV1 {
         Ok(())
     }
 
-    fn validate_clone_bodies(&self) -> Result<(), ChunkingFailureV1> {
+    fn validate_clone_bodies(&self, validate_payloads: bool) -> Result<(), ChunkingFailureV1> {
         let occurrences = self
             .symbols
             .iter()
@@ -372,7 +383,7 @@ impl CodeFileIndexArtifactsV1 {
             body.occurrence.path.is_empty()
                 || body.occurrence.body_span.is_empty()
                 || body.occurrence.payload_digest != body.payload.payload_digest
-                || body.payload.validate().is_err()
+                || (validate_payloads && body.payload.validate().is_err())
                 || !occurrences.contains(&body.occurrence.symbol_occurrence_id)
         }) {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
@@ -515,7 +526,28 @@ impl CodeFileIndexArtifactsV1 {
         generation_id: CodeGenerationId,
         file_occurrence_id: FileOccurrenceId,
     ) -> Result<Self, ChunkingFailureV1> {
-        self.validate()?;
+        self.rematerialize_for_generation_inner(generation_id, file_occurrence_id, true)
+    }
+
+    pub(crate) fn rematerialize_for_generation_reusing_clone_payloads(
+        &self,
+        generation_id: CodeGenerationId,
+        file_occurrence_id: FileOccurrenceId,
+    ) -> Result<Self, ChunkingFailureV1> {
+        self.rematerialize_for_generation_inner(generation_id, file_occurrence_id, false)
+    }
+
+    fn rematerialize_for_generation_inner(
+        &self,
+        generation_id: CodeGenerationId,
+        file_occurrence_id: FileOccurrenceId,
+        validate_clone_payloads: bool,
+    ) -> Result<Self, ChunkingFailureV1> {
+        if validate_clone_payloads {
+            self.validate()?;
+        } else {
+            self.validate_reusing_clone_payloads()?;
+        }
         let chunks = self
             .chunks
             .rematerialize_for_generation(generation_id.clone(), file_occurrence_id.clone())?;
@@ -592,7 +624,11 @@ impl CodeFileIndexArtifactsV1 {
             schema_evidence: self.schema_evidence.clone(),
             unresolved_references,
         };
-        result.validate()?;
+        if validate_clone_payloads {
+            result.validate()?;
+        } else {
+            result.validate_reusing_clone_payloads()?;
+        }
         Ok(result)
     }
 }

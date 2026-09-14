@@ -34,6 +34,7 @@ use super::{
         CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, DeterministicCodeChunker,
         ExactExtractionAuthorityV1, ExtractionAdmittedCodeSearchChunkV1, content_digest,
     },
+    clones::CodeIndexCloneBodyV1,
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1},
     incremental::{ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment},
@@ -478,6 +479,8 @@ where
 pub struct PhysicalCodeArtifactPoolStatsV1 {
     pub inserted: u64,
     pub reused: u64,
+    pub clone_payloads_reused: u64,
+    pub clone_payloads_computed: u64,
     /// Artifact allocations still owned by a published or staged generation.
     /// The physical pool indexes these allocations weakly and never extends
     /// their lifetime.
@@ -490,6 +493,8 @@ struct PhysicalCodeArtifactPoolStateV1 {
     insertion_order: VecDeque<ManifestDigest>,
     inserted: u64,
     reused: u64,
+    clone_payloads_reused: u64,
+    clone_payloads_computed: u64,
 }
 
 /// Registry-scoped physical parse/chunk artifact pool. The key binds every
@@ -565,6 +570,15 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         })
     }
 
+    fn record_clone_payloads(&self, reused: u64, computed: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.clone_payloads_reused = state.clone_payloads_reused.saturating_add(reused);
+        state.clone_payloads_computed = state.clone_payloads_computed.saturating_add(computed);
+    }
+
     pub fn stats(&self) -> PhysicalCodeArtifactPoolStatsV1 {
         let state = self
             .state
@@ -573,6 +587,8 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         PhysicalCodeArtifactPoolStatsV1 {
             inserted: state.inserted,
             reused: state.reused,
+            clone_payloads_reused: state.clone_payloads_reused,
+            clone_payloads_computed: state.clone_payloads_computed,
             resident: u64::try_from(
                 state
                     .artifacts
@@ -596,10 +612,12 @@ impl FileGenerationArtifactsV1 {
             if &self.extraction.extractor_revision != extractor_revision {
                 return Err(ChunkingFailureV1::GenerationMismatch);
             }
-            let mut artifacts = self.artifacts.rematerialize_for_generation(
-                target.generation_id.clone(),
-                target.file.file_occurrence_id.clone(),
-            )?;
+            let mut artifacts = self
+                .artifacts
+                .rematerialize_for_generation_reusing_clone_payloads(
+                    target.generation_id.clone(),
+                    target.file.file_occurrence_id.clone(),
+                )?;
             for body in &mut artifacts.clone_bodies {
                 body.occurrence.project_id = file.authority().project_id.clone();
                 body.occurrence.repository_id = file.authority().repository_id.clone();
@@ -644,7 +662,10 @@ impl FileGenerationArtifactsV1 {
         }
         let mut artifacts = self
             .artifacts
-            .rematerialize_for_generation(generation_id.clone(), file.file_occurrence_id.clone())?;
+            .rematerialize_for_generation_reusing_clone_payloads(
+                generation_id.clone(),
+                file.file_occurrence_id.clone(),
+            )?;
         for body in &mut artifacts.clone_bodies {
             body.occurrence.project_id = config.project_id.clone();
             body.occurrence.repository_id = config.repository.clone();
@@ -1532,6 +1553,10 @@ where
         self.retained_parses.stats()
     }
 
+    pub fn physical_artifact_pool_stats(&self) -> PhysicalCodeArtifactPoolStatsV1 {
+        self.physical_artifacts.stats()
+    }
+
     /// Load the currently reusable immutable generation. A restart therefore
     /// resumes from the publication authority rather than mutable worker state.
     ///
@@ -1915,6 +1940,7 @@ where
         chunker: &DeterministicCodeChunker,
         repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
         file: &SanitizedCodeFileV1,
+        prior_clone_bodies: Option<&[CodeIndexCloneBodyV1]>,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
         worker: &crate::hotpath_observe::WorkerBusyGuard,
@@ -1955,6 +1981,10 @@ where
                 worker,
             ) {
                 crate::hotpath_observe::add_reused_parses(1);
+                physical_artifacts.record_clone_payloads(
+                    u64::try_from(reused.artifacts.clone_bodies.len()).unwrap_or(u64::MAX),
+                    0,
+                );
                 Self::checkpoint(control)?;
                 return Ok((physical_reuse_key, reused));
             }
@@ -2031,18 +2061,20 @@ where
                 Err(error) => return Err(error),
             };
             Self::checkpoint(control)?;
-            let (artifacts, exact_authority) = chunker
-                .index_file_with_authority_from_extraction(
+            let (artifacts, exact_authority, clone_stats) = chunker
+                .index_file_with_authority_from_extraction_reusing(
                     &receipt_bound,
                     &extraction,
                     descriptor,
                     captured.sensitivity_level,
                     &cancellation,
+                    prior_clone_bodies,
                 )
                 .map_err(|error| match error {
                     ChunkingFailureV1::Cancelled => Self::interruption_error(control),
                     error => CodeIndexProductionErrorV1::Chunk(error),
                 })?;
+            physical_artifacts.record_clone_payloads(clone_stats.reused, clone_stats.computed);
             Self::checkpoint(control)?;
             let (authority, extraction, _) = extraction.into_parts();
             let artifact = Arc::new(FileGenerationArtifactsV1 {
@@ -2121,6 +2153,7 @@ where
                     chunker,
                     repository_parse_identity,
                     file,
+                    None,
                     captured_files,
                     control,
                     worker,
@@ -2164,6 +2197,11 @@ where
                     file,
                 )
             })
+            .collect::<BTreeMap<_, _>>();
+        let prior_by_path = active
+            .files
+            .iter()
+            .map(|file| (file.authority.logical_path.as_str(), file))
             .collect::<BTreeMap<_, _>>();
         let current_by_occurrence = capability
             .snapshot()
@@ -2247,6 +2285,11 @@ where
                         };
                         if let Ok(artifact) = carried {
                             crate::hotpath_observe::add_reused_parses(1);
+                            physical_artifacts.record_clone_payloads(
+                                u64::try_from(artifact.artifacts.clone_bodies.len())
+                                    .unwrap_or(u64::MAX),
+                                0,
+                            );
                             Ok(IncrementFileMaterializationV1::CarryForward(Arc::new(
                                 artifact,
                             )))
@@ -2266,6 +2309,7 @@ where
                                 chunker,
                                 repository_parse_identity,
                                 file,
+                                Some(&prior.artifacts.clone_bodies),
                                 captured_files,
                                 control,
                                 worker,
@@ -2277,6 +2321,9 @@ where
                         }
                     }
                     FileExtractionActionV1::ReExtract { file } => {
+                        let prior_clone_bodies = prior_by_path
+                            .get(file.logical_path.as_str())
+                            .map(|prior| prior.artifacts.clone_bodies.as_slice());
                         let (reuse_key, artifact) = Self::extract_file(
                             config,
                             physical_artifacts,
@@ -2288,6 +2335,7 @@ where
                             chunker,
                             repository_parse_identity,
                             file,
+                            prior_clone_bodies,
                             captured_files,
                             control,
                             worker,

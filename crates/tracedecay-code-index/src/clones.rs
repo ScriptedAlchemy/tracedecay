@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
     CloneBodyEligibilityV1, CloneBodyRenameIssueV1, CloneBodyRenameStatusV1,
@@ -70,6 +72,120 @@ pub struct CloneBodyOccurrenceV1 {
 pub struct CodeIndexCloneBodyV1 {
     pub payload: CloneBodyPayloadV1,
     pub occurrence: CloneBodyOccurrenceV1,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClonePayloadBuildStatsV1 {
+    pub(crate) reused: u64,
+    pub(crate) computed: u64,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct ClonePayloadReuseKeyV1<'a> {
+    language: &'a str,
+    symbol_kind: &'a str,
+    token_count: u32,
+    conservative_revision: u16,
+    conservative_tokens: &'a [ConservativeCloneTokenV1],
+    tokenization_status: CloneBodyTokenizationStatusV1,
+    tokenization_issues: &'a [CloneBodyTokenizationIssueV1],
+    rename_revision: Option<u16>,
+    rename_tokens: Option<&'a [ConservativeCloneTokenV1]>,
+    rename_coverage: CloneBodyRenameStatusV1,
+    rename_issues: &'a [CloneBodyRenameIssueV1],
+}
+
+struct ClonePayloadReuseIndexV1<'a>(HashMap<ClonePayloadReuseKeyV1<'a>, &'a CloneBodyPayloadV1>);
+
+pub(crate) struct ClonePayloadBuildContextV1<'a> {
+    prior: ClonePayloadReuseIndexV1<'a>,
+    stats: ClonePayloadBuildStatsV1,
+}
+
+impl<'a> ClonePayloadBuildContextV1<'a> {
+    pub(crate) fn new(prior: Option<&'a [CodeIndexCloneBodyV1]>) -> Self {
+        Self {
+            prior: ClonePayloadReuseIndexV1::new(prior),
+            stats: ClonePayloadBuildStatsV1::default(),
+        }
+    }
+
+    pub(crate) fn payload(
+        &mut self,
+        extracted: &ExtractedCloneBodyV1,
+    ) -> Result<CloneBodyPayloadV1, String> {
+        match self.prior.payload_for(extracted) {
+            Some(payload) => {
+                self.stats.reused = self.stats.reused.saturating_add(1);
+                Ok(payload.clone())
+            }
+            None => {
+                self.stats.computed = self.stats.computed.saturating_add(1);
+                CloneBodyPayloadV1::from_extracted(extracted)
+            }
+        }
+    }
+
+    pub(crate) fn stats(&self) -> ClonePayloadBuildStatsV1 {
+        self.stats
+    }
+}
+
+impl<'a> ClonePayloadReuseIndexV1<'a> {
+    fn new(prior: Option<&'a [CodeIndexCloneBodyV1]>) -> Self {
+        Self(
+            prior
+                .unwrap_or_default()
+                .iter()
+                .map(|body| {
+                    (
+                        ClonePayloadReuseKeyV1::from_payload(&body.payload),
+                        &body.payload,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn payload_for(&self, extracted: &ExtractedCloneBodyV1) -> Option<&'a CloneBodyPayloadV1> {
+        self.0
+            .get(&ClonePayloadReuseKeyV1::from_extracted(extracted))
+            .copied()
+    }
+}
+
+impl<'a> ClonePayloadReuseKeyV1<'a> {
+    fn from_extracted(body: &'a ExtractedCloneBodyV1) -> Self {
+        Self {
+            language: &body.language,
+            symbol_kind: body.symbol_kind.as_str(),
+            token_count: body.non_trivia_token_count,
+            conservative_revision: body.normalization_revision,
+            conservative_tokens: &body.conservative_tokens,
+            tokenization_status: body.tokenization_status,
+            tokenization_issues: &body.tokenization_issues,
+            rename_revision: body.rename_normalization_revision,
+            rename_tokens: body.rename_tokens.as_deref(),
+            rename_coverage: body.rename_status,
+            rename_issues: &body.rename_issues,
+        }
+    }
+
+    fn from_payload(payload: &'a CloneBodyPayloadV1) -> Self {
+        Self {
+            language: &payload.language,
+            symbol_kind: &payload.symbol_kind,
+            token_count: payload.token_count,
+            conservative_revision: payload.conservative_normalization_revision,
+            conservative_tokens: &payload.conservative_tokens,
+            tokenization_status: payload.tokenization_status,
+            tokenization_issues: &payload.tokenization_issues,
+            rename_revision: payload.rename_normalization_revision,
+            rename_tokens: payload.rename_tokens.as_deref(),
+            rename_coverage: payload.rename_coverage,
+            rename_issues: &payload.rename_issues,
+        }
+    }
 }
 
 struct ClonePayloadDigestInputV1<'a> {
