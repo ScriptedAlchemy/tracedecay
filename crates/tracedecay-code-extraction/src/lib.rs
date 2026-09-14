@@ -126,9 +126,10 @@ mod zig_extractor;
 pub use astro_extractor::AstroExtractor;
 pub use c_extractor::CExtractor;
 pub use clone_body::{
-    CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1, CloneBodyEligibilityV1,
-    CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1,
-    ExtractedCloneBodyV1, MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+    CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1, CloneBodyEligibilityV1, CloneBodyRenameIssueV1,
+    CloneBodyRenameStatusV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
+    ConservativeCloneTokenV1, ExtractedCloneBodyV1, MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+    RENAME_CLONE_NORMALIZATION_REVISION_V1,
 };
 pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;

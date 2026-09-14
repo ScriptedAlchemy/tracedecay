@@ -68,6 +68,7 @@ mod qbasic;
 mod quickbasic;
 #[cfg(feature = "lang-quint")]
 mod quint;
+mod rename_clone_tokens;
 #[cfg(feature = "lang-ruby")]
 mod ruby;
 mod rust;

@@ -380,6 +380,52 @@ fn canonical_reextraction_visits_only_changed_top_level_syntax() {
 }
 
 #[test]
+fn incremental_artifact_replaces_only_the_changed_clone_body() {
+    let before = "fn stable() { keep(); }\nfn edited() { before(); }\n";
+    let after = "fn stable() { keep(); }\nfn edited() { after(); }\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "rust",
+        before,
+        ParseLimits::default(),
+    )
+    .expect("initial parse");
+    let initial = document
+        .extract_canonical_artifact(&RustExtractor, &opened, None)
+        .expect("initial artifact");
+    let stable_before = initial
+        .artifact
+        .clone_bodies
+        .iter()
+        .find(|body| {
+            initial
+                .artifact
+                .result
+                .nodes
+                .iter()
+                .any(|node| node.id == body.symbol_occurrence_id && node.name == "stable")
+        })
+        .expect("stable clone body")
+        .clone();
+
+    let report = document
+        .reparse(
+            identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            after,
+        )
+        .expect("incremental parse");
+    let changed = document
+        .extract_canonical_artifact(&RustExtractor, &report, Some(&initial.artifact))
+        .expect("incremental artifact");
+    let fresh = RustExtractor.extract_artifact("src/lib.rs", after);
+    assert_artifact_rows_match_fresh_parse(&changed.artifact, &fresh);
+    assert!(
+        changed.artifact.clone_bodies.contains(&stable_before),
+        "unchanged clone row must be reused byte-for-byte"
+    );
+}
+
+#[test]
 fn same_line_column_shifts_reextract_following_top_level_syntax() {
     let before = "fn a() -> u32 { 1 } fn b() -> u32 { 2 }\n";
     let after = "fn longer() -> u32 { 1 } fn b() -> u32 { 2 }\n";

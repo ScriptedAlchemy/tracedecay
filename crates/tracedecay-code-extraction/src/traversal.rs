@@ -57,7 +57,10 @@ pub(crate) fn find_descendant_by_kind<'tree>(
     found
 }
 
-fn visit_children_while<'tree>(node: TsNode<'tree>, mut visit: impl FnMut(TsNode<'tree>) -> bool) {
+pub(crate) fn visit_children_while<'tree>(
+    node: TsNode<'tree>,
+    mut visit: impl FnMut(TsNode<'tree>) -> bool,
+) {
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
