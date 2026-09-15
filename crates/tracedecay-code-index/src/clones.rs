@@ -776,32 +776,7 @@ fn chain_clone_anchors<F: FnMut() -> bool>(
 ) -> Result<Vec<CloneTokenAnchorV1>, CloneAlignmentStoppedV1> {
     let mut verified_anchors = Vec::with_capacity(anchors.len());
     for anchor in anchors {
-        meter.tick()?;
-        let Some(left) = usize::try_from(anchor.left_token_position)
-            .ok()
-            .and_then(|position| {
-                left.get(position..position.saturating_add(CLONE_FINGERPRINT_K_V1))
-            })
-        else {
-            continue;
-        };
-        let Some(right) = usize::try_from(anchor.right_token_position)
-            .ok()
-            .and_then(|position| {
-                right.get(position..position.saturating_add(CLONE_FINGERPRINT_K_V1))
-            })
-        else {
-            continue;
-        };
-        let mut matches = true;
-        for (left, right) in left.iter().zip(right) {
-            meter.tick()?;
-            if left != right {
-                matches = false;
-                break;
-            }
-        }
-        if matches {
+        if verify_clone_token_anchor_with_meter(left, right, anchor, meter)? {
             verified_anchors.push(*anchor);
         }
     }
@@ -854,6 +829,34 @@ fn chain_clone_anchors<F: FnMut() -> bool>(
     }
     chain.reverse();
     Ok(chain)
+}
+
+fn verify_clone_token_anchor_with_meter<F: FnMut() -> bool>(
+    left: &[ConservativeCloneTokenV1],
+    right: &[ConservativeCloneTokenV1],
+    anchor: &CloneTokenAnchorV1,
+    meter: &mut CloneAlignmentWorkMeterV1<F>,
+) -> Result<bool, CloneAlignmentStoppedV1> {
+    meter.tick()?;
+    let Some(left) = usize::try_from(anchor.left_token_position)
+        .ok()
+        .and_then(|position| left.get(position..position.saturating_add(CLONE_FINGERPRINT_K_V1)))
+    else {
+        return Ok(false);
+    };
+    let Some(right) = usize::try_from(anchor.right_token_position)
+        .ok()
+        .and_then(|position| right.get(position..position.saturating_add(CLONE_FINGERPRINT_K_V1)))
+    else {
+        return Ok(false);
+    };
+    for (left, right) in left.iter().zip(right) {
+        meter.tick()?;
+        if left != right {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn diff_clone_token_segment<F: FnMut() -> bool>(
