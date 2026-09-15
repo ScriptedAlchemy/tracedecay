@@ -2161,7 +2161,7 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
 /// mutex for its whole pass — sealing a production-scale corpus holds it for
 /// minutes per generation — while the seated serving generation stays fully
 /// decoded, activated, and proven current from before the pass began.
-/// Verified graph reads (redundancy, diagnose, `dead_code`, callers, impact)
+/// Verified graph reads (diagnose, `dead_code`, callers, impact)
 /// resolve through `latest_complete_ready_decoded_for_root_scope`; refusing
 /// them "not ready" for the whole pass turned bounded background work into a
 /// tool outage that outlived exact/lexical retrieval by 25+ minutes.

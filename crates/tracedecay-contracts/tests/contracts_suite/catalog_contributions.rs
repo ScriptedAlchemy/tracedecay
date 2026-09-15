@@ -154,7 +154,6 @@ fn verified_graph_mcp_reads_have_application_primitive_admission_identity() {
 
     for operation_name in [
         "context",
-        "redundancy",
         "node",
         "callees",
         "impact",

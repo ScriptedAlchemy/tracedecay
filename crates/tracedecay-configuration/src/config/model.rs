@@ -56,7 +56,7 @@ pub const SYNC_RETENTION_SETTING_KEY: &str = "sync.retention.v1";
 /// exclude pattern built by [`default_exclude_patterns`].
 ///
 /// Path-level (not just directory-level) so callers can filter a flat list
-/// of file paths in one pass, e.g. the redundancy scanner's candidate list.
+/// of file paths in one pass.
 pub fn is_generated_path_segment(path: &str) -> bool {
     has_minified_suffix(path) || path.split('/').any(is_generated_dir_segment)
 }
@@ -77,8 +77,8 @@ fn has_minified_suffix(path: &str) -> bool {
 /// - `.git/**`, `.tracedecay/**` — VCS and `TraceDecay`'s own metadata dirs;
 ///   these are tool/repo bookkeeping, not generated *code*, so they stay
 ///   local to the config's default patterns rather than joining
-///   [`GENERATED_DIR_SEGMENTS`] (which the migrate/scan/redundancy call
-///   sites also consult for non-config-driven decisions).
+///   [`GENERATED_DIR_SEGMENTS`] (which migrate and scan call sites also
+///   consult for non-config-driven decisions).
 /// - `bin/**` — historically excluded here by default, but not treated as
 ///   "generated" elsewhere: a `bin/` directory can hold real source in some
 ///   project layouts, so it isn't added to the shared segment list.

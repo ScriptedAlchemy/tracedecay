@@ -2,11 +2,11 @@
 //! extracted from `tracedecay-application` so session-facing adapters
 //! (`tracedecay-automation-runtime`, `tracedecay-host-admission`,
 //! `tracedecay-mcp`, `tracedecay-cli`) compile without the advisory,
-//! semantic-runtime, and code-index surfaces that crate carries.
+//! and code-index surfaces that crate carries.
 //!
 //! This crate must never depend on `tracedecay-application`,
-//! `tracedecay-semantic`, `tracedecay-code-index`, `tracedecay-search-eval`,
-//! or `tracedecay-lsp` — that boundary is the point of the extraction.
+//! `tracedecay-code-index`, `tracedecay-search-eval`, or `tracedecay-lsp` —
+//! that boundary is the point of the extraction.
 
 pub mod anchor_resolution;
 pub mod context;

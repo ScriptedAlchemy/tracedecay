@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
@@ -13,7 +12,6 @@ use crate::result::{CoverageCompleteness, OpaqueCursor};
 pub const MAX_GREP_RESULTS_V1: u32 = 200;
 pub const MAX_GREP_CONTEXT_LINES_V1: u32 = 3;
 pub const MAX_ANALYSIS_RESULTS_V1: u32 = 100;
-pub const MAX_REDUNDANCY_PAIRS_V1: u32 = 500;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -163,99 +161,6 @@ pub struct ComplexityResultV1 {
     pub ranking: Vec<ComplexityItemV1>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RedundancyRequestV1 {
-    pub path: Option<String>,
-    pub min_lines: u32,
-    pub max_pairs: u32,
-    pub similarity_threshold: f64,
-    pub include_naming_only: bool,
-    pub include_generated_paths: bool,
-    pub cursor: Option<OpaqueCursor>,
-}
-
-impl RedundancyRequestV1 {
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        if self.max_pairs > MAX_REDUNDANCY_PAIRS_V1
-            || !self.similarity_threshold.is_finite()
-            || !(0.0..=1.0).contains(&self.similarity_threshold)
-        {
-            return Err(ApplicationContractError::InvalidRange {
-                field: "redundancy request bounds",
-            });
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RedundancyNodeV1 {
-    pub file: String,
-    pub line: u32,
-    pub name: String,
-    pub id: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RedundancySignalsV1 {
-    pub ast_match: bool,
-    pub cfg_match: bool,
-    pub call_seq_match: bool,
-    pub shingle_jaccard: f64,
-    /// Cosine over the two bodies' shingle sets (lexical, not a model vector).
-    pub body_vector_cosine: f64,
-    pub generic_helper_downranked: bool,
-    pub body_tokens: [u64; 2],
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RedundancyPairV1 {
-    pub similarity: f64,
-    pub ranking_score: f64,
-    pub severity: String,
-    pub overlap_kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub classification: Option<String>,
-    pub a: RedundancyNodeV1,
-    pub b: RedundancyNodeV1,
-    pub signals: RedundancySignalsV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RedundancyGroupV1 {
-    pub size: u64,
-    pub nodes: Vec<RedundancyNodeV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RedundancyThresholdsV1 {
-    pub min_lines: u32,
-    pub similarity_threshold: f64,
-    pub include_naming_only: bool,
-    pub include_generated_paths: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RedundancyResultV1 {
-    pub candidates: u64,
-    pub scanned: u64,
-    pub skipped_for_size: u64,
-    pub pair_count: u64,
-    pub pairs: Vec<RedundancyPairV1>,
-    pub groups: Vec<RedundancyGroupV1>,
-    pub groups_scope: String,
-    pub ranked_by: String,
-    pub scope: String,
-    pub thresholds: RedundancyThresholdsV1,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyDepthRequestV1 {
@@ -364,14 +269,6 @@ pub trait ComplexityAuthorityV1 {
     ) -> PrimitiveFutureV1<'a, ComplexityResultV1>;
 }
 
-pub trait RedundancyAuthorityV1 {
-    fn redundancy<'a>(
-        &'a self,
-        context: &'a PrimitivePortContextV1<'a>,
-        request: &'a RedundancyRequestV1,
-    ) -> PrimitiveFutureV1<'a, RedundancyResultV1>;
-}
-
 pub trait DependencyDepthAuthorityV1 {
     fn dependency_depth<'a>(
         &'a self,
@@ -440,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn analysis_request_json_validation_covers_complexity_redundancy_and_depth() {
+    fn analysis_request_json_validation_covers_complexity_and_depth() {
         let complexity: ComplexityRequestV1 = serde_json::from_value(serde_json::json!({
             "node_kind": "function",
             "path": "src/lib.rs",
@@ -457,26 +354,6 @@ mod tests {
         };
         assert!(matches!(
             over_complexity.validate(),
-            Err(ApplicationContractError::InvalidRange { .. })
-        ));
-
-        let redundancy: RedundancyRequestV1 = serde_json::from_value(serde_json::json!({
-            "path": null,
-            "min_lines": 8,
-            "max_pairs": 20,
-            "similarity_threshold": 0.6,
-            "include_naming_only": false,
-            "include_generated_paths": false,
-            "cursor": null
-        }))
-        .unwrap();
-        redundancy.validate().unwrap();
-        let bad_threshold = RedundancyRequestV1 {
-            similarity_threshold: 1.5,
-            ..redundancy
-        };
-        assert!(matches!(
-            bad_threshold.validate(),
             Err(ApplicationContractError::InvalidRange { .. })
         ));
 

@@ -1,9 +1,7 @@
 //! Production adapters for the existing single-root grep and analysis
 //! authorities.
 //!
-//! Lexical grep and redundancy remain injected because their callers own
-//! request composition and result rendering. Filesystem search is delegated
-//! to the canonical code-index implementation.
+//! Filesystem search is delegated to the canonical code-index implementation.
 
 use std::sync::Arc;
 

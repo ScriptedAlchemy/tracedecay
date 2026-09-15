@@ -71,7 +71,7 @@ mod unavailable_evidence_tests;
 
 pub use affected_tests::TraceDecayAffectedTestsPortV1;
 pub use extended_primitive::TraceDecayExtendedPrimitivePortV1;
-pub use lexical_grep::{TraceDecayLexicalGrepAuthorityV1, TraceDecayRedundancyAuthorityV1};
+pub use lexical_grep::TraceDecayLexicalGrepAuthorityV1;
 use managed_test_scope::ProductionManagedTestRunCurrentScope;
 pub use retrieval_ports::{TraceDecayHealthPortV1, TraceDecaySourceLinesPortV1};
 pub use symbol_graph_snapshot::ProjectSymbolGraphCursorSnapshotAuthority;
@@ -687,7 +687,6 @@ pub async fn open_production_primitive_runtime(
             Arc::clone(&source_runtime),
             Arc::clone(&code_graph),
         )),
-        Arc::new(TraceDecayRedundancyAuthorityV1),
         temporal,
         Arc::new(TraceDecaySourceLinesPortV1::new(
             Arc::clone(&source_runtime),

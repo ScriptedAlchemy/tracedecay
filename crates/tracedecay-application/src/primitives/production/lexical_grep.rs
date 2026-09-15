@@ -1,4 +1,4 @@
-//! Lexical grep and redundancy authorities over the project code graph.
+//! Lexical grep authority over the project code graph.
 
 use std::sync::Arc;
 
@@ -9,7 +9,6 @@ use tracedecay_code_index::grep_search::{
 use tracedecay_contracts::retrieval::grep_analysis::{
     GrepAnalysisProblemV1, GrepHitV1, GrepRequestV1, GrepResultV1, LexicalGrepAuthorityV1,
     PrimitiveFutureV1, PrimitiveOutcomeV1, PrimitivePageV1, PrimitivePortContextV1,
-    RedundancyAuthorityV1, RedundancyRequestV1, RedundancyResultV1,
 };
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, SourceReadContext, request_graph_cancellation,
@@ -176,31 +175,6 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 }
             },
             label = "usecases.primitives.grep"
-        ))
-    }
-}
-
-pub struct TraceDecayRedundancyAuthorityV1;
-
-impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
-    fn redundancy<'a>(
-        &'a self,
-        _context: &'a PrimitivePortContextV1<'a>,
-        request: &'a RedundancyRequestV1,
-    ) -> PrimitiveFutureV1<'a, RedundancyResultV1> {
-        Box::pin(hotpath::future!(
-            async move {
-                if request.cursor.is_some() {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        "compatibility cursor unsupported".to_owned(),
-                    ));
-                }
-                PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                    "the verified graph generation does not publish redundancy fingerprints"
-                        .to_owned(),
-                ))
-            },
-            label = "usecases.primitives.redundancy"
         ))
     }
 }

@@ -294,7 +294,7 @@ The language coverage is broad — the functional family (Haskell, Elixir, OCaml
 
 The agent ecosystem keeps growing too. Every month brings a new AI coding tool with its own configuration format. The trait-based architecture handles this well, but the real challenge is keeping more than a dozen integration paths tested and working across three operating systems.
 
-TraceDecay started as a way to make Claude Code stop reading the same files over and over. It's become something broader: a semantic index that any AI coding agent can query, refreshing its index on demand, understanding more than fifty languages across optional per-branch databases, tracking its own impact down to the individual tool call, and shipping as a single native binary that upgrades itself. The core insight hasn't changed. Give the AI a graph instead of making it grep. Everything else followed from that.
+TraceDecay started as a way to make Claude Code stop reading the same files over and over. It has become a code graph that any AI coding agent can query, refreshing its index on demand, understanding more than fifty languages across optional per-branch databases, tracking its own impact down to the individual tool call, and shipping as a single native binary that upgrades itself. The core insight has not changed. Give the AI a graph instead of making it grep.
 
 ---
 

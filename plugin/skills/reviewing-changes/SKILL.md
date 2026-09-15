@@ -11,9 +11,9 @@ and test links supplement the diff; they cannot prove unindexed or external
 consumers safe. Deepen on a risky symbol rather than repeating every analysis
 across all changed files.
 
-A scan hit is a lead: test unwraps, unsafe blocks, and vector-only duplicate
-matches are not automatically defects. Confirm concrete behavior and reachable
-callers. For dead-code or ship-risk work, see [safety audit](references/safety-audit.md).
+A scan hit is a lead: test unwraps and unsafe blocks are not automatically
+defects. Confirm concrete behavior and reachable callers. For dead-code or
+ship-risk work, see [safety audit](references/safety-audit.md).
 
 Generation-bound Git reads do not authorize index/ref writes. TraceDecay Git
 preview/apply (`tracedecay_git_preview`, then `tracedecay_git_apply`) consumes

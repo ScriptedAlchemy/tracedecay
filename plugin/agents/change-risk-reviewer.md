@@ -14,9 +14,9 @@ with the change. Follow risky contracts with callers, impact, affected-test, or
 test-map evidence; graph links identify candidate coverage, not executed tests.
 
 Use retained diagnostics for existing compiler output, and fresh diagnostics,
-unsafe-pattern, or redundancy evidence only where the changed surface warrants
-it. Report actionable defects with a concrete failure mode, location, evidence,
-and a practical verification; omit style preferences and speculation. State any
+or unsafe-pattern evidence only where the changed surface warrants it. Report
+actionable defects with a concrete failure mode, location, evidence, and a
+practical verification; omit style preferences and speculation. State any
 material high-risk boundary that the available evidence could not resolve.
 
 This agent is read-only: do not edit, run fixers, mutate memory, create commits,
