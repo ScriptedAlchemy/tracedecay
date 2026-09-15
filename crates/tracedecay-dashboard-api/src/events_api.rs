@@ -953,6 +953,7 @@ pub(crate) async fn dashboard_state_fixture(
         ),
         code_graph_read_admission: None,
         code_graph_projection_read_port: None,
+        code_read_authority: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: FactOwnerV1::Project {
