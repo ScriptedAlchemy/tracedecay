@@ -29285,12 +29285,6 @@
     "WorkflowRunProjection": {
       "additionalProperties": false,
       "properties": {
-        "active_fan_out_attempts": {
-          "additionalProperties": {
-            "$ref": "#/$defs/WorkAttemptIdentityV1"
-          },
-          "type": "object"
-        },
         "definition": {
           "$ref": "#/$defs/WorkflowDefinition"
         },
@@ -29355,7 +29349,6 @@
         "fan_out_plans",
         "released_fan_out_attempts",
         "settled_fan_out_attempts",
-        "active_fan_out_attempts",
         "history"
       ],
       "type": "object"

@@ -36,9 +36,7 @@ pub use delivery_recorder::{
     DeliverySettlementRecorderSummaryV1,
 };
 pub use delivery_settlement::{DeliverySettlementAuthorityV1, DeliverySettlementEmissionV1};
-pub use emit::{
-    emit_index, record_adoption_eligibility, record_adoption_outcome, record_storage,
-};
+pub use emit::{emit_index, record_adoption_eligibility, record_adoption_outcome, record_storage};
 pub use execution_emit::{
     ExecutionOwnerFactInputV1, ExecutionTopologyObservationUnavailableV1,
     NativeIntegrationObservationResultV1, execution_owner_fact_envelope,

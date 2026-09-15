@@ -6049,7 +6049,6 @@ export const WorkflowRunGetRequestSchema = z.object({
 export type WorkflowRunGetRequest = z.infer<typeof WorkflowRunGetRequestSchema>;
 
 export const WorkflowRunProjectionSchema = z.object({
-  active_fan_out_attempts: z.record(z.lazy(() => WorkAttemptIdentityV1Schema)),
   definition: z.lazy(() => WorkflowDefinitionSchema),
   fan_out_plans: z.record(z.lazy(() => WorkflowFanOutPlanV1Schema)),
   history: z.array(z.lazy(() => WorkflowRunEventSchema)),
