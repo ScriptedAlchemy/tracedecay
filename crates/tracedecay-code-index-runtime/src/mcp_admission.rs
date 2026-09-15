@@ -24,18 +24,8 @@ pub trait CodeIndexScopeResolverV1: Clone + Send + Sync + 'static {
     ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1>;
 }
 
-/// Revalidates checkout identity while preserving the scope that minted the route grant.
-/// A branch label may move under one admitted repository/worktree without changing that identity.
-#[derive(Clone, Debug)]
-pub struct RegisteredProjectScopeResolverV1 {
-    admitted: ResolvedScope,
-}
-
-impl RegisteredProjectScopeResolverV1 {
-    pub fn new(admitted: ResolvedScope) -> Self {
-        Self { admitted }
-    }
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegisteredProjectScopeResolverV1;
 
 impl CodeIndexScopeResolverV1 for RegisteredProjectScopeResolverV1 {
     fn resolved_scope_for_project(
@@ -43,15 +33,8 @@ impl CodeIndexScopeResolverV1 for RegisteredProjectScopeResolverV1 {
         project_root: &Path,
         project_id: &ProjectId,
     ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
-        let current = crate::resolved_scope_for_project(project_root, project_id)
-            .map_err(|_| CodeIndexScopeUnavailableV1)?;
-        if current.project_id != self.admitted.project_id
-            || current.repository_id != self.admitted.repository_id
-            || current.worktree_id != self.admitted.worktree_id
-        {
-            return Err(CodeIndexScopeUnavailableV1);
-        }
-        Ok(self.admitted.clone())
+        crate::resolved_scope_for_project(project_root, project_id)
+            .map_err(|_| CodeIndexScopeUnavailableV1)
     }
 }
 
@@ -103,58 +86,4 @@ pub trait CodeIndexMcpReadAdmissionV1: Clone + Send + Sync + 'static {
         &self,
         scope: &ResolvedScope,
     ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1>;
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-    use std::process::Command;
-
-    use super::*;
-
-    fn git(root: &Path, arguments: &[&str]) {
-        let status =
-            Command::new(tracedecay_runtime_core::git::try_git_program().expect("Git executable"))
-                .args(arguments)
-                .current_dir(root)
-                .status()
-                .expect("run Git fixture command");
-        assert!(status.success(), "Git failed: {arguments:?}");
-    }
-
-    fn repository() -> tempfile::TempDir {
-        let root = tempfile::TempDir::new().expect("repository");
-        git(root.path(), &["init", "-q", "-b", "main"]);
-        git(root.path(), &["config", "user.name", "TraceDecay Test"]);
-        git(
-            root.path(),
-            &["config", "user.email", "tracedecay@example.invalid"],
-        );
-        std::fs::write(root.path().join("lib.rs"), "pub fn value() {}\n").expect("source");
-        git(root.path(), &["add", "lib.rs"]);
-        git(root.path(), &["commit", "-qm", "seed"]);
-        root
-    }
-
-    #[test]
-    fn admitted_scope_survives_branch_switch_but_rejects_another_checkout() {
-        let project = repository();
-        let project_id = ProjectId::new("project.scope-resolver").expect("project id");
-        let admitted =
-            crate::resolved_scope_for_project(project.path(), &project_id).expect("main scope");
-        let resolver = RegisteredProjectScopeResolverV1::new(admitted.clone());
-
-        git(project.path(), &["switch", "-qc", "feature"]);
-        let resolved = resolver
-            .resolved_scope_for_project(project.path(), &project_id)
-            .expect("same checkout after branch switch");
-        assert_eq!(resolved, admitted);
-
-        let foreign = repository();
-        assert!(
-            resolver
-                .resolved_scope_for_project(foreign.path(), &project_id)
-                .is_err()
-        );
-    }
 }

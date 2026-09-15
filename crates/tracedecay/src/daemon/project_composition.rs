@@ -1936,17 +1936,13 @@ fn project_code_index_authorities(
         invocation.code_index_schedulers.clone(),
         project_id.clone(),
         read_admission_provider.clone(),
-        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1::new(
-            scope.clone(),
-        ),
+        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1,
     );
     let branch_diff_executor = code_index_branch_diff_executor(
         invocation.code_index_schedulers.clone(),
         project_id.clone(),
         read_admission_provider,
-        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1::new(
-            scope.clone(),
-        ),
+        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1,
     );
     Ok(ProjectCodeIndexAuthorities {
         publication_identity,
