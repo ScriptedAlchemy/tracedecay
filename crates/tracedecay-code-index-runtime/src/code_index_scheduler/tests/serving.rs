@@ -686,17 +686,17 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
             .expect("advance clone successor");
     }
     assert!(latest.query_owners_are_ready());
-    let v15_path = active_text_artifact_path(store.path());
-    assert_ne!(v15_path, v14_path);
-    let v15_revision: i64 = rusqlite::Connection::open(v15_path)
-        .expect("open V15 artifact")
+    let v16_path = active_text_artifact_path(store.path());
+    assert_ne!(v16_path, v14_path);
+    let v16_revision: i64 = rusqlite::Connection::open(v16_path)
+        .expect("open V16 artifact")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
             [],
             |row| row.get(0),
         )
-        .expect("read V15 revision");
-    assert_eq!(v15_revision, 15);
+        .expect("read V16 revision");
+    assert_eq!(v16_revision, 16);
 }
 
 #[tokio::test]
@@ -834,7 +834,7 @@ fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_own
             |row| row.get(0),
         )
         .expect("read successor revision");
-    assert_eq!(revision, 15);
+    assert_eq!(revision, 16);
 }
 
 fn start_partial_clone_successor(
@@ -1000,11 +1000,31 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .expect("read staged clone posting");
+    let original_fingerprint: (String, i64, i64, i64, String, i64, String, String) = connection
+        .query_row(
+            "SELECT language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("read staged clone fingerprint");
     connection
         .execute_batch(
             "DROP TRIGGER immutable_clone_occurrences_update;
              DROP TRIGGER immutable_clone_exact_postings_delete;
-             DROP TRIGGER builder_gate_clone_exact_postings_insert;",
+             DROP TRIGGER builder_gate_clone_exact_postings_insert;
+             DROP TRIGGER immutable_clone_fingerprint_postings_delete;
+             DROP TRIGGER builder_gate_clone_fingerprint_postings_insert;",
         )
         .expect("remove staging mutation guards for tamper injection");
     connection
@@ -1036,6 +1056,34 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
             ],
         )
         .expect("replace the posting while preserving counts and references");
+    connection
+        .execute(
+            "DELETE FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4 AND symbol_occurrence_id = ?5 AND token_position = ?6",
+            rusqlite::params![
+                original_fingerprint.0,
+                original_fingerprint.1,
+                original_fingerprint.2,
+                original_fingerprint.3,
+                original_fingerprint.4,
+                original_fingerprint.5,
+            ],
+        )
+        .expect("delete one persisted fingerprint");
+    connection
+        .execute(
+            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                original_fingerprint.0,
+                original_fingerprint.1,
+                original_fingerprint.2,
+                original_fingerprint.3,
+                original_fingerprint.4,
+                original_fingerprint.5 + 1,
+                original_fingerprint.6,
+                original_fingerprint.7,
+            ],
+        )
+        .expect("replace fingerprint at another position");
     drop(connection);
 
     let scheduler = scheduler(
@@ -1050,7 +1098,7 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
             .expect("revalidate or rebuild resumed clone rows");
     }
     let published =
-        rusqlite::Connection::open(active_text_artifact_path(store.path())).expect("open V15 head");
+        rusqlite::Connection::open(active_text_artifact_path(store.path())).expect("open V16 head");
     let occurrence: Vec<u8> = published
         .query_row(
             "SELECT occurrence FROM clone_occurrences WHERE symbol_occurrence_id = ?1",
@@ -1073,6 +1121,25 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("read rebuilt clone posting"),
+        1
+    );
+    assert_eq!(
+        published
+            .query_row(
+                "SELECT COUNT(*) FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4 AND symbol_occurrence_id = ?5 AND token_position = ?6 AND payload_digest = ?7 AND body_digest = ?8",
+                rusqlite::params![
+                    original_fingerprint.0,
+                    original_fingerprint.1,
+                    original_fingerprint.2,
+                    original_fingerprint.3,
+                    original_fingerprint.4,
+                    original_fingerprint.5,
+                    original_fingerprint.6,
+                    original_fingerprint.7,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read rebuilt clone fingerprint"),
         1
     );
 }
