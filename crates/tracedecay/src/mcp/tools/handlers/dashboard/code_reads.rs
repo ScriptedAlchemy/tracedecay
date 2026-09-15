@@ -57,10 +57,10 @@ impl DashboardCodeReadAdapter {
 }
 
 impl DashboardCodeReadPortV1 for DashboardCodeReadAdapter {
-    fn shared_family<'a>(
-        &'a self,
+    fn shared_family(
+        &self,
         request: DashboardSharedFamilyRequestV1,
-    ) -> DashboardSharedFamilyReadFuture<'a> {
+    ) -> DashboardSharedFamilyReadFuture<'_> {
         Box::pin(async move {
             let cursor = request
                 .cursor
@@ -98,10 +98,10 @@ impl DashboardCodeReadPortV1 for DashboardCodeReadAdapter {
         })
     }
 
-    fn revision_pair<'a>(
-        &'a self,
+    fn revision_pair(
+        &self,
         request: DashboardRevisionPairRequestV1,
-    ) -> DashboardRevisionPairReadFuture<'a> {
+    ) -> DashboardRevisionPairReadFuture<'_> {
         Box::pin(async move {
             let control = LocalBranchReadControlV1 {
                 max_refs: 1,
