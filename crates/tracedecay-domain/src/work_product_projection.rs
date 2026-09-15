@@ -8,8 +8,24 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ProjectionGenerationId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptStateV1,
     WorkGraphVersionV1, WorkItemV1, WorkProductContractError, WorkProductGraphV1,
-    WorkProjectionSequenceV1,
 };
+
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(transparent)]
+#[schemars(title = "WorkProjectionSequenceV1")]
+pub struct WorkProjectionSequenceV1(u64);
+
+impl WorkProjectionSequenceV1 {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,

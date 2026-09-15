@@ -33,7 +33,6 @@ pub mod work_placement;
 pub mod work_product;
 pub mod work_product_event;
 pub mod work_product_projection;
-pub mod work_read;
 pub mod work_routing;
 pub mod work_run_control;
 pub mod work_runtime;
@@ -381,11 +380,7 @@ pub use session_derived::{
     SessionDerivedEvidenceRecordV1, derive_session_evidence_from_occurrences,
 };
 pub use source_path_policy::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
-pub use work::{
-    MAX_WORK_DEPENDENCIES, MAX_WORK_TITLE_BYTES, RuntimeEvidenceRef,
-    WORK_PROJECTION_STATE_VERSION_V1, WorkAuthority, WorkContractError, WorkEvent, WorkEventKind,
-    WorkProjection, WorkProjectionStateV1, WorkVersion,
-};
+pub use work::{RuntimeEvidenceRef, WorkAuthority, WorkContractError, WorkVersion};
 pub use work_duplicate_adjudication::{
     MAX_WORK_DUPLICATE_REASON_BYTES_V1, WorkDuplicateAdjudicationCommandV1,
     WorkDuplicateAdjudicationContractErrorV1, WorkDuplicateAdjudicationEvidenceV1,
@@ -423,13 +418,9 @@ pub use work_product_event::{
 pub use work_product_projection::{
     WorkCausalProjectionV1, WorkCriticalPathProjectionV1, WorkDagEdgeV1, WorkDagProjectionV1,
     WorkKanbanCardV1, WorkKanbanProjectionV1, WorkLegalActionV1, WorkProductProjectionBundleV1,
-    WorkRuntimeAttemptProjectionV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1,
-    WorkTimelineEntryV1, WorkTimelineLaneV1, WorkTimelineProjectionV1, WorkWorkloadProjectionV1,
-};
-pub use work_read::{
-    MAX_WORK_PROJECTION_CURSOR_BYTES, MAX_WORK_PROJECTION_READ_ITEMS, WorkProjectionCoverageV1,
-    WorkProjectionDeltaV1, WorkProjectionReadError, WorkProjectionResumeCursorV1,
-    WorkProjectionSequenceRangeV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
+    WorkProjectionSequenceV1, WorkRuntimeAttemptProjectionV1, WorkRuntimeProjectionCoverageV1,
+    WorkRuntimeProjectionV1, WorkTimelineEntryV1, WorkTimelineLaneV1, WorkTimelineProjectionV1,
+    WorkWorkloadProjectionV1,
 };
 pub use work_routing::{
     WorkContentLocationClassV1, WorkEffortClassV1, WorkOrdinalBandV1, WorkRouteCandidateV1,
