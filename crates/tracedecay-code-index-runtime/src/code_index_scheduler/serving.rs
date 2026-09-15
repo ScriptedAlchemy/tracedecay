@@ -523,6 +523,52 @@ impl ProductionCodeIndexQueryOwnersV1 {
         self.lexical.retrieve_lexical(request)
     }
 
+    pub(crate) fn similar(
+        &self,
+        symbol_occurrence_id: &tracedecay_domain::SymbolOccurrenceId,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<tracedecay_query::code_search::CodeIndexSimilarCompletedV1>, RetrievalPortError>
+    {
+        let Some(source) = self
+            .hydration
+            .clone_body(symbol_occurrence_id)
+            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let mut exact_groups = Vec::new();
+        for key in source.payload.exact_keys(source.occurrence.eligibility) {
+            let page = self
+                .hydration
+                .clone_exact_page(&source.occurrence, &key, None, limit, control)
+                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+            let members = page
+                .members
+                .into_iter()
+                .filter(|member| {
+                    member.occurrence.symbol_occurrence_id != source.occurrence.symbol_occurrence_id
+                })
+                .collect::<Vec<_>>();
+            if !members.is_empty() {
+                exact_groups.push(
+                    tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 { key, members },
+                );
+            }
+        }
+        let near = self
+            .hydration
+            .clone_fingerprint_page(&source.occurrence, &source.payload, None, limit, control)
+            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+        Ok(Some(
+            tracedecay_query::code_search::CodeIndexSimilarCompletedV1 {
+                source,
+                exact_groups,
+                near,
+            },
+        ))
+    }
+
     #[cfg(test)]
     pub fn is_artifact_backed(&self) -> bool {
         true
@@ -1430,7 +1476,7 @@ impl LatestCodeTextGenerationV1 {
         Ok(true)
     }
 
-    pub(super) fn production_query_owners_with_budget(
+    pub(crate) fn production_query_owners_with_budget(
         &self,
         _build_budget: &RetrievalBudget,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
