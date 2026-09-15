@@ -12,7 +12,7 @@ use tracedecay_domain::{
     RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
 };
 
-use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key};
+use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key, symbol_occurrence_id};
 use crate::clones::CodeIndexCloneBodyV1;
 use crate::extract::ExtractionBatchV1;
 use crate::extract::parser_import_rows_digest;
@@ -571,34 +571,18 @@ impl CodeFileIndexArtifactsV1 {
         } else {
             self.validate_reusing_clone_payloads()?;
         }
-        let chunks = self
-            .chunks
-            .rematerialize_for_generation(generation_id.clone(), file_occurrence_id.clone())?;
         let mut occurrences = BTreeMap::new();
-        for (prior, current) in self.chunks.chunks.iter().zip(&chunks.chunks) {
-            if let Some(prior_occurrence) = &prior.anchor.symbol_occurrence_id {
-                let current_occurrence = current
-                    .anchor
-                    .symbol_occurrence_id
-                    .as_ref()
-                    .ok_or_else(|| {
-                        ChunkingFailureV1::NonCanonicalIdentity(
-                            "rematerialized symbol occurrence is missing".to_owned(),
-                        )
-                    })?
-                    .clone();
-                match occurrences.get(prior_occurrence) {
-                    Some(existing) if existing != &current_occurrence => {
-                        return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                            "symbol occurrence rematerialized inconsistently".to_owned(),
-                        ));
-                    }
-                    _ => {
-                        occurrences.insert(prior_occurrence.clone(), current_occurrence);
-                    }
-                }
-            }
+        for symbol in &self.symbols {
+            occurrences.insert(
+                symbol.occurrence.clone(),
+                symbol_occurrence_id(&generation_id, &file_occurrence_id, &symbol.identity)?,
+            );
         }
+        let chunks = self.chunks.rematerialize_for_generation(
+            generation_id.clone(),
+            file_occurrence_id.clone(),
+            &occurrences,
+        )?;
 
         let mut symbols = self.symbols.clone();
         for symbol in &mut symbols {

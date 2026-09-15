@@ -18,7 +18,7 @@ use tracedecay_domain::{
     CodeSearchChunkV1, FileOccurrenceId, ManifestDigest, SymbolOccurrenceId,
 };
 
-use super::chunks::{ChunkingFailureV1, CodeFileChunksV1};
+use super::chunks::{ChunkingFailureV1, CodeFileChunksV1, symbol_occurrence_id};
 use super::generations::{FileExtractionActionV1, GenerationIncrementPlanV1};
 use super::lineage::{
     GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecordV1,
@@ -236,8 +236,27 @@ pub fn materialize_generation_increment(
                         "carry-forward content digest does not match prior chunks".to_owned(),
                     ));
                 }
+                let rematerialized_occurrences = prior
+                    .chunks
+                    .iter()
+                    .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.as_ref())
+                    .map(|prior_occurrence| {
+                        let symbol = prior_symbols_by_occurrence
+                            .get(prior_occurrence)
+                            .ok_or_else(|| {
+                                ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
+                            })?;
+                        symbol_occurrence_id(&generation_id, file_occurrence_id, &symbol.identity)
+                            .map(|current| (prior_occurrence.clone(), current))
+                            .map_err(map_chunking_error)
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
                 let current = prior
-                    .rematerialize_for_generation(generation_id.clone(), file_occurrence_id.clone())
+                    .rematerialize_for_generation(
+                        generation_id.clone(),
+                        file_occurrence_id.clone(),
+                        &rematerialized_occurrences,
+                    )
                     .map_err(map_chunking_error)?;
                 let occurrence_map = prior
                     .chunks
