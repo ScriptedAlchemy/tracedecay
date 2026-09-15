@@ -525,55 +525,89 @@ impl ProductionCodeIndexQueryOwnersV1 {
 
     pub(crate) fn similar(
         &self,
-        symbol_occurrence_id: &tracedecay_domain::SymbolOccurrenceId,
-        limit: usize,
+        request: &tracedecay_query::code_search::CodeIndexSimilarRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<
         Option<tracedecay_query::code_search::CodeIndexSimilarCompletedV1>,
         RetrievalPortError,
     > {
-        let Some(source) = self
-            .hydration
-            .clone_body(symbol_occurrence_id)
-            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?
-        else {
+        let source = match &request.target {
+            tracedecay_query::code_search::CodeIndexSimilarTargetV1::SymbolOccurrence(
+                occurrence,
+            ) => self.hydration.clone_body(occurrence),
+            tracedecay_query::code_search::CodeIndexSimilarTargetV1::SourceRange { path, span } => {
+                self.hydration.clone_body_by_source_range(path, *span)
+            }
+        }
+        .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+        let Some(source) = source else {
             return Ok(None);
         };
+        // Request-wide budgets: share result_limit and work_limit across match
+        // classes instead of resetting a per-family page size on each key.
+        let mut remaining_results = request.result_limit;
+        let mut remaining_work = request.work_limit.saturating_sub(1);
         let mut exact_groups = Vec::new();
-        for key in source.payload.exact_keys(source.occurrence.eligibility) {
-            let members = self.verified_exact_clone_members(&source, &key, limit, control)?;
-            if !members.is_empty() {
+        for key in source
+            .payload
+            .exact_keys(source.occurrence.eligibility)
+            .into_iter()
+            .filter(|key| request.match_classes.contains(&key.class))
+        {
+            if remaining_results == 0 || remaining_work == 0 {
+                break;
+            }
+            let page_limit = remaining_results.min(remaining_work);
+            let (members, complete, next_cursor) = self.verified_exact_clone_page(
+                &source,
+                &key,
+                request.cursor.as_ref(),
+                page_limit,
+                control,
+            )?;
+            remaining_results = remaining_results.saturating_sub(members.len());
+            // Count verified members plus one lookahead slot consumed by the
+            // last exact-page fetch when the postings continue.
+            let work_spent = members.len() + usize::from(next_cursor.is_some());
+            remaining_work = remaining_work.saturating_sub(work_spent.max(1));
+            if !members.is_empty() || !complete {
                 exact_groups.push(
-                    tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 { key, members },
+                    tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 {
+                        key,
+                        members,
+                        complete,
+                        next_cursor,
+                    },
                 );
             }
         }
-        let near = self
-            .hydration
-            .clone_fingerprint_page(&source.occurrence, &source.payload, None, limit, control)
-            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
         Ok(Some(
             tracedecay_query::code_search::CodeIndexSimilarCompletedV1 {
                 source,
                 exact_groups,
-                near,
             },
         ))
     }
 
     /// Continue paging past filter rejects until `limit` verified members exist.
-    fn verified_exact_clone_members(
+    fn verified_exact_clone_page(
         &self,
         source: &tracedecay_code_index::clones::CodeIndexCloneBodyV1,
         key: &tracedecay_code_index::clones::CloneExactKeyV1,
+        start_cursor: Option<&tracedecay_query::retrieval::lexical::CloneArtifactCursorV1>,
         limit: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<
-        Vec<tracedecay_query::retrieval::lexical::CloneExactArtifactMemberV1>,
+        (
+            Vec<tracedecay_query::retrieval::lexical::CloneExactArtifactMemberV1>,
+            bool,
+            Option<tracedecay_query::retrieval::lexical::CloneArtifactCursorV1>,
+        ),
         RetrievalPortError,
     > {
         let mut members = Vec::new();
-        let mut cursor = None;
+        let mut cursor = start_cursor.cloned();
+        let mut complete = false;
         while members.len() < limit {
             let page = self
                 .hydration
@@ -598,10 +632,14 @@ impl ProductionCodeIndexQueryOwnersV1 {
             }
             match page.next_cursor {
                 Some(next) if members.len() < limit => cursor = Some(next),
-                _ => break,
+                Some(next) => return Ok((members, false, Some(next))),
+                None => {
+                    complete = true;
+                    break;
+                }
             }
         }
-        Ok(members)
+        Ok((members, complete, None))
     }
 
     #[cfg(test)]

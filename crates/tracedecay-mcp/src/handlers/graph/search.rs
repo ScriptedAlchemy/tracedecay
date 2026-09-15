@@ -7,17 +7,17 @@ use std::future::Future;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_code_index::clones::CloneNormalizationClassV1;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
     ContextSurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveRequestV1,
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
-    SimilarAlignedDifferenceV1, SimilarExactGroupV1, SimilarNearPairV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, SimilarSymbolV1,
+    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
+    SimilarSurfaceRequestV1, SimilarTargetV1,
 };
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+#[cfg(test)]
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
@@ -1036,77 +1036,39 @@ pub async fn handle_find_exact_symbol(
 }
 
 #[hotpath::measure(label = "mcp.graph.similar.total")]
-pub async fn handle_similar(
-    ctx: &McpToolContext<'_>,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
+pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
     let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
-    let limit = request.limit.map_or(10, |value| value.min(100) as usize);
-    let requested_symbol = request.symbol.clone();
-
-    let outcome = hotpath::future!(
-        execute_code_index_search(
-            ctx.code_index_search_executor(),
-            tracedecay_query::code_search::CodeIndexSearchRequestV1 {
-                project_root: ctx.project_root().to_path_buf(),
-                query: request.symbol,
-                source_revision: None,
-                source_tree: None,
-                source_reference: None,
-                limit,
-                cursor: None,
-                lexical_routing: LexicalRoutingV1::prefer_symbol(),
-                authority: ctx.code_index_search_authority().cloned(),
-                deadline: ctx.deadline().cloned(),
-                cancellation: ctx.cancellation().cloned(),
-            }
+    let project_id = request.project_id;
+    let repository_id = request.repository_id;
+    let target = match request.target {
+        SimilarTargetV1::SymbolOccurrence {
+            symbol_occurrence_id,
+        } => tracedecay_query::code_search::CodeIndexSimilarTargetV1::SymbolOccurrence(
+            symbol_occurrence_id,
         ),
-        label = "mcp.graph.similar.query"
-    )
-    .await;
-    let complete = match outcome {
-        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => complete,
-        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(_) => {
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-similarity-unavailable".to_owned(),
-                retryable: false,
-                detail: "the maintained code-index search lanes are unavailable".to_owned(),
-            });
+        SimilarTargetV1::SourceRange { path, span } => {
+            tracedecay_query::code_search::CodeIndexSimilarTargetV1::SourceRange { path, span }
         }
     };
-    let code_generation = complete.code_generation.clone();
-    let mut results = Vec::new();
-    hotpath::measure_block!("mcp.graph.similar.graph", {
-        for ranked in &complete.ordered_candidates {
-            let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
-                continue;
-            };
-            let candidates =
-                graph.resolve_qualified_name(&display.qualified_name, Some(&display.kind), 16)?;
-            let mut matched = None;
-            for node in candidates {
-                if required_graph_file_path(&node)? == display.path.as_str() {
-                    matched = Some(node);
-                    break;
-                }
-            }
-            if let Some(node) = matched {
-                results.push((node, ranked.candidate.utility_micros));
-            }
-        }
-    });
-    let source = results
+    let match_classes = request
+        .match_classes
         .iter()
-        .find(|(node, _)| {
-            required_graph_metadata(node)
-                .is_ok_and(|metadata| metadata.simple_name == requested_symbol)
+        .map(|class| match class {
+            SimilarMatchClassV1::ConservativeExact => {
+                tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative
+            }
+            SimilarMatchClassV1::RenameNormalizedExact => {
+                tracedecay_code_index::clones::CloneNormalizationClassV1::Rename
+            }
         })
-        .map(|(node, _)| node.clone())
-        .ok_or_else(|| TraceDecayError::ProjectRoute {
-            reason_code: "similar-source-not-found".to_owned(),
-            retryable: false,
-            detail: format!("symbol `{requested_symbol}` was not found in the verified graph"),
+        .collect();
+    let cursor = request
+        .cursor
+        .as_deref()
+        .map(tracedecay_query::retrieval::lexical::CloneArtifactCursorV1::decode)
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid tracedecay_similar cursor: {error}"),
         })?;
     let executor =
         ctx.code_index_similar_executor()
@@ -1117,9 +1079,11 @@ pub async fn handle_similar(
             })?;
     let similar = match executor(tracedecay_query::code_search::CodeIndexSimilarRequestV1 {
         project_root: ctx.project_root().to_path_buf(),
-        code_generation,
-        symbol_occurrence_id: source.occurrence.clone(),
-        limit,
+        target,
+        match_classes,
+        result_limit: request.result_limit as usize,
+        work_limit: request.work_limit as usize,
+        cursor,
         authority: ctx.code_index_search_authority().cloned(),
         deadline: ctx.deadline().cloned(),
         cancellation: ctx.cancellation().cloned(),
@@ -1131,9 +1095,7 @@ pub async fn handle_similar(
             return Err(TraceDecayError::ProjectRoute {
                 reason_code: "similar-source-not-found".to_owned(),
                 retryable: false,
-                detail: format!(
-                    "symbol `{requested_symbol}` has no body in the verified clone index"
-                ),
+                detail: "the selected source has no body in the verified clone index".to_owned(),
             });
         }
         tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(_) => {
@@ -1144,88 +1106,104 @@ pub async fn handle_similar(
             });
         }
     };
-    let (payload, touched_files) = similar_surface_from_clone_index(graph, source, similar)?;
+    if similar.source.occurrence.project_id != project_id
+        || similar.source.occurrence.repository_id != repository_id
+    {
+        return Err(TraceDecayError::ProjectRoute {
+            reason_code: "similar-source-not-found".to_owned(),
+            retryable: false,
+            detail: "the selected source is outside the authorized repository scope".to_owned(),
+        });
+    }
+    let source = similar_occurrence(&similar.source.occurrence);
+    let mut touched_files = vec![source.path.clone()];
+    let mut complete = true;
+    let families = similar
+        .exact_groups
+        .into_iter()
+        .map(|group| -> Result<SimilarFamilyV1> {
+            complete &= group.complete;
+            let match_class = match group.key.class {
+                tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative => {
+                    SimilarMatchClassV1::ConservativeExact
+                }
+                tracedecay_code_index::clones::CloneNormalizationClassV1::Rename => {
+                    SimilarMatchClassV1::RenameNormalizedExact
+                }
+            };
+            let members = group
+                .members
+                .into_iter()
+                .filter(|member| {
+                    member.occurrence.project_id == project_id
+                        && member.occurrence.repository_id == repository_id
+                })
+                .map(|member| {
+                    let occurrence = similar_occurrence(&member.occurrence);
+                    touched_files.push(occurrence.path.clone());
+                    occurrence
+                })
+                .collect::<Vec<_>>();
+            let next_cursor = group
+                .next_cursor
+                .as_ref()
+                .map(tracedecay_query::retrieval::lexical::CloneArtifactCursorV1::encode)
+                .transpose()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("failed to encode tracedecay_similar cursor: {error}"),
+                })?;
+            Ok(SimilarFamilyV1 {
+                match_class,
+                normalization_revision: group.key.normalization_revision,
+                family_digest: group.key.digest,
+                representative_payload_digest: similar.source.payload.payload_digest.clone(),
+                member_count: members.len(),
+                members,
+                complete: group.complete,
+                next_cursor,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    touched_files.sort();
+    touched_files.dedup();
+    let coverage = match similar.source.occurrence.eligibility {
+        tracedecay_code_index::clones::CloneBodyEligibilityV1::Eligible if complete => {
+            SimilarCoverageV1::Complete
+        }
+        tracedecay_code_index::clones::CloneBodyEligibilityV1::Eligible => {
+            SimilarCoverageV1::Partial
+        }
+        tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedTooSmall {
+            minimum_tokens,
+        } => SimilarCoverageV1::ExcludedTooSmall { minimum_tokens },
+        tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedIncompleteTokenization => {
+            SimilarCoverageV1::ExcludedIncompleteTokenization
+        }
+    };
+    let result = SimilarResultV1 {
+        source_generation: source.source_generation.clone(),
+        source,
+        families,
+        coverage,
+    };
     let value =
-        hotpath::measure_block!("mcp.graph.similar.serialize", serde_json::to_value(payload)?);
+        hotpath::measure_block!("mcp.graph.similar.serialize", serde_json::to_value(result)?);
     Ok(generic_tool_result(ctx, &args, &value, touched_files))
 }
 
-fn similar_symbol_from_graph_node(node: &CodeGraphSymbolSummaryV1) -> Result<SimilarSymbolV1> {
-    let metadata = required_graph_metadata(node)?;
-    Ok(SimilarSymbolV1 {
-        id: node.occurrence.as_str().to_owned(),
-        name: metadata.simple_name.clone(),
-        kind: metadata.kind.clone(),
-        file: required_graph_file_path(node)?.to_owned(),
-        line: user_line(metadata.start_line),
-        signature: metadata.signature.clone(),
-        utility_micros: 0,
-    })
-}
-
-fn clone_normalization_class_label(class: CloneNormalizationClassV1) -> &'static str {
-    match class {
-        CloneNormalizationClassV1::Conservative => "conservative",
-        CloneNormalizationClassV1::Rename => "rename",
+fn similar_occurrence(
+    occurrence: &tracedecay_code_index::clones::CloneBodyOccurrenceV1,
+) -> SimilarOccurrenceV1 {
+    SimilarOccurrenceV1 {
+        project_id: occurrence.project_id.clone(),
+        repository_id: occurrence.repository_id.clone(),
+        worktree_id: occurrence.worktree_id.clone(),
+        source_generation: occurrence.source_generation.clone(),
+        snapshot_digest: occurrence.snapshot_digest.clone(),
+        symbol_occurrence_id: occurrence.symbol_occurrence_id.clone(),
+        path: occurrence.path.clone(),
+        body_span: occurrence.body_span,
     }
-}
-
-fn similar_surface_from_clone_index(
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    source: CodeGraphSymbolSummaryV1,
-    similar: tracedecay_query::code_search::CodeIndexSimilarCompletedV1,
-) -> Result<(SimilarResultV1, Vec<String>)> {
-    let source_symbol = similar_symbol_from_graph_node(&source)?;
-    let mut clone_nodes = vec![source];
-    let mut exact_groups = Vec::new();
-    for group in similar.exact_groups {
-        let mut members = Vec::new();
-        for member in group.members {
-            let Some(node) = graph.symbol_summary(&member.occurrence.symbol_occurrence_id)? else {
-                continue;
-            };
-            members.push(similar_symbol_from_graph_node(&node)?);
-            clone_nodes.push(node);
-        }
-        if !members.is_empty() {
-            exact_groups.push(SimilarExactGroupV1 {
-                class: clone_normalization_class_label(group.key.class).to_owned(),
-                members,
-            });
-        }
-    }
-    let mut near_pairs = Vec::new();
-    for pair in similar.near.page.members {
-        for occurrence in pair.occurrences {
-            let Some(candidate) = graph.symbol_summary(&occurrence.symbol_occurrence_id)? else {
-                continue;
-            };
-            near_pairs.push(SimilarNearPairV1 {
-                source: source_symbol.clone(),
-                candidate: similar_symbol_from_graph_node(&candidate)?,
-                source_coverage_millionths: pair.source_coverage_millionths,
-                candidate_coverage_millionths: pair.candidate_coverage_millionths,
-                differences: pair
-                    .differences
-                    .iter()
-                    .map(|difference| SimilarAlignedDifferenceV1 {
-                        left_token_count: difference.left_tokens.len(),
-                        right_token_count: difference.right_tokens.len(),
-                    })
-                    .collect(),
-            });
-            clone_nodes.push(candidate);
-        }
-    }
-    let touched_files = graph_symbol_paths(&clone_nodes)?;
-    Ok((
-        SimilarResultV1 {
-            source: source_symbol,
-            exact_groups,
-            near_pairs,
-        },
-        touched_files,
-    ))
 }
 
 /// Reads a file's lines (0-based) for snippet extraction, memoizing by path so

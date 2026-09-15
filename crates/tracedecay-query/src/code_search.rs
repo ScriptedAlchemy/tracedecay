@@ -388,11 +388,22 @@ pub type CodeIndexSearchExecutor =
     Arc<dyn Fn(CodeIndexSearchRequestV1) -> CodeIndexSearchFuture + Send + Sync + 'static>;
 
 #[derive(Clone, Debug)]
+pub enum CodeIndexSimilarTargetV1 {
+    SymbolOccurrence(tracedecay_domain::SymbolOccurrenceId),
+    SourceRange {
+        path: String,
+        span: tracedecay_domain::SourceSpan,
+    },
+}
+
+#[derive(Clone, Debug)]
 pub struct CodeIndexSimilarRequestV1 {
     pub project_root: PathBuf,
-    pub code_generation: String,
-    pub symbol_occurrence_id: tracedecay_domain::SymbolOccurrenceId,
-    pub limit: usize,
+    pub target: CodeIndexSimilarTargetV1,
+    pub match_classes: Vec<tracedecay_code_index::clones::CloneNormalizationClassV1>,
+    pub result_limit: usize,
+    pub work_limit: usize,
+    pub cursor: Option<crate::retrieval::lexical::CloneArtifactCursorV1>,
     pub authority: Option<CodeIndexSearchAuthorityV1>,
     pub deadline: Option<tracedecay_contracts::Deadline>,
     pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
@@ -402,13 +413,14 @@ pub struct CodeIndexSimilarRequestV1 {
 pub struct CodeIndexSimilarExactGroupV1 {
     pub key: tracedecay_code_index::clones::CloneExactKeyV1,
     pub members: Vec<crate::retrieval::lexical::CloneExactArtifactMemberV1>,
+    pub complete: bool,
+    pub next_cursor: Option<crate::retrieval::lexical::CloneArtifactCursorV1>,
 }
 
 #[derive(Clone, Debug)]
 pub struct CodeIndexSimilarCompletedV1 {
     pub source: tracedecay_code_index::clones::CodeIndexCloneBodyV1,
     pub exact_groups: Vec<CodeIndexSimilarExactGroupV1>,
-    pub near: crate::retrieval::lexical::CloneFingerprintArtifactReadV1,
 }
 
 #[derive(Clone, Debug)]
