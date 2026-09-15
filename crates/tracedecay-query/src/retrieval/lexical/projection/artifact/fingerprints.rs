@@ -554,7 +554,6 @@ pub(super) fn read_clone_fingerprint_page(
             has_more = true;
             break;
         }
-        last_compared = Some(key.clone());
         accounting.candidate_bodies_compared =
             accounting.candidate_bodies_compared.saturating_add(1);
         let candidate_tokens = candidate
@@ -612,10 +611,11 @@ pub(super) fn read_clone_fingerprint_page(
                         );
                     }
                 }
-                has_more = ordinal.saturating_add(1) < candidate_count;
+                has_more = true;
                 break;
             }
         };
+        last_compared = Some(key.clone());
         if selected_block_containment.is_some()
             || (alignment.left_coverage_millionths
                 >= CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1
