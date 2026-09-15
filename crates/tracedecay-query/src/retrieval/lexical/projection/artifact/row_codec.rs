@@ -307,7 +307,7 @@ pub(super) fn encode_artifact_row(
             &LEGACY_FIELD_LENGTH_ORDER,
             false,
         ),
-        LexicalArtifactLayoutV1::V16 => encode_binary(
+        LexicalArtifactLayoutV1::V16 | LexicalArtifactLayoutV1::V17 => encode_binary(
             row,
             dictionary,
             ROW_CODEC_V16_MAGIC,
@@ -365,7 +365,7 @@ pub(super) fn decode_artifact_row(
             &LEGACY_FIELD_LENGTH_ORDER,
             false,
         ),
-        LexicalArtifactLayoutV1::V16 => decode_binary(
+        LexicalArtifactLayoutV1::V16 | LexicalArtifactLayoutV1::V17 => decode_binary(
             generation,
             chunk_id,
             bytes,

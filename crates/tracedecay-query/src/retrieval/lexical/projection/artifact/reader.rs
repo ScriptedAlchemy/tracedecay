@@ -1476,7 +1476,8 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
-            | LexicalArtifactLayoutV1::V16 => {
+            | LexicalArtifactLayoutV1::V16
+            | LexicalArtifactLayoutV1::V17 => {
                 lookup_term_ids(connection, terms).map_err(map_query_artifact_error)?
             }
         };
@@ -1488,7 +1489,8 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
-            | LexicalArtifactLayoutV1::V16 => v11_ids.len(),
+            | LexicalArtifactLayoutV1::V16
+            | LexicalArtifactLayoutV1::V17 => v11_ids.len(),
         };
         ensure_sqlite_bind_capacity(documents.parameters.len(), dynamic_binds)?;
         ensure_sqlite_bound_value_bytes(
@@ -1506,6 +1508,7 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
             | LexicalArtifactLayoutV1::V16
+            | LexicalArtifactLayoutV1::V17
                 if v11_ids.is_empty() =>
             {
                 "'[]'".to_owned()
@@ -1527,7 +1530,8 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
-            | LexicalArtifactLayoutV1::V16 => {
+            | LexicalArtifactLayoutV1::V16
+            | LexicalArtifactLayoutV1::V17 => {
                 let placeholders = std::iter::repeat_n("?", v11_ids.len())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -1590,7 +1594,8 @@ fn visit_lexical_rows(
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16 => {
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17 => {
                     let encoded: Vec<(i64, String, i64)> =
                         serde_json::from_str(&encoded_frequencies).map_err(contract_error)?;
                     entries.reserve(encoded.len());
@@ -2342,7 +2347,8 @@ impl<'a> ArtifactQueryV1<'a> {
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
-            | LexicalArtifactLayoutV1::V16 => {
+            | LexicalArtifactLayoutV1::V16
+            | LexicalArtifactLayoutV1::V17 => {
                 let subtoken_field = field_code(LexicalFieldV1::Subtoken);
                 for term in whole_terms {
                     if let Some(term_id) =
@@ -2420,7 +2426,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16 => {
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17 => {
                     sources.push(DocumentQueryV1::exact_id(
                         literal.field,
                         &literal.canonical_bytes,
@@ -2538,7 +2545,10 @@ impl<'a> ArtifactQueryV1<'a> {
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
-            | LexicalArtifactLayoutV1::V16 => "SELECT term FROM vocabulary WHERE in_fuzzy = 1",
+            | LexicalArtifactLayoutV1::V16
+            | LexicalArtifactLayoutV1::V17 => {
+                "SELECT term FROM vocabulary WHERE in_fuzzy = 1"
+            }
         }
     }
 
@@ -2595,7 +2605,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16 => {
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17 => {
                     field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
                         .map_err(map_query_artifact_error)?
                 }
@@ -2645,7 +2656,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16 => {
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17 => {
                     let assigned = lookup_term_ids(self.connection, terms)
                         .map_err(map_query_artifact_error)?;
                     let term_ids = assigned.values().copied().collect::<Vec<_>>();

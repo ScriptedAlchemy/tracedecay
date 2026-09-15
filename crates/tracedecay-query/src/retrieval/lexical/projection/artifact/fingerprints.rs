@@ -157,7 +157,7 @@ pub(super) fn read_clone_fingerprint_page(
     } = request;
     if !layout.has_clone_fingerprints() {
         return Err(CodeLexicalArtifactErrorV1::Incompatible(
-            "clone fingerprint lookup requires lexical artifact revision 16".to_owned(),
+            "clone fingerprint lookup requires lexical artifact revision 17".to_owned(),
         ));
     }
     if limit == 0 || limit > MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1 {

@@ -757,7 +757,7 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
 
 #[cfg(unix)]
 #[test]
-fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
+fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v16() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
@@ -772,7 +772,7 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     let latest = scheduler.latest_complete().expect("latest generation");
 
     while !latest.query_owners_are_ready() {
-        latest.advance_text_serving(1).expect("advance V14 build");
+        latest.advance_text_serving(1).expect("advance V16 build");
     }
     assert!(
         latest.text_projection_needs_work(),
@@ -781,26 +781,8 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     latest
         .production_query_owners()
         .expect("lexical owners serve during clone successor");
-    let v14_path = active_text_artifact_path(store.path());
-    let v14_revision: i64 = rusqlite::Connection::open(&v14_path)
-        .expect("open V14 artifact")
-        .query_row(
-            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("read V14 revision");
-    assert_eq!(v14_revision, 14);
-
-    while latest.text_projection_needs_work() {
-        latest
-            .advance_text_serving(16)
-            .expect("advance clone successor");
-    }
-    assert!(latest.query_owners_are_ready());
     let v16_path = active_text_artifact_path(store.path());
-    assert_ne!(v16_path, v14_path);
-    let v16_revision: i64 = rusqlite::Connection::open(v16_path)
+    let v16_revision: i64 = rusqlite::Connection::open(&v16_path)
         .expect("open V16 artifact")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -809,10 +791,28 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
         )
         .expect("read V16 revision");
     assert_eq!(v16_revision, 16);
+
+    while latest.text_projection_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("advance clone successor");
+    }
+    assert!(latest.query_owners_are_ready());
+    let v17_path = active_text_artifact_path(store.path());
+    assert_ne!(v17_path, v16_path);
+    let v17_revision: i64 = rusqlite::Connection::open(v17_path)
+        .expect("open V17 artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read V17 revision");
+    assert_eq!(v17_revision, 17);
 }
 
 #[tokio::test]
-async fn query_admission_serves_v14_while_clone_successor_is_pending() {
+async fn query_admission_serves_v16_while_clone_successor_is_pending() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
@@ -826,7 +826,7 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     published(scheduler.reconcile_now().expect("publish generation"));
     let latest = scheduler.latest_complete().expect("latest generation");
     while !latest.query_owners_are_ready() {
-        latest.advance_text_serving(1).expect("advance V14 build");
+        latest.advance_text_serving(1).expect("advance V16 build");
     }
     assert!(
         latest.text_projection_needs_work(),
@@ -853,10 +853,10 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     let executed = registry
         .execute_query_search(&scope, core_search_request("alpha"))
         .await
-        .expect("V14 exact and lexical owners remain admissible");
+        .expect("V16 exact and lexical owners remain admissible");
     assert!(
         ranks_symbol(&ranked_symbol_names(&executed, &latest), "alpha"),
-        "the query must return the V14 alpha symbol"
+        "the query must return the V16 alpha symbol"
     );
     assert!(
         registry
@@ -871,7 +871,7 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
 }
 
 #[test]
-fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_owners() {
+fn transient_clone_successor_reservation_refusal_retries_without_cooling_v16_owners() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
@@ -886,7 +886,7 @@ fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_own
         published(scheduler.reconcile_now().expect("publish generation"));
         let latest = scheduler.latest_complete().expect("latest generation");
         while !latest.query_owners_are_ready() {
-            latest.advance_text_serving(1).expect("publish V14 head");
+            latest.advance_text_serving(1).expect("publish V16 head");
         }
     }
 
@@ -923,7 +923,7 @@ fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_own
     );
     latest
         .production_query_owners()
-        .expect("V14 owners remain queryable after successor refusal");
+        .expect("V16 owners remain queryable after successor refusal");
     assert!(
         latest.text_projection_needs_work(),
         "the refused successor must remain pending for a later scheduler wake"
@@ -961,9 +961,9 @@ fn start_partial_clone_successor(
     published(scheduler.reconcile_now().expect("publish generation"));
     let latest = scheduler.latest_complete().expect("latest generation");
     while !latest.query_owners_are_ready() {
-        latest.advance_text_serving(1).expect("advance V14 build");
+        latest.advance_text_serving(1).expect("advance V16 build");
     }
-    let v14_path = active_text_artifact_path(store.path());
+    let v16_path = active_text_artifact_path(store.path());
     assert!(latest.text_projection_needs_work());
     assert!(
         !latest
@@ -973,7 +973,7 @@ fn start_partial_clone_successor(
     );
     latest
         .production_query_owners()
-        .expect("V14 owners remain readable");
+        .expect("V16 owners remain readable");
     let staging_path = std::fs::read_dir(store.path().join("code-text-artifacts-v1"))
         .expect("read text artifact root")
         .map(|entry| entry.expect("read text artifact entry").path())
@@ -997,7 +997,7 @@ fn start_partial_clone_successor(
         .expect("count clone-successor source pages");
     assert!(next_page > 0 && next_page <= source_pages);
     (
-        v14_path,
+        v16_path,
         staging_path,
         u64::try_from(next_page).expect("nonnegative clone-successor cursor"),
         u64::try_from(source_pages).expect("nonnegative source page count"),
@@ -1005,13 +1005,13 @@ fn start_partial_clone_successor(
 }
 
 #[test]
-fn clone_successor_restart_revalidates_its_source_cursor_and_keeps_v14_readable() {
+fn clone_successor_restart_revalidates_its_source_cursor_and_keeps_v16_readable() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
     )]);
     let store = TempDir::new().expect("store root");
-    let (v14_path, staging_path, next_page, source_pages) =
+    let (v16_path, staging_path, next_page, source_pages) =
         start_partial_clone_successor(&fixture, &store);
 
     let scheduler = scheduler(
@@ -1025,7 +1025,7 @@ fn clone_successor_restart_revalidates_its_source_cursor_and_keeps_v14_readable(
         .expect("resume clone successor after restart");
     latest
         .production_query_owners()
-        .expect("V14 owners serve during resumed successor");
+        .expect("V16 owners serve during resumed successor");
     assert!(
         !completed,
         "the first resumed slice must authenticate persisted rows before publishing"
@@ -1049,17 +1049,17 @@ fn clone_successor_restart_revalidates_its_source_cursor_and_keeps_v14_readable(
             .advance_text_serving(16)
             .expect("finish resumed clone successor");
     }
-    assert_ne!(active_text_artifact_path(store.path()), v14_path);
+    assert_ne!(active_text_artifact_path(store.path()), v16_path);
 }
 
 #[test]
-fn corrupt_clone_successor_staging_is_rebuilt_without_cooling_v14_owners() {
+fn corrupt_clone_successor_staging_is_rebuilt_without_cooling_v16_owners() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
     )]);
     let store = TempDir::new().expect("store root");
-    let (v14_path, staging_path, _, _) = start_partial_clone_successor(&fixture, &store);
+    let (v16_path, staging_path, _, _) = start_partial_clone_successor(&fixture, &store);
     rusqlite::Connection::open(&staging_path)
         .expect("open clone-successor staging")
         .execute(
@@ -1079,13 +1079,13 @@ fn corrupt_clone_successor_staging_is_rebuilt_without_cooling_v14_owners() {
         .expect("discard corrupt clone successor and rebuild");
     latest
         .production_query_owners()
-        .expect("V14 owners serve while successor rebuilds");
+        .expect("V16 owners serve while successor rebuilds");
     while latest.text_projection_needs_work() {
         latest
             .advance_text_serving(16)
             .expect("finish rebuilt clone successor");
     }
-    assert_ne!(active_text_artifact_path(store.path()), v14_path);
+    assert_ne!(active_text_artifact_path(store.path()), v16_path);
 }
 
 #[test]

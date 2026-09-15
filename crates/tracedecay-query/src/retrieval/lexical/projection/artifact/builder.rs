@@ -222,7 +222,8 @@ impl PreparedExactInsertRefV1<'_> {
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
-            | LexicalArtifactLayoutV1::V16 => PreparedExactInsertKeyV1::V12 {
+            | LexicalArtifactLayoutV1::V16
+            | LexicalArtifactLayoutV1::V17 => PreparedExactInsertKeyV1::V12 {
                 term_id: self.term_id,
                 field: self.field_code,
                 document_id: self.document_id,
@@ -719,7 +720,8 @@ impl FinalizationSectionV1 {
                 Self::DocumentIntegrity,
                 LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16,
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17,
             ) => "SELECT document_id, digest FROM document_integrity ORDER BY document_id",
             (Self::DocumentIntegrity, _) => {
                 "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id"
@@ -741,7 +743,8 @@ impl FinalizationSectionV1 {
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16,
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17,
             ) => {
                 "SELECT term_id, field, document_id, frequency FROM term_postings ORDER BY term_id, field, document_id"
             }
@@ -779,7 +782,8 @@ impl FinalizationSectionV1 {
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16,
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17,
             ) => {
                 "SELECT term_id, field, document_frequency FROM term_stats ORDER BY term_id, field"
             }
@@ -793,7 +797,8 @@ impl FinalizationSectionV1 {
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16,
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17,
             ) => "SELECT term_id, term, in_fuzzy FROM vocabulary ORDER BY term_id",
         }
     }
@@ -811,6 +816,7 @@ impl FinalizationSectionV1 {
                     LexicalArtifactLayoutV1::V14
                         | LexicalArtifactLayoutV1::V15
                         | LexicalArtifactLayoutV1::V16
+                        | LexicalArtifactLayoutV1::V17
                 ) =>
             {
                 "SELECT document_id, digest FROM document_integrity ORDER BY document_id LIMIT ?1"
@@ -821,6 +827,7 @@ impl FinalizationSectionV1 {
                     LexicalArtifactLayoutV1::V14
                         | LexicalArtifactLayoutV1::V15
                         | LexicalArtifactLayoutV1::V16
+                        | LexicalArtifactLayoutV1::V17
                 ) =>
             {
                 "SELECT document_id, digest FROM document_integrity WHERE document_id > ?1 ORDER BY document_id LIMIT ?2"
@@ -1870,7 +1877,12 @@ impl CodeLexicalArtifactBuilderV1 {
                 if self.layout.has_clone_index() {
                     hotpath::measure_block!(
                         "query.artifact.batch.clone_bodies",
-                        append_prepared_clone_bodies(&transaction, pages, control)
+                        append_prepared_clone_bodies(
+                            &transaction,
+                            self.layout,
+                            pages,
+                            control,
+                        )
                     )?;
                 }
                 if self.layout.interns_row_dictionary() {
@@ -3690,6 +3702,7 @@ fn sql_blob(value: &[u8]) -> ToSqlOutput<'_> {
 
 fn append_prepared_clone_bodies(
     transaction: &Transaction<'_>,
+    layout: LexicalArtifactLayoutV1,
     pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -3748,7 +3761,10 @@ fn append_prepared_clone_bodies(
             }
         }
     }
-    append_prepared_clone_fingerprints(transaction, pages, control)
+    if layout.has_clone_fingerprints() {
+        append_prepared_clone_fingerprints(transaction, pages, control)?;
+    }
+    Ok(())
 }
 
 fn append_prepared_clone_fingerprints(
@@ -3874,7 +3890,8 @@ fn append_prepared_postings(
         | LexicalArtifactLayoutV1::V13
         | LexicalArtifactLayoutV1::V14
         | LexicalArtifactLayoutV1::V15
-        | LexicalArtifactLayoutV1::V16 => "exact_postings(term_id, field, document_id)",
+        | LexicalArtifactLayoutV1::V16
+        | LexicalArtifactLayoutV1::V17 => "exact_postings(term_id, field, document_id)",
         LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
             "exact_postings(field, term, document_id)"
         }
@@ -3947,7 +3964,8 @@ fn append_prepared_postings(
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
                 | LexicalArtifactLayoutV1::V15
-                | LexicalArtifactLayoutV1::V16 => {
+                | LexicalArtifactLayoutV1::V16
+                | LexicalArtifactLayoutV1::V17 => {
                     exact_insert.push([
                         sql_integer(entry.term_id),
                         sql_integer(entry.field_code),
@@ -5014,7 +5032,8 @@ fn build_serving_index_step(
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
-            | LexicalArtifactLayoutV1::V16 => {
+            | LexicalArtifactLayoutV1::V16
+            | LexicalArtifactLayoutV1::V17 => {
                     "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term_id)"
                 }
             };
@@ -5179,7 +5198,8 @@ fn read_staged_artifact_layout(
         | LexicalArtifactLayoutV1::V13
         | LexicalArtifactLayoutV1::V14
         | LexicalArtifactLayoutV1::V15
-        | LexicalArtifactLayoutV1::V16) => Ok(layout),
+        | LexicalArtifactLayoutV1::V16
+        | LexicalArtifactLayoutV1::V17) => Ok(layout),
     }
 }
 
