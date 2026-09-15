@@ -726,6 +726,44 @@ impl CodeLexicalArtifactReaderV1 {
         })
     }
 
+    pub fn clone_body(
+        &self,
+        symbol_occurrence_id: &SymbolOccurrenceId,
+    ) -> Result<Option<CodeIndexCloneBodyV1>, CodeLexicalArtifactErrorV1> {
+        let connection = self.lock_connection()?;
+        let row = connection
+            .query_row(
+                "SELECT occurrence.occurrence, payload.payload \
+                 FROM clone_occurrences AS occurrence \
+                 LEFT JOIN clone_body_payloads AS payload \
+                 ON payload.payload_digest = occurrence.payload_digest \
+                 WHERE occurrence.symbol_occurrence_id = ?1",
+                [symbol_occurrence_id.as_str()],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        let Some((occurrence, Some(payload))) = row else {
+            return Ok(None);
+        };
+        let occurrence = serde_json::from_slice::<CloneBodyOccurrenceV1>(&occurrence)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        let payload = serde_json::from_slice::<CloneBodyPayloadV1>(&payload)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        if occurrence.symbol_occurrence_id != *symbol_occurrence_id
+            || occurrence.payload_digest != payload.payload_digest
+            || payload.validate().is_err()
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone body lookup did not match its occurrence and payload".to_owned(),
+            ));
+        }
+        Ok(Some(CodeIndexCloneBodyV1 {
+            payload,
+            occurrence,
+        }))
+    }
+
     pub fn clone_fingerprint_page(
         &self,
         authority: &CloneBodyOccurrenceV1,
