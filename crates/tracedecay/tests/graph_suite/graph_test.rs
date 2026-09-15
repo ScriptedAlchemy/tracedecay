@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use tempfile::TempDir;
-use tracedecay_usecases::git_intelligence::churn::file_churn;
 use tracedecay_graph_query::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth,
     gini_coefficient, gini_label, modularity_score,
 };
+use tracedecay_usecases::git_intelligence::churn::file_churn;
 
 // These tests cover the store-independent health algorithms. Code-graph read
 // behavior is covered through the verified Grafeo reader and production MCP

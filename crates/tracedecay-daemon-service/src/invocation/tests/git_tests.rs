@@ -53,7 +53,8 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
                 untracked: 0,
                 ignored: 0,
                 changed_paths: Vec::new(),
-                schema_version: tracedecay_usecases::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
+                schema_version: tracedecay_usecases::git_query::GIT_QUERY_SCHEMA_VERSION_V1
+                    .to_owned(),
             },
             coverage: tracedecay_domain::git::GitCoverageV1::complete(),
             truncated_by_bound: false,
@@ -102,7 +103,8 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
                     untracked: 0,
                     ignored: 0,
                     changed_paths: Vec::new(),
-                    schema_version: tracedecay_usecases::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
+                    schema_version: tracedecay_usecases::git_query::GIT_QUERY_SCHEMA_VERSION_V1
+                        .to_owned(),
                 },
                 coverage: tracedecay_domain::git::GitCoverageV1::degraded(vec![
                     tracedecay_domain::git::GitDegradationV1::TruncatedOutput,

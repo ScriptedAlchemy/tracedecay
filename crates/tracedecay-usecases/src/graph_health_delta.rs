@@ -18,8 +18,8 @@ use tracedecay_domain::{
     ObservabilityTerminalResultV1, UtcMicros, canonical_sha256,
 };
 
-use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::observability::RegisteredObservabilityPortV1;
 

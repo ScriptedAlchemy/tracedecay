@@ -573,6 +573,28 @@ pub struct MountedCodeIndexWorktreeV1 {
     pub task: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Clone)]
+struct ReadyDecodedProbeV1 {
+    source_freshness: super::SourceFreshnessFenceV1,
+    historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
+    serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
+    shutting_down: Arc<AtomicBool>,
+}
+
+#[hotpath::measure_all]
+impl ReadyDecodedProbeV1 {
+    fn from_mounted(worktree: &MountedCodeIndexWorktreeV1) -> Self {
+        Self {
+            source_freshness: worktree.source_freshness.clone(),
+            historical_generation_owner: worktree.historical_generation_owner.clone(),
+            serving_generation: Arc::clone(&worktree.serving_generation),
+            serving_source_witness: Arc::clone(&worktree.serving_source_witness),
+            shutting_down: Arc::clone(&worktree.shutting_down),
+        }
+    }
+}
+
 /// Unique mounted worktree for one admitted repo+worktree scope.
 ///
 /// Real mounts key the registry from the same canonical root that derives the
@@ -5118,7 +5140,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<LatestCompleteCodeIndexV1> {
         self.activate_for_scope(scope);
         let root = {
-            let mounted = self.mounted.try_lock().ok()?;
+            let mounted = self.mounted.lock().await;
             unique_mounted_for_scope(&mounted, scope)
                 .unique()?
                 .0
@@ -5134,13 +5156,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
-        let (
-            source_freshness,
-            historical_generation_owner,
-            serving_generation,
-            serving_source_witness,
-            shutting_down,
-        ) = {
+        let probe = {
             let mounted = self.mounted.try_lock().ok()?;
             let worktree = mounted.get(&project_root)?;
             if worktree.repository_id != scope.repository_id
@@ -5148,37 +5164,46 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 return None;
             }
-            (
-                worktree.source_freshness.clone(),
-                worktree.historical_generation_owner.clone(),
-                Arc::clone(&worktree.serving_generation),
-                Arc::clone(&worktree.serving_source_witness),
-                Arc::clone(&worktree.shutting_down),
-            )
+            ReadyDecodedProbeV1::from_mounted(worktree)
         };
+        Self::current_ready_decoded_with_probe(&project_root, scope, probe)
+    }
+
+    fn current_ready_decoded_with_probe(
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        probe: ReadyDecodedProbeV1,
+    ) -> Option<LatestCompleteCodeIndexV1> {
         // The census asks only whether a fully decoded generation is already
         // seated. A graph-off mount deliberately leaves this slot empty while
         // its authenticated text owner is warming. Return that known answer
         // before entering the exact freshness probe: probing an unseated slot
         // cannot produce a decoded owner, and on an initial lightweight mount
         // it would turn `freshness_unknown` into a fabricated overflow wake.
-        let serving = serving_generation
+        let serving = probe
+            .serving_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
-        if !source_freshness.exact_source_is_ready(&project_root, &shutting_down)
-            || !historical_generation_owner
+        if !probe
+            .source_freshness
+            .exact_source_is_ready(project_root, &probe.shutting_down)
+            || !probe
+                .historical_generation_owner
                 .active_publication_covers(serving.generation())
                 .ok()?
         {
-            *serving_source_witness
+            *probe
+                .serving_source_witness
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             return None;
         }
-        *serving_source_witness
+        *probe
+            .serving_source_witness
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = source_freshness
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = probe
+            .source_freshness
             .source_currency_witness_for(&serving.generation().manifest().generation_id);
         // Checkout-identity gate: the ready probe (or its recorded witness)
         // proved the generation current against the live worktree, and the
@@ -5208,11 +5233,20 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let registry = self.clone();
-        let project_root = project_root.to_path_buf();
+        let project_root = project_root.canonicalize().ok()?;
+        let probe = {
+            let mounted = self.mounted.lock().await;
+            let worktree = mounted.get(&project_root)?;
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                return None;
+            }
+            ReadyDecodedProbeV1::from_mounted(worktree)
+        };
         let scope = scope.clone();
         tokio::task::spawn_blocking(move || {
-            registry.current_ready_decoded_for_root_scope(&project_root, &scope)
+            Self::current_ready_decoded_with_probe(&project_root, &scope, probe)
         })
         .await
         .ok()
@@ -5228,7 +5262,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // so this is the first authenticated demand boundary on that path.
         self.activate_for_scope(scope);
         let (root, graph_activation_enabled, text_generation) = {
-            let mounted = self.mounted.try_lock().ok()?;
+            let mounted = self.mounted.lock().await;
             let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
             (
                 root.clone(),
@@ -5497,9 +5531,7 @@ impl CodeIndexSchedulerRegistryV1 {
             None
         };
         let (scheduler, serving_generation, text_generation, hints, wake, pending_wake) = {
-            let Ok(mounted) = self.mounted.try_lock() else {
-                return false;
-            };
+            let mounted = self.mounted.lock().await;
             let Some((_, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
                 return false;
             };

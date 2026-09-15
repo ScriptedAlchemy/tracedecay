@@ -99,7 +99,7 @@ pub mod work;
 
 pub use lsp_support::analyzer_runtime_config_error;
 pub use source_authorization::{
-    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture, ProjectSourceAccessDenial,
-    ProjectSourceAccessOutcome, ProjectSourceAccessSnapshot, ProjectSourceAccessSnapshotPort,
-    project_source_access_snapshot_for_request,
+    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
+    ProjectSourceAccessDenial, ProjectSourceAccessOutcome, ProjectSourceAccessSnapshot,
+    ProjectSourceAccessSnapshotPort, project_source_access_snapshot_for_request,
 };

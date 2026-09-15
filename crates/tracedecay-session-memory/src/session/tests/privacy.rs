@@ -11,10 +11,10 @@ use tracedecay_domain::{
     ActorId, HydrationStateV1, ProjectId, RepositoryId, RetrievalAnchorId, RetrievalGrainV1,
     SessionId, TemporalModeV1, UtcMicros, WorktreeId,
 };
-use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
+use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ranking::DiversityLimits;

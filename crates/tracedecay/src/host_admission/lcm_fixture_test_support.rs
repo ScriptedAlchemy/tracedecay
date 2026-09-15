@@ -635,10 +635,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         draft: tracedecay_lcm::LcmSummaryNodeDraft,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmSummaryNode,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmSummaryNode, tracedecay_lcm::LcmError> {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
@@ -671,10 +668,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         update: tracedecay_lcm::LcmLifecycleUpdate,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmLifecycleState,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmLifecycleState, tracedecay_lcm::LcmError> {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
@@ -682,9 +676,7 @@ impl HostAdmissionTestRuntimeV1 {
             .begin_write_transaction()
             .await
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
-        let state =
-            tracedecay_lcm::compression::update_lifecycle(&transaction, update)
-                .await?;
+        let state = tracedecay_lcm::compression::update_lifecycle(&transaction, update).await?;
         transaction.commit().await?;
         Ok(state)
     }
@@ -1163,8 +1155,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> std::result::Result<Option<(String, String)>, tracedecay_lcm::LcmError>
-    {
+    ) -> std::result::Result<Option<(String, String)>, tracedecay_lcm::LcmError> {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
@@ -1202,9 +1193,10 @@ impl HostAdmissionTestRuntimeV1 {
                 [query],
             )
             .await?;
-        let row = rows.next().await?.ok_or_else(|| {
-            tracedecay_lcm::LcmError::Db("COUNT(*) returned no row".to_owned())
-        })?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or_else(|| tracedecay_lcm::LcmError::Db("COUNT(*) returned no row".to_owned()))?;
         Ok(row.get(0)?)
     }
 
@@ -1213,8 +1205,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> std::result::Result<Option<Option<String>>, tracedecay_lcm::LcmError>
-    {
+    ) -> std::result::Result<Option<Option<String>>, tracedecay_lcm::LcmError> {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
@@ -1240,10 +1231,7 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         payload_ref: &str,
         opts: &tracedecay_lcm::payload::DeleteOpts,
-    ) -> std::result::Result<
-        tracedecay_lcm::payload::DeleteOutcome,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::payload::DeleteOutcome, tracedecay_lcm::LcmError> {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
@@ -1256,28 +1244,27 @@ impl HostAdmissionTestRuntimeV1 {
             .begin_write_transaction()
             .await
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
-        let prepared =
-            tracedecay_lcm::payload::delete_external_payload_in_transaction(
-                &transaction,
-                storage_root,
-                payload_ref,
-                opts,
-            )
-            .await?;
+        let prepared = tracedecay_lcm::payload::delete_external_payload_in_transaction(
+            &transaction,
+            storage_root,
+            payload_ref,
+            opts,
+        )
+        .await?;
         transaction.commit().await?;
 
         let mut outcome = prepared.outcome;
         if prepared.pending_removal_bytes.is_some() {
-            let transaction = database.begin_write_transaction().await.map_err(|error| {
-                tracedecay_lcm::LcmError::Db(error.to_string())
-            })?;
-            let drained =
-                tracedecay_lcm::gc::drain_pending_payload_delete_in_transaction(
-                    &transaction,
-                    storage_root,
-                    payload_ref,
-                )
-                .await;
+            let transaction = database
+                .begin_write_transaction()
+                .await
+                .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+            let drained = tracedecay_lcm::gc::drain_pending_payload_delete_in_transaction(
+                &transaction,
+                storage_root,
+                payload_ref,
+            )
+            .await;
             match drained {
                 Ok(removed) => {
                     transaction.commit().await?;
@@ -1301,10 +1288,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_external_payload_manifest_for_test(
         &self,
         payload_ref: &str,
-    ) -> std::result::Result<
-        Option<LcmExternalPayloadManifestTestRecord>,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<Option<LcmExternalPayloadManifestTestRecord>, tracedecay_lcm::LcmError>
+    {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
@@ -1413,21 +1398,13 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         conversation_id: &str,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmLifecycleState,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmLifecycleState, tracedecay_lcm::LcmError> {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
-        tracedecay_lcm::compression::lifecycle_state(
-            &snapshot,
-            provider,
-            conversation_id,
-        )
-        .await
+        tracedecay_lcm::compression::lifecycle_state(&snapshot, provider, conversation_id).await
     }
 
     #[doc(hidden)]

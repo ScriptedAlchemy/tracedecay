@@ -13,9 +13,7 @@ use super::{RegisteredWorkRuntime, work_background_context};
 
 mod recovery;
 
-pub(crate) use recovery::{
-    WorkflowFanOutRecoveryOwnerV1, reconcile_active_workflow_fan_out,
-};
+pub(crate) use recovery::{WorkflowFanOutRecoveryOwnerV1, reconcile_active_workflow_fan_out};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reconcile_workflow_fan_out(

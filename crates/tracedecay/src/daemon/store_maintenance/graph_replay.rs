@@ -102,10 +102,7 @@ pub(super) fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
     }
 }
 
-#[hotpath::measure(
-    label = "daemon.git.maintenance.graph_replay_release",
-    future = true
-)]
+#[hotpath::measure(label = "daemon.git.maintenance.graph_replay_release", future = true)]
 pub(super) async fn reconcile_graph_replay_releases(
     graph: &TraceDecay,
     store_root: &Path,

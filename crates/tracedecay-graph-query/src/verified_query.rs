@@ -30,11 +30,11 @@ use super::{
     CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
     map_projection_error,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::SourceReadRuntimePort;
 use crate::context::read_modes;
 use crate::context::source_read::{self, SourceReadOutput, SourceReadRequest};
 use tracedecay_session_memory::context::{RequestInterruption, run_deadline_signal_interruptible};
-#[cfg(any(test, feature = "test-helpers"))]
-use crate::SourceReadRuntimePort;
 
 /// Inputs required to admit and open one verified graph query.
 #[derive(Clone)]
@@ -553,7 +553,8 @@ impl VerifiedGraphQuery {
                                 "verified test-attribution census exceeded its symbol budget",
                             )
                         })?;
-                    let mut in_file = self.symbols_in_logical_file(path, budget.saturating_add(1))?;
+                    let mut in_file =
+                        self.symbols_in_logical_file(path, budget.saturating_add(1))?;
                     if in_file.len() > budget {
                         return Err(graph_budget_exhausted(
                             "verified test-attribution census exceeded its symbol budget",
@@ -676,7 +677,10 @@ pub async fn open_verified_graph_query(
             .await?
             .map_err(map_code_graph_read_runtime_error)?;
             refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
-            Some(AdmittedSourceAuthority::capture(&context, runtime.as_ref())?)
+            Some(AdmittedSourceAuthority::capture(
+                &context,
+                runtime.as_ref(),
+            )?)
         }
     };
     let graph_cancellation = application_graph_cancellation(request.cancellation);
@@ -686,13 +690,9 @@ pub async fn open_verified_graph_query(
         &request.deadline,
         request.cancellation,
         projection.open(
-            CodeGraphReadRequest::new(
-                &context,
-                observed_at,
-                Arc::clone(&graph_cancellation),
-            )
-            .with_deadline(request.deadline.clone())
-            .with_live_cancellation(request.cancellation),
+            CodeGraphReadRequest::new(&context, observed_at, Arc::clone(&graph_cancellation))
+                .with_deadline(request.deadline.clone())
+                .with_live_cancellation(request.cancellation),
         ),
     )
     .await?

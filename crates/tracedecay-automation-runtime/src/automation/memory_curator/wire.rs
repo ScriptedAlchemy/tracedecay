@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_domain::{Confidence, FactCategoryV1, FactEventId, FactId, FactRelationKindV1};
-use tracedecay_store::ProjectMemoryFactUpdatePatchV1;
 use tracedecay_session_memory::memory::{
     ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
     ProjectMemoryFactAddRequest,
 };
+use tracedecay_store::ProjectMemoryFactUpdatePatchV1;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]

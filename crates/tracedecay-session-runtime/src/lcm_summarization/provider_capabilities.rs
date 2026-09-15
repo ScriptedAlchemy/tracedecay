@@ -13,11 +13,11 @@ use std::time::Duration;
 use serde_json::Value;
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationFactV1};
 
+use tracedecay_lcm::{LcmError, LcmSummaryRequest};
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
     engine::{QueryExecutor, params},
 };
-use tracedecay_lcm::{LcmError, LcmSummaryRequest};
 
 use super::cursor_agent::{CursorAgentSummaryConfig, summarize_with_cursor_agent};
 use super::{AuthoritativeSummary, SummaryResolutionError};

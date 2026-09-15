@@ -4408,10 +4408,7 @@ impl SourceFreshnessFenceV1 {
         reconciled_without_generation: bool,
     ) {
         let micros = now_micros().0;
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.git_metadata = git_metadata;
         state.last_stat_signature = stat_signature;
         state.ignored_source_admissions = ignored_source_admissions.to_vec();
@@ -4424,10 +4421,7 @@ impl SourceFreshnessFenceV1 {
     }
 
     fn refresh_monotonic_clock(&self, project_wall_clock: bool) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.last_reconciled_at = Instant::now();
         if project_wall_clock {
             self.last_reconciled_at_micros
@@ -6018,13 +6012,12 @@ impl CodeIndexWorktreeSchedulerV1 {
             .publication
             .load_active_shared()
             .is_ok_and(|generation| generation.is_none());
-        self.freshness_fence
-            .mark_reconciled(
-                metadata,
-                signature,
-                &self.ignored_source_admissions,
-                reconciled_without_generation,
-            );
+        self.freshness_fence.mark_reconciled(
+            metadata,
+            signature,
+            &self.ignored_source_admissions,
+            reconciled_without_generation,
+        );
     }
 
     /// Record the restore-time freshness witness for the current active

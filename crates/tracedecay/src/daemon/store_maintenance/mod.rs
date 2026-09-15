@@ -474,8 +474,14 @@ pub(in crate::daemon) async fn run_code_generation_retention(
     }
     let vector_inventory =
         resolve_vector_retention_inventory(graph, schedulers, observations).await;
-    apply_code_generation_retention(graph, schedulers, observations, vector_inventory, cancellation)
-        .await
+    apply_code_generation_retention(
+        graph,
+        schedulers,
+        observations,
+        vector_inventory,
+        cancellation,
+    )
+    .await
 }
 
 /// The offline protection pin: the generation the mounted scheduler is

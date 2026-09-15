@@ -151,7 +151,8 @@ mod tests {
             async move {
                 let _drop_receipt = DropReceipt(Some(dropped));
                 project_entered.wait().await;
-                std::future::pending::<tracedecay_domain::errors::Result<ExactSessionIdentity>>().await
+                std::future::pending::<tracedecay_domain::errors::Result<ExactSessionIdentity>>()
+                    .await
             },
             async move {
                 profile_entered.wait().await;

@@ -964,11 +964,12 @@ async fn ensure_fingerprints(
 ) -> Result<HashMap<String, Fingerprint>> {
     let project_root = cg.project_root().to_path_buf();
     let candidates = candidates.to_vec();
-    let load = tokio::task::spawn_blocking(move || compute_fingerprints(&project_root, &candidates))
-        .await
-        .map_err(|error| {
-            redundancy_graph_problem(&format!("fingerprint worker did not complete: {error}"))
-        })??;
+    let load =
+        tokio::task::spawn_blocking(move || compute_fingerprints(&project_root, &candidates))
+            .await
+            .map_err(|error| {
+                redundancy_graph_problem(&format!("fingerprint worker did not complete: {error}"))
+            })??;
     Ok(load.fingerprints)
 }
 

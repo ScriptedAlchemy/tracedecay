@@ -18,11 +18,11 @@ use tracedecay_domain::{
     WorktreeId,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
+use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_usecases::primitives::SourceReadAdapter;

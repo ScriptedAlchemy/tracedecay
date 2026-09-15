@@ -227,11 +227,9 @@ fn external_admission_for_recovery_project(
     let FactOwnerV1::Project { project_id } = owner else {
         panic!("automation recovery fixture requires a project owner")
     };
-    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
-        cg.project_root(),
-        &project_id,
-    )
-    .expect("recovery scope");
+    let recovery_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+            .expect("recovery scope");
     let mut admission = external_admission_for_job(run_id, request_id, job_id);
     admission.scope = recovery_scope.clone();
     admission.effect_receipt_template.scope = recovery_scope.clone();
@@ -251,11 +249,9 @@ fn retirement_admission_for_recovery_project(
     let FactOwnerV1::Project { project_id } = owner.clone() else {
         panic!("automation retirement fixture requires a project owner")
     };
-    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
-        cg.project_root(),
-        &project_id,
-    )
-    .expect("retirement recovery scope");
+    let recovery_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+            .expect("retirement recovery scope");
     let mut admission = admission(run_id, request_id);
     admission.request.task = AutomationTaskRequestV1::SessionReflector(
         tracedecay_application::retained_surfaces::SessionReflectorRunInputV1 {
@@ -3084,9 +3080,7 @@ fn cancellation_observed_under_lock_leaves_foreign_reservation_pending() {
 fn retained_settlement_waiter_is_send_and_static() {
     fn assert_send_static<T: Send + 'static>() {}
 
-    assert_send_static::<
-        super::RetainedSettlementWaiter<tracedecay_domain::errors::Result<()>>,
-    >();
+    assert_send_static::<super::RetainedSettlementWaiter<tracedecay_domain::errors::Result<()>>>();
     assert_send_static::<
         super::RetainedSettlementWaiter<
             tracedecay_domain::errors::Result<(
@@ -3469,11 +3463,9 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let FactOwnerV1::Project { project_id } = owner else {
         panic!("retained cleanup recovery requires a project owner")
     };
-    let recovery_scope = tracedecay_code_index_runtime::resolved_scope_for_project(
-        cg.project_root(),
-        &project_id,
-    )
-    .expect("recovery scope");
+    let recovery_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+            .expect("recovery scope");
     let mut cleanup_admission =
         external_admission_for_job(run_id, "request.retained-user-job-drop", job_id);
     cleanup_admission.scope = recovery_scope.clone();

@@ -11,11 +11,11 @@ use tracedecay_application::{
     CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
 };
 use tracedecay_domain::Confidence;
+use tracedecay_session_memory::memory::memory_application_error;
 use tracedecay_store::{
     FactReadControl, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
     ProjectMemoryFactSearchQuery,
 };
-use tracedecay_session_memory::memory::memory_application_error;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};

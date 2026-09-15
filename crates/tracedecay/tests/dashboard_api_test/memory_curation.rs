@@ -309,10 +309,10 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
         SanitizerDispositionV1, SensitivityV1,
     };
     use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-    use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1};
     use tracedecay_session_memory::memory::{
         MemoryApplication, ProjectMemoryFactAddRequest, automatic_fact_add_command,
     };
+    use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1};
 
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()

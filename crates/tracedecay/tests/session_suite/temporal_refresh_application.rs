@@ -12,13 +12,6 @@ use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1, UtcMicros, WorktreeId,
 };
-use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
-use tracedecay_store::{
-    SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
-    SessionRefreshProgressV1, SessionRefreshStore, SessionTemporalProjectionBatchV1,
-};
-use tracedecay_temporal_query::ports::ExecutionControl;
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
@@ -31,6 +24,13 @@ use tracedecay_session_memory::session::{
     SessionRefreshTarget, SessionRequestBinding, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer,
 };
+use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
+use tracedecay_store::{
+    SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
+    SessionRefreshProgressV1, SessionRefreshStore, SessionTemporalProjectionBatchV1,
+};
+use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::common::{LcmTestRuntime, open_lcm_db};
 

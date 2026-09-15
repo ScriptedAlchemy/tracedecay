@@ -116,30 +116,26 @@ async fn require_admitted_observation_shape(
         let columns = table_columns(conn, "observations").await?;
         let recorded = migration_recorded(conn, OBSERVATION_SCHEMA_MIGRATION).await?;
         if columns != canonical_column_set(OBSERVATION_CANONICAL_COLUMNS) || !recorded {
-            return Err(
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    OBSERVATION_AUTHORITY,
-                    "observations carries a pre-release branch-local shape that no \
+            return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+                OBSERVATION_AUTHORITY,
+                "observations carries a pre-release branch-local shape that no \
                      published binary ever wrote; there is no sanctioned migration, \
                      reset the observation authority to recreate it at the canonical \
                      schema",
-                ),
-            );
+            ));
         }
     }
     let advances = table_columns(conn, "source_cursor_advances").await?;
     if !advances.is_empty()
         && advances != canonical_column_set(SOURCE_CURSOR_ADVANCES_CANONICAL_COLUMNS)
     {
-        return Err(
-            tracedecay_domain::errors::TraceDecayError::reset_required(
-                OBSERVATION_AUTHORITY,
-                "source_cursor_advances carries a pre-release branch-local shape \
+        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            OBSERVATION_AUTHORITY,
+            "source_cursor_advances carries a pre-release branch-local shape \
                  that no published binary ever wrote; there is no sanctioned \
                  migration, reset the observation authority to recreate it at the \
                  canonical schema",
-            ),
-        );
+        ));
     }
     Ok(())
 }

@@ -1,8 +1,8 @@
 //! Durable remote-deletion tombstones and cleanup state.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use crate::RegisteredGlobalDb;
 

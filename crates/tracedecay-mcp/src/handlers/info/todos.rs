@@ -8,8 +8,8 @@ use crate::{decode_primitive_request, generic_tool_result};
 use serde_json::Value;
 use tracedecay_application::retrieval::{TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::storage::ProjectPath;
 use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_runtime_core::storage::ProjectPath;
 
 use super::verified::{all_symbols, end_line, required_file_path, required_metadata};
 

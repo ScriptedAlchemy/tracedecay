@@ -5,16 +5,14 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_lcm::payload::DeleteOpts;
-use tracedecay_lcm::types::{
-    LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt,
-};
+use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use tracedecay_lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmError, LcmExpandRequest, LcmExpandResponse,
     LcmExpandTarget, LcmRawMessage, LcmSourceRef, LcmStatus, LcmStorageKind, LcmSummaryNode,
     LcmSummaryNodeDraft,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 use crate::common::{lcm_payload_message as raw_message, lcm_payload_session as sample_session};
@@ -27,11 +25,7 @@ fn externalized_tool_payload(prefix: &str, fill: char) -> String {
         fill.to_string().repeat(TOOL_PAYLOAD_FIXTURE_FILLER_CHARS)
     );
     assert!(
-        tracedecay_lcm::security::should_externalize(
-            "tool",
-            Some("tool_result"),
-            &payload,
-        ),
+        tracedecay_lcm::security::should_externalize("tool", Some("tool_result"), &payload,),
         "tool payload fixture should externalize"
     );
     payload
@@ -1122,8 +1116,7 @@ async fn delete_external_payload_rejects_referenced_payload_without_hash_verific
         .unwrap()
         .payload_ref
         .expect("payload ref");
-    let payload_path =
-        tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+    let payload_path = tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.exists());
 
     let result = db
@@ -1409,8 +1402,7 @@ async fn redaction_applies_before_whole_message_externalization() {
     );
 
     // The durable payload body was redacted before it ever hit disk.
-    let payload_path =
-        tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+    let payload_path = tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     let payload_body = std::fs::read_to_string(&payload_path).expect("payload file should exist");
     assert!(!payload_body.contains(secret));
     assert!(payload_body.contains("[TraceDecay redacted: credential assignment]"));

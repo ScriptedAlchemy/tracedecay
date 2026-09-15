@@ -38,11 +38,9 @@ pub(super) async fn handle_automation_runs_command(
         AutomationRunsAction::View { run_id, json, .. } => {
             let record = find_run_record(&dashboard_root, &run_id)
                 .await?
-                .ok_or_else(
-                    || tracedecay_domain::errors::TraceDecayError::Config {
-                        message: format!("automation run not found: {run_id}"),
-                    },
-                )?;
+                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("automation run not found: {run_id}"),
+                })?;
             if json {
                 println!(
                     "{}",
@@ -60,20 +58,16 @@ pub(super) async fn handle_automation_runs_command(
         } => {
             let record = find_run_record(&dashboard_root, &run_id)
                 .await?
-                .ok_or_else(
-                    || tracedecay_domain::errors::TraceDecayError::Config {
-                        message: format!("automation run not found: {run_id}"),
-                    },
-                )?;
+                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("automation run not found: {run_id}"),
+                })?;
             let artifact = record
                 .artifacts
                 .iter()
                 .find(|artifact| artifact.kind == kind)
-                .ok_or_else(
-                    || tracedecay_domain::errors::TraceDecayError::Config {
-                        message: format!("automation run artifact not found: {run_id}/{kind}"),
-                    },
-                )?;
+                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("automation run artifact not found: {run_id}/{kind}"),
+                })?;
             let payload =
                 read_run_artifact_payload(&dashboard_root, &record.run_id, artifact).await?;
             if json {

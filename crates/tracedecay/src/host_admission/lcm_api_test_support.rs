@@ -6,10 +6,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_compress_for_test(
         &self,
         request: tracedecay_lcm::LcmCompressionRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmCompressionResponse,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmCompressionResponse, tracedecay_lcm::LcmError> {
         lcm_compress(
             self.project_registered
                 .clone()
@@ -23,10 +20,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_describe_for_test(
         &self,
         request: tracedecay_lcm::LcmDescribeRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmDescribeResponse,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmDescribeResponse, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -38,10 +32,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_expand_for_test(
         &self,
         request: tracedecay_lcm::LcmExpandRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmExpandResponse,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmExpandResponse, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -53,10 +44,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_expand_query_for_test(
         &self,
         request: tracedecay_lcm::LcmExpandQueryRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmExpandQueryResponse,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmExpandQueryResponse, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -70,10 +58,7 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: &str,
         node_id: &str,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmSummaryExpansion,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmSummaryExpansion, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -85,10 +70,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_grep_for_test(
         &self,
         request: tracedecay_lcm::LcmGrepRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmGrepOutcome,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmGrepOutcome, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -137,10 +119,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_load_session_for_test(
         &self,
         request: tracedecay_lcm::LcmLoadSessionRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmLoadSessionPage,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmLoadSessionPage, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -152,10 +131,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_preflight_for_test(
         &self,
         request: tracedecay_lcm::LcmPreflightRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmPreflightResponse,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmPreflightResponse, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -168,10 +144,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: Option<&str>,
         limit: usize,
-    ) -> std::result::Result<
-        Vec<tracedecay_lcm::LcmRecentSession>,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<Vec<tracedecay_lcm::LcmRecentSession>, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -187,10 +160,7 @@ impl HostAdmissionTestRuntimeV1 {
         session_id: Option<&str>,
         config: &tracedecay_lcm::LcmGcConfig,
         now: i64,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmGcReport,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmGcReport, tracedecay_lcm::LcmError> {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
@@ -208,10 +178,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_session_boundary_for_test(
         &self,
         request: tracedecay_lcm::LcmSessionBoundaryRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmSessionBoundaryResponse,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmSessionBoundaryResponse, tracedecay_lcm::LcmError>
+    {
         lcm_session_boundary(
             self.project_registered
                 .clone()
@@ -237,10 +205,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_session_replay_slice_for_test(
         &self,
         request: &tracedecay_lcm::LcmSessionReplayRequest,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmSessionReplaySlice,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmSessionReplaySlice, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -253,10 +218,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: Option<&str>,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmStatus,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmStatus, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -274,10 +236,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: Option<&str>,
-    ) -> std::result::Result<
-        tracedecay_lcm::LcmStatus,
-        tracedecay_lcm::LcmError,
-    > {
+    ) -> std::result::Result<tracedecay_lcm::LcmStatus, tracedecay_lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())

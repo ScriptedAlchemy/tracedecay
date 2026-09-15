@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
-use tracedecay_graph_db::GraphCancellation;
 use tracedecay_domain::errors::Result;
+use tracedecay_graph_db::GraphCancellation;
 
 const MAX_CONTEXT_SYMBOLS: usize = 12;
 const MAX_FILE_SYMBOLS: usize = 100_000;

@@ -621,9 +621,7 @@ async fn active_replay_tool_calls_apply_ingest_protection_and_externalize_media_
         .lcm_expand(tracedecay_lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-tool-calls-protection".into(),
-            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload {
-                payload_ref,
-            },
+            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload { payload_ref },
             content_slice: Some(tracedecay_lcm::LcmContentSlice {
                 offset: 0,
                 limit: media_payload.chars().count(),
@@ -697,9 +695,7 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
         .lcm_expand(tracedecay_lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-media".into(),
-            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload {
-                payload_ref,
-            },
+            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload { payload_ref },
             content_slice: Some(tracedecay_lcm::LcmContentSlice {
                 offset: 0,
                 limit: media_payload.chars().count(),

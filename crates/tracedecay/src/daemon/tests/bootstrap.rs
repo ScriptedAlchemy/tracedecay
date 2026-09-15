@@ -2,9 +2,9 @@ use super::*;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 use std::process::Command;
-use tracedecay_mcp::JsonRpcResponse;
 #[cfg(unix)]
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_mcp::JsonRpcResponse;
 #[cfg(unix)]
 use tracedecay_session_memory::context::CancellationToken;
 
@@ -2442,11 +2442,11 @@ async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
                     message: "unrelated open observer dropped".to_owned(),
                 }
             })?;
-            release_rx.await.map_err(|_| {
-                tracedecay_domain::errors::TraceDecayError::Config {
+            release_rx
+                .await
+                .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
                     message: "unrelated open release dropped".to_owned(),
-                }
-            })?;
+                })?;
             Ok(())
         })
         .await;

@@ -20,11 +20,11 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
     FactWriteBatch, FactWriteControl, RetrievalAnchorQuery,
 };
-use tracedecay_session_memory::memory::MemoryApplication;
 
 use crate::common::open_graph_db_from_template;
 

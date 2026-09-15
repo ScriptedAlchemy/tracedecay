@@ -1,6 +1,6 @@
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 use tracedecay_runtime_core::branch::BranchAddOutcome;
-use tracedecay_domain::errors::TraceDecayError;
 
 use std::path::Path;
 use std::sync::Arc;

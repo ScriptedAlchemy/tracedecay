@@ -32,8 +32,8 @@ use tracedecay_domain::configuration::{
     INDEX_TRACK_CALL_SITES_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, TELEMETRY_TIMINGS_SETTING_KEY,
 };
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::storage::StoreLayout;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,10 +225,12 @@ pub fn install_pinned_runtime_configuration_cache(
         .map_err(|_| config_error("pinned runtime configuration cache is already installed"))
 }
 
-fn pinned_runtime_configuration_cache() -> Result<&'static dyn PinnedRuntimeConfigurationCachePort> {
-    PINNED_RUNTIME_CONFIGURATION_CACHE.get().map(Arc::as_ref).ok_or_else(|| {
-        config_error("pinned runtime configuration cache is not installed")
-    })
+fn pinned_runtime_configuration_cache() -> Result<&'static dyn PinnedRuntimeConfigurationCachePort>
+{
+    PINNED_RUNTIME_CONFIGURATION_CACHE
+        .get()
+        .map(Arc::as_ref)
+        .ok_or_else(|| config_error("pinned runtime configuration cache is not installed"))
 }
 
 pub fn publish_pinned_runtime_configuration(

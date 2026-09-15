@@ -62,15 +62,15 @@ use self::execution::{
     TaskSessionTemporalExecutionReportV1, TemporalExecutionFuture,
 };
 use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
+use tracedecay_lcm::contracts::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
+    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
+};
 use tracedecay_query::retrieval::evidence_lanes::{
     CanonicalTaskSessionCandidateExportPortV1, TaskSessionLaneRequestV1,
     TaskSessionLaneRetrieverV1, TaskSessionPlan23BindingV1,
 };
 use tracedecay_runtime_core::db::engine::Error as EngineError;
-use tracedecay_lcm::contracts::{
-    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
-    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
-};
 use tracedecay_sessions::runtime::git_correlation::{
     GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
     recover_git_evidence_projection,

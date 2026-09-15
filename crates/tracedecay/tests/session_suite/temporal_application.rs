@@ -28,7 +28,6 @@ use tracedecay_domain::{
     RepositoryId, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSummaryIdV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
 };
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
@@ -42,6 +41,7 @@ use tracedecay_session_memory::session::{
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, SessionTemporalQuery,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 const DIGEST: [u8; 32] = [0x5a; 32];
 
@@ -863,7 +863,8 @@ impl Default for QuerySpec {
                 estimator_version: "words-v1".to_owned(),
             },
             execution_limits: ExecutionLimits::default(),
-            freshness_policy: tracedecay_session_memory::session::SessionFreshnessPolicy::AllowStored,
+            freshness_policy:
+                tracedecay_session_memory::session::SessionFreshnessPolicy::AllowStored,
             retrieval_scope: None,
         }
     }

@@ -15,6 +15,7 @@ use tracedecay_application::{ApplicationOperation, CancellationSignal, Deadline,
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_lsp::analyzer::activity::{active_languages_for_files, documents_for_adapter};
 use tracedecay_lsp::analyzer::adapters::builtin_adapters;
@@ -25,7 +26,6 @@ use tracedecay_lsp::analyzer::host_ownership::HostAnalyzerOwnership;
 use tracedecay_lsp::analyzer::settings::{
     CodeDiagnosticsSettings, IdleBackfillMode, save_settings,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::lsp_support::analyzer_runtime_config_error;
 
@@ -547,9 +547,9 @@ fn indexed_files(
     let mut files = reader
         .files(500_000, cancellation)
         .map_err(|error| {
-            tracedecay_graph_query::map_code_graph_read_runtime_error(tracedecay_graph_query::map_projection_error(
-                error,
-            ))
+            tracedecay_graph_query::map_code_graph_read_runtime_error(
+                tracedecay_graph_query::map_projection_error(error),
+            )
         })?
         .into_iter()
         .map(|file| file.logical_path)

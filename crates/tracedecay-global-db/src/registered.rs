@@ -571,9 +571,7 @@ impl RegisteredGlobalDb {
         config: &tracedecay_lcm::retention::LcmRetentionConfig,
         mode: tracedecay_lcm::retention::RetentionMode,
         now: i64,
-    ) -> tracedecay_domain::errors::Result<
-        tracedecay_lcm::retention::LcmRetentionReport,
-    > {
+    ) -> tracedecay_domain::errors::Result<tracedecay_lcm::retention::LcmRetentionReport> {
         let storage_root = self.db_path().parent().ok_or_else(|| {
             registered_error(
                 "run registered session retention",

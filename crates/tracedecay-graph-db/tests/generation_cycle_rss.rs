@@ -87,11 +87,7 @@ fn relation(index: usize) -> GraphRelation {
     .unwrap()
 }
 
-fn batch(
-    cycle: usize,
-    watermark: &str,
-    mutations: Vec<GraphMutation>,
-) -> GraphWriteBatch {
+fn batch(cycle: usize, watermark: &str, mutations: Vec<GraphMutation>) -> GraphWriteBatch {
     GraphWriteBatch::new(
         cycle_namespace(cycle),
         projection(),
@@ -178,12 +174,8 @@ fn retire_cycle(db: &GraphDbLeaseV1, cycle: usize, rows: usize) {
         let mutations = (start..end)
             .map(|index| GraphMutation::DeleteEntity(entity_id(index)))
             .collect();
-        db.apply_unverified(batch(
-            cycle,
-            &format!("wm-retire-entity-{page}"),
-            mutations,
-        ))
-        .unwrap();
+        db.apply_unverified(batch(cycle, &format!("wm-retire-entity-{page}"), mutations))
+            .unwrap();
     }
 }
 
@@ -218,7 +210,10 @@ fn generation_cycle_residency_probe() {
     for cycle in 0..cycles {
         let started = Instant::now();
         stage_cycle(&db, cycle, rows);
-        sample(&format!("cycle {cycle}: staged ({:.1?})", started.elapsed()));
+        sample(&format!(
+            "cycle {cycle}: staged ({:.1?})",
+            started.elapsed()
+        ));
 
         if cycle > 0 {
             let started = Instant::now();

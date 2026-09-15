@@ -26,13 +26,13 @@ pub use catalog_discovery::{
 pub(crate) use handlers::retained_catalog::{
     execute_profile_retained_mcp_tool, retained_mcp_operation,
 };
-pub(crate) use handlers::{
-    handle_projectless_admin_cli, handle_projectless_hook_runtime,
-    replay_projectless_hermes_host_admission,
-};
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,
     handle_tool_call_with_registry_options,
+};
+pub(crate) use handlers::{
+    handle_projectless_admin_cli, handle_projectless_hook_runtime,
+    replay_projectless_hermes_host_admission,
 };
 
 /// Explicit owner for advertised tools awaiting typed application contracts.

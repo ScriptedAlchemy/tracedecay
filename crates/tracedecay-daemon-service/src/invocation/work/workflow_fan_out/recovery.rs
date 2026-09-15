@@ -415,10 +415,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         })
     }
 
-    pub(crate) fn refresh_grant(
-        &self,
-        grant: tracedecay_application::CapabilityGrantSnapshot,
-    ) {
+    pub(crate) fn refresh_grant(&self, grant: tracedecay_application::CapabilityGrantSnapshot) {
         self.inner
             .registered
             .lock()

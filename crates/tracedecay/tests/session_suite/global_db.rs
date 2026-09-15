@@ -2,8 +2,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
-use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_lcm::LcmStorageKind;
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
@@ -98,8 +98,7 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
-    ) -> tracedecay_domain::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>>
-    {
+    ) -> tracedecay_domain::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>> {
         self.query_profile_analytics_events_for_test(query).await
     }
 
@@ -697,9 +696,7 @@ async fn upsert_session_message_round_trips_and_updates() {
             .text
             .starts_with("Updated answer about parsing transcripts.")
     );
-    assert!(
-        fetched.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS
-    );
+    assert!(fetched.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(
         fetched
             .text
@@ -720,14 +717,9 @@ async fn upsert_session_message_round_trips_and_updates() {
         .await
         .expect("raw search fields")
         .expect("raw message should exist");
-    assert!(
-        snippet_text.chars().count()
-            <= tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS
-    );
+    assert!(snippet_text.chars().count() <= tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS);
     assert!(snippet_text.contains(tracedecay_lcm::DERIVED_TRUNCATION_MARKER));
-    assert!(
-        index_text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS
-    );
+    assert!(index_text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(index_text.contains(tracedecay_lcm::DERIVED_TRUNCATION_MARKER));
 }
 
@@ -790,10 +782,7 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
         .get_session_message("cursor", "message-1")
         .await
         .expect("compatibility message should exist");
-    assert!(
-        compatibility.text.chars().count()
-            <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS
-    );
+    assert!(compatibility.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(
         compatibility
             .text
@@ -845,9 +834,7 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .get_session_message("cursor", "tool-large")
         .await
         .expect("projection should exist");
-    assert!(
-        fetched.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS
-    );
+    assert!(fetched.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(!fetched.text.contains(body_secret));
     assert!(
         fetched

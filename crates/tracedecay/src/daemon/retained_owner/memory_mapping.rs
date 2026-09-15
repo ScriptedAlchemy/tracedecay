@@ -21,6 +21,9 @@ use tracedecay_application::retained_surfaces::{
 use tracedecay_domain::{
     ActorId, Confidence, FactIdentitySourceV1, FactOwnerV1, PayloadAccessState, ProvenanceId,
 };
+use tracedecay_session_memory::memory::{
+    MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+};
 use tracedecay_store::{
     FactCommitReceipt, FactStoreError, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactFeedbackActionV1,
@@ -34,9 +37,6 @@ use tracedecay_store::{
     ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryMemoryStatusV1,
-};
-use tracedecay_session_memory::memory::{
-    MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 
 pub(super) const MAX_RETAINED_FACT_LIMIT: usize = 200;

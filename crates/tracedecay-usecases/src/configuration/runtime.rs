@@ -20,9 +20,9 @@ use crate::config::{
 use crate::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticConfigurationSnapshotSourceV1,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 use super::ports::{

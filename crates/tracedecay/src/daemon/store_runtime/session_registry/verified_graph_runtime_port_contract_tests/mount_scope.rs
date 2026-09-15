@@ -2,14 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay_domain::{ActorId, BrainId, Confidence, FactCategoryV1, FactOwnerV1, UserProfileId};
+use tracedecay_session_memory::memory::{
+    MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+};
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactWriteControl, ProjectMemoryFactProjectionV1,
     ProjectMemoryFactSearchGraphCoverageV1, ProjectMemoryFactSearchKindV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryGraphQueryV1,
     ProjectMemoryGraphStore, StoreShardIdV1,
-};
-use tracedecay_session_memory::memory::{
-    MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 
 use super::{ContractFixture, await_mounted_graph_operation, project_id};

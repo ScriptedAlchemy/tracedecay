@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use tracedecay_automation_runtime::ports::project_runtime::ProjectRuntime;
 pub use tracedecay_code_index::is_test_file;
-use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_usecases::configuration::UserSettingsDaemonClient;
 

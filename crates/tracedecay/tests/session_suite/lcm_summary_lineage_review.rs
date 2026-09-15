@@ -3,14 +3,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, LcmLineageFaultForTest};
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_lcm::types::{
-    LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition,
-};
+use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandRequest, LcmExpandTarget,
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::common::{lcm_dag_message, lcm_dag_session};
@@ -56,8 +54,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
-    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError>
-    {
+    ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError> {
         self.lcm_publish_immutable_summary_for_test(HostAdmissionScope::Profile, publication)
             .await
     }

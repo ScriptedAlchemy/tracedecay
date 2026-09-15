@@ -25,8 +25,7 @@ use tracedecay_store::{
     GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
     GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationStoreV1,
     GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
 };
 
 use super::super::DaemonSessionRuntimeRegistryV1;

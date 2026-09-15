@@ -5562,6 +5562,36 @@ async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mounted_map_contention_cannot_hide_query_authority() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let held = registry.mounted.lock().await;
+    let lookup_registry = registry.clone();
+    let lookup_scope = scope.clone();
+    let lookup = tokio::spawn(async move {
+        lookup_registry
+            .query_authority_for_scope(&lookup_scope)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !lookup.is_finished(),
+        "map contention waits for the micro-held map authority instead of fabricating unavailability"
+    );
+
+    drop(held);
+    assert!(
+        lookup
+            .await
+            .expect("query-authority lookup joins")
+            .is_some(),
+        "the mounted query authority remains visible after map contention"
+    );
+    registry.shutdown().await;
+}
+
 /// A quiet probe that disproves currency (worktree drift) must refuse the read
 /// and withdraw the busy-read witness, so later busy reads cannot keep serving
 /// the disproved seat.

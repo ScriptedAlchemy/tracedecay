@@ -139,10 +139,7 @@ async fn assert_compress_baseline_case(case: CompressBaselineCase) {
             // The daemon authority resolves auxiliary summaries itself; when
             // the registered cursor-agent summarizer cannot run the pending
             // summary is typed unavailable rather than delegated to the host.
-            assert_eq!(
-                response.reason, "cursor_agent_unavailable",
-                "{case_name}"
-            );
+            assert_eq!(response.reason, "cursor_agent_unavailable", "{case_name}");
             assert_eq!(response.summary_nodes_created, 0, "{case_name}");
             assert!(response.context_recovery_hint.is_none(), "{case_name}");
             let summary_request = response

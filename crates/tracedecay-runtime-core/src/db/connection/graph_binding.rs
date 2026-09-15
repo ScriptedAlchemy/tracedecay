@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::Database;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use crate::store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// One short-lived use of the graph authority bound to a database owner.
 ///

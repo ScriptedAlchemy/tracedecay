@@ -10,15 +10,15 @@ use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactId, FactOwnerV1, FactRelationKindV1, ProjectId,
     ProjectMemoryGraphRelationKindV1,
 };
-use tracedecay_store::{
-    FactReadControl, FactStoreError, FactWriteControl, ProjectMemoryFactIdV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
-    ProjectMemoryGraphTargetV1,
-};
 use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryApplicationError, MemoryOperationContext,
     ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+};
+use tracedecay_store::{
+    FactReadControl, FactStoreError, FactWriteControl, ProjectMemoryFactIdV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
+    ProjectMemoryGraphTargetV1,
 };
 
 use super::DaemonSessionRuntimeRegistryV1;

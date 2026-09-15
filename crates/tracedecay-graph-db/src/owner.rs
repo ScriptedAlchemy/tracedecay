@@ -10,9 +10,9 @@ use tracedecay_store::{
     RetainedGraphStoreOwnerOperationLeaseErrorV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
-use crate::GraphDbRegistration;
 #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
 use crate::GraphDbOpenOptions;
+use crate::GraphDbRegistration;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use crate::{GraphCancellation, GraphDbLocation, GraphDurability, GraphFormatVersion};
 use crate::{GraphDb, GraphDbError, GraphDbRuntimeState, GraphSnapshot};

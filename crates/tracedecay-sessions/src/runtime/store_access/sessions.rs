@@ -3,14 +3,14 @@ use std::fmt::Write as _;
 
 use serde_json::Value as JsonValue;
 
-use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
+use crate::runtime::SessionMessageSearchResult;
 use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
-use crate::runtime::SessionMessageSearchResult;
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
 use super::search::{
@@ -734,8 +734,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_facts")]
     pub async fn workflow_fact_rows(
         &self,
-    ) -> tracedecay_domain::errors::Result<Vec<(String, Option<String>, Option<String>)>>
-    {
+    ) -> tracedecay_domain::errors::Result<Vec<(String, Option<String>, Option<String>)>> {
         let snapshot = self.read_snapshot().await.map_err(|error| {
             tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "begin registered workflow fact snapshot".to_owned(),

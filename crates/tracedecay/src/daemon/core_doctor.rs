@@ -7,8 +7,8 @@ use tokio::time::{Duration, timeout};
 
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_domain::errors::Result;
+use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 #[path = "core_doctor_schema.rs"]
@@ -467,7 +467,10 @@ fn doctor_semantic_runtime_status(
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> serde_json::Value {
     serde_json::to_value(
-        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(project_path, configuration),
+        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
+            project_path,
+            configuration,
+        ),
     )
     .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
@@ -994,15 +997,13 @@ mod doctor_runtime_route_tests {
         let digest = "c".repeat(64);
         let lifecycle = lifecycle_status(
             Some("JinaEmbeddingsV2BaseCode"),
-            Some(
-                tracedecay_semantic::SemanticModelLifecycleStateV1::Failed {
-                    model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                    revision: "rev".to_owned(),
-                    artifact_digest: digest,
-                    detail: "artifact verify failed".to_owned(),
-                    retryable: false,
-                },
-            ),
+            Some(tracedecay_semantic::SemanticModelLifecycleStateV1::Failed {
+                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
+                revision: "rev".to_owned(),
+                artifact_digest: digest,
+                detail: "artifact verify failed".to_owned(),
+                retryable: false,
+            }),
         );
         let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
             Some(seated_generic_unavailable()),

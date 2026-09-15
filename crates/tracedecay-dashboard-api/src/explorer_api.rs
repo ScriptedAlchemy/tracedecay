@@ -34,8 +34,8 @@ use super::read_model::{
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
 use super::{DashboardHttpRequestControlV1, DashboardState, graph_service};
-use tracedecay_session_memory::context::CancellationToken;
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
+use tracedecay_session_memory::context::CancellationToken;
 
 const SOURCE_IDS: [ExplorerSourceIdV1; 4] = [
     ExplorerSourceIdV1::CodeGraph,

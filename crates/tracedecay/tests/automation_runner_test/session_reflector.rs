@@ -1415,11 +1415,9 @@ async fn session_reflector_replay_respects_include_summaries_false() {
                 depth: 0,
                 summary_text: "summary that should not be replayed when summaries are disabled"
                     .to_string(),
-                source_refs: vec![
-                    tracedecay_lcm::LcmSourceRef::RawMessage {
-                        store_id: source.store_id,
-                    },
-                ],
+                source_refs: vec![tracedecay_lcm::LcmSourceRef::RawMessage {
+                    store_id: source.store_id,
+                }],
                 source_token_count: 10,
                 summary_token_count: 5,
                 source_time_start: Some(1_715_000_001),

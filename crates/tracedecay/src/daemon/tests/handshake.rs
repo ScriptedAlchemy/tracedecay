@@ -475,9 +475,7 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
         .write_all(format!("{preface}\n").as_bytes())
         .await
         .expect("write bad auth preface");
-    let handshake = test_handshake_defaults()
-        .to_line()
-        .expect("handshake json");
+    let handshake = test_handshake_defaults().to_line().expect("handshake json");
     writer
         .write_all(format!("{handshake}\n").as_bytes())
         .await

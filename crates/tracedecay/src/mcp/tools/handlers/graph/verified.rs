@@ -8,6 +8,7 @@ use serde_json::Value;
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::Result;
+use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
 use tracedecay_mcp::context_headings::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
 };
@@ -16,7 +17,6 @@ use tracedecay_mcp::handlers::graph::{
     required_graph_metadata, single_graph_adjacency_batch, traverse_verified_neighbors,
 };
 use tracedecay_mcp::path_tree::format_compact_path_list;
-use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
 
 #[hotpath::measure(label = "mcp.graph.context_markdown")]
 pub(super) fn verified_context_markdown(

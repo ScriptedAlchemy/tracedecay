@@ -3,12 +3,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_lcm::{
     LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest,
     LcmMaintenanceDebt, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSourceRef,
     LcmStorageKind, LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 use crate::common::{self, LcmTestRuntime, open_lcm_db};

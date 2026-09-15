@@ -81,7 +81,9 @@ impl PreparedBranchAdminMutation {
     /// CAS-publishes the prepared metadata mutation when no database file was
     /// selected for deletion. Branches served by the single project store
     /// retire this way: the metadata entry is the only state to remove.
-    pub fn finish_without_database_deletion(self) -> tracedecay_domain::errors::Result<BranchAdminReport> {
+    pub fn finish_without_database_deletion(
+        self,
+    ) -> tracedecay_domain::errors::Result<BranchAdminReport> {
         if !self.database_paths.is_empty() {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "branch database deletion requires daemon store administration"
@@ -99,7 +101,10 @@ impl PreparedBranchAdminMutation {
     }
 
     #[hotpath::measure(label = "runtime_core.branch.commit_destructive")]
-    fn commit_with_hook<H>(self, mut hook: H) -> tracedecay_domain::errors::Result<BranchAdminReport>
+    fn commit_with_hook<H>(
+        self,
+        mut hook: H,
+    ) -> tracedecay_domain::errors::Result<BranchAdminReport>
     where
         H: FnMut(BranchAdminCommitBoundary) -> tracedecay_domain::errors::Result<()>,
     {
@@ -378,9 +383,10 @@ pub(super) fn rollback_published_branch_tracking(
             message: format!("cannot roll back branch '{branch_name}': branch metadata changed"),
         });
     }
-    let after = metadata_after.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!("cannot roll back branch '{branch_name}': metadata disappeared"),
-    })?;
+    let after =
+        metadata_after.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("cannot roll back branch '{branch_name}': metadata disappeared"),
+        })?;
     crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, &after).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("cannot retire failed branch '{branch_name}': {error}"),
@@ -423,13 +429,14 @@ fn load_branch_meta_exact(
             ),
         });
     }
-    let serialized =
-        std::fs::read_to_string(&path).map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+    let serialized = std::fs::read_to_string(&path).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "cannot read branch metadata at '{}': {error}",
                 path.display()
             ),
-        })?;
+        }
+    })?;
     let meta = crate::branch_meta::parse(&serialized).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
@@ -451,7 +458,9 @@ fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
     [db_path.to_path_buf(), wal, shm]
 }
 
-pub(super) fn remove_branch_db_files_checked(db_path: &Path) -> tracedecay_domain::errors::Result<()> {
+pub(super) fn remove_branch_db_files_checked(
+    db_path: &Path,
+) -> tracedecay_domain::errors::Result<()> {
     for path in branch_db_family_paths(db_path) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}

@@ -21,11 +21,12 @@ pub(crate) async fn run(
     if invocation.json {
         print!("{}", workflow_json_line(&outcome)?);
     } else {
-        let outcome = outcome.map_err(|problem| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("{}: {}", problem.problem.code, problem.problem.message),
-            }
-        })?;
+        let outcome =
+            outcome.map_err(
+                |problem| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("{}: {}", problem.problem.code, problem.problem.message),
+                },
+            )?;
         println!("Workflow {}", operation.route_segment().replace('-', " "));
         println!("Project: {}", project_root.display());
         println!("{}", serde_json::to_string_pretty(&outcome)?);

@@ -12,12 +12,12 @@ use tracedecay_domain::{
     FactAssertionId, FactCategoryV1, FactId, PayloadAccessState, ProjectMemoryGraphRelationKindV1,
     RetrievalAnchorId,
 };
+use tracedecay_session_memory::memory::MemoryApplicationError;
 use tracedecay_store::{
     FactReadControl, FactStoreError, MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
     ProjectMemoryDashboardEntityV1, ProjectMemoryFactProjectionV1, ProjectMemoryGraphPageV1,
     ProjectMemoryGraphQueryV1, ProjectMemoryGraphTargetV1,
 };
-use tracedecay_session_memory::memory::MemoryApplicationError;
 
 use super::super::read_model::{DashboardCoverageV1, DashboardDomainStateV1};
 use super::super::{DashboardHttpRequestControlV1, DashboardState};

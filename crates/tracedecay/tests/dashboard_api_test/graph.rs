@@ -45,12 +45,12 @@ use tracedecay_domain::{
     SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
+use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 struct DashboardFixture {
     _tmp: TempDir,
@@ -85,13 +85,11 @@ impl CodeGraphProjectionReadPort for FixtureGraphProjectionV1 {
                 return Err(CodeGraphReadError::Denied);
             }
             match request.context.admission_at(request.observed_at) {
-                RequestAdmission::Admitted => {
-                    VerifiedCodeGraphRead::new(
-                        self.scope.clone(),
-                        Arc::clone(&self.store),
-                        tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
-                    )
-                }
+                RequestAdmission::Admitted => VerifiedCodeGraphRead::new(
+                    self.scope.clone(),
+                    Arc::clone(&self.store),
+                    tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                ),
                 RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
             }

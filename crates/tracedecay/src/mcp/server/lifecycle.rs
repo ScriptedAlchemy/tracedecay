@@ -302,7 +302,9 @@ impl ProjectServerResponseLifecycle {
         &self.response_gate
     }
 
-    pub(crate) fn response_revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
+    pub(crate) fn response_revoked(
+        &self,
+    ) -> &tracedecay_session_memory::context::CancellationToken {
         &self.response_revoked
     }
 }

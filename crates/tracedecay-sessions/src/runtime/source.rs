@@ -512,7 +512,8 @@ pub async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
     let discovery = hotpath::measure_block!(
         "sessions.ingest.discover_blocking",
         run_blocking_transcript_section(|| {
-            source.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
+            source
+                .discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
         })
     );
     for path in discovery.paths {

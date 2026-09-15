@@ -17,14 +17,14 @@ use tracedecay_temporal_query::ports::{
 };
 
 use tracedecay_global_db::WorkflowScopeFilter;
-use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
+use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
+use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
 use tracedecay_sessions::runtime::{
     SessionMessageSearchResult, SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
 };
-use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,11 +53,7 @@ pub struct SessionRetrievalCommand {
 }
 
 impl SessionRetrievalCommand {
-    pub fn new(
-        query: SessionTemporalQuery,
-        filters: SessionRetrievalFilters,
-        goals: bool,
-    ) -> Self {
+    pub fn new(query: SessionTemporalQuery, filters: SessionRetrievalFilters, goals: bool) -> Self {
         let query = query
             .with_compatibility_filter_digest(compatibility_filter_digest(&filters, goals))
             .with_semantic_filter(temporal_candidate_filter(&filters, goals));

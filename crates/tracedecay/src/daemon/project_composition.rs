@@ -1346,8 +1346,9 @@ fn project_code_index_authorities(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project search identity is invalid: {error}"),
         })?;
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
-        .map_err(|error| TraceDecayError::Config {
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
+            .map_err(|error| TraceDecayError::Config {
             message: format!("project search scope is invalid: {error:?}"),
         })?;
     let graph_projection_read_port = project_open_owners::project_code_graph_projection_read_port(

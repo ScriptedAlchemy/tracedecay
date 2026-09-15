@@ -407,7 +407,11 @@ mod tests {
         let container = root.join("graph.grafeo");
         std::fs::write(&container, b"torn container bytes").unwrap();
         std::fs::create_dir(wal_sidecar_path(&container)).unwrap();
-        std::fs::write(wal_sidecar_path(&container).join("wal_00000001.log"), b"wal").unwrap();
+        std::fs::write(
+            wal_sidecar_path(&container).join("wal_00000001.log"),
+            b"wal",
+        )
+        .unwrap();
         std::fs::write(container.with_extension("verified"), b"marker").unwrap();
         container
     }
@@ -439,7 +443,10 @@ mod tests {
             panic!("identical deterministic verdicts must quarantine");
         };
 
-        assert!(!container.exists(), "the live container path must be vacant");
+        assert!(
+            !container.exists(),
+            "the live container path must be vacant"
+        );
         assert!(!wal_sidecar_path(&container).exists());
         assert!(!container.with_extension("verified").exists());
         assert_eq!(
@@ -493,12 +500,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let container = seeded_family(temp.path());
 
-        let outcome = recover_deterministically_corrupt_container(
-            &container,
-            "transient verdict",
-            &|| Ok(memory_database()),
-        )
-        .unwrap();
+        let outcome =
+            recover_deterministically_corrupt_container(&container, "transient verdict", &|| {
+                Ok(memory_database())
+            })
+            .unwrap();
 
         assert!(matches!(outcome, CorruptStoreRecovery::Reopened(_)));
         assert!(container.exists(), "a reopened store must not be touched");
@@ -580,11 +586,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let container = temp.path().join("graph.grafeo");
 
-        let error =
-            recover_deterministically_corrupt_container(&container, "fault", &|| {
-                Err(corrupt("fault"))
-            })
-            .unwrap_err();
+        let error = recover_deterministically_corrupt_container(&container, "fault", &|| {
+            Err(corrupt("fault"))
+        })
+        .unwrap_err();
 
         assert!(
             matches!(&error, GraphDbError::Unavailable { message }

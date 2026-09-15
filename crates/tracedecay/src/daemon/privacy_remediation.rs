@@ -10,14 +10,14 @@
 
 use std::sync::Arc;
 
-use tracedecay_store::{FactReadControl, FactWriteControl};
 use tracedecay_session_memory::memory::{
     PrivacyRemediationTriggerV1, ProjectMemoryPrivacyRemediationReceiptV1,
 };
+use tracedecay_store::{FactReadControl, FactWriteControl};
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
 use tracedecay_domain::errors::Result;
+use tracedecay_global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
 
 /// Spawns the bounded background rescan for one adopted project store.
 pub(crate) fn spawn_at_rest_privacy_remediation(
@@ -117,12 +117,12 @@ mod tests {
         ProvenanceId, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1,
     };
+    use tracedecay_session_memory::memory::{MemoryApplication, PrivacyRemediationTriggerV1};
     use tracedecay_store::{
         FactWriteControl, ProjectMemoryFactAddMaterialV1, ProjectMemoryFactIdV1,
         ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
         ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
     };
-    use tracedecay_session_memory::memory::{MemoryApplication, PrivacyRemediationTriggerV1};
 
     use super::{remediation_read_control, remediation_write_control};
     use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;

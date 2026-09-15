@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId};
-use tracedecay_runtime_core::db::engine::params;
 use tracedecay_lcm::contracts::validate_payload_ref;
+use tracedecay_runtime_core::db::engine::params;
 
 use super::{
     HydrationError, HydrationResolution, PayloadDescriptor, PayloadSource,

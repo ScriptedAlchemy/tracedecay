@@ -364,8 +364,8 @@ pub(crate) async fn fact_exists(
 ) -> bool {
     use tracedecay_domain::FactId;
     use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-    use tracedecay_store::{ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
     use tracedecay_session_memory::memory::MemoryApplication;
+    use tracedecay_store::{ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
 
     let owner = project_memory_owner(cg);
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db())).unwrap();

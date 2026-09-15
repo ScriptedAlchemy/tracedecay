@@ -18,9 +18,9 @@ use tracedecay_application::now_micros;
 use tracedecay_domain::canonical_json_value;
 use tracedecay_domain::canonical_text::sha256_hex;
 
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Sentinel session id used for cross-session cache rows. Picked so it cannot
 /// collide with a real session UUID.

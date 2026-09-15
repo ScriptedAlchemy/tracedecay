@@ -11,8 +11,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
-use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 
 use crate::schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 

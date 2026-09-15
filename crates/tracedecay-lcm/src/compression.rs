@@ -3,10 +3,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-use crate::retrieval_content::projected_content_hash;
-use tracedecay_store::SessionMessageRecord;
 use crate::message_storage_text;
+use crate::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value as SqlValue, params};
+use tracedecay_store::SessionMessageRecord;
 
 use super::compression_decision::{
     self, AssemblyCapInput, CompressionPlanInput, CondensationCandidateDecision,
@@ -1517,10 +1517,7 @@ fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
 }
 
 fn replay_token_estimate(messages: &[Value]) -> i64 {
-    messages
-        .iter()
-        .map(crate::lcm_message_budget_tokens)
-        .sum()
+    messages.iter().map(crate::lcm_message_budget_tokens).sum()
 }
 
 fn replay_exceeds_budget(replay_token_estimate: i64, max_assembly_tokens: Option<i64>) -> bool {

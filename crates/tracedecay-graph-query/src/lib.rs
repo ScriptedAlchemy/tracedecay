@@ -36,13 +36,15 @@ pub use projection::{
     application_graph_cancellation, map_code_graph_read_runtime_error, map_projection_error,
     request_graph_cancellation,
 };
-pub use queries::{FileAdjacencyScan, GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1};
+pub use queries::{
+    FileAdjacencyScan, GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1,
+};
 pub use source_authority::{
     CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
 };
 pub use verified_query::{
-    VerifiedGraphQuery, VerifiedGraphQueryFuture, VerifiedGraphQueryPort, VerifiedGraphQueryRequest,
-    open_verified_graph_query,
+    VerifiedGraphQuery, VerifiedGraphQueryFuture, VerifiedGraphQueryPort,
+    VerifiedGraphQueryRequest, open_verified_graph_query,
 };
 
 /// Narrow root-owned filesystem authority used by source retrieval.

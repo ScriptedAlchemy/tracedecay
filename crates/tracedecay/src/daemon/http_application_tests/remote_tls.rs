@@ -545,12 +545,12 @@ async fn remote_tls_startup_rejects_unusable_leaf_and_chain_constraints() {
     }
     let leaf_without_anchor_config =
         tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
-        Some("127.0.0.1:0".parse().unwrap()),
-        Some(leaf_without_anchor),
-        Some(leaf_without_anchor_key),
-    )
-    .unwrap()
-    .unwrap();
+            Some("127.0.0.1:0".parse().unwrap()),
+            Some(leaf_without_anchor),
+            Some(leaf_without_anchor_key),
+        )
+        .unwrap()
+        .unwrap();
     let leaf_without_anchor_error = match DaemonHttpApplicationService::bind_with_remote_tls(
         unprovisioned_remote_registry("remote-tls-leaf-without-anchor"),
         AUTH_TOKEN,

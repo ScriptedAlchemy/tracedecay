@@ -24,10 +24,10 @@ use super::{
     measurement,
 };
 use crate::observability::RegisteredObservabilityPortV1;
+use tracedecay_application::{ObservabilityQueryPort, ObservabilityQueryV1};
 use tracedecay_session_memory::provider_usage::{
     ProviderUsageAggregateV1, ProviderUsageCoverageV1, ProviderUsageDeltaV1,
 };
-use tracedecay_application::{ObservabilityQueryPort, ObservabilityQueryV1};
 
 const LATENCY_DESCRIPTOR: &str = "provider-latency.v1";
 const LATENCY_PROJECTOR: &str = "costs-provider-latency-projector.v1";

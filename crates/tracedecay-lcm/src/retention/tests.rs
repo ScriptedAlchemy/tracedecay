@@ -720,11 +720,9 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<()
     );
     assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 0);
     assert_eq!(
-        std::fs::read_dir(crate::payload::payload_dir(
-            &store.storage_root
-        ))
-        .map_err(|error| error.to_string())?
-        .count(),
+        std::fs::read_dir(crate::payload::payload_dir(&store.storage_root))
+            .map_err(|error| error.to_string())?
+            .count(),
         0,
         "failed CAS removes the newly-created payload file"
     );

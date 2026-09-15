@@ -23,8 +23,10 @@ use super::{
 };
 use crate::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
 use crate::git_intelligence::NativeGitIntelligence;
-use tracedecay_graph_query::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
 use tracedecay_application::git::{GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1};
+use tracedecay_graph_query::{
+    CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation,
+};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
 

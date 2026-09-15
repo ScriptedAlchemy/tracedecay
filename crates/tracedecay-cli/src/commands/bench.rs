@@ -12,11 +12,9 @@ pub(crate) async fn handle_bench(
     let queries_toml = queries
         .map(std::fs::read_to_string)
         .transpose()
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("failed to read query file: {error}"),
-            },
-        )?;
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("failed to read query file: {error}"),
+        })?;
     let result = daemon_tool_json(
         Some(&resolved.project_path),
         "tracedecay_admin_project",
@@ -31,11 +29,9 @@ pub(crate) async fn handle_bench(
     let output = result
         .get("output")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon bench response omitted output".to_string(),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon bench response omitted output".to_string(),
+        })?;
     print!("{output}");
     Ok(())
 }

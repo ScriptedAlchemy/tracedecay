@@ -211,8 +211,7 @@ where
     Refresh: FnOnce(
         daemon_control::DaemonServiceState,
     ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>>,
-    Restore:
-        FnOnce(daemon_control::DaemonServiceState) -> tracedecay_domain::errors::Result<()>,
+    Restore: FnOnce(daemon_control::DaemonServiceState) -> tracedecay_domain::errors::Result<()>,
 {
     let previous_state = quiesce()?;
     let _lifecycle_lease = match acquire() {
@@ -378,16 +377,12 @@ where
 }
 
 #[hotpath::measure(label = "cli.update.run")]
-pub(crate) fn run_update_command(
-    no_reinstall: bool,
-) -> tracedecay_domain::errors::Result<()> {
+pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay_domain::errors::Result<()> {
     run_update_flow("update", RefreshPolicy::Always, no_reinstall)
 }
 
 #[hotpath::measure(label = "cli.upgrade.run")]
-pub(crate) fn run_upgrade_command(
-    no_reinstall: bool,
-) -> tracedecay_domain::errors::Result<()> {
+pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay_domain::errors::Result<()> {
     run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
 }
 
@@ -499,11 +494,11 @@ fn run_post_update_subcommand(
         command.arg("--no-reinstall");
     }
     let status =
-        command.status().map_err(
-            |e| tracedecay_domain::errors::TraceDecayError::Config {
+        command
+            .status()
+            .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to run post-update with '{tracedecay_bin}': {e}"),
-            },
-        )?;
+            })?;
     if status.success() {
         return Ok(());
     }
@@ -562,11 +557,11 @@ pub(crate) fn record_completed_reinstall_pass(
     config: &mut UserConfig,
 ) -> tracedecay_domain::errors::Result<()> {
     if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
-        config.save().map_err(
-            |err| tracedecay_domain::errors::TraceDecayError::Config {
+        config
+            .save()
+            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("could not save tracedecay config: {err}"),
-            },
-        )?;
+            })?;
     }
     Ok(())
 }
@@ -628,8 +623,7 @@ pub(crate) async fn run_post_update_tasks(
 ) -> tracedecay_domain::errors::Result<()> {
     eprintln!("\nPreparing safe post-update maintenance.");
     eprintln!("  Waiting for TraceDecay writers to shut down cleanly — do not interrupt.");
-    let previous_daemon_state =
-        daemon_control::verify_installed_service_quiesced_under_lease()?;
+    let previous_daemon_state = daemon_control::verify_installed_service_quiesced_under_lease()?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
     let mutation_result = run_post_update_mutations(no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
@@ -755,10 +749,7 @@ mod tests {
                 Ok(())
             },
             |state| {
-                assert_eq!(
-                    state,
-                    daemon_control::DaemonServiceState::RunningEnabled
-                );
+                assert_eq!(state, daemon_control::DaemonServiceState::RunningEnabled);
                 order.borrow_mut().push("refresh");
                 Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
             },
@@ -779,10 +770,7 @@ mod tests {
             || Ok(daemon_control::DaemonServiceState::StoppedEnabled),
             || Ok(()),
             |state| {
-                assert_eq!(
-                    state,
-                    daemon_control::DaemonServiceState::RunningEnabled
-                );
+                assert_eq!(state, daemon_control::DaemonServiceState::RunningEnabled);
                 Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
             },
             |_| panic!("successful lease acquisition must not restore the old service"),
@@ -809,10 +797,7 @@ mod tests {
                 Ok(None)
             },
             |state| {
-                assert_eq!(
-                    state,
-                    daemon_control::DaemonServiceState::RunningEnabled
-                );
+                assert_eq!(state, daemon_control::DaemonServiceState::RunningEnabled);
                 order.borrow_mut().push("restore");
                 Ok(())
             },

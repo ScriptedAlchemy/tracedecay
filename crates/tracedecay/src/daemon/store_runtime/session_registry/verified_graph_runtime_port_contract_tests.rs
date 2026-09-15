@@ -4,12 +4,12 @@ use std::sync::atomic::AtomicBool;
 
 use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
     VerifiedGraphSnapshot,
 };
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_store::{
     FactReadControl, GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1,
@@ -594,7 +594,8 @@ async fn exact_shard_retirement_closes_retained_graph_after_root_is_absent() {
 #[tokio::test]
 async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_graph() {
     let fixture = ContractFixture::new("session-relation-close-retry").await;
-    let session_sync = Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
+    let session_sync =
+        Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
     fixture
         .registry
         .install_session_sync_service(&session_sync)

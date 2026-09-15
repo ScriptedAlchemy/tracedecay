@@ -13,8 +13,8 @@ use tracedecay_store::{
     WorkflowFactRecord, derive_canonical_projection, workflow_semantic_kind,
 };
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_lcm::contracts::LcmError;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_sessions::runtime::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
@@ -1573,7 +1573,13 @@ pub(super) async fn apply_effect(
     // into that already-deep composition overflows the base-opt worker stack.
     match effect {
         ObservationProjection::Message(projection) => {
-            Box::pin(apply_message_effect(conn, sequence, observation, projection)).await
+            Box::pin(apply_message_effect(
+                conn,
+                sequence,
+                observation,
+                projection,
+            ))
+            .await
         }
         ObservationProjection::Composite {
             message,

@@ -61,10 +61,7 @@ pub struct DaemonAdvisoryCycleInvocationOwner {
 }
 
 impl DaemonAdvisoryCycleInvocationOwner {
-    pub fn new(
-        project_id: ProjectId,
-        service: Arc<dyn DaemonAdvisoryCycleInvocationPort>,
-    ) -> Self {
+    pub fn new(project_id: ProjectId, service: Arc<dyn DaemonAdvisoryCycleInvocationPort>) -> Self {
         Self {
             project_id,
             service,

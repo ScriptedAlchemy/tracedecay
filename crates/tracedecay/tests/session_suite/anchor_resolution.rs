@@ -19,6 +19,10 @@ use tracedecay_domain::{
     VectorWatermark, WatermarkDriftV1,
 };
 use tracedecay_host_admission::HostAdmissionFacade;
+use tracedecay_session_memory::anchor_resolution::{
+    EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
+};
+use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
@@ -29,10 +33,6 @@ use tracedecay_store::{
     StoredFactV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
-use tracedecay_session_memory::anchor_resolution::{
-    EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
-};
-use tracedecay_session_memory::memory::MemoryApplication;
 
 const GENERATION: u64 = 7;
 const PROJECTION_SHARD: &str = "observation.projection";

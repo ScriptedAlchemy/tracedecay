@@ -733,7 +733,8 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let serving = status_output(serving);
     assert_eq!(serving["retrieval_serving"], json!({"status": "serving"}));
     assert_eq!(
-        serving["serving_branch"], json!("main"),
+        serving["serving_branch"],
+        json!("main"),
         "a serving census restores the branch claim: {serving}",
     );
 

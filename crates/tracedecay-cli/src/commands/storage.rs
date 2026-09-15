@@ -291,11 +291,7 @@ fn handle_wipe_inner(
     all: bool,
     assume_yes: bool,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>>
-            + Send
-            + 'static,
-    >,
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
 > {
     // Erase the deeply nested wipe future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
@@ -457,11 +453,7 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay_domain::errors::Result<
 fn handle_list_inner(
     all: bool,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>>
-            + Send
-            + 'static,
-    >,
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
 > {
     // Erase the deeply nested list future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.

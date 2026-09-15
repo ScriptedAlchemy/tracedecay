@@ -79,11 +79,9 @@ pub(crate) async fn handle_host_bundle_component_command(
         }
     })?;
     let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            },
-        )?;
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
     let mut user_config = tracedecay_session_memory::user_config::UserConfig::load();
     let explicitly_scoped = agent.is_some();
     let agent_ids = match agent {
@@ -102,11 +100,9 @@ pub(crate) async fn handle_host_bundle_component_command(
     }
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(
-            |_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "system clock is before the Unix epoch".to_string(),
-            },
-        )?
+        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "system clock is before the Unix epoch".to_string(),
+        })?
         .as_secs();
     for agent_id in &agent_ids {
         let component_set = canonical_host_component_set(agent_id, options.component, now_unix)?;
@@ -151,11 +147,11 @@ pub(crate) async fn handle_host_bundle_component_command(
                 user_config.installed_agents.push(agent_id);
             }
         }
-        user_config.save().map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
+        user_config
+            .save()
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to save user config: {error}"),
-            }
-        })?;
+            })?;
     }
     Ok(())
 }
@@ -263,11 +259,12 @@ fn apply_host_bundle_artifact_action_at(
             message: "artifact restore requires --yes".to_string(),
         });
     }
-    let component = options.component.ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: "artifact backup/restore requires --component".to_string(),
-        }
-    })?;
+    let component =
+        options
+            .component
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "artifact backup/restore requires --component".to_string(),
+            })?;
     let (agent_id, backup_operation_id) = match &action {
         crate::cli::HostBundleAction::ArtifactBackup { agent } => (agent.as_str(), None),
         crate::cli::HostBundleAction::ArtifactRestore { agent, backup_id } => {
@@ -296,11 +293,9 @@ fn apply_host_bundle_artifact_action_at(
         }
     };
     let component_set = canonical_host_component_set(agent_id, Some(component), now_unix)?
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: unsupported_host_component_set_message(agent_id),
-            },
-        )?;
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: unsupported_host_component_set_message(agent_id),
+        })?;
     ensure_artifact_only_restore_boundary(agent_id, &component_set, home, lifecycle_root)?;
     let [entry] = component_set.component_set.components.as_slice() else {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -310,11 +305,9 @@ fn apply_host_bundle_artifact_action_at(
     let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
         tracedecay_application::request_identity::GlobalOperationIdentityKind::HostArtifact,
     )
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("could not generate host artifact operation id: {error}"),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("could not generate host artifact operation id: {error}"),
+    })?;
     let mut writer =
         tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
             home,
@@ -351,18 +344,14 @@ pub(crate) async fn handle_host_bundle_artifact_command(
         }
     })?;
     let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            },
-        )?;
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(
-            |_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "system clock is before the Unix epoch".to_string(),
-            },
-        )?
+        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "system clock is before the Unix epoch".to_string(),
+        })?
         .as_secs();
     let is_restore = matches!(
         &action,
@@ -414,11 +403,9 @@ fn component_set_request(
     let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
         tracedecay_application::request_identity::GlobalOperationIdentityKind::HostComponentSet,
     )
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("could not generate host lifecycle operation id: {error}"),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("could not generate host lifecycle operation id: {error}"),
+    })?;
     let host = component_set.component_set.host;
     Ok(
         tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1 {
@@ -808,11 +795,9 @@ fn apply_default_canonical_component_set(
 ) -> tracedecay_domain::errors::Result<()> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(
-            |_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "system clock is before the Unix epoch".to_string(),
-            },
-        )?
+        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "system clock is before the Unix epoch".to_string(),
+        })?
         .as_secs();
     let component_set =
         canonical_host_component_set(agent_id, None, now_unix)?.ok_or_else(|| {
@@ -821,11 +806,9 @@ fn apply_default_canonical_component_set(
             }
         })?;
     let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            },
-        )?;
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
     apply_canonical_component_set(
         agent_id,
         operation,
@@ -844,10 +827,8 @@ fn apply_default_canonical_component_set(
 }
 
 fn load_host_lifecycle_user_config() -> tracedecay_domain::errors::Result<UserConfig> {
-    UserConfig::load_strict().map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("failed to load host lifecycle policy: {error}"),
-        }
+    UserConfig::load_strict().map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("failed to load host lifecycle policy: {error}"),
     })
 }
 
@@ -983,17 +964,12 @@ impl FeedbackRollbackIdentityV2 {
     }
 }
 
-fn canonical_feedback_path(
-    label: &str,
-    path: &Path,
-) -> tracedecay_domain::errors::Result<PathBuf> {
-    fs::canonicalize(path).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "could not canonicalize feedback rollback {label} {}: {error}",
-                path.display()
-            ),
-        }
+fn canonical_feedback_path(label: &str, path: &Path) -> tracedecay_domain::errors::Result<PathBuf> {
+    fs::canonicalize(path).map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!(
+            "could not canonicalize feedback rollback {label} {}: {error}",
+            path.display()
+        ),
     })
 }
 
@@ -1076,32 +1052,24 @@ fn feedback_rollback_inputs(
         }
     })?;
     let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            },
-        )?;
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
     let host = host_kind_for_agent(agent_id)?;
     let previous = tracedecay::agents::host_bundle_v2::latest_host_component_set_receipt_at(
         &lifecycle_root,
         host,
     )
     .map_err(host_bundle_error)?
-    .ok_or_else(
-        || tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("no aggregate host receipt exists for {agent_id}"),
-        },
-    )?;
+    .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("no aggregate host receipt exists for {agent_id}"),
+    })?;
     let component = selected_feedback_component(&previous)?;
     let mut target =
         tracedecay::agents::host_bundle_registry::verified_embedded_host_bundle(host, component, 0)
-            .map_err(
-                |error| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!(
-                        "compiled feedback route is unavailable for {agent_id}: {error}"
-                    ),
-                },
-            )?;
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("compiled feedback route is unavailable for {agent_id}: {error}"),
+            })?;
     let companion_owned_paths = companion_owned_live_paths(&home, &previous)?;
     target
         .manifest
@@ -1131,11 +1099,9 @@ fn feedback_rollback_inputs(
             .artifacts
             .iter_mut()
             .find(|artifact| artifact.relative_path == content.relative_path)
-            .ok_or_else(
-                || tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "compiled feedback route content has no manifest artifact".to_string(),
-                },
-            )?;
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "compiled feedback route content has no manifest artifact".to_string(),
+            })?;
         artifact.artifact_digest = Sha256::digest(&content.bytes).into();
     }
     Ok((home, lifecycle_root, previous, target))
@@ -1163,11 +1129,9 @@ fn feedback_request(
     let operation_id = tracedecay_application::request_identity::mint_global_operation_id(
         tracedecay_application::request_identity::GlobalOperationIdentityKind::HostFeedbackRollback,
     )
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("could not generate feedback rollback operation id: {error}"),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("could not generate feedback rollback operation id: {error}"),
+    })?;
     Ok(
         tracedecay::agents::host_bundle_v2::HostBundleExecutionRequestV1 {
             lifecycle: tracedecay::agents::host_bundle_v2::HostBundleLifecycleRequestV1 {
@@ -1415,11 +1379,9 @@ fn feedback_registration_path<'a>(
     paths
         .get(file.path_index)
         .map(PathBuf::as_path)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: "feedback registration path index is invalid".to_string(),
-            },
-        )
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "feedback registration path index is invalid".to_string(),
+        })
 }
 
 fn capture_feedback_applied_registration(
@@ -1509,11 +1471,8 @@ fn validate_feedback_registration_restore(
             applied
         } else if effect_started {
             let intent_path = tracedecay::agents::host_config_write_intent_path(
-                intent_root.ok_or_else(|| {
-                    tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "feedback registration effect has no write-intent root"
-                            .to_string(),
-                    }
+                intent_root.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "feedback registration effect has no write-intent root".to_string(),
                 })?,
                 path,
             )?;
@@ -1855,14 +1814,12 @@ fn restore_feedback_file_permissions(
     state: &FeedbackFilePermissionsV2,
 ) -> tracedecay_domain::errors::Result<()> {
     let mut permissions = fs::metadata(path)
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "could not inspect feedback registration permissions {}: {error}",
-                    path.display()
-                ),
-            },
-        )?
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "could not inspect feedback registration permissions {}: {error}",
+                path.display()
+            ),
+        })?
         .permissions();
     #[cfg(unix)]
     if let Some(mode) = state.unix_mode {
@@ -1881,14 +1838,12 @@ fn restore_feedback_file_permissions(
     fs::File::open(path)
         .and_then(|file| file.sync_all())
         .and_then(|()| sync_parent_directory(path, DirectorySyncPolicy::TolerateUnsupported))
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "could not durably restore feedback registration {}: {error}",
-                    path.display()
-                ),
-            },
-        )
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "could not durably restore feedback registration {}: {error}",
+                path.display()
+            ),
+        })
 }
 
 fn write_feedback_state(
@@ -1912,11 +1867,9 @@ fn write_feedback_state(
         &bytes,
         DirectorySyncPolicy::TolerateUnsupported,
     )
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("could not durably publish feedback rollback state: {error}"),
-        },
-    )
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("could not durably publish feedback rollback state: {error}"),
+    })
 }
 
 fn feedback_doctor_state_path(lifecycle_root: &Path, agent_id: &str) -> PathBuf {
@@ -1939,11 +1892,9 @@ fn persist_feedback_state(
         "status": state.status,
         "state_path": state_path,
     }))
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("could not serialize feedback Doctor state: {error}"),
-        },
-    )?;
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("could not serialize feedback Doctor state: {error}"),
+    })?;
     let parent = doctor_path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -2105,25 +2056,24 @@ fn feedback_rollback_apply(
         Ok(()) => {
             state.registration_effect_started = true;
             persist_feedback_state(state_path, &lifecycle_root, &state)?;
-            let activation_result =
-                tracedecay::agents::with_host_config_write_intents(
-                    state.registration_intent_root.clone(),
-                    || {
-                        integration.activate_deployed_host_component_registration(
-                            &[target.manifest.component],
-                            &context,
-                        )
-                    },
-                )
-                .and_then(|()| {
-                    if integration.id() == "cursor" {
-                        return Ok(());
-                    }
-                    let health = tracedecay::agents::HealthcheckContext {
-                        home: home.clone(),
-                        project_path: std::env::current_dir().unwrap_or_else(|_| home.clone()),
-                    };
-                    (integration.host_component_registration(target.manifest.component, &health)
+            let activation_result = tracedecay::agents::with_host_config_write_intents(
+                state.registration_intent_root.clone(),
+                || {
+                    integration.activate_deployed_host_component_registration(
+                        &[target.manifest.component],
+                        &context,
+                    )
+                },
+            )
+            .and_then(|()| {
+                if integration.id() == "cursor" {
+                    return Ok(());
+                }
+                let health = tracedecay::agents::HealthcheckContext {
+                    home: home.clone(),
+                    project_path: std::env::current_dir().unwrap_or_else(|_| home.clone()),
+                };
+                (integration.host_component_registration(target.manifest.component, &health)
                     == tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current)
                     .then_some(())
                     .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
@@ -2131,7 +2081,7 @@ fn feedback_rollback_apply(
                             "{agent_id} did not verify its activated feedback registration"
                         ),
                     })
-                });
+            });
             let capture_result = capture_feedback_applied_registration(
                 &home,
                 integration.as_ref(),
@@ -2192,11 +2142,9 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
         }
     })?;
     let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            },
-        )?;
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
     if host_kind_for_agent(&state.agent_id)? != state.host {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "feedback rollback state host does not match its integration".to_string(),
@@ -2518,11 +2466,7 @@ fn handle_host_bundle_recovery_command_inner(
     dry_run: bool,
     yes: bool,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>>
-            + Send
-            + 'static,
-    >,
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
 > {
     // Erase the deeply nested host-bundle-recovery future before it reaches
     // the measured wrapper so every profiling feature can compute its layout.
@@ -2588,22 +2532,18 @@ fn handle_host_bundle_recovery_command_inner(
 
         let now_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(
-                |_| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "system clock is before the Unix epoch".to_string(),
-                },
-            )?
+            .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "system clock is before the Unix epoch".to_string(),
+            })?
             .as_secs();
         for host in pending {
             let agent_id = tracedecay::agents::integration_id_for_host(host);
             let operation = writer
                 .pending_component_set_journal_operation(host)
                 .map_err(host_bundle_error)?
-                .ok_or_else(
-                    || tracedecay_domain::errors::TraceDecayError::Config {
-                        message: format!("{agent_id}: pending lifecycle journal disappeared"),
-                    },
-                )?;
+                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("{agent_id}: pending lifecycle journal disappeared"),
+                })?;
             let mut registration = CatalogHostComponentRegistrationAuthority::new(
                 agent_id,
                 &home,
@@ -2651,11 +2591,9 @@ fn host_kind_for_agent(
         .into_iter()
         .filter(|host| !ALIASED_HOSTS.contains(host))
         .find(|host| tracedecay::agents::integration_id_for_host(*host) == agent)
-        .ok_or_else(
-            || tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("agent {agent:?} has no embedded first-party host component"),
-            },
-        )
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("agent {agent:?} has no embedded first-party host component"),
+        })
 }
 
 fn host_bundle_error(
@@ -2766,11 +2704,11 @@ pub(crate) async fn handle_install_command(
             user_cfg.installed_agents.push(id);
             installed_names.push(name);
         }
-        user_cfg.save().map_err(|err| {
-            tracedecay_domain::errors::TraceDecayError::Config {
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to save user config: {err}"),
-            }
-        })?;
+            })?;
     } else {
         let (to_install, to_uninstall) =
             tracedecay::agents::pick_integrations_interactive(&home, &user_cfg.installed_agents)?;
@@ -2814,11 +2752,11 @@ pub(crate) async fn handle_install_command(
                 .agent_dashboard_enabled
                 .insert(id.clone(), !no_dashboard);
         }
-        user_cfg.save().map_err(|err| {
-            tracedecay_domain::errors::TraceDecayError::Config {
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to save user config: {err}"),
-            }
-        })?;
+            })?;
     }
 
     eprintln!();
@@ -2845,20 +2783,18 @@ pub(crate) async fn handle_install_command(
         crate::update_cmd::record_completed_reinstall_pass(&mut user_cfg)?;
     } else {
         user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-        user_cfg.save().map_err(|err| {
-            tracedecay_domain::errors::TraceDecayError::Config {
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to save user config: {err}"),
-            }
-        })?;
+            })?;
     }
 
     tracedecay::agents::offer_git_post_commit_hook(&tracedecay_bin);
     Ok(())
 }
 
-pub(crate) async fn handle_reinstall_command(
-    adopt: bool,
-) -> tracedecay_domain::errors::Result<()> {
+pub(crate) async fn handle_reinstall_command(adopt: bool) -> tracedecay_domain::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
@@ -3058,11 +2994,9 @@ fn preflight_agent_integration(
 
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(
-            |_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "system clock is before the Unix epoch".to_string(),
-            },
-        )?
+        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "system clock is before the Unix epoch".to_string(),
+        })?
         .as_secs();
     let Some(component_set) = canonical_host_component_set(agent_id, None, now_unix)? else {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -3092,11 +3026,9 @@ fn preflight_agent_integration(
         ));
     }
     let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            },
-        )?;
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
     preview_canonical_component_set(
         agent_id,
         HostBundleCliOperation::Repair,
@@ -3255,11 +3187,11 @@ pub(crate) async fn handle_uninstall_command(
         )?;
         user_cfg.installed_agents.retain(|a| a != &id);
         user_cfg.agent_dashboard_enabled.remove(&id);
-        user_cfg.save().map_err(|err| {
-            tracedecay_domain::errors::TraceDecayError::Config {
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to save user config: {err}"),
-            }
-        })?;
+            })?;
     } else {
         for id in user_cfg.installed_agents.clone() {
             apply_default_canonical_component_set(
@@ -3272,11 +3204,11 @@ pub(crate) async fn handle_uninstall_command(
         }
         user_cfg.installed_agents.clear();
         user_cfg.agent_dashboard_enabled.clear();
-        user_cfg.save().map_err(|err| {
-            tracedecay_domain::errors::TraceDecayError::Config {
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to save user config: {err}"),
-            }
-        })?;
+            })?;
         eprintln!("All agent integrations removed.");
     }
     Ok(())
