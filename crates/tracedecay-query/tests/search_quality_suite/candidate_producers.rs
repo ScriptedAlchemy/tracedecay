@@ -1360,6 +1360,47 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
 }
 
 #[test]
+fn clone_body_source_range_selects_the_containing_occurrence() {
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.clone.range".to_owned(),
+        "src/range.ts".to_owned(),
+        b"export function selected(input) { const one = parse(input); const two = use(one); const three = use(two); return finish(three, input, one, two); }\n".to_vec(),
+    )]);
+    let (pages, receipt) = drain_verified_pages(&fixture, 1);
+    let expected = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .next()
+        .expect("clone body");
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("lexical-artifact-v16.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let verified = {
+        let mut builder =
+            CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
+                .expect("create V16 artifact");
+        for page in &pages {
+            builder.append_page(page, &control).expect("append page");
+        }
+        finish_staged_artifact(&mut builder, &receipt, &control)
+    };
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &artifact_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("open V16 artifact");
+
+    let selected = reader
+        .clone_body_by_source_range(&expected.occurrence.path, expected.occurrence.body_span)
+        .expect("select clone body by source range")
+        .expect("selected clone body");
+
+    assert_eq!(selected, *expected);
+}
+
+#[test]
 fn v16_clone_payloads_are_content_addressed_and_postings_page() {
     let body = "one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten();";
     let fixture = real_lexical_source_fixture_from_sources(vec![

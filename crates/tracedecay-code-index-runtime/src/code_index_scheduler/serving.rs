@@ -550,6 +550,11 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 .into_iter()
                 .filter(|member| {
                     member.occurrence.symbol_occurrence_id != source.occurrence.symbol_occurrence_id
+                        && tracedecay_code_index::clones::verify_exact_clone_payload(
+                            &source.payload,
+                            &member.payload,
+                            &key,
+                        )
                 })
                 .collect::<Vec<_>>();
             if !members.is_empty() {
