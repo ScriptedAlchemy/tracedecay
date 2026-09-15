@@ -188,7 +188,10 @@ fn declared_node_matches_scope(
             && node.project_id == scope.project_id
             && node.repository_id == scope.repository_id
             && scope.reference.as_ref() == Some(&node.reference)
-            && node.worktree_id.as_ref() == Some(&scope.worktree_id)
+            && node
+                .worktree_id
+                .as_ref()
+                .is_none_or(|worktree_id| worktree_id == &scope.worktree_id)
     })
 }
 
