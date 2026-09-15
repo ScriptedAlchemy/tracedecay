@@ -1358,12 +1358,13 @@ fn sealed_store_drops_whitespace_only_window_chunks() {
         }),
         "sealed rows must not include whitespace-only FileWindow chunks"
     );
-    // One-line functions previously minted signature + body + whitespace window
-    // (3N). Attribution keeps signature + body only.
-    assert_eq!(chunks.len(), FUNCTIONS * 2);
+    // A one-line declaration is one body row: its signature span is the body.
+    assert_eq!(chunks.len(), FUNCTIONS);
     assert!(
-        chunks.len() < FUNCTIONS * 3,
-        "sealed chunk count must drop below the three-per-function baseline"
+        chunks
+            .iter()
+            .all(|chunk| { chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody }),
+        "one-line declarations must seal as body rows only"
     );
     let sealed = generation.encode_sealed().expect("generation seals");
     assert!(!sealed.is_empty(), "sealed store must carry bytes");
