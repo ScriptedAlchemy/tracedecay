@@ -140,7 +140,7 @@ impl WorkflowFanOutCensusStoragePort for WorkflowSqliteAuthority {
         &self,
         run_id: &RunId,
     ) -> Result<Option<WorkflowFanOutCensusV1>, WorkflowFanOutCensusError> {
-        let transaction = self.handle().begin_immediate().map_err(unavailable)?;
+        let transaction = self.handle().begin_deferred().map_err(unavailable)?;
         let result = latest_tx(&transaction, run_id);
         let _ = transaction.rollback();
         result
@@ -151,7 +151,7 @@ impl WorkflowFanOutCensusStoragePort for WorkflowSqliteAuthority {
         run_id: &RunId,
         workflow_sequence: u64,
     ) -> Result<Option<WorkflowFanOutCensusV1>, WorkflowFanOutCensusError> {
-        let transaction = self.handle().begin_immediate().map_err(unavailable)?;
+        let transaction = self.handle().begin_deferred().map_err(unavailable)?;
         let result = before_tx(&transaction, run_id, workflow_sequence);
         let _ = transaction.rollback();
         result
@@ -263,7 +263,7 @@ impl WorkflowFanOutCensusStoragePort for WorkflowSqliteAuthority {
         if limit == 0 || limit > 256 {
             return Err(WorkflowFanOutCensusError::InvalidInput);
         }
-        let transaction = self.handle().begin_immediate().map_err(unavailable)?;
+        let transaction = self.handle().begin_deferred().map_err(unavailable)?;
         let rows = query_tx(
             &transaction,
             "SELECT census_payload, census_digest
@@ -312,7 +312,7 @@ impl WorkflowFanOutCensusStoragePort for WorkflowSqliteAuthority {
         authority: &WorkAuthority,
         after: Option<&WorkflowActiveRunRecoveryCursorV1>,
     ) -> Result<WorkflowFanOutCensusBackfillPageV1, WorkflowFanOutCensusError> {
-        let transaction = self.handle().begin_immediate().map_err(unavailable)?;
+        let transaction = self.handle().begin_deferred().map_err(unavailable)?;
         let page_limit = i64::try_from(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 + 1)
             .map_err(|_| WorkflowFanOutCensusError::Unavailable)?;
         let rows = match after {
