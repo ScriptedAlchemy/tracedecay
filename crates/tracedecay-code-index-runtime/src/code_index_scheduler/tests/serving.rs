@@ -45,7 +45,7 @@ use tracedecay_runtime_core::resident_memory::{
 };
 
 use super::{
-    CALLER_PAGE, GitFixture, ReadyRetrievalControlV1, active_text_artifact_path,
+    ALPHA_LIB_V1, CALLER_PAGE, GitFixture, ReadyRetrievalControlV1, active_text_artifact_path,
     application_context, build_progress_snapshot, caller_star_sources, callers_page_meta,
     core_search_request, decode_hex, git, install_verified_graph_store,
     install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
@@ -486,6 +486,73 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
         text.advance_text_serving(1),
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
     ));
+}
+
+#[test]
+fn same_process_text_restore_releases_the_decoded_generation_before_projection() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed generation"));
+    assert!(
+        scheduler.latest_complete_already_decoded().is_some(),
+        "seal installs the built generation so reconcile does not encode then decode"
+    );
+    assert_eq!(scheduler.sealed_decode_count(), 0);
+
+    let text = scheduler
+        .servable_retained_text_generation()
+        .expect("same-process text restore");
+    assert!(
+        scheduler.latest_complete_already_decoded().is_none(),
+        "pre-seat text projection must drop the build-phase generation before pages start"
+    );
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        0,
+        "text restore must not replace the released pin with a sealed-byte decode"
+    );
+    while !text
+        .advance_text_serving(64)
+        .expect("advance same-process text projection")
+    {}
+    assert!(text.query_owners_are_ready());
+    assert!(
+        scheduler.latest_complete_already_decoded().is_none(),
+        "ready exact and lexical owners must not re-pin the decoded generation"
+    );
+    assert_eq!(scheduler.sealed_decode_count(), 0);
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("one-file incremental seal"),
+    );
+    assert!(
+        scheduler.latest_complete_already_decoded().is_some(),
+        "incremental seal must decode the parent and install the successor"
+    );
+    assert!(
+        scheduler.sealed_decode_count() >= 1,
+        "releasing the pin forces the next increment to decode on demand"
+    );
+    let incremental_text = scheduler
+        .servable_retained_text_generation()
+        .expect("incremental text restore");
+    assert!(
+        scheduler.latest_complete_already_decoded().is_none(),
+        "incremental text restore must release the successor before projection"
+    );
+    while !incremental_text
+        .advance_text_serving(64)
+        .expect("advance incremental text projection")
+    {}
+    assert!(incremental_text.query_owners_are_ready());
 }
 
 #[test]

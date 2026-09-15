@@ -2171,7 +2171,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     None,
                 )
             } else {
-                let mut source = text_artifact_store
+                let source = text_artifact_store
                     .open_sealed_source_with_progress(
                         &sealed_identity,
                         &text_control,
@@ -2214,14 +2214,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                         },
                     )
                     .ok()?;
-                if let Ok(Some(published)) = self.publication.active_already_decoded()
-                    && published.manifest().generation_id == generation_id
-                {
-                    // Same-process successor: the builder still holds the decoded
-                    // files. Re-decoding the sealed files array is how a 455 MiB
-                    // cancel-batch successor spent the receipt wait in source_scan.
-                    let _ = source.attach_published_files(&published);
-                }
                 (
                     source.metadata().clone(),
                     source.format_revision(),
@@ -2253,6 +2245,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             .flatten()
             .as_ref()
             != Some(&pointer)
+        {
+            text_control.retire();
+            return None;
+        }
+        if self
+            .publication
+            .release_decoded_active_after_seal()
+            .is_err()
         {
             text_control.retire();
             return None;
