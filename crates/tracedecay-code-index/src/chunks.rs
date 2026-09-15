@@ -309,6 +309,35 @@ impl ExactExtractionAuthorityV1 {
         admitted.into_iter().collect()
     }
 
+    /// Wrap chunks after their owning file artifact has passed its complete
+    /// canonical validation. The file authority and this exact authority are
+    /// minted together and immutable, so repeating every chunk's JSON digest
+    /// here would only re-prove bytes the caller just validated. Cardinality,
+    /// uniqueness, and authority membership remain fail-closed at the handoff.
+    pub(crate) fn admit_validated_all(
+        &self,
+        chunks: Vec<Arc<CodeSearchChunkV1>>,
+    ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
+        if chunks.len() != self.chunk_digests.len() {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "validated chunk set does not match parser-backed exact extraction authority"
+                    .to_owned(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut admitted = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            if !seen.insert(chunk.id.clone()) || !self.chunk_digests.contains_key(&chunk.id) {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "validated chunk set does not match parser-backed exact extraction authority"
+                        .to_owned(),
+                ));
+            }
+            admitted.push(ExtractionAdmittedCodeSearchChunkV1 { chunk });
+        }
+        Ok(admitted)
+    }
+
     /// Rebind an exact authority only after every prior parser-backed chunk
     /// has been verified and the carried chunks preserve logical identity and
     /// content digest. This is the restart/incremental bridge for the
@@ -2360,6 +2389,26 @@ mod tests {
         let admitted = authority.admit(expected.clone()).expect("exact admission");
 
         assert_eq!(admitted.into_chunk(), *expected);
+    }
+
+    #[test]
+    fn validated_batch_admission_keeps_exact_authority_membership_fail_closed() {
+        let chunks = file_chunks();
+        chunks
+            .validate()
+            .expect("file chunks validate before admission");
+        let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
+        let admitted = authority
+            .admit_validated_all(chunks.chunks.clone())
+            .expect("validated exact batch admits");
+        assert_eq!(admitted.len(), chunks.chunks.len());
+
+        let mut foreign = chunks.chunks.clone();
+        Arc::make_mut(&mut foreign[0]).id = id("chunk.foreign");
+        assert!(
+            authority.admit_validated_all(foreign).is_err(),
+            "membership must still reject a foreign chunk after file validation"
+        );
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";

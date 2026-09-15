@@ -320,6 +320,7 @@ pub struct VerifiedSealedLexicalPageV1 {
     cumulative_digest: ManifestDigest,
     next_cursor: VerifiedSealedLexicalCursorV1,
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
+    serialized_chunks: Vec<Vec<u8>>,
     symbol_displays: Vec<Option<VerifiedSealedLexicalSymbolDisplayV1>>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     previous_cursor: VerifiedSealedLexicalCursorV1,
@@ -410,20 +411,22 @@ impl VerifiedSealedLexicalPageV1 {
         let mut cumulative_digest = self.previous_cursor.cumulative_digest.clone();
         let mut import_dictionary_digest = self.previous_cursor.import_dictionary_digest.clone();
         let mut payload_bytes = 0u64;
-        if self.symbol_displays.len() != self.chunks.len() {
+        if self.symbol_displays.len() != self.chunks.len()
+            || self.serialized_chunks.len() != self.chunks.len()
+        {
             return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical symbol-display cardinality does not match its chunks".to_owned(),
+                "sealed lexical page payload cardinality does not match its chunks".to_owned(),
             ));
         }
-        for (admitted, display) in self.chunks.iter().zip(&self.symbol_displays) {
-            let serialized = serde_json::to_vec(admitted.chunk()).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed lexical chunk serialization failed: {error}"
-                ))
-            })?;
-            hash_record(&mut page_hasher, &serialized)?;
+        for ((admitted, serialized), display) in self
+            .chunks
+            .iter()
+            .zip(&self.serialized_chunks)
+            .zip(&self.symbol_displays)
+        {
+            hash_record(&mut page_hasher, serialized)?;
             cumulative_digest =
-                advance_digest(&cumulative_digest, SOURCE_CHAIN_RECORD_DOMAIN, &serialized)?;
+                advance_digest(&cumulative_digest, SOURCE_CHAIN_RECORD_DOMAIN, serialized)?;
             match (&admitted.chunk().anchor.symbol_occurrence_id, display) {
                 (Some(occurrence), Some(display)) if occurrence == display.occurrence() => {
                     let serialized_display = serde_json::to_vec(display).map_err(|error| {
@@ -659,8 +662,15 @@ impl VerifiedSealedLexicalPageV1 {
                 ))
             },
         );
+        let serialized_chunk_bytes = self.serialized_chunks.iter().fold(
+            self.serialized_chunks
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Vec<u8>>()),
+            |bytes, chunk| bytes.saturating_add(chunk.capacity()),
+        );
         self.imports.iter().fold(
             chunk_bytes
+                .saturating_add(serialized_chunk_bytes)
                 .saturating_add(symbol_display_bytes)
                 .saturating_add(digest_bytes)
                 .saturating_add(
@@ -846,6 +856,7 @@ pub enum VerifiedSealedLexicalPageBatchReadV1 {
 
 struct PendingSealedLexicalPageV1 {
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
+    serialized_chunks: Vec<Vec<u8>>,
     page_bytes: usize,
     symbol_displays: Vec<Option<VerifiedSealedLexicalSymbolDisplayV1>>,
     imports: Vec<CodeIndexImportEvidenceV1>,
@@ -1531,6 +1542,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let mut cursor = previous_cursor.clone();
         let mut page_hasher = page_hasher(cursor.next_page_ordinal);
         let mut chunks = Vec::new();
+        let mut serialized_chunks = Vec::new();
         let mut page_bytes = 0usize;
         let mut symbol_displays = Vec::new();
         let mut symbol_display_bytes = 0usize;
@@ -1594,6 +1606,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         previous_cursor,
                         PendingSealedLexicalPageV1 {
                             chunks,
+                            serialized_chunks,
                             page_bytes,
                             symbol_displays,
                             imports,
@@ -1624,6 +1637,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 })?;
                 symbol_display_bytes = next_symbol_display_bytes;
                 chunks.push(admitted.chunks[chunk_ordinal].clone());
+                serialized_chunks.push(serialized);
                 symbol_displays.push(display);
                 chunk_ordinal += 1;
                 cursor.next_chunk_ordinal = u64::try_from(chunk_ordinal).map_err(|_| {
@@ -1636,6 +1650,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         previous_cursor,
                         PendingSealedLexicalPageV1 {
                             chunks,
+                            serialized_chunks,
                             page_bytes,
                             symbol_displays,
                             imports,
@@ -1676,6 +1691,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         previous_cursor,
                         PendingSealedLexicalPageV1 {
                             chunks,
+                            serialized_chunks,
                             page_bytes,
                             symbol_displays,
                             imports,
@@ -1725,6 +1741,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     previous_cursor,
                     PendingSealedLexicalPageV1 {
                         chunks,
+                        serialized_chunks,
                         page_bytes,
                         symbol_displays,
                         imports,
@@ -1741,6 +1758,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 previous_cursor,
                 PendingSealedLexicalPageV1 {
                     chunks,
+                    serialized_chunks,
                     page_bytes,
                     symbol_displays,
                     imports,
@@ -1809,7 +1827,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let start_index = self.file_range_index(file_offset)?;
-        let workers = crate::parallelism::indexing_workers().max(1);
         let mut prefetch_bytes = 0u64;
         let mut inputs = Vec::new();
         for (index, &(start, end)) in self.file_ranges[start_index..].iter().enumerate() {
@@ -1819,10 +1836,9 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 )
             })?;
             if index > 0
-                && (inputs.len() >= workers
-                    || prefetch_bytes
-                        .checked_add(file_bytes)
-                        .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1))
+                && prefetch_bytes
+                    .checked_add(file_bytes)
+                    .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1)
             {
                 break;
             }
@@ -1858,6 +1874,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         Ok(())
     }
 
+    #[hotpath::measure(label = "code_index.lexical_source.memory_prefetch")]
     fn fill_admitted_window_from_memory(
         &mut self,
         file_offset: u64,
@@ -1869,6 +1886,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             )
         })?;
         let start_index = self.file_range_index(file_offset)?;
+        let workers = crate::parallelism::indexing_workers().max(1);
         let mut prefetch_bytes = 0u64;
         let mut inputs = Vec::new();
         for (index, file) in files[start_index..].iter().enumerate() {
@@ -1883,9 +1901,10 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 )
             })?;
             if index > 0
-                && prefetch_bytes
-                    .checked_add(file_bytes)
-                    .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1)
+                && (inputs.len() >= workers
+                    || prefetch_bytes
+                        .checked_add(file_bytes)
+                        .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1))
             {
                 break;
             }
@@ -1920,6 +1939,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     ) -> Result<StagedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         let PendingSealedLexicalPageV1 {
             chunks,
+            serialized_chunks,
             page_bytes,
             symbol_displays,
             imports,
@@ -1997,6 +2017,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             cumulative_digest: cursor.cumulative_digest.clone(),
             next_cursor: cursor.clone(),
             chunks,
+            serialized_chunks,
             symbol_displays,
             imports,
             previous_cursor: previous_cursor.clone(),
@@ -2845,7 +2866,7 @@ fn admit_validated_file_parts(
         }
         let imports = artifacts.imports.clone();
         let chunks = exact_authority
-            .admit_all(artifacts.chunks.chunks.clone())
+            .admit_validated_all(artifacts.chunks.chunks.clone())
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
         let mut serialized_chunks = Vec::with_capacity(chunks.len());
         let mut serialized_displays = Vec::with_capacity(chunks.len());
