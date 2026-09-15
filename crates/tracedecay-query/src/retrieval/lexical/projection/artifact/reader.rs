@@ -26,6 +26,9 @@ use tracedecay_domain::{
 use tracedecay_private_fs::open_private_file;
 
 use super::builder::compute_section_digests;
+use super::fingerprints::{
+    CloneFingerprintArtifactReadV1, CloneFingerprintReadRequestV1, read_clone_fingerprint_page,
+};
 use super::format::{
     ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, CodeLexicalImportMembershipWitnessV1,
     VerifiedCodeLexicalArtifactV1, artifact_digest, decode_ngram_bitmap, decode_padded_receipt,
@@ -84,18 +87,26 @@ pub struct CloneExactArtifactMemberV1 {
 pub const MAX_CLONE_EXACT_PAGE_MEMBERS_V1: usize = 1_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloneExactArtifactCursorV1 {
-    artifact_digest: ManifestDigest,
-    generation: CodeGenerationId,
-    key: CloneExactKeyV1,
-    authority_digest: ManifestDigest,
-    last_symbol_occurrence_id: SymbolOccurrenceId,
+pub struct CloneArtifactCursorV1 {
+    pub(super) artifact_digest: ManifestDigest,
+    pub(super) generation: CodeGenerationId,
+    pub(super) request_digest: ManifestDigest,
+    pub(super) after: CloneArtifactCursorPositionV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloneExactArtifactPageV1 {
-    pub members: Vec<CloneExactArtifactMemberV1>,
-    pub next_cursor: Option<CloneExactArtifactCursorV1>,
+pub(super) enum CloneArtifactCursorPositionV1 {
+    Exact(SymbolOccurrenceId),
+    Fingerprint {
+        body_digest: ManifestDigest,
+        payload_digest: ManifestDigest,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneArtifactPageV1<T> {
+    pub members: Vec<T>,
+    pub next_cursor: Option<CloneArtifactCursorV1>,
 }
 
 fn clone_authority_digest(
@@ -159,6 +170,10 @@ impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
 impl CodeLexicalArtifactReaderV1 {
     pub fn has_clone_index(&self) -> bool {
         self.layout.has_clone_index()
+    }
+
+    pub fn has_clone_fingerprints(&self) -> bool {
+        self.layout.has_clone_fingerprints()
     }
 
     /// Open a published artifact whose trust anchor is its content address:
@@ -584,10 +599,10 @@ impl CodeLexicalArtifactReaderV1 {
         &self,
         authority: &CloneBodyOccurrenceV1,
         key: &CloneExactKeyV1,
-        cursor: Option<&CloneExactArtifactCursorV1>,
+        cursor: Option<&CloneArtifactCursorV1>,
         limit: usize,
         control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<CloneExactArtifactPageV1, CodeLexicalArtifactErrorV1> {
+    ) -> Result<CloneArtifactPageV1<CloneExactArtifactMemberV1>, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
             || self.metadata.generation != authority.source_generation
@@ -607,7 +622,14 @@ impl CodeLexicalArtifactReaderV1 {
             )));
         }
         let authority_digest = clone_authority_digest(authority)?;
-        let after = self.clone_exact_after(key, cursor, &authority_digest)?;
+        let request_digest = canonical_sha256(&(
+            "tracedecay.clone-exact-request.v1",
+            self.receipt.artifact_digest(),
+            &authority_digest,
+            key,
+        ))
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let after = self.clone_exact_after(cursor, &request_digest)?;
         let fetch = limit.checked_add(1).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract("clone exact page limit overflowed".to_owned())
         })?;
@@ -640,38 +662,76 @@ impl CodeLexicalArtifactReaderV1 {
         }
         let next_cursor = (members.len() > limit)
             .then(|| {
-                members
-                    .get(limit - 1)
-                    .map(|member| CloneExactArtifactCursorV1 {
-                        artifact_digest: self.receipt.artifact_digest().clone(),
-                        generation: self.metadata.generation.clone(),
-                        key: key.clone(),
-                        authority_digest,
-                        last_symbol_occurrence_id: member.occurrence.symbol_occurrence_id.clone(),
-                    })
+                members.get(limit - 1).map(|member| CloneArtifactCursorV1 {
+                    artifact_digest: self.receipt.artifact_digest().clone(),
+                    generation: self.metadata.generation.clone(),
+                    request_digest,
+                    after: CloneArtifactCursorPositionV1::Exact(
+                        member.occurrence.symbol_occurrence_id.clone(),
+                    ),
+                })
             })
             .flatten();
         members.truncate(limit);
-        Ok(CloneExactArtifactPageV1 {
+        Ok(CloneArtifactPageV1 {
             members,
             next_cursor,
         })
     }
 
+    pub fn clone_fingerprint_page(
+        &self,
+        authority: &CloneBodyOccurrenceV1,
+        source: &CloneBodyPayloadV1,
+        cursor: Option<&CloneArtifactCursorV1>,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CloneFingerprintArtifactReadV1, CodeLexicalArtifactErrorV1> {
+        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
+            || self.metadata.generation != authority.source_generation
+        {
+            return Err(CodeLexicalArtifactErrorV1::Missing(
+                "clone lookup authority is unavailable".to_owned(),
+            ));
+        }
+        let authority_digest = clone_authority_digest(authority)?;
+        let connection = self.lock_connection()?;
+        read_clone_fingerprint_page(
+            &connection,
+            CloneFingerprintReadRequestV1 {
+                layout: self.layout,
+                receipt: &self.receipt,
+                authority_digest: &authority_digest,
+                authority,
+                source,
+                cursor,
+                limit,
+                control,
+            },
+        )
+    }
+
     fn clone_exact_after<'a>(
         &self,
-        key: &CloneExactKeyV1,
-        cursor: Option<&'a CloneExactArtifactCursorV1>,
-        authority_digest: &ManifestDigest,
+        cursor: Option<&'a CloneArtifactCursorV1>,
+        request_digest: &ManifestDigest,
     ) -> Result<&'a str, CodeLexicalArtifactErrorV1> {
         match cursor {
             Some(cursor)
                 if cursor.artifact_digest == *self.receipt.artifact_digest()
                     && cursor.generation == self.metadata.generation
-                    && cursor.key == *key
-                    && cursor.authority_digest == *authority_digest =>
+                    && cursor.request_digest == *request_digest =>
             {
-                Ok(cursor.last_symbol_occurrence_id.as_str())
+                match &cursor.after {
+                    CloneArtifactCursorPositionV1::Exact(symbol_occurrence_id) => {
+                        Ok(symbol_occurrence_id.as_str())
+                    }
+                    CloneArtifactCursorPositionV1::Fingerprint { .. } => {
+                        Err(CodeLexicalArtifactErrorV1::Contract(
+                            "clone cursor position does not match an exact read".to_owned(),
+                        ))
+                    }
+                }
             }
             Some(_) => Err(CodeLexicalArtifactErrorV1::Contract(
                 "clone exact cursor does not match its artifact, key, or authority".to_owned(),
@@ -1150,7 +1210,8 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
-            | LexicalArtifactLayoutV1::V15 => {
+            | LexicalArtifactLayoutV1::V15
+            | LexicalArtifactLayoutV1::V16 => {
                 lookup_term_ids(connection, terms).map_err(map_query_artifact_error)?
             }
         };
@@ -1161,7 +1222,8 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
-            | LexicalArtifactLayoutV1::V15 => v11_ids.len(),
+            | LexicalArtifactLayoutV1::V15
+            | LexicalArtifactLayoutV1::V16 => v11_ids.len(),
         };
         ensure_sqlite_bind_capacity(documents.parameters.len(), dynamic_binds)?;
         ensure_sqlite_bound_value_bytes(
@@ -1178,6 +1240,7 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
+            | LexicalArtifactLayoutV1::V16
                 if v11_ids.is_empty() =>
             {
                 "'[]'".to_owned()
@@ -1198,7 +1261,8 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
-            | LexicalArtifactLayoutV1::V15 => {
+            | LexicalArtifactLayoutV1::V15
+            | LexicalArtifactLayoutV1::V16 => {
                 let placeholders = std::iter::repeat_n("?", v11_ids.len())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -1260,7 +1324,8 @@ fn visit_lexical_rows(
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
-                | LexicalArtifactLayoutV1::V15 => {
+                | LexicalArtifactLayoutV1::V15
+                | LexicalArtifactLayoutV1::V16 => {
                     let encoded: Vec<(i64, String, i64)> =
                         serde_json::from_str(&encoded_frequencies).map_err(contract_error)?;
                     entries.reserve(encoded.len());
@@ -2002,7 +2067,8 @@ impl<'a> ArtifactQueryV1<'a> {
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
-            | LexicalArtifactLayoutV1::V15 => {
+            | LexicalArtifactLayoutV1::V15
+            | LexicalArtifactLayoutV1::V16 => {
                 let subtoken_field = field_code(LexicalFieldV1::Subtoken);
                 for term in whole_terms {
                     if let Some(term_id) =
@@ -2079,7 +2145,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
-                | LexicalArtifactLayoutV1::V15 => {
+                | LexicalArtifactLayoutV1::V15
+                | LexicalArtifactLayoutV1::V16 => {
                     sources.push(DocumentQueryV1::exact_id(
                         literal.field,
                         &literal.canonical_bytes,
@@ -2196,7 +2263,8 @@ impl<'a> ArtifactQueryV1<'a> {
             | LexicalArtifactLayoutV1::V12
             | LexicalArtifactLayoutV1::V13
             | LexicalArtifactLayoutV1::V14
-            | LexicalArtifactLayoutV1::V15 => "SELECT term FROM vocabulary WHERE in_fuzzy = 1",
+            | LexicalArtifactLayoutV1::V15
+            | LexicalArtifactLayoutV1::V16 => "SELECT term FROM vocabulary WHERE in_fuzzy = 1",
         }
     }
 
@@ -2252,7 +2320,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
-                | LexicalArtifactLayoutV1::V15 => {
+                | LexicalArtifactLayoutV1::V15
+                | LexicalArtifactLayoutV1::V16 => {
                     field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
                         .map_err(map_query_artifact_error)?
                 }
@@ -2301,7 +2370,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 | LexicalArtifactLayoutV1::V12
                 | LexicalArtifactLayoutV1::V13
                 | LexicalArtifactLayoutV1::V14
-                | LexicalArtifactLayoutV1::V15 => {
+                | LexicalArtifactLayoutV1::V15
+                | LexicalArtifactLayoutV1::V16 => {
                     let assigned = lookup_term_ids(self.connection, terms)
                         .map_err(map_query_artifact_error)?;
                     let term_ids = assigned.values().copied().collect::<Vec<_>>();

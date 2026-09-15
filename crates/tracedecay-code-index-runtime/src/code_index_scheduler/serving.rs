@@ -2106,7 +2106,7 @@ impl LatestCodeTextGenerationV1 {
                 let source = self.take_preopened_source_or_open(&sealed_identity, control)?;
                 let ready_progress =
                     self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
-                let needs_clone_successor = !reader.has_clone_index();
+                let needs_clone_successor = !reader.has_clone_fingerprints();
                 let prior = reader.verified_artifact().clone();
                 self.install_artifact_owners(reader, reader_reservation)?;
                 self.publish_text_progress_snapshot(ready_progress);
@@ -2655,7 +2655,7 @@ impl LatestCodeTextGenerationV1 {
             control,
         )
         .map_err(map_text_artifact_error)?;
-        let needs_clone_successor = !reader.has_clone_index();
+        let needs_clone_successor = !reader.has_clone_fingerprints();
         let prior = reader.verified_artifact().clone();
         self.install_artifact_owners(reader, reader_reservation)?;
         if needs_clone_successor {

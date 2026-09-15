@@ -1,20 +1,34 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+pub use tracedecay_code_extraction::{
+    CloneBodyEligibilityV1, CloneBodyRenameStatusV1, ConservativeCloneTokenV1,
+};
 use tracedecay_code_extraction::{
-    CloneBodyEligibilityV1, CloneBodyRenameIssueV1, CloneBodyRenameStatusV1,
-    CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1,
+    CloneBodyRenameIssueV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
     ExtractedCloneBodyV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
-    WorktreeId, canonical_sha256,
+    WorktreeId, canonical_json_bytes, canonical_sha256,
 };
 
 const BODY_DIGEST_DOMAIN: &str = "tracedecay.clone-body.v1";
 const CONSERVATIVE_DIGEST_DOMAIN: &str = "tracedecay.clone-conservative.v1";
 const RENAME_DIGEST_DOMAIN: &str = "tracedecay.clone-rename.v1";
 const PAYLOAD_DIGEST_DOMAIN: &str = "tracedecay.clone-payload.v1";
+const FINGERPRINT_DOMAIN: &str = "tracedecay.clone-fingerprint.v1";
+
+pub const CLONE_FINGERPRINT_K_V1: usize = 7;
+pub const CLONE_FINGERPRINT_WINDOW_V1: usize = 8;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct CloneFingerprintPositionV1 {
+    pub fingerprint: u64,
+    pub token_position: u32,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +36,14 @@ const PAYLOAD_DIGEST_DOMAIN: &str = "tracedecay.clone-payload.v1";
 pub enum CloneNormalizationClassV1 {
     Conservative = 1,
     Rename = 2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloneFingerprintStreamV1<'a> {
+    pub class: CloneNormalizationClassV1,
+    pub normalization_revision: u16,
+    pub tokens: &'a [ConservativeCloneTokenV1],
+    pub rename_tier_unavailable: Option<CloneBodyRenameStatusV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -387,6 +409,46 @@ impl CloneBodyPayloadV1 {
         keys
     }
 
+    pub fn fingerprint_stream(
+        &self,
+        eligibility: CloneBodyEligibilityV1,
+    ) -> Option<CloneFingerprintStreamV1<'_>> {
+        if eligibility != CloneBodyEligibilityV1::Eligible
+            || self.tokenization_status != CloneBodyTokenizationStatusV1::Complete
+        {
+            return None;
+        }
+        if self.rename_coverage == CloneBodyRenameStatusV1::Complete
+            && let (Some(normalization_revision), Some(tokens)) = (
+                self.rename_normalization_revision,
+                self.rename_tokens.as_deref(),
+            )
+        {
+            return Some(CloneFingerprintStreamV1 {
+                class: CloneNormalizationClassV1::Rename,
+                normalization_revision,
+                tokens,
+                rename_tier_unavailable: None,
+            });
+        }
+        Some(CloneFingerprintStreamV1 {
+            class: CloneNormalizationClassV1::Conservative,
+            normalization_revision: self.conservative_normalization_revision,
+            tokens: &self.conservative_tokens,
+            rename_tier_unavailable: Some(self.rename_coverage),
+        })
+    }
+
+    pub fn fingerprint_positions(
+        &self,
+        eligibility: CloneBodyEligibilityV1,
+    ) -> Result<Vec<CloneFingerprintPositionV1>, String> {
+        let Some(stream) = self.fingerprint_stream(eligibility) else {
+            return Ok(Vec::new());
+        };
+        winnow_clone_tokens(stream.tokens)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let digests = clone_payload_digests(ClonePayloadDigestInputV1 {
             language: &self.language,
@@ -409,5 +471,223 @@ impl CloneBodyPayloadV1 {
             return Err("clone payload digests do not match their canonical tokens".to_owned());
         }
         Ok(())
+    }
+}
+
+fn winnow_clone_tokens(
+    tokens: &[ConservativeCloneTokenV1],
+) -> Result<Vec<CloneFingerprintPositionV1>, String> {
+    if tokens.len() < CLONE_FINGERPRINT_K_V1 + CLONE_FINGERPRINT_WINDOW_V1 - 1 {
+        return Ok(Vec::new());
+    }
+    let hashes = tokens
+        .windows(CLONE_FINGERPRINT_K_V1)
+        .map(|window| {
+            let bytes = canonical_json_bytes(&(FINGERPRINT_DOMAIN, window))
+                .map_err(|error| error.to_string())?;
+            let digest = Sha256::digest(bytes);
+            let prefix: [u8; 8] = digest[..8]
+                .try_into()
+                .map_err(|error: std::array::TryFromSliceError| error.to_string())?;
+            Ok(u64::from_be_bytes(prefix) & i64::MAX as u64)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    select_rightmost_minima(&hashes)
+        .into_iter()
+        .map(|token_position| {
+            Ok(CloneFingerprintPositionV1 {
+                fingerprint: hashes[token_position],
+                token_position: u32::try_from(token_position).map_err(|error| error.to_string())?,
+            })
+        })
+        .collect()
+}
+
+fn select_rightmost_minima(hashes: &[u64]) -> Vec<usize> {
+    if hashes.len() < CLONE_FINGERPRINT_WINDOW_V1 {
+        return Vec::new();
+    }
+    let mut selected = Vec::new();
+    for (window_start, window) in hashes.windows(CLONE_FINGERPRINT_WINDOW_V1).enumerate() {
+        let mut minimum = 0usize;
+        for position in 1..window.len() {
+            if window[position] <= window[minimum] {
+                minimum = position;
+            }
+        }
+        let position = window_start + minimum;
+        if selected.last() != Some(&position) {
+            selected.push(position);
+        }
+    }
+    selected
+}
+
+pub fn verify_clone_token_anchor(
+    left: &[ConservativeCloneTokenV1],
+    left_position: u32,
+    right: &[ConservativeCloneTokenV1],
+    right_position: u32,
+) -> bool {
+    let Ok(left_position) = usize::try_from(left_position) else {
+        return false;
+    };
+    let Ok(right_position) = usize::try_from(right_position) else {
+        return false;
+    };
+    let Some(left) = left.get(left_position..left_position.saturating_add(CLONE_FINGERPRINT_K_V1))
+    else {
+        return false;
+    };
+    let Some(right) =
+        right.get(right_position..right_position.saturating_add(CLONE_FINGERPRINT_K_V1))
+    else {
+        return false;
+    };
+    left == right
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use tracedecay_code_extraction::{
+        CloneBodyRenameStatusV1, ConservativeCloneTokenV1, LanguageExtractor, TypeScriptExtractor,
+    };
+
+    use super::{
+        CLONE_FINGERPRINT_K_V1, CLONE_FINGERPRINT_WINDOW_V1, CloneBodyPayloadV1,
+        CloneNormalizationClassV1, select_rightmost_minima, verify_clone_token_anchor,
+        winnow_clone_tokens,
+    };
+
+    fn tokens(prefix: &str, count: usize) -> Vec<ConservativeCloneTokenV1> {
+        (0..count)
+            .map(|ordinal| ConservativeCloneTokenV1::Syntax {
+                syntax_kind: "identifier".to_owned(),
+                text: format!("{prefix}{ordinal}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn standard_winnowing_observes_the_6_7_13_14_token_boundaries() {
+        assert!(
+            winnow_clone_tokens(&tokens("six", 6))
+                .expect("winnow")
+                .is_empty()
+        );
+        assert!(
+            winnow_clone_tokens(&tokens("seven", 7))
+                .expect("winnow")
+                .is_empty()
+        );
+        assert!(
+            winnow_clone_tokens(&tokens("thirteen", 13))
+                .expect("winnow")
+                .is_empty()
+        );
+        assert_eq!(
+            winnow_clone_tokens(&tokens("fourteen", 14))
+                .expect("winnow")
+                .len(),
+            1
+        );
+        assert_eq!(CLONE_FINGERPRINT_K_V1, 7);
+        assert_eq!(CLONE_FINGERPRINT_WINDOW_V1, 8);
+    }
+
+    #[test]
+    fn standard_winnowing_selects_the_rightmost_equal_minimum_once() {
+        assert_eq!(select_rightmost_minima(&[9, 1, 1, 2, 3, 4, 5, 6]), vec![2]);
+        assert_eq!(
+            select_rightmost_minima(&[4, 4, 4, 4, 4, 4, 4, 4, 4, 4]),
+            vec![7, 8, 9]
+        );
+        assert_eq!(
+            select_rightmost_minima(&[9, 1, 2, 3, 4, 5, 6, 7, 8]),
+            vec![1],
+            "the same selected position must not be emitted by adjacent windows"
+        );
+    }
+
+    #[test]
+    fn a_shared_fourteen_token_run_has_a_common_fingerprint() {
+        let shared = tokens("shared", 14);
+        let mut left = tokens("left-prefix", 9);
+        left.extend(shared.clone());
+        left.extend(tokens("left-suffix", 9));
+        let mut right = tokens("right-prefix", 9);
+        right.extend(shared);
+        right.extend(tokens("right-suffix", 9));
+
+        let left = winnow_clone_tokens(&left).expect("left winnowing");
+        let right = winnow_clone_tokens(&right).expect("right winnowing");
+        assert!(
+            left.iter().any(|left| right
+                .iter()
+                .any(|right| left.fingerprint == right.fingerprint)),
+            "the k+w-1 shared-token guarantee must hold at the fingerprint layer"
+        );
+    }
+
+    #[test]
+    fn a_forced_fingerprint_collision_cannot_verify_different_token_bytes() {
+        let left = tokens("left", CLONE_FINGERPRINT_K_V1);
+        let mut right = left.clone();
+        right[3] = ConservativeCloneTokenV1::Syntax {
+            syntax_kind: "identifier".to_owned(),
+            text: "different".to_owned(),
+        };
+
+        assert!(!verify_clone_token_anchor(&left, 0, &right, 0));
+        assert!(verify_clone_token_anchor(&left, 0, &left, 0));
+    }
+
+    #[test]
+    fn rename_stream_requires_complete_binding_normalization() {
+        let complete = TypeScriptExtractor.extract_artifact(
+            "src/complete.ts",
+            "function copy(input) { const one = parse(input); const two = use(one); const three = use(two); return finish(three, input, one, two); }",
+        );
+        let complete = complete.clone_bodies.first().expect("complete body");
+        let complete_payload = CloneBodyPayloadV1::from_extracted(complete).expect("payload");
+        let complete_stream = complete_payload
+            .fingerprint_stream(complete.eligibility)
+            .expect("complete stream");
+        assert_eq!(complete_stream.class, CloneNormalizationClassV1::Rename);
+        assert_eq!(complete_stream.rename_tier_unavailable, None);
+
+        let partial = TypeScriptExtractor.extract_artifact(
+            "src/partial.js",
+            "function copy(input) { const one = eval(input); const two = use(one); const three = use(two); return finish(three, input, one, two); }",
+        );
+        let partial = partial.clone_bodies.first().expect("partial body");
+        assert_eq!(partial.rename_status, CloneBodyRenameStatusV1::Partial);
+        let partial_payload = CloneBodyPayloadV1::from_extracted(partial).expect("payload");
+        let partial_stream = partial_payload
+            .fingerprint_stream(partial.eligibility)
+            .expect("conservative stream");
+        assert_eq!(
+            partial_stream.class,
+            CloneNormalizationClassV1::Conservative
+        );
+        assert_eq!(
+            partial_stream.rename_tier_unavailable,
+            Some(CloneBodyRenameStatusV1::Partial)
+        );
+    }
+
+    #[test]
+    fn a_forced_body_digest_collision_cannot_validate_other_token_bytes() {
+        let extracted = TypeScriptExtractor.extract_artifact(
+            "src/body.ts",
+            "function copy(input) { const one = parse(input); const two = use(one); const three = use(two); return finish(three, input, one, two); }",
+        );
+        let body = extracted.clone_bodies.first().expect("clone body");
+        let mut payload = CloneBodyPayloadV1::from_extracted(body).expect("payload");
+        payload.conservative_tokens[0] = ConservativeCloneTokenV1::Syntax {
+            syntax_kind: "identifier".to_owned(),
+            text: "colliding-but-different".to_owned(),
+        };
+        assert!(payload.validate().is_err());
     }
 }
