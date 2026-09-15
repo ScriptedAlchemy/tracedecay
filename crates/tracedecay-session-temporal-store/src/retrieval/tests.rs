@@ -1300,9 +1300,17 @@ async fn root_direct_user_query_skips_a_common_tool_result_cohort() {
             .starts_with("occurrence-common-tool-")
     );
     assert_eq!(
-        read.text_column(ROOT_OCCURRENCE_FTS_QUERY, params(1), 0)
+        read.text_column(ROOT_DIRECT_USER_TIME_OCCURRENCE_FTS_QUERY, params(1), 0)
             .await,
         ["occurrence-common-user"]
+    );
+    let plan = read
+        .explain_query_plan(ROOT_DIRECT_USER_TIME_OCCURRENCE_FTS_QUERY, params(1))
+        .await;
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_session_messages_timestamp")),
+        "bounded direct-user search must start from the timestamp index: {plan:?}"
     );
 }
 

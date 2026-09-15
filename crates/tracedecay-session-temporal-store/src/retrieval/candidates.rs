@@ -392,10 +392,10 @@ pub(super) async fn query_candidate_clause(
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
     let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
     let filter = snapshot_request.semantic_filter();
-    let direct_user = SqlValue::Integer(i64::from(
-        filter.message_type
-            == tracedecay_temporal_query::ports::TemporalMessageTypeFilterV1::DirectUser,
-    ));
+    let is_direct_user = filter.message_type
+        == tracedecay_temporal_query::ports::TemporalMessageTypeFilterV1::DirectUser;
+    let is_time_bounded = filter.start_time.is_some() || filter.end_time.is_some();
+    let direct_user = SqlValue::Integer(i64::from(is_direct_user));
     let filter_start = filter.start_time.map_or(SqlValue::Null, SqlValue::Integer);
     let filter_end = filter.end_time.map_or(SqlValue::Null, SqlValue::Integer);
     let occurrence_fts_query = if clause.channel == CandidateChannel::Lexical {
@@ -430,7 +430,11 @@ pub(super) async fn query_candidate_clause(
         // rows through the index and no retained-row text scan. That is a
         // measured empty channel, not a budget refusal.
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => (
-            ROOT_EXACT_CANDIDATE_QUERY,
+            if is_direct_user && is_time_bounded {
+                ROOT_DIRECT_USER_TIME_EXACT_CANDIDATE_QUERY
+            } else {
+                ROOT_EXACT_CANDIDATE_QUERY
+            },
             vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
@@ -449,15 +453,27 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(exact_source_cap),
                 SqlValue::Integer(limit),
                 direct_user.clone(),
-                filter_start.clone(),
-                filter_end.clone(),
+                if is_direct_user && is_time_bounded {
+                    SqlValue::Integer(filter.start_time.unwrap_or(i64::MIN))
+                } else {
+                    filter_start.clone()
+                },
+                if is_direct_user && is_time_bounded {
+                    SqlValue::Integer(filter.end_time.unwrap_or(i64::MAX))
+                } else {
+                    filter_end.clone()
+                },
             ],
         ),
         (
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
             CandidateChannel::Phrase | CandidateChannel::Entity | CandidateChannel::Lexical,
         ) => (
-            ROOT_OCCURRENCE_FTS_QUERY,
+            if is_direct_user && is_time_bounded {
+                ROOT_DIRECT_USER_TIME_OCCURRENCE_FTS_QUERY
+            } else {
+                ROOT_OCCURRENCE_FTS_QUERY
+            },
             vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
@@ -474,8 +490,8 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(stable_cap),
                 SqlValue::Integer(limit),
                 direct_user,
-                filter_start,
-                filter_end,
+                SqlValue::Integer(filter.start_time.unwrap_or(i64::MIN)),
+                SqlValue::Integer(filter.end_time.unwrap_or(i64::MAX)),
             ],
         ),
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Time) => {

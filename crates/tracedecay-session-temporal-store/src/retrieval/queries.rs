@@ -226,6 +226,44 @@ macro_rules! root_direct_user_prefilter {
     };
 }
 
+macro_rules! root_direct_user_time_cohort {
+    ($start:literal, $end:literal) => {
+        concat!(
+            "WITH direct_user_messages AS MATERIALIZED (
+          SELECT message.provider, message.session_id, message.message_id
+          FROM session_messages AS message
+               INDEXED BY idx_session_messages_timestamp
+          JOIN sessions AS message_session
+            ON message_session.provider = message.provider
+           AND message_session.session_id = message.session_id
+          WHERE message.timestamp BETWEEN ",
+            $start,
+            " AND ",
+            $end,
+            "
+            AND message.role = 'user'
+            AND message_session.project_key = ?1
+            AND (?2 IS NULL OR message.provider = ?2)
+      )"
+        )
+    };
+}
+
+macro_rules! root_no_tool_result_predicate {
+    () => {
+        "NOT EXISTS (
+          SELECT 1
+          FROM observations AS filter_observation
+          JOIN json_each(
+              filter_observation.observation_json,
+              '$.payload.facts'
+          ) AS filter_fact
+          WHERE filter_observation.observation_id = o.source_observation_id
+            AND json_extract(filter_fact.value, '$.kind') = 'tool_result'
+      )"
+    };
+}
+
 macro_rules! summary_keyset {
     ($time:literal, $id:literal) => {
         concat!(
@@ -653,6 +691,100 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?12"
+);
+
+// A bounded direct-user query starts from the existing timestamp index rather
+// than spending its execution work budget walking old common-term FTS hits.
+// The occurrence FTS lookup still proves the requested text match, while the
+// canonical observation predicate excludes mixed tool-result envelopes.
+pub(super) const ROOT_DIRECT_USER_TIME_OCCURRENCE_FTS_QUERY: &str = concat!(
+    root_direct_user_time_cohort!("?14", "?15"),
+    "
+    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
+           o.message_id, o.turn_id, o.session_id, o.role,
+           authority_session.provider, frozen.generation
+    FROM direct_user_messages AS filter_message
+    JOIN sessions AS authority_session
+      ON authority_session.provider = filter_message.provider
+     AND authority_session.session_id = filter_message.session_id
+     AND authority_session.project_key = ?1
+    JOIN session_temporal_generations AS frozen
+      ON frozen.session_id = filter_message.session_id
+     AND frozen.state = 'active'
+    JOIN session_occurrences AS o
+         INDEXED BY idx_session_occurrences_message
+      ON o.session_id = filter_message.session_id
+     AND o.generation = frozen.generation
+     AND o.message_id = filter_message.message_id
+     AND o.source_provider = filter_message.provider
+    JOIN session_occurrences_fts
+      ON session_occurrences_fts.rowid = o.rowid
+    JOIN retrieval_anchors AS authority_anchor
+      ON authority_anchor.anchor_id = o.retrieval_anchor_id
+    WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
+      AND session_occurrences_fts MATCH ?3
+      AND ",
+    root_no_tool_result_predicate!(),
+    "
+      ",
+    occurrence_root_keyset!("?4", "?5", "?6"),
+    "
+      ",
+    occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
+    "
+      ",
+    root_occurrence_cursor_bound!("?11"),
+    "
+    ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
+    LIMIT ?12"
+);
+
+pub(super) const ROOT_DIRECT_USER_TIME_EXACT_CANDIDATE_QUERY: &str = concat!(
+    root_direct_user_time_cohort!("?16", "?17"),
+    "
+    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
+           o.message_id, o.turn_id, o.session_id, o.role,
+           authority_session.provider, o.snippet_text, ?3, frozen.generation
+    FROM direct_user_messages AS filter_message
+    JOIN sessions AS authority_session
+      ON authority_session.provider = filter_message.provider
+     AND authority_session.session_id = filter_message.session_id
+     AND authority_session.project_key = ?1
+    JOIN session_temporal_generations AS frozen
+      ON frozen.session_id = filter_message.session_id
+     AND frozen.state = 'active'
+    JOIN session_occurrences AS o
+         INDEXED BY idx_session_occurrences_message
+      ON o.session_id = filter_message.session_id
+     AND o.generation = frozen.generation
+     AND o.message_id = filter_message.message_id
+     AND o.source_provider = filter_message.provider
+    JOIN session_occurrences_fts
+      ON session_occurrences_fts.rowid = o.rowid
+    JOIN retrieval_anchors AS authority_anchor
+      ON authority_anchor.anchor_id = o.retrieval_anchor_id
+    WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
+      AND session_occurrences_fts MATCH ?4
+      AND instr(o.snippet_text, ?3) > 0
+      AND ",
+    root_no_tool_result_predicate!(),
+    "
+      ",
+    occurrence_root_keyset!("?5", "?6", "?7"),
+    "
+      ",
+    occurrence_row_length_bounds!("?8", "?9", "?10", "?11", "authority_session.provider"),
+    "
+      AND length(CAST(o.snippet_text AS BLOB)) <= ?13
+      ",
+    root_occurrence_cursor_bound!("?12"),
+    "
+    ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
+    LIMIT ?14"
 );
 
 pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
