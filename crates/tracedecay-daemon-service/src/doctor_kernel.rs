@@ -146,7 +146,7 @@ fn host_integration_read_from_report(
     }
 }
 
-// === Code index mount (SemanticIndex family) =================================
+// === Code index mount ========================================================
 
 /// Read the real code-index mount state from the daemon scheduler registry.
 ///

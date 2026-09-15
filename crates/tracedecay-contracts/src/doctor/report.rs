@@ -42,7 +42,7 @@ pub const DOCTOR_FINDING_FAMILIES: [DoctorFindingFamilyV1; 7] = [
     DoctorFindingFamilyV1::StorageRuntime,
     DoctorFindingFamilyV1::Storage,
     DoctorFindingFamilyV1::LanguageServer,
-    DoctorFindingFamilyV1::SemanticIndex,
+    DoctorFindingFamilyV1::CodeIndex,
     DoctorFindingFamilyV1::Observability,
 ];
 
@@ -54,7 +54,7 @@ pub const fn doctor_finding_family_label(family: DoctorFindingFamilyV1) -> &'sta
         DoctorFindingFamilyV1::StorageRuntime => "storage_runtime",
         DoctorFindingFamilyV1::Storage => "storage",
         DoctorFindingFamilyV1::LanguageServer => "language_server",
-        DoctorFindingFamilyV1::SemanticIndex => "semantic_index",
+        DoctorFindingFamilyV1::CodeIndex => "code_index",
         DoctorFindingFamilyV1::Observability => "observability",
     }
 }
@@ -469,7 +469,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         self
     }
 
-    /// Wire the code-index mount source (SemanticIndex family).
+    /// Wire the code-index mount source.
     #[must_use]
     pub fn with_code_index(mut self, port: &'a dyn CodeIndexMountDoctorPort) -> Self {
         self.code_index = Some(port);
@@ -508,7 +508,7 @@ impl<'a> DoctorReportComposerV1<'a> {
                 DoctorFindingFamilyV1::LanguageServer => {
                     self.compose_language_server(context).await?
                 }
-                DoctorFindingFamilyV1::SemanticIndex => self.compose_code_index(context).await?,
+                DoctorFindingFamilyV1::CodeIndex => self.compose_code_index(context).await?,
                 DoctorFindingFamilyV1::Observability => self.compose_observability(context).await?,
             };
             entries.extend(family_entries);
@@ -681,7 +681,7 @@ impl<'a> DoctorReportComposerV1<'a> {
     ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
     {
         let Some(port) = self.code_index else {
-            return unwired_family(DoctorFindingFamilyV1::SemanticIndex);
+            return unwired_family(DoctorFindingFamilyV1::CodeIndex);
         };
         let read = port.code_index_mount(context).await;
         let consultation = match read {

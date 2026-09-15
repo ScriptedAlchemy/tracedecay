@@ -363,7 +363,7 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         Some(DoctorEvidenceStateV1::Denied)
     );
     assert_eq!(
-        family_state(DoctorFindingFamilyV1::SemanticIndex),
+        family_state(DoctorFindingFamilyV1::CodeIndex),
         Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
     );
     assert_eq!(

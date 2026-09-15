@@ -1709,11 +1709,11 @@ export type DoctorFamilyUnavailableReasonV1 = z.infer<typeof DoctorFamilyUnavail
 The initial list covers advisory findings from
 Brain, Explorer, Loom, Code, and Observatory, plus the legacy
 `core_doctor` checks (graph quick-check, temporal/migration health,
-configuration compatibility drift, semantic runtime, session ingest).
+configuration compatibility drift, code-index mount state, session ingest).
 Each family maps to one audited typed input surface. The set is kept small
 and honest; new families are added through a future versioned enum rather
 than by widening the meaning of an existing variant. */
-export const DoctorFindingFamilyV1Schema = z.union([z.literal("advisory"), z.literal("configuration"), z.literal("storage_runtime"), z.literal("storage"), z.literal("language_server"), z.literal("semantic_index"), z.literal("observability")]);
+export const DoctorFindingFamilyV1Schema = z.union([z.literal("advisory"), z.literal("configuration"), z.literal("storage_runtime"), z.literal("storage"), z.literal("language_server"), z.literal("code_index"), z.literal("observability")]);
 export type DoctorFindingFamilyV1 = z.infer<typeof DoctorFindingFamilyV1Schema>;
 
 /** The canonical Doctor report projection for the read-only dashboard. */
