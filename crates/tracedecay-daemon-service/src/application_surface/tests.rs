@@ -774,6 +774,7 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
             "node",
             "port_order",
             "port_status",
+            "redundancy",
             "rename_preview",
             "rename_symbol",
             "replace_symbol",
