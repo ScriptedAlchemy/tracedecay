@@ -1415,6 +1415,9 @@ impl ProductionSemanticRuntimeV1 {
         if verified.vector_generation_id != certified.vector_generation_id {
             return Err(SemanticRuntimeBackendErrorV1::Rejected);
         }
+        self.lifecycle
+            .mark_ready()
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
         let lifecycle_verification = hotpath::measure_block!(
             "semantic.evaluation.snapshot.verify_lifecycle",
             self.evaluation_lifecycle_verification(

@@ -26,6 +26,7 @@ use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_usecases::semantic_runtime::{
     CommittedRetrievalProfileStateV1, RetrievalProfileActivationObserverErrorV1,
     RetrievalProfileActivationObserverV1, SemanticRuntimeFuture,
+    SemanticRuntimeGenerationInspectorV1,
     prepare_project_semantic_redundancy_authority, project_semantic_production_runtime,
     project_semantic_retained_code_generation,
 };
@@ -206,6 +207,10 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         .ok_or(RetrievalProfileActivationObserverErrorV1::Rejected)?;
                     let runtime = project_semantic_production_runtime(&project_root)
                         .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                    let _verified_generation = runtime
+                        .inspect_generation(pins)
+                        .await
+                        .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?;
                     let vectors = runtime
                         .active_vector_generation(pins)
                         .await
