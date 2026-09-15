@@ -484,16 +484,10 @@ pub(super) async fn execute_context_scout(
             DaemonInvocationProblem::NotFoundOrNotAuthorized,
         );
     };
-    let current = match registered.runtime.activated_configuration() {
+    let current = match registered.runtime.client().current().await {
         Ok(current) => current.into_current_state(),
-        Err(_) => {
-            return application_problem(
-                wire_request_id,
-                ApplicationProblem::unavailable(SafeDiagnostic {
-                    code: "context_scout.configuration_unavailable".to_owned(),
-                    message: "The activated Context Scout configuration is unavailable".to_owned(),
-                }),
-            );
+        Err(error) => {
+            return application_problem(wire_request_id, configuration_problem(error));
         }
     };
     let Some(configuration) =
@@ -825,25 +819,18 @@ async fn execute_context_scout_state_transition(
         &registry,
         control.address,
         &registered.scope,
-        current_micros(),
     )
     .await
     {
+        tracing::warn!(
+            %error,
+            "Context Scout configuration activation scheduled for reconciliation"
+        );
         let runtime = Arc::clone(&registered.runtime);
         let reconciliation_owner = Arc::clone(&owner);
         let reconciliation_registry = Arc::clone(&registry);
         let reconciliation_scope = registered.scope.clone();
         let reconciliation_address = control.address;
-        let error_code = error.code().to_owned();
-        if let Err(observation_error) = runtime
-            .record_runtime_activation(None, Some(error_code), current_micros())
-            .await
-        {
-            tracing::warn!(
-                %observation_error,
-                "Context Scout activation degradation could not be recorded"
-            );
-        }
         tokio::spawn(async move {
             if let Err(reconciliation_error) = reconcile_context_scout_configuration(
                 &runtime,
@@ -851,7 +838,6 @@ async fn execute_context_scout_state_transition(
                 &reconciliation_registry,
                 reconciliation_address,
                 &reconciliation_scope,
-                current_micros(),
             )
             .await
             {
@@ -878,23 +864,6 @@ enum ContextScoutActivationReconciliationError {
     ActivationRejected,
     #[error("the Context Scout exact-address pin could not be advanced")]
     AddressActivationRejected,
-    #[error("the Context Scout activation observation could not be recorded")]
-    ObservationUnavailable,
-}
-
-impl ContextScoutActivationReconciliationError {
-    #[hotpath::skip]
-    const fn code(self) -> &'static str {
-        match self {
-            Self::ConfigurationUnavailable => "context_scout.activation.configuration_unavailable",
-            Self::InvalidConfiguration => "context_scout.activation.configuration_invalid",
-            Self::ActivationRejected => "context_scout.activation.reconciliation_pending",
-            Self::AddressActivationRejected => {
-                "context_scout.activation.address_reconciliation_pending"
-            }
-            Self::ObservationUnavailable => "context_scout.activation.observation_unavailable",
-        }
-    }
 }
 
 #[hotpath::measure(label = "daemon.service.context_scout.reconcile", future = true)]
@@ -904,10 +873,11 @@ async fn reconcile_context_scout_configuration(
     registry: &Arc<ProjectContextScoutAddressRegistryV1>,
     address: ContextScoutAddressV1,
     scope: &ResolvedScope,
-    observed_at: UtcMicros,
 ) -> Result<(), ContextScoutActivationReconciliationError> {
     let current = runtime
-        .activated_configuration()
+        .client()
+        .current()
+        .await
         .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
     let current = current.into_current_state();
     let refreshed =
@@ -928,10 +898,7 @@ async fn reconcile_context_scout_configuration(
             .await
             .map_err(|_| ContextScoutActivationReconciliationError::ActivationRejected)?;
     }
-    runtime
-        .record_runtime_activation(Some(current.revision_id), None, observed_at)
-        .await
-        .map_err(|_| ContextScoutActivationReconciliationError::ObservationUnavailable)
+    Ok(())
 }
 
 const fn context_scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> &'static str {
