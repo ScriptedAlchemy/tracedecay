@@ -876,9 +876,13 @@ pub fn tracedecay_bin() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| option_env!("CARGO_BIN_EXE_tracedecay").map(PathBuf::from))
         .unwrap_or_else(|| {
-            panic!(
-                "CLI binary not built: build it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN"
-            )
+            let test_executable =
+                std::env::current_exe().expect("test executable path should resolve");
+            let profile_dir = test_executable
+                .parent()
+                .and_then(Path::parent)
+                .expect("integration test should run from a Cargo profile directory");
+            profile_dir.join(format!("tracedecay{}", std::env::consts::EXE_SUFFIX))
         });
     assert!(
         binary.is_file(),
