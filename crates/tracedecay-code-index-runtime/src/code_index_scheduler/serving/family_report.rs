@@ -1,14 +1,15 @@
 use std::path::{Component, Path};
 
-use tracedecay_code_index::clones::{CloneExactKeyV1, CodeIndexCloneBodyV1};
+use tracedecay_code_index::clones::{
+    CloneExactKeyV1, CloneNormalizationClassV1, CodeIndexCloneBodyV1,
+};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
-use tracedecay_query::code_search::{
-    CodeIndexRedundancyCompletedV1, CodeIndexRedundancyFamilyV1, CodeIndexRedundancyOutcomeV1,
-    CodeIndexRedundancyPartialReasonV1, CodeIndexRedundancyPartialV1, CodeIndexRedundancyQueryV1,
+use tracedecay_contracts::retrieval::{
+    RedundancyCoverageV1, RedundancyFamilyV1, RedundancyPartialReasonV1, RedundancyRankingV1,
+    RedundancyResultV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1,
 };
-use tracedecay_query::retrieval::lexical::{
-    CloneArtifactCursorV1, CloneExactArtifactMemberV1,
-};
+use tracedecay_query::code_search::CodeIndexRedundancyQueryV1;
+use tracedecay_query::retrieval::lexical::{CloneArtifactCursorV1, CloneExactArtifactMemberV1};
 
 use super::ProductionCodeIndexQueryOwnersV1;
 use crate::query::retrieval::ports::RetrievalPortError;
@@ -18,7 +19,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         &self,
         request: &CodeIndexRedundancyQueryV1,
         control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<CodeIndexRedundancyOutcomeV1, RetrievalPortError> {
+    ) -> Result<RedundancyResultV1, RetrievalPortError> {
         let family_page_limit = request.family_limit.min(request.work_limit / 3).max(1);
         let page = self
             .hydration
@@ -28,7 +29,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 &request.match_classes,
                 request.path.as_deref(),
                 request.include_generated_paths,
-                request.cursor.as_ref(),
+                request.cursor.as_deref(),
                 family_page_limit,
                 control,
             )
@@ -78,19 +79,33 @@ impl ProductionCodeIndexQueryOwnersV1 {
             work_spent = work_spent.saturating_add(read.work_spent);
             examined_members = examined_members.saturating_add(read.work_spent);
             let mut members = Vec::with_capacity(read.members.len().saturating_add(1));
-            members.push(CloneExactArtifactMemberV1 {
-                payload: source.payload.clone(),
-                occurrence: source.occurrence,
-            });
-            members.extend(read.members);
+            members.push(similar_occurrence(&source.occurrence));
+            members.extend(
+                read.members
+                    .iter()
+                    .map(|member| similar_occurrence(&member.occurrence)),
+            );
             work_exhausted |= read.work_exhausted;
             report_continuation = Some(candidate.continuation);
-            families.push(CodeIndexRedundancyFamilyV1 {
-                key: candidate.key,
-                representative_payload_digest: source.payload.payload_digest,
-                complete: read.complete && members.len() == candidate.member_count,
-                next_cursor: read.next_cursor,
-                members,
+            let match_class = similar_match_class(candidate.key.class);
+            let next_cursor = read
+                .next_cursor
+                .as_ref()
+                .map(CloneArtifactCursorV1::encode)
+                .transpose()
+                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+            let complete = read.complete && members.len() == candidate.member_count;
+            families.push(RedundancyFamilyV1 {
+                family: SimilarFamilyV1 {
+                    match_class,
+                    normalization_revision: candidate.key.normalization_revision,
+                    family_digest: candidate.key.digest,
+                    representative_payload_digest: source.payload.payload_digest,
+                    member_count: members.len(),
+                    members,
+                    complete,
+                    next_cursor,
+                },
                 total_member_count: candidate.member_count,
                 reviewable_source_bytes: candidate.reviewable_source_bytes,
             });
@@ -99,41 +114,42 @@ impl ProductionCodeIndexQueryOwnersV1 {
             }
         }
         let source_generation = self.hydration.metadata().generation.clone();
-        if work_exhausted
+        let (coverage, next_cursor) = if work_exhausted
             || (family_page_limit < request.family_limit && page_continuation.is_some())
         {
-            Ok(CodeIndexRedundancyOutcomeV1::Partial(Box::new(
-                CodeIndexRedundancyPartialV1 {
-                    source_generation,
-                    reason: CodeIndexRedundancyPartialReasonV1::WorkLimit,
-                    families,
+            (
+                RedundancyCoverageV1::Partial {
+                    reason: RedundancyPartialReasonV1::WorkLimit,
                     examined_families,
                     examined_members,
-                    next_cursor: report_continuation,
                 },
-            )))
+                report_continuation,
+            )
         } else if page_continuation.is_some() {
-            Ok(CodeIndexRedundancyOutcomeV1::Partial(Box::new(
-                CodeIndexRedundancyPartialV1 {
-                    source_generation,
-                    reason: CodeIndexRedundancyPartialReasonV1::FamilyLimit,
-                    families,
+            (
+                RedundancyCoverageV1::Partial {
+                    reason: RedundancyPartialReasonV1::FamilyLimit,
                     examined_families,
                     examined_members,
-                    next_cursor: page_continuation,
                 },
-            )))
+                page_continuation,
+            )
         } else {
-            Ok(CodeIndexRedundancyOutcomeV1::Complete(Box::new(
-                CodeIndexRedundancyCompletedV1 {
-                    source_generation,
-                    families,
+            (
+                RedundancyCoverageV1::Complete {
                     examined_families,
                     examined_members,
-                    next_cursor: None,
                 },
-            )))
-        }
+                None,
+            )
+        };
+        Ok(RedundancyResultV1 {
+            source_generation,
+            ranked_by: RedundancyRankingV1::ReviewableSourceBytes,
+            families,
+            coverage,
+            next_cursor,
+        })
     }
 
     fn verified_redundancy_members(
@@ -229,4 +245,26 @@ fn report_path_matches(path: &str, scope: Option<&str>, include_generated_paths:
                             .is_some_and(tracedecay_domain::is_generated_dir_segment)
                 )
             }))
+}
+
+fn similar_occurrence(
+    occurrence: &tracedecay_code_index::clones::CloneBodyOccurrenceV1,
+) -> SimilarOccurrenceV1 {
+    SimilarOccurrenceV1 {
+        project_id: occurrence.project_id.clone(),
+        repository_id: occurrence.repository_id.clone(),
+        worktree_id: occurrence.worktree_id.clone(),
+        source_generation: occurrence.source_generation.clone(),
+        snapshot_digest: occurrence.snapshot_digest.clone(),
+        symbol_occurrence_id: occurrence.symbol_occurrence_id.clone(),
+        path: occurrence.path.clone(),
+        body_span: occurrence.body_span,
+    }
+}
+
+fn similar_match_class(class: CloneNormalizationClassV1) -> SimilarMatchClassV1 {
+    match class {
+        CloneNormalizationClassV1::Conservative => SimilarMatchClassV1::ConservativeExact,
+        CloneNormalizationClassV1::Rename => SimilarMatchClassV1::RenameNormalizedExact,
+    }
 }

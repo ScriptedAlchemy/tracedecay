@@ -1477,8 +1477,7 @@ where
         let scope_resolver = scope_resolver.clone();
         let execution_admission = Arc::clone(&execution_admission);
         Box::pin(async move {
-            let unavailable =
-                |reason| code_search::CodeIndexRedundancyOutcomeV1::Unavailable(reason);
+            let unavailable = |reason| Err(reason);
             if request.family_limit == 0
                 || request.family_limit
                     > tracedecay_contracts::retrieval::MAX_REDUNDANCY_FAMILIES_V1 as usize
@@ -1600,7 +1599,7 @@ where
             })
             .await;
             match read {
-                Ok(Ok(outcome)) => outcome,
+                Ok(Ok(outcome)) => Ok(outcome),
                 Ok(Err(_)) | Err(_) => {
                     unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
                 }

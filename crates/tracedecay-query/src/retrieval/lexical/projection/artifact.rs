@@ -44,8 +44,7 @@ pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{
     CloneArtifactCursorV1, CloneArtifactPageV1, CloneExactArtifactMemberV1,
     CloneExactFamilyArtifactCandidateV1, CloneExactFamilyArtifactPageV1,
-    CloneFamilyArtifactCursorV1, CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1,
-    MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
+    CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
 };
 pub use schema::CodeLexicalArtifactWriterRevisionV1;
 

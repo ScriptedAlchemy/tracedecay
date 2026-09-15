@@ -448,57 +448,22 @@ pub struct CodeIndexRedundancyQueryV1 {
     pub family_limit: usize,
     pub member_limit: usize,
     pub work_limit: usize,
-    pub cursor: Option<crate::retrieval::lexical::CloneFamilyArtifactCursorV1>,
+    pub cursor: Option<String>,
     pub authority: Option<CodeIndexSearchAuthorityV1>,
     pub deadline: Option<tracedecay_contracts::Deadline>,
     pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
-#[derive(Clone, Debug)]
-pub struct CodeIndexRedundancyFamilyV1 {
-    pub key: tracedecay_code_index::clones::CloneExactKeyV1,
-    pub representative_payload_digest: tracedecay_domain::ManifestDigest,
-    pub members: Vec<crate::retrieval::lexical::CloneExactArtifactMemberV1>,
-    pub total_member_count: usize,
-    pub reviewable_source_bytes: u64,
-    pub complete: bool,
-    pub next_cursor: Option<crate::retrieval::lexical::CloneArtifactCursorV1>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CodeIndexRedundancyPartialReasonV1 {
-    FamilyLimit,
-    WorkLimit,
-}
-
-#[derive(Clone, Debug)]
-pub struct CodeIndexRedundancyCompletedV1 {
-    pub source_generation: tracedecay_domain::CodeGenerationId,
-    pub families: Vec<CodeIndexRedundancyFamilyV1>,
-    pub examined_families: usize,
-    pub examined_members: usize,
-    pub next_cursor: Option<crate::retrieval::lexical::CloneFamilyArtifactCursorV1>,
-}
-
-#[derive(Clone, Debug)]
-pub struct CodeIndexRedundancyPartialV1 {
-    pub source_generation: tracedecay_domain::CodeGenerationId,
-    pub reason: CodeIndexRedundancyPartialReasonV1,
-    pub families: Vec<CodeIndexRedundancyFamilyV1>,
-    pub examined_families: usize,
-    pub examined_members: usize,
-    pub next_cursor: Option<crate::retrieval::lexical::CloneFamilyArtifactCursorV1>,
-}
-
-#[derive(Clone, Debug)]
-pub enum CodeIndexRedundancyOutcomeV1 {
-    Complete(Box<CodeIndexRedundancyCompletedV1>),
-    Partial(Box<CodeIndexRedundancyPartialV1>),
-    Unavailable(CodeIndexSearchUnavailableReasonV1),
-}
-
 pub type CodeIndexRedundancyFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = CodeIndexRedundancyOutcomeV1> + Send + 'static>,
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<
+                    tracedecay_contracts::retrieval::RedundancyResultV1,
+                    CodeIndexSearchUnavailableReasonV1,
+                >,
+            > + Send
+            + 'static,
+    >,
 >;
 
 pub type CodeIndexRedundancyExecutor =

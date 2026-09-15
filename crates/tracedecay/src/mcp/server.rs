@@ -334,7 +334,6 @@ pub struct McpServer {
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
     /// Daemon-owned, authority-gated clone similarity bridge.
     code_index_similar_executor: Option<CodeIndexSimilarExecutor>,
-    /// Daemon-owned, authority-gated repository clone-family bridge.
     code_index_redundancy_executor: Option<CodeIndexRedundancyExecutor>,
     /// Daemon-owned exact sealed-generation branch comparison bridge.
     code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
