@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_host_integration::host_bundle_stale_preview;
 use tracedecay_host_integration::host_bundle_storage_failure;
 
-const REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION: u16 = 2;
+const REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct RegistrationBackupIdentityV1 {
@@ -19,6 +19,7 @@ struct RegistrationBackupIdentityV1 {
     integration_id: String,
     canonical_home: PathBuf,
     canonical_profile: PathBuf,
+    canonical_project: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -55,12 +56,14 @@ impl RegistrationBackupIdentityV1 {
         integration_id: &str,
         home: &Path,
         profile: &Path,
+        project: Option<&Path>,
     ) -> Result<Self, crate::agents::host_bundle_v2::HostBundleError> {
         Ok(Self {
             schema_version: REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION,
             integration_id: integration_id.to_string(),
             canonical_home: canonical_path(home)?,
             canonical_profile: canonical_path(profile)?,
+            canonical_project: project.map(canonical_path).transpose()?,
         })
     }
 
@@ -69,11 +72,12 @@ impl RegistrationBackupIdentityV1 {
         integration_id: &str,
         home: &Path,
         profile: &Path,
+        project: Option<&Path>,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         if self.schema_version != REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION {
             return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat);
         }
-        let observed = Self::new(integration_id, home, profile)?;
+        let observed = Self::new(integration_id, home, profile, project)?;
         (self.integration_id == observed.integration_id
             && self.canonical_home == observed.canonical_home
             && self.canonical_profile == observed.canonical_profile)
@@ -82,12 +86,19 @@ impl RegistrationBackupIdentityV1 {
     }
 }
 
+#[derive(Clone, Debug)]
+enum CatalogRegistrationScope {
+    Global,
+    Project(PathBuf),
+}
+
 pub struct CatalogHostComponentRegistrationAuthority {
     integration: Box<dyn crate::agents::AgentIntegration>,
     context: crate::agents::InstallContext,
     health_context: crate::agents::HealthcheckContext,
     lifecycle_root: PathBuf,
     registration_path: Option<PathBuf>,
+    scope: CatalogRegistrationScope,
     operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     should_apply: bool,
     confirmed_registration_revision: Option<[u8; 32]>,
@@ -178,6 +189,45 @@ impl CatalogHostComponentRegistrationAuthority {
             },
             lifecycle_root: lifecycle_root.to_path_buf(),
             registration_path,
+            scope: CatalogRegistrationScope::Global,
+            operation,
+            should_apply: false,
+            confirmed_registration_revision: None,
+            declared_artifact_writes: BTreeSet::new(),
+            staged_foreign_registration_revision: None,
+        })
+    }
+
+    pub fn new_project_with_tracedecay_bin(
+        agent_id: &str,
+        home: &Path,
+        project_path: &Path,
+        lifecycle_root: &Path,
+        operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
+        tracedecay_bin: String,
+    ) -> crate::errors::Result<Self> {
+        let integration = crate::agents::get_integration(agent_id)?;
+        if !integration.supports_local_install() {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: format!("{} has no project-local lifecycle", integration.name()),
+            });
+        }
+        Ok(Self {
+            registration_path: None,
+            integration,
+            context: crate::agents::InstallContext {
+                home: home.to_path_buf(),
+                tracedecay_bin,
+                tool_permissions: crate::agents::expected_tool_perms(),
+                project_root: Some(project_path.to_path_buf()),
+                dashboard: false,
+            },
+            health_context: crate::agents::HealthcheckContext {
+                home: home.to_path_buf(),
+                project_path: project_path.to_path_buf(),
+            },
+            lifecycle_root: lifecycle_root.to_path_buf(),
+            scope: CatalogRegistrationScope::Project(project_path.to_path_buf()),
             operation,
             should_apply: false,
             confirmed_registration_revision: None,
@@ -305,6 +355,9 @@ impl CatalogHostComponentRegistrationAuthority {
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Cline
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::RooCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kilo
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Zed
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Antigravity
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Vibe
             || (component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
                 && component_set.components.iter().any(|component| {
                     matches!(
@@ -468,11 +521,22 @@ impl CatalogHostComponentRegistrationAuthority {
         &self,
         component: crate::agents::host_bundle_v2::HostBundleComponentV1,
     ) -> crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 {
-        self.integration.host_component_registration_for_lifecycle(
-            component,
-            &self.health_context,
-            &self.context,
-        )
+        match &self.scope {
+            CatalogRegistrationScope::Global => self
+                .integration
+                .host_component_registration_for_lifecycle(
+                    component,
+                    &self.health_context,
+                    &self.context,
+                ),
+            CatalogRegistrationScope::Project(_) => self
+                .integration
+                .project_host_component_registration_for_lifecycle(
+                    component,
+                    &self.health_context,
+                    &self.context,
+                ),
+        }
     }
 
     fn registration_paths(
@@ -484,10 +548,19 @@ impl CatalogHostComponentRegistrationAuthority {
             .iter()
             .map(|component| component.manifest.component)
             .collect::<Vec<_>>();
-        let mut paths = self
-            .integration
-            .host_component_registration_paths_checked(&components, &self.context.home)
-            .map_err(|error| Self::registration_error(component_set.host, error))?;
+        let mut paths = match &self.scope {
+            CatalogRegistrationScope::Global => self
+                .integration
+                .host_component_registration_paths_checked(&components, &self.context.home),
+            CatalogRegistrationScope::Project(project) => self
+                .integration
+                .project_host_component_registration_paths(
+                    &components,
+                    &self.context.home,
+                    project,
+                ),
+        }
+        .map_err(|error| Self::registration_error(component_set.host, error))?;
         if self.integration.id() == "claude" {
             let artifact_owned_manifest = self
                 .context
@@ -497,6 +570,12 @@ impl CatalogHostComponentRegistrationAuthority {
         }
         paths.sort();
         paths.dedup();
+        let root = match &self.scope {
+            CatalogRegistrationScope::Global => self.context.home.as_path(),
+            CatalogRegistrationScope::Project(project) => project.as_path(),
+        };
+        crate::agents::ensure_project_local_safe_paths(root, paths.iter().map(PathBuf::as_path))
+            .map_err(|error| Self::registration_error(component_set.host, error))?;
         Ok(paths)
     }
 
@@ -619,6 +698,10 @@ impl CatalogHostComponentRegistrationAuthority {
             self.integration.id(),
             &self.context.home,
             &self.lifecycle_root,
+            match &self.scope {
+                CatalogRegistrationScope::Global => None,
+                CatalogRegistrationScope::Project(project) => Some(project.as_path()),
+            },
         )?;
         let identity_bytes =
             serde_json::to_vec(&identity).map_err(|_| host_bundle_storage_failure!())?;
@@ -918,6 +1001,10 @@ impl CatalogHostComponentRegistrationAuthority {
             self.integration.id(),
             &self.context.home,
             &self.lifecycle_root,
+            match &self.scope {
+                CatalogRegistrationScope::Global => None,
+                CatalogRegistrationScope::Project(project) => Some(project.as_path()),
+            },
         )?;
         let mutation_plan = fs::read(self.mutation_plan_path(operation_id))
             .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
@@ -1604,24 +1691,51 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
                         .iter()
                         .map(|component| component.manifest.component)
                         .collect::<Vec<_>>();
-                    match request.lifecycle.operation {
-                        crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
+                    match (&self.scope, request.lifecycle.operation) {
+                        (
+                            CatalogRegistrationScope::Global,
+                            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall,
+                        ) => self
                             .integration
                             .deactivate_deployed_host_component_registration(
                                 &components,
                                 &self.context,
-                            )
-                            .map_err(|error| Self::registration_error(component_set.host, error)),
-                        crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
-                        | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-                        | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
+                            ),
+                        (
+                            CatalogRegistrationScope::Global,
+                            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
+                            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
+                            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair,
+                        ) => self
                             .integration
                             .activate_deployed_host_component_registration(
                                 &components,
                                 &self.context,
-                            )
-                            .map_err(|error| Self::registration_error(component_set.host, error)),
+                            ),
+                        (
+                            CatalogRegistrationScope::Project(project),
+                            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall,
+                        ) => self
+                            .integration
+                            .deactivate_project_host_component_registration(
+                                &components,
+                                &self.context,
+                                project,
+                            ),
+                        (
+                            CatalogRegistrationScope::Project(project),
+                            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
+                            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
+                            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair,
+                        ) => self
+                            .integration
+                            .activate_project_host_component_registration(
+                                &components,
+                                &self.context,
+                                project,
+                            ),
                     }
+                    .map_err(|error| Self::registration_error(component_set.host, error))
                 }
             },
         );
@@ -2008,24 +2122,29 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
-        let identity =
-            RegistrationBackupIdentityV1::new("codex", home.path(), profile.path()).unwrap();
+        let identity = RegistrationBackupIdentityV1::new(
+            "codex",
+            home.path(),
+            profile.path(),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
-            identity.validate("codex", home.path(), profile.path()),
+            identity.validate("codex", home.path(), profile.path(), None),
             Ok(())
         );
         for result in [
-            identity.validate("codex", other.path(), profile.path()),
-            identity.validate("codex", home.path(), other.path()),
-            identity.validate("cursor", home.path(), profile.path()),
+            identity.validate("codex", other.path(), profile.path(), None),
+            identity.validate("codex", home.path(), other.path(), None),
+            identity.validate("cursor", home.path(), profile.path(), None),
         ] {
             assert_eq!(result, Err(HostBundleError::WrongTarget));
         }
         let mut future_identity = identity;
         future_identity.schema_version = REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION + 1;
         assert_eq!(
-            future_identity.validate("codex", home.path(), profile.path()),
+            future_identity.validate("codex", home.path(), profile.path(), None),
             Err(HostBundleError::UnsupportedRecoveryFormat)
         );
     }
@@ -2072,6 +2191,7 @@ mod tests {
             authority.integration.id(),
             home.path(),
             lifecycle_root.path(),
+            None,
         )
         .unwrap();
         write_registration_backup(

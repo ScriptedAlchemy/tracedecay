@@ -22,7 +22,7 @@ const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
 /// Canonical hosts whose first-party component lifecycle can publish durable
 /// ownership receipts. Discovery-only and evidence-unadmitted hosts stay in
 /// `HostKindV1::ALL`, but never enter install/update/uninstall sweeps.
-pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 13] = [
+pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 16] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
@@ -36,6 +36,9 @@ pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 13] = [
     HostKindV1::Cline,
     HostKindV1::RooCode,
     HostKindV1::Kilo,
+    HostKindV1::Zed,
+    HostKindV1::Antigravity,
+    HostKindV1::Vibe,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,7 +128,10 @@ pub fn unsupported_host_component_set_reason(
         // native hook/plugin surfaces remain evidence-gated.
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => None,
+        | HostKindV1::Kilo
+        | HostKindV1::Zed
+        | HostKindV1::Antigravity
+        | HostKindV1::Vibe => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
@@ -174,9 +180,15 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         | HostKindV1::Copilot
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => {
+        | HostKindV1::Kilo
+        | HostKindV1::Zed
+        | HostKindV1::Antigravity => {
             vec![HostBundleComponentV1::ContextMcp]
         }
+        HostKindV1::Vibe => vec![
+            HostBundleComponentV1::Agent,
+            HostBundleComponentV1::ContextMcp,
+        ],
         HostKindV1::CursorCloud | HostKindV1::ClineFamily => Vec::new(),
     }
 }
@@ -612,10 +624,10 @@ fn component_assets(
         // The component receipt owns this descriptor only; the activation
         // adapter merges its server entry into `mcp_config.json`.
         (HostKindV1::Devin, HostBundleComponentV1::ContextMcp) => (
-            ".config/devin/tracedecay",
+            ".tracedecay-hosts/devin",
             vec![(
                 "context-mcp.json",
-                r#"{"host":"devin","registration":"../mcp_config.json","registrar":"tracedecay managed merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"transport":"stdio"}}"#,
+                r#"{"host":"devin","component":"context-mcp","registration":"mcp_config.json","registrar":"tracedecay managed merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"transport":"stdio"}}"#,
             )],
         ),
         (HostKindV1::RooCode, HostBundleComponentV1::ContextMcp) => (
@@ -630,6 +642,34 @@ fn component_assets(
             vec![(
                 "context-mcp.json",
                 r#"{"host":"kilo","registration":"../kilo.jsonc","registrar":"tracedecay managed merge","route":"mcp","server":{"command":["__TRACEDECAY_BIN__","serve"]}}"#,
+            )],
+        ),
+        (HostKindV1::Zed, HostBundleComponentV1::ContextMcp) => (
+            ".tracedecay-hosts/zed",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"zed","component":"context-mcp","registration":"settings.json","registrar":"tracedecay managed JSONC merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
+            )],
+        ),
+        (HostKindV1::Antigravity, HostBundleComponentV1::ContextMcp) => (
+            ".tracedecay-hosts/antigravity",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"antigravity","component":"context-mcp","registrations":["antigravity/mcp_config.json","antigravity-cli/plugins/tracedecay.json"],"registrar":"tracedecay managed JSON merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
+            )],
+        ),
+        (HostKindV1::Vibe, HostBundleComponentV1::Agent) => (
+            ".tracedecay-hosts/vibe",
+            vec![(
+                "agent.json",
+                r#"{"host":"vibe","component":"agent","registrations":["prompts/cli.md"],"registrar":"tracedecay managed prompt and skill index","route":"agent"}"#,
+            )],
+        ),
+        (HostKindV1::Vibe, HostBundleComponentV1::ContextMcp) => (
+            ".tracedecay-hosts/vibe",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"vibe","component":"context-mcp","registration":"config.toml","registrar":"tracedecay managed TOML merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"transport":"stdio"}}"#,
             )],
         ),
         (HostKindV1::OpenCode, HostBundleComponentV1::Agent) => (
@@ -1209,6 +1249,67 @@ mod tests {
                 ),
                 Err(HostBundleRegistryError::Incompatible)
             );
+        }
+    }
+
+    #[test]
+    fn zed_antigravity_and_vibe_package_disjoint_canonical_components() {
+        let cases = [
+            (
+                HostKindV1::Zed,
+                vec![HostBundleComponentV1::ContextMcp],
+            ),
+            (
+                HostKindV1::Antigravity,
+                vec![HostBundleComponentV1::ContextMcp],
+            ),
+            (
+                HostKindV1::Vibe,
+                vec![
+                    HostBundleComponentV1::Agent,
+                    HostBundleComponentV1::ContextMcp,
+                ],
+            ),
+        ];
+
+        let mut paths = BTreeSet::new();
+        for (host, expected) in cases {
+            assert_eq!(default_components(host), expected);
+            assert_eq!(unsupported_host_component_set_reason(host), None);
+            let set = verified_embedded_default_host_component_set(
+                host,
+                0,
+                crate::agents::TEST_GENERATOR_COMMIT,
+            )
+            .expect("admitted host has a canonical component set");
+            assert_eq!(
+                set.component_set
+                    .components
+                    .iter()
+                    .map(|component| component.manifest.component)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for component in set.component_set.components {
+                assert_eq!(component.contents.len(), 1);
+                let descriptor = &component.contents[0];
+                assert!(
+                    paths.insert(descriptor.relative_path.clone()),
+                    "receipt descriptors must be disjoint"
+                );
+                assert!(
+                    descriptor
+                        .relative_path
+                        .starts_with(&format!(".tracedecay-hosts/{}/", host.descriptor().slug()))
+                );
+                let descriptor: serde_json::Value =
+                    serde_json::from_slice(&descriptor.bytes).expect("JSON receipt descriptor");
+                assert_eq!(descriptor["host"], host.descriptor().cli_id());
+                assert_eq!(
+                    descriptor["component"],
+                    component_name(component.manifest.component)
+                );
+            }
         }
     }
 

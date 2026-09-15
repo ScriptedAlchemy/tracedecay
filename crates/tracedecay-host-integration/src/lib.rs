@@ -337,6 +337,48 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
                 starts_analyzer: false,
             },
         ]),
+        HostKindV1::Zed => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(HostApiAbsent),
+                evidence_ref: "zed_host_hook_surface_absent_v1",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "src/agents/zed.rs",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::Antigravity => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(HostApiAbsent),
+                evidence_ref: "antigravity_host_hook_surface_absent_v1",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "src/agents/antigravity.rs",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::Vibe => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(HostApiAbsent),
+                evidence_ref: "vibe_host_hook_surface_absent_v1",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "src/agents/vibe.rs",
+                starts_analyzer: false,
+            },
+        ]),
     }
     evidence
 }
@@ -557,7 +599,10 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::RooCode
         | HostKindV1::Kilo
         | HostKindV1::Gemini
-        | HostKindV1::Copilot => return None,
+        | HostKindV1::Copilot
+        | HostKindV1::Zed
+        | HostKindV1::Antigravity
+        | HostKindV1::Vibe => return None,
     };
     let bytes = assets
         .native_fixtures

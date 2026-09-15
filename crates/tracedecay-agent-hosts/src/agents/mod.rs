@@ -378,6 +378,16 @@ pub trait AgentIntegration {
         self.host_component_registration(component, health)
     }
 
+    /// Read the project-scoped registration state for one canonical component.
+    fn project_host_component_registration_for_lifecycle(
+        &self,
+        _component: host_bundle_v2::HostBundleComponentV1,
+        _health: &HealthcheckContext,
+        _install: &InstallContext,
+    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+        host_bundle_v2::HostBundleRegistrationStateV1::Missing
+    }
+
     /// Returns true if this agent appears to be installed on the system
     /// (its config directory exists).
     fn is_detected(&self, _home: &Path) -> bool {
@@ -699,6 +709,9 @@ pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str
         host_bundle_v2::HostKindV1::OpenCode => "opencode",
         host_bundle_v2::HostKindV1::Gemini => "gemini",
         host_bundle_v2::HostKindV1::Copilot => "copilot",
+        host_bundle_v2::HostKindV1::Zed => "zed",
+        host_bundle_v2::HostKindV1::Antigravity => "antigravity",
+        host_bundle_v2::HostKindV1::Vibe => "vibe",
     }
 }
 

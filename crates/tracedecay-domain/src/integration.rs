@@ -45,10 +45,13 @@ pub enum HostKindV1 {
     OpenCode,
     Gemini,
     Copilot,
+    Zed,
+    Antigravity,
+    Vibe,
 }
 
 impl HostKindV1 {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 18] = [
         Self::ClaudeCode,
         Self::CursorDesktop,
         Self::CursorCloud,
@@ -64,6 +67,9 @@ impl HostKindV1 {
         Self::Gemini,
         Self::Copilot,
         Self::Devin,
+        Self::Zed,
+        Self::Antigravity,
+        Self::Vibe,
     ];
 
     /// Project a stock host surface into the bounded host observation catalog
@@ -84,7 +90,10 @@ impl HostKindV1 {
             | Self::KimiCode
             | Self::OpenCode
             | Self::Gemini
-            | Self::Copilot => None,
+            | Self::Copilot
+            | Self::Zed
+            | Self::Antigravity
+            | Self::Vibe => None,
         }
     }
 }
@@ -179,9 +188,9 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Supported,
             Supported,
         ),
-        // Devin owns local stdio MCP registration but exposes no
+        // These hosts own local stdio MCP registration but expose no
         // TraceDecay-specific diagnostic or hook registration surface.
-        HostKindV1::Devin => (
+        HostKindV1::Devin | HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Unavailable(CheckedInEvidenceMissing),
@@ -505,6 +514,9 @@ impl HostIntegrationCatalogV1 {
             HostKindV1::Gemini => &STOCK_HOST_CAPABILITIES[12],
             HostKindV1::Copilot => &STOCK_HOST_CAPABILITIES[13],
             HostKindV1::Devin => &STOCK_HOST_CAPABILITIES[14],
+            HostKindV1::Zed => &STOCK_HOST_CAPABILITIES[15],
+            HostKindV1::Antigravity => &STOCK_HOST_CAPABILITIES[16],
+            HostKindV1::Vibe => &STOCK_HOST_CAPABILITIES[17],
         }
     }
 
@@ -595,7 +607,7 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 15] = [
+const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 18] = [
     canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
     canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
     canonical_stock_host_capabilities(HostKindV1::CursorCloud),
@@ -611,6 +623,9 @@ const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 15] = [
     canonical_stock_host_capabilities(HostKindV1::Gemini),
     canonical_stock_host_capabilities(HostKindV1::Copilot),
     canonical_stock_host_capabilities(HostKindV1::Devin),
+    canonical_stock_host_capabilities(HostKindV1::Zed),
+    canonical_stock_host_capabilities(HostKindV1::Antigravity),
+    canonical_stock_host_capabilities(HostKindV1::Vibe),
 ];
 
 #[derive(Serialize)]

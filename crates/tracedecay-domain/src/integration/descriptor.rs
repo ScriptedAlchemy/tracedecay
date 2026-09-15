@@ -105,6 +105,8 @@ pub enum HostProjectRegistrationPathV1 {
     KiroProjectDirectory,
     KimiProjectDirectory,
     OpenCodeProjectDirectory,
+    ZedProjectDirectory,
+    VibeProjectDirectory,
     Unavailable,
 }
 
@@ -119,6 +121,8 @@ impl HostProjectRegistrationPathV1 {
             Self::KiroProjectDirectory => Some(".kiro"),
             Self::KimiProjectDirectory => Some(".kimi-code"),
             Self::OpenCodeProjectDirectory => Some(".config/opencode"),
+            Self::ZedProjectDirectory => Some(".zed"),
+            Self::VibeProjectDirectory => Some(".vibe"),
             Self::Unavailable => None,
         }
     }
@@ -190,7 +194,13 @@ impl HostKindV1 {
             // and Copilot publishes no third-party hook surface at all, so
             // persisting a hook key for any of them would name a spool no event
             // can ever reach.
-            Self::Devin | Self::ClineFamily | Self::Gemini | Self::Copilot => None,
+            Self::Devin
+            | Self::ClineFamily
+            | Self::Gemini
+            | Self::Copilot
+            | Self::Zed
+            | Self::Antigravity
+            | Self::Vibe => None,
             Self::Cline => Some(NativeHostIdentityV1::Cline),
             Self::RooCode => Some(NativeHostIdentityV1::RooCode),
             Self::Kilo => Some(NativeHostIdentityV1::Kilo),
@@ -212,7 +222,7 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
     use HostProjectRegistrationPathV1::{
         ClaudeProjectDirectory, CodexProjectDirectory, CursorProjectDirectory,
         DevinProjectDirectory, HermesProjectDirectory, KimiProjectDirectory, KiroProjectDirectory,
-        OpenCodeProjectDirectory,
+        OpenCodeProjectDirectory, VibeProjectDirectory, ZedProjectDirectory,
     };
 
     let (cli_id, slug, hook, components, asset_render_policy, activation_policy, path) = match host
@@ -370,6 +380,33 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             ManagedEmbedded,
             Managed,
             HostProjectRegistrationPathV1::Unavailable,
+        ),
+        HostKindV1::Zed => (
+            "zed",
+            "zed",
+            NotApplicable,
+            vec![ContextMcp],
+            ManagedEmbedded,
+            Managed,
+            ZedProjectDirectory,
+        ),
+        HostKindV1::Antigravity => (
+            "antigravity",
+            "antigravity",
+            NotApplicable,
+            vec![ContextMcp],
+            ManagedEmbedded,
+            Managed,
+            HostProjectRegistrationPathV1::Unavailable,
+        ),
+        HostKindV1::Vibe => (
+            "vibe",
+            "vibe",
+            NotApplicable,
+            vec![Agent, ContextMcp],
+            ManagedEmbedded,
+            Managed,
+            VibeProjectDirectory,
         ),
     };
     HostDescriptorV1 {

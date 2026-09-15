@@ -72,9 +72,36 @@ pub fn resolved_host_bundle_lifecycle_root() -> crate::errors::Result<PathBuf> {
     Ok(crate::storage::default_profile_root()?.join("host-components"))
 }
 
+/// Resolve a project-isolated receipt root without placing lifecycle state in
+/// the repository or aliasing two projects through the same host receipt.
+pub fn resolved_project_host_bundle_lifecycle_root(
+    project_path: &Path,
+) -> crate::errors::Result<PathBuf> {
+    project_host_bundle_lifecycle_root_at(
+        &resolved_host_bundle_lifecycle_root()?,
+        project_path,
+    )
+}
+
+pub fn project_host_bundle_lifecycle_root_at(
+    lifecycle_root: &Path,
+    project_path: &Path,
+) -> crate::errors::Result<PathBuf> {
+    let project = fs::canonicalize(project_path).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
+            message: format!(
+                "failed to resolve project host lifecycle identity for {}: {error}",
+                project_path.display()
+            ),
+        }
+    })?;
+    let digest = Sha256::digest(project.as_os_str().as_encoded_bytes());
+    Ok(lifecycle_root.join("projects").join(hex::encode(digest)))
+}
+
 /// Canonical stock-host enumeration shared by packaging, delivery, and
 /// conformance consumers.
-pub const fn stock_host_kinds() -> [HostKindV1; 15] {
+pub const fn stock_host_kinds() -> [HostKindV1; 18] {
     HostKindV1::ALL
 }
 

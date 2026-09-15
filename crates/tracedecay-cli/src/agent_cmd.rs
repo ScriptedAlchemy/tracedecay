@@ -666,6 +666,31 @@ fn apply_canonical_component_set(
     lifecycle_root: &Path,
     context: &ComponentSetApplyContext,
 ) -> tracedecay_domain::errors::Result<()> {
+    apply_canonical_component_set_at(
+        agent_id,
+        operation,
+        component_set,
+        options,
+        home,
+        home,
+        lifecycle_root,
+        context,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_canonical_component_set_at(
+    agent_id: &str,
+    operation: HostBundleCliOperation,
+    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
+    options: &crate::cli::HostBundleCliOptions,
+    artifact_root: &Path,
+    home: &Path,
+    lifecycle_root: &Path,
+    context: &ComponentSetApplyContext,
+    project_path: Option<&Path>,
+) -> tracedecay_domain::errors::Result<()> {
     let ComponentSetApplyContext {
         tracedecay_bin,
         dashboard,
@@ -679,7 +704,7 @@ fn apply_canonical_component_set(
     )?;
     let mut writer =
         tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
-            home,
+            artifact_root,
             lifecycle_root,
         )
         .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
@@ -688,27 +713,50 @@ fn apply_canonical_component_set(
         component_set.component_set.host,
         &mut writer,
         |operation| {
-            CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
-                agent_id,
-                home,
-                lifecycle_root,
-                operation,
-                tracedecay_bin.to_string(),
-                dashboard,
-            )
+            match project_path {
+                Some(project_path) => {
+                    CatalogHostComponentRegistrationAuthority::new_project_with_tracedecay_bin(
+                        agent_id,
+                        home,
+                        project_path,
+                        lifecycle_root,
+                        operation,
+                        tracedecay_bin.to_string(),
+                    )
+                }
+                None => CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
+                    agent_id,
+                    home,
+                    lifecycle_root,
+                    operation,
+                    tracedecay_bin.to_string(),
+                    dashboard,
+                ),
+            }
         },
     )?;
     let mut transaction =
         tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
-    let mut registration =
-        CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
+    let mut registration = match project_path {
+        Some(project_path) => {
+            CatalogHostComponentRegistrationAuthority::new_project_with_tracedecay_bin(
+                agent_id,
+                home,
+                project_path,
+                lifecycle_root,
+                request.lifecycle.operation,
+                tracedecay_bin.to_string(),
+            )
+        }
+        None => CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
             agent_id,
             home,
             lifecycle_root,
             request.lifecycle.operation,
             tracedecay_bin.to_string(),
             dashboard,
-        )?;
+        ),
+    }?;
     // Recover this host's own outstanding journal before previewing, exactly as
     // `HostComponentSetTransactionV1::execute` does. Without this the residue of
     // any earlier failure — including one that has since been fixed — makes
@@ -837,7 +885,7 @@ pub(crate) async fn handle_project_local_lifecycle_command(
     agent_id: String,
     operation: HostBundleCliOperation,
 ) -> tracedecay_domain::errors::Result<()> {
-    if agent_id != "devin" {
+    if !matches!(agent_id.as_str(), "devin" | "zed" | "vibe") {
         return Err(project_local_host_lifecycle_unavailable());
     }
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
@@ -868,36 +916,47 @@ pub(crate) async fn handle_project_local_lifecycle_command(
         project_root: Some(project_path.clone()),
         dashboard: false,
     };
-    let components = [tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp];
-    let _registration_paths =
-        integration.project_host_component_registration_paths(&components, &home, &project_path)?;
-    match operation {
-        HostBundleCliOperation::Install
-        | HostBundleCliOperation::Update
-        | HostBundleCliOperation::Repair => {
-            prepare_native_activation_if_needed(integration.as_ref(), &context)?;
-            integration.activate_project_host_component_registration(
-                &components,
-                &context,
-                &project_path,
-            )?;
-            eprintln!(
-                "\x1b[32m+\x1b[0m {} project MCP registration",
-                integration.name()
-            );
-        }
-        HostBundleCliOperation::Uninstall => {
-            integration.deactivate_project_host_component_registration(
-                &components,
-                &context,
-                &project_path,
-            )?;
-            eprintln!(
-                "\x1b[31m-\x1b[0m {} project MCP registration",
-                integration.name()
-            );
-        }
-    }
+    prepare_native_activation_if_needed(integration.as_ref(), &context)?;
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "system clock is before the Unix epoch".to_string(),
+        })?
+        .as_secs();
+    let component_set = canonical_host_component_set_with_tracedecay_bin(
+        &agent_id,
+        None,
+        now_unix,
+        &context.tracedecay_bin,
+    )?
+    .ok_or_else(|| project_local_host_lifecycle_unavailable())?;
+    let lifecycle_root =
+        tracedecay::agents::host_bundle_v2::resolved_project_host_bundle_lifecycle_root(
+            &project_path,
+        )?;
+    apply_canonical_component_set_at(
+        &agent_id,
+        operation,
+        &component_set,
+        &crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        },
+        &project_path,
+        &home,
+        &lifecycle_root,
+        &ComponentSetApplyContext {
+            tracedecay_bin: context.tracedecay_bin,
+            dashboard: false,
+        },
+        Some(&project_path),
+    )?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m {} project component lifecycle complete",
+        integration.name()
+    );
     Ok(())
 }
 
@@ -2715,7 +2774,8 @@ pub(crate) async fn handle_install_command(
     validate_codex_automation_flags(agent.as_deref(), automation)?;
     if local {
         let agent_id = agent.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "`tracedecay install --local` requires `--agent devin`".to_string(),
+            message: "`tracedecay install --local` requires `--agent devin`, `--agent zed`, or `--agent vibe`"
+                .to_string(),
         })?;
         return handle_project_local_lifecycle_command(agent_id, HostBundleCliOperation::Install)
             .await;

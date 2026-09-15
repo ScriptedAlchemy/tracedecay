@@ -53,10 +53,16 @@ pub fn require_component_capabilities(
         (HostKindV1::Copilot, Core) => &[Hooks, Mcp],
         // Devin's supported first-party route is its independent
         // `mcpServers.tracedecay` registration; it has no Core surface.
-        (HostKindV1::Devin, Core) => return Err(HostBundleError::UnsupportedCapability),
+        (
+            HostKindV1::Devin
+            | HostKindV1::Zed
+            | HostKindV1::Antigravity
+            | HostKindV1::Vibe,
+            Core,
+        ) => return Err(HostBundleError::UnsupportedCapability),
         (_, ContextMcp | OperatorMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
-        (HostKindV1::OpenCode, Agent) => &[Cli],
+        (HostKindV1::OpenCode | HostKindV1::Vibe, Agent) => &[Cli],
         (_, Agent) => return Err(HostBundleError::UnsupportedCapability),
     };
     for capability in required {

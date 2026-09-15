@@ -149,6 +149,33 @@ const KILO_CONFIGS: &[(&str, &[u8])] = &[(
 }
 "#,
 )];
+const ZED_CONFIGS: &[(&str, &[u8])] = &[(
+    ".config/zed/settings.json",
+    br#"{"context_servers":{"foreign":{"command":"foreign-bin","args":["serve"]}},"ui":{"theme":"dark"}}
+"#,
+)];
+const ANTIGRAVITY_CONFIGS: &[(&str, &[u8])] = &[
+    (
+        ".gemini/antigravity/mcp_config.json",
+        br#"{"mcpServers":{"foreign":{"command":"foreign-ide"}},"ui":{"theme":"dark"}}
+"#,
+    ),
+    (
+        ".gemini/antigravity-cli/plugins/tracedecay.json",
+        br#"{"mcpServers":{"foreign":{"command":"foreign-cli"}},"plugin":{"enabled":true}}
+"#,
+    ),
+];
+const VIBE_CONFIGS: &[(&str, &[u8])] = &[
+    (
+        ".vibe/config.toml",
+        b"# operator comment\nmodel = \"codestral\"\n\n[[mcp_servers]]\nname = \"foreign\"\ncommand = \"foreign-bin\"\nargs = [\"serve\"]\n",
+    ),
+    (
+        ".vibe/prompts/cli.md",
+        b"# Operator-owned Vibe rules\n\nKeep this paragraph.\n",
+    ),
+];
 
 fn host_case(host: HostKindV1) -> HostCase {
     let configs = match host {
@@ -165,6 +192,9 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::Cline => CLINE_CONFIGS,
         HostKindV1::RooCode => ROO_CONFIGS,
         HostKindV1::Kilo => KILO_CONFIGS,
+        HostKindV1::Zed => ZED_CONFIGS,
+        HostKindV1::Antigravity => ANTIGRAVITY_CONFIGS,
+        HostKindV1::Vibe => VIBE_CONFIGS,
         unsupported => panic!("no production lifecycle case for unsupported host {unsupported:?}"),
     };
     HostCase {
@@ -255,6 +285,14 @@ impl IsolatedCli {
     fn lifecycle_root(&self) -> PathBuf {
         self.profile.join("host-components")
     }
+
+    fn project_lifecycle_root(&self) -> PathBuf {
+        tracedecay::agents::host_bundle_v2::project_host_bundle_lifecycle_root_at(
+            &self.lifecycle_root(),
+            self.project.path(),
+        )
+        .unwrap()
+    }
 }
 fn assert_success(host: &str, phase: &str, output: Output) {
     assert!(
@@ -266,9 +304,59 @@ fn assert_success(host: &str, phase: &str, output: Output) {
 }
 
 fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
+    if case.host == HostKindV1::Antigravity {
+        for (relative, foreign_command) in [
+            (".gemini/antigravity/mcp_config.json", "foreign-ide"),
+            (
+                ".gemini/antigravity-cli/plugins/tracedecay.json",
+                "foreign-cli",
+            ),
+        ] {
+            let config: serde_json::Value =
+                serde_json::from_slice(&fs::read(cli.home.path().join(relative)).unwrap()).unwrap();
+            assert_eq!(
+                config["mcpServers"]["foreign"]["command"],
+                foreign_command
+            );
+            assert_eq!(
+                config["mcpServers"]["tracedecay"]["command"],
+                serde_json::json!(cli.bin_dir.join("tracedecay"))
+            );
+            assert_eq!(
+                config["mcpServers"]["tracedecay"]["args"],
+                serde_json::json!(["serve"])
+            );
+        }
+        return;
+    }
+    if case.host == HostKindV1::Vibe {
+        let contents =
+            fs::read_to_string(cli.home.path().join(".vibe/config.toml")).unwrap();
+        assert!(contents.contains("# operator comment"));
+        let config: toml::Value = toml::from_str(&contents).unwrap();
+        let servers = config["mcp_servers"].as_array().unwrap();
+        assert!(servers.iter().any(|server| {
+            server["name"].as_str() == Some("foreign")
+                && server["command"].as_str() == Some("foreign-bin")
+        }));
+        let tracedecay = servers
+            .iter()
+            .find(|server| server["name"].as_str() == Some("tracedecay"))
+            .unwrap();
+        assert_eq!(
+            tracedecay["command"].as_str(),
+            Some(cli.bin_dir.join("tracedecay").to_str().unwrap())
+        );
+        assert_eq!(tracedecay["args"][0].as_str(), Some("serve"));
+        let prompt = fs::read_to_string(cli.home.path().join(".vibe/prompts/cli.md")).unwrap();
+        assert!(prompt.contains("Keep this paragraph."));
+        assert!(prompt.contains("## Prefer tracedecay MCP tools"));
+        return;
+    }
     let (relative, root) = match case.host {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
         HostKindV1::Devin => (".config/devin/mcp_config.json", "mcpServers"),
+        HostKindV1::Zed => (".config/zed/settings.json", "context_servers"),
         HostKindV1::RooCode => (
             ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
             "mcpServers",
@@ -284,7 +372,10 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         case.id
     );
     let theme = match case.host {
-        HostKindV1::Cline | HostKindV1::Devin | HostKindV1::RooCode => &config["ui"]["theme"],
+        HostKindV1::Cline
+        | HostKindV1::Devin
+        | HostKindV1::RooCode
+        | HostKindV1::Zed => &config["ui"]["theme"],
         HostKindV1::Kilo => &config["theme"],
         _ => unreachable!(),
     };
@@ -325,6 +416,13 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
                 serde_json::json!([cli.bin_dir.join("tracedecay"), "serve"])
             );
             assert_eq!(entry["enabled"], true);
+        }
+        HostKindV1::Zed => {
+            assert_eq!(
+                entry["command"],
+                serde_json::json!(cli.bin_dir.join("tracedecay"))
+            );
+            assert_eq!(entry["args"], serde_json::json!(["serve"]));
         }
         _ => unreachable!(),
     }
@@ -540,7 +638,10 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
         | HostKindV1::Copilot
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => Vec::new(),
+        | HostKindV1::Kilo
+        | HostKindV1::Zed
+        | HostKindV1::Antigravity
+        | HostKindV1::Vibe => Vec::new(),
         _ => unreachable!("non-acceptance host"),
     }
 }
@@ -577,6 +678,9 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         HostKindV1::Cline,
         HostKindV1::Devin,
         HostKindV1::Hermes,
+        HostKindV1::Zed,
+        HostKindV1::Antigravity,
+        HostKindV1::Vibe,
     ] {
         let case = host_case(host);
         assert!(!lifecycle_requires_absent_host_binary(case.host));
@@ -589,6 +693,12 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             cli.run(&["install", "--agent", case.id]),
         );
         assert_documented_mcp_registration(case, &cli);
+        if matches!(
+            host,
+            HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe
+        ) {
+            assert_success(case.id, "sandbox Doctor", cli.run(&["doctor"]));
+        }
         let install_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &install_receipt);
 
@@ -780,6 +890,169 @@ fn production_cli_installs_devin_project_mcp_without_touching_siblings() {
         config["mcpServers"]["tracedecay"]["env"],
         serde_json::json!({})
     );
+}
+
+#[test]
+fn production_cli_completes_receipt_backed_project_lifecycle_for_advertised_hosts() {
+    for (host, config_relative) in [
+        (HostKindV1::Zed, ".zed/settings.json"),
+        (HostKindV1::Vibe, ".vibe/config.toml"),
+    ] {
+        let case = host_case(host);
+        let cli = IsolatedCli::new();
+        let (config, original) = match host {
+            HostKindV1::Zed => (
+                cli.project.path().join(config_relative),
+                br#"{"context_servers":{"foreign":{"command":"foreign"}},"ui":{"theme":"dark"}}
+"#
+                .to_vec(),
+            ),
+            HostKindV1::Vibe => (
+                cli.project.path().join(config_relative),
+                b"# project peer\nmodel = \"codestral\"\n\n[[mcp_servers]]\nname = \"foreign\"\ncommand = \"foreign\"\n"
+                    .to_vec(),
+            ),
+            _ => unreachable!(),
+        };
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, &original).unwrap();
+        if host == HostKindV1::Vibe {
+            let prompt = cli.project.path().join(".vibe/prompts/cli.md");
+            fs::create_dir_all(prompt.parent().unwrap()).unwrap();
+            fs::write(&prompt, "# Project Vibe instructions\n").unwrap();
+        }
+
+        assert_success(
+            case.id,
+            "project install",
+            cli.run(&["install", "--agent", case.id, "--local"]),
+        );
+        let receipt = latest_host_component_set_receipt_at(&cli.project_lifecycle_root(), host)
+            .unwrap()
+            .expect("project component receipt");
+        assert_eq!(
+            receipt
+                .component_receipts
+                .iter()
+                .map(|component| component.component)
+                .collect::<Vec<_>>(),
+            tracedecay::agents::host_bundle_registry::default_components(host)
+        );
+        for artifact in receipt
+            .component_receipts
+            .iter()
+            .flat_map(|component| &component.artifacts)
+        {
+            assert!(cli.project.path().join(&artifact.relative_path).is_file());
+        }
+
+        let doctor = cli.run(&["doctor"]);
+        assert_success(case.id, "project-only Doctor", doctor);
+
+        let repair_target = &receipt.component_receipts[0].artifacts[0].relative_path;
+        fs::write(
+            cli.project.path().join(repair_target),
+            b"corrupt project descriptor",
+        )
+        .unwrap();
+        let interrupted = cli.run_with_env(
+            &["reinstall", "--agent", case.id, "--local"],
+            VERIFY_FAILURE_ENV,
+            "1",
+        );
+        assert!(!interrupted.status.success());
+        assert_success(
+            case.id,
+            "project recovery and repair",
+            cli.run(&["reinstall", "--agent", case.id, "--local"]),
+        );
+
+        assert_success(
+            case.id,
+            "project update",
+            cli.run(&["update-plugin", "--agent", case.id, "--local"]),
+        );
+        assert_success(
+            case.id,
+            "project uninstall",
+            cli.run(&["uninstall", "--agent", case.id, "--local"]),
+        );
+        let removed = latest_host_component_set_receipt_at(&cli.project_lifecycle_root(), host)
+            .unwrap()
+            .expect("project uninstall receipt");
+        assert!(removed.component_receipts.iter().all(|component| component
+            .artifacts
+            .iter()
+            .all(|artifact| !cli.project.path().join(&artifact.relative_path).exists())));
+        let contents = fs::read_to_string(&config).unwrap();
+        match host {
+            HostKindV1::Zed => {
+                let document: serde_json::Value = serde_json::from_str(&contents).unwrap();
+                assert_eq!(document["ui"]["theme"], "dark");
+                assert_eq!(
+                    document["context_servers"]["foreign"]["command"],
+                    "foreign"
+                );
+                assert!(
+                    document["context_servers"]
+                        .get("tracedecay")
+                        .is_none()
+                );
+            }
+            HostKindV1::Vibe => {
+                assert!(contents.contains("# project peer"));
+                assert!(contents.contains("name = \"foreign\""));
+                assert!(!contents.contains("name = \"tracedecay\""));
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn project_lifecycle_refuses_malformed_and_symlinked_host_documents() {
+    let malformed = IsolatedCli::new();
+    let malformed_config = malformed.project.path().join(".vibe/config.toml");
+    fs::create_dir_all(malformed_config.parent().unwrap()).unwrap();
+    fs::write(&malformed_config, "[[mcp_servers]\n").unwrap();
+    let before = fs::read(&malformed_config).unwrap();
+    let refused = malformed.run(&["install", "--agent", "vibe", "--local"]);
+    assert!(!refused.status.success());
+    assert_eq!(fs::read(&malformed_config).unwrap(), before);
+    assert!(
+        latest_host_component_set_receipt_at(
+            &malformed.project_lifecycle_root(),
+            HostKindV1::Vibe
+        )
+        .unwrap()
+        .is_none()
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let cli = IsolatedCli::new();
+        let external = TempDir::new().unwrap();
+        let external_settings = external.path().join("settings.json");
+        fs::write(
+            &external_settings,
+            br#"{"context_servers":{"foreign":{"command":"foreign"}}}"#,
+        )
+        .unwrap();
+        symlink(external.path(), cli.project.path().join(".zed")).unwrap();
+        let refused = cli.run(&["install", "--agent", "zed", "--local"]);
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("symlink"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert_eq!(
+            fs::read(&external_settings).unwrap(),
+            br#"{"context_servers":{"foreign":{"command":"foreign"}}}"#
+        );
+    }
 }
 
 #[test]

@@ -106,6 +106,21 @@ impl AgentIntegration for DevinIntegration {
         )
     }
 
+    fn project_host_component_registration_for_lifecycle(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+        install: &InstallContext,
+    ) -> HostBundleRegistrationStateV1 {
+        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+            return HostBundleRegistrationStateV1::Missing;
+        }
+        devin_mcp_registration_state(
+            &devin_project_mcp_config_path(&ctx.project_path),
+            Some(&install.tracedecay_bin),
+        )
+    }
+
     fn is_detected(&self, home: &Path) -> bool {
         devin_config_dir(home).is_dir()
     }
