@@ -1,12 +1,6 @@
 /**
- * CORTEX — the macro sheet of the structure LENS. One navigable space:
- * Far = CORTEX. Touch a symbol = TRACE floods. Enter a file = CORE SAMPLE.
- *
- * This is the far end of the same continuum the LENS ruler already carries, not
- * a page of its own: it renders inside the `cortex` position above the
- * connectivity spine, and it takes the workspace's current symbol focus so the
- * reader can see WHERE on the terrain the thing they are tracing lives. Moving
- * the ruler to TRACE or CORE from here changes altitude over the same identity.
+ * TOPOLOGY aggregates modules above the symbol graph and keeps the current
+ * symbol focus visible on that module terrain.
  *
  * The division of labour is the plan's honesty boundary (`:196`):
  *
@@ -60,10 +54,10 @@ export function CortexRelief({ focusPath }: { focusPath?: string | null }) {
   return (
     <section
       className="flex flex-col border-b border-edge-subtle"
-      aria-label="CORTEX module relief"
+      aria-label="Topology module relief"
     >
       <div className="flex flex-wrap items-baseline gap-2 border-b border-edge-subtle px-3 py-2">
-        <h2 className="td-title">CORTEX</h2>
+        <h2 className="td-title">Topology</h2>
         <span aria-hidden className="td-rule" />
         <span className="td-legend normal-case tracking-normal text-text-muted">
           the indexed repository as continuous relief · elevation is dependency depth,
@@ -137,7 +131,7 @@ function ReliefSheet({
           the symbol this workspace is focused on lives in{' '}
           <span className="td-value text-text-secondary">{focusedDirectory}</span> —{' '}
           {model.drawnRegions.some((region) => region.directory === focusedDirectory)
-            ? 'that region is ringed on the relief above. Move the lens to TRACE to flood it.'
+            ? 'that region is ringed on the relief above. Open Trace to inspect its call neighborhood.'
             : 'that directory is not one of the drawn regions, so nothing is ringed above; its row is in the table below if the scan reached it.'}
         </p>
       ) : null}
