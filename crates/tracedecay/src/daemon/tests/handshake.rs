@@ -343,6 +343,11 @@ fn client_version_skew_flags_only_real_mismatches() {
 #[cfg(unix)]
 #[tokio::test]
 async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
+    // The refusal frame advertises `binary_version()`, which reads the
+    // registered product runtime; this test never builds a handshake, so it
+    // must register the fixture itself instead of inheriting it from
+    // `test_handshake_defaults`.
+    crate::product_runtime::register_fixture_product_runtime();
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
     let client_identity = test_client_identity_for(home.join("client"));
@@ -403,6 +408,11 @@ async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
 #[cfg(unix)]
 #[tokio::test]
 async fn non_json_handshake_reads_invalid_handshake_refusal() {
+    // The refusal frame advertises `binary_version()`, which reads the
+    // registered product runtime; this test never builds a handshake, so it
+    // must register the fixture itself instead of inheriting it from
+    // `test_handshake_defaults`.
+    crate::product_runtime::register_fixture_product_runtime();
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
     let client_identity = test_client_identity_for(home.join("client"));
