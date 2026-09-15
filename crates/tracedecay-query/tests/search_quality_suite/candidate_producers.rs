@@ -2226,28 +2226,26 @@ fn fingerprint_candidate_and_posting_budgets_report_partial_coverage() {
 
 #[test]
 fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
-    let shared = (0..1_500)
-        .map(|ordinal| format!("shared_step_{ordinal}(); "))
+    let shared = (0..1_400)
+        .map(|ordinal| format!("{ordinal},"))
         .collect::<String>();
-    let fixture = real_lexical_source_fixture_from_sources(
-        (0..4)
-            .map(|ordinal| {
-                (
-                    format!("file.clone.cursor.{ordinal}"),
-                    format!("src/cursor-{ordinal}.ts"),
-                    format!(
-                        "export function cursor_{ordinal}() {{ {shared} unique_{ordinal}(); }}"
-                    )
-                    .into_bytes(),
-                )
-            })
-            .collect(),
-    );
+    let source_text = (0..12)
+        .map(|ordinal| {
+            format!(
+                "export function cursor_{ordinal}() {{ const values = [{shared}]; return values[{ordinal}]; }}\n"
+            )
+        })
+        .collect::<String>();
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.clone.cursor".to_owned(),
+        "src/cursor.ts".to_owned(),
+        source_text.into_bytes(),
+    )]);
     let (_directory, pages, reader) = build_clone_artifact(&fixture);
     let source = pages
         .iter()
         .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
-        .find(|body| body.occurrence.path == "src/cursor-0.ts")
+        .min_by_key(|body| body.occurrence.body_span.start_byte)
         .expect("cursor source body");
     let read = reader
         .clone_fingerprint_page(
@@ -2262,7 +2260,8 @@ fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
     assert!(
         read.partial_reasons
             .contains(&CloneFingerprintPartialReasonV1::VerificationWorkBudget),
-        "fixture must exhaust alignment work: {read:#?}"
+        "fixture must exhaust alignment work: {:?}",
+        read.accounting
     );
     let last_completed = read
         .page
