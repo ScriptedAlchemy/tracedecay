@@ -16,6 +16,14 @@ use tracedecay_store::{
 
 use super::support::{decode, encode, invalid, same_json};
 
+/// Rows moved per retired-table migration write.
+///
+/// The costliest production rewrite measured about 1.5 ms per row. Three
+/// thousand rows cost about 4.5 seconds at that rate, leaving more than sixfold
+/// headroom beneath the 30-second exact-SQL statement limit while still
+/// amortizing each transaction over a substantial batch.
+pub const RETIRED_MUTATION_COPY_CHUNK_ROWS: i64 = 3_000;
+
 // Immutable histories stay append-only until the canonical retention policy
 // explicitly covers external-source receipts. Current-state reads and writes
 // use only primary-key/index probes and normalized current rows.

@@ -11,16 +11,16 @@ use tracedecay_domain::{
     canonical_json_bytes,
     framed_log::{self, checksum as frame_checksum},
 };
-use tracedecay_private_fs::framed_log::atomic_write as shared_atomic_write;
+use tracedecay_private_fs::framed_log::atomic_write_accelerator;
 
 use crate::{
     HookHostV1, MAX_HOOK_PAYLOAD_BYTES, MAX_SPOOL_BYTES_PER_HOST, MAX_SPOOL_RECORDS_PER_HOST,
 };
 
 use super::{
-    CHECKPOINT_FILE, CHECKPOINT_FORMAT_VERSION, DIRECTORY_POLICY, HookSpoolConfigV1,
-    HookSpoolError, TRANSITION_FILE, checkpoint_path, read_bounded, records_path, transition_path,
-    types::PendingRecordV1, validate_regular_or_missing,
+    CHECKPOINT_FILE, CHECKPOINT_FORMAT_VERSION, HookSpoolConfigV1, HookSpoolError, TRANSITION_FILE,
+    checkpoint_path, read_bounded, records_path, transition_path, types::PendingRecordV1,
+    validate_regular_or_missing,
 };
 
 const MAX_CHECKPOINT_BYTES: usize = (MAX_SPOOL_BYTES_PER_HOST as usize) * 4;
@@ -325,13 +325,8 @@ pub(super) fn write_checkpoint(
     bytes.extend_from_slice(&body_bytes);
     let checksum = frame_checksum(&bytes);
     bytes.extend_from_slice(&checksum);
-    shared_atomic_write(
-        &checkpoint_path(root),
-        CHECKPOINT_FILE,
-        &bytes,
-        DIRECTORY_POLICY,
-    )
-    .map_err(|_| HookSpoolError::Io)?;
+    atomic_write_accelerator(&checkpoint_path(root), CHECKPOINT_FILE, &bytes)
+        .map_err(|_| HookSpoolError::Io)?;
     Ok(CheckpointAnchorV1 {
         records_revision,
         checksum,
@@ -377,13 +372,8 @@ pub(super) fn write_transition(
     let checksum = frame_checksum(&body_bytes);
     let bytes = serde_json::to_vec(&HookSpoolTransitionFileV1 { body, checksum })
         .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-    shared_atomic_write(
-        &transition_path(root),
-        TRANSITION_FILE,
-        &bytes,
-        DIRECTORY_POLICY,
-    )
-    .map_err(|_| HookSpoolError::Io)?;
+    atomic_write_accelerator(&transition_path(root), TRANSITION_FILE, &bytes)
+        .map_err(|_| HookSpoolError::Io)?;
     Ok(current_revision)
 }
 

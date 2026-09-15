@@ -423,6 +423,26 @@ fn reused_event_id_with_different_envelope_is_rejected_after_reopen() {
 }
 
 #[test]
+fn a_durable_frame_reconciles_its_retained_append_intent_on_reopen() {
+    let root = TestDir::new("durable-frame-intent");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+    drop(spool);
+
+    let durable_meta = read_meta(&root.0).unwrap().unwrap();
+    assert_eq!(durable_meta.next_sequence, 1);
+    assert_eq!(durable_meta.append_intent.unwrap().sequence, 1);
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
+    assert_eq!(report.next_sequence, 2);
+    assert_eq!(spool.pending.len(), 1);
+    assert_eq!(spool.meta.next_sequence, 2);
+    assert!(spool.meta.append_intent.is_none());
+}
+
+#[test]
 fn checkpoint_anchor_is_reused_until_the_suffix_threshold() {
     let root = TestDir::new("checkpoint-suffix");
     let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
