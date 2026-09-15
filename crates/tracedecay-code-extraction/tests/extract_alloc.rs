@@ -34,7 +34,7 @@ use tracedecay_code_extraction::{
     RExtractor, RubyExtractor, RustExtractor, ScalaExtractor, SqlExtractor, SwiftExtractor,
     TomlExtractor, TypeScriptExtractor, VbNetExtractor, WgslExtractor, ZigExtractor, ts_provider,
 };
-use tracedecay_domain::{ExtractionResult, NodeKind};
+use tracedecay_domain::{EdgeKind, ExtractionResult, NodeKind};
 use tree_sitter::{Parser, Tree};
 
 /// Counts bytes handed out by the Rust allocator on the current thread.
@@ -248,6 +248,21 @@ fn signature_of<'r>(result: &'r ExtractionResult, kind: NodeKind, name: &str) ->
         .signature
         .as_deref()
         .unwrap_or_else(|| panic!("{name} has no signature"))
+}
+
+fn call_bindings(result: &ExtractionResult) -> Vec<(&str, &str)> {
+    result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| reference.reference_kind == EdgeKind::Calls)
+        .filter_map(|reference| {
+            let owner = result
+                .nodes
+                .iter()
+                .find(|node| node.id == reference.from_node_id)?;
+            Some((owner.name.as_str(), reference.reference_name.as_str()))
+        })
+        .collect()
 }
 
 /// A byte range covering the small trailing item that starts at `needle`,
@@ -720,11 +735,12 @@ fn representative_language_walks_allocate_by_changed_region() {
     assert!(over_budget.is_empty(), "{}", over_budget.join("\n"));
 }
 
-/// Bash rebuilds its document-spanning script module after an edit, but the
-/// reset walk must still borrow the caller's source instead of copying it.
+/// Bash rebuilds its document-spanning script module after an edit. The
+/// reset walk must borrow the caller's source and still bind script-level
+/// calls that sit outside the selected region.
 #[test]
 fn bash_changed_region_reset_walk_does_not_copy_source() {
-    let source = regional_fixture("tiny() { :; }\n");
+    let source = regional_fixture("kept() { echo kept; }\nkept\ntiny() { echo tiny; }\n");
     let cold = BashExtractor.extract("region.sh", &source);
     let tree = parse_with_grammar("bash", &source);
     let region = trailing_region(&source, "tiny()");
@@ -745,18 +761,28 @@ fn bash_changed_region_reset_walk_does_not_copy_source() {
         }
     );
     assert_eq!(incremental.metrics.visited_bytes, source.len());
-    assert_eq!(
-        canonical_digest(&cold),
-        canonical_digest(&incremental.result)
-    );
-    assert_eq!(
-        canonical_digest(&cold),
-        "d1b8003a5b51fbeaa81bc03dc58ff38ad4f8ebd7af74533882cbabe8c47a2eb1"
-    );
     assert!(
         walk_bytes < source.len(),
         "Bash reset walk allocated {walk_bytes} bytes for a {} byte source",
         source.len()
+    );
+    assert!(
+        incremental
+            .result
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Function && node.name == "kept"),
+        "reset walk must re-extract kept, which sits outside the selected region"
+    );
+    let mut calls = call_bindings(&incremental.result);
+    calls.sort_unstable();
+    assert_eq!(
+        calls,
+        [("kept", "echo"), ("region", "kept"), ("tiny", "echo")]
+    );
+    assert_eq!(
+        canonical_digest(&cold),
+        canonical_digest(&incremental.result)
     );
 }
 
