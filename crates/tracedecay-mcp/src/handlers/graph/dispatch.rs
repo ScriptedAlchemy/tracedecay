@@ -72,7 +72,7 @@ pub async fn dispatch_tool(
         "tracedecay_callees" => handle_callees(&open(read("callees")?).await?, args).await,
         "tracedecay_impact" => handle_impact(&open(read("impact")?).await?, args).await,
         "tracedecay_node" => handle_node(&open(read("node")?).await?, args).await,
-        "tracedecay_similar" => handle_similar(ctx, &open(read("similar")?).await?, args).await,
+        "tracedecay_similar" => handle_similar(ctx, args).await,
         "tracedecay_rename_preview" => {
             handle_rename_preview(ctx, &open(read("rename_preview")?).await?, args).await
         }

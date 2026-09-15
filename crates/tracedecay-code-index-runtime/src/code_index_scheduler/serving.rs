@@ -525,33 +525,59 @@ impl ProductionCodeIndexQueryOwnersV1 {
 
     pub(crate) fn similar(
         &self,
-        symbol_occurrence_id: &tracedecay_domain::SymbolOccurrenceId,
-        limit: usize,
+        request: &tracedecay_query::code_search::CodeIndexSimilarRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<
         Option<tracedecay_query::code_search::CodeIndexSimilarCompletedV1>,
         RetrievalPortError,
     > {
-        let Some(source) = self
-            .hydration
-            .clone_body(symbol_occurrence_id)
-            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?
-        else {
+        let source = match &request.target {
+            tracedecay_query::code_search::CodeIndexSimilarTargetV1::SymbolOccurrence(
+                occurrence,
+            ) => self.hydration.clone_body(occurrence),
+            tracedecay_query::code_search::CodeIndexSimilarTargetV1::SourceRange { path, span } => {
+                self.hydration.clone_body_by_source_range(path, *span)
+            }
+        }
+        .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+        let Some(source) = source else {
             return Ok(None);
         };
         let mut exact_groups = Vec::new();
-        for key in source.payload.exact_keys(source.occurrence.eligibility) {
-            let members = self.verified_exact_clone_members(&source, &key, limit, control)?;
-            if !members.is_empty() {
+        for key in source
+            .payload
+            .exact_keys(source.occurrence.eligibility)
+            .into_iter()
+            .filter(|key| request.match_classes.contains(&key.class))
+        {
+            let (members, complete, next_cursor) =
+                self.verified_exact_clone_page(&source, &key, request, control)?;
+            if !members.is_empty() || !complete {
                 exact_groups.push(
-                    tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 { key, members },
+                    tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 {
+                        key,
+                        members,
+                        complete,
+                        next_cursor,
+                    },
                 );
             }
         }
-        let near = self
-            .hydration
-            .clone_fingerprint_page(&source.occurrence, &source.payload, None, limit, control)
-            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+        let near = if request.cursor.is_none() {
+            Some(
+                self.hydration
+                    .clone_fingerprint_page(
+                        &source.occurrence,
+                        &source.payload,
+                        None,
+                        request.result_limit.min(request.work_limit - 1),
+                        control,
+                    )
+                    .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         Ok(Some(
             tracedecay_query::code_search::CodeIndexSimilarCompletedV1 {
                 source,
@@ -561,24 +587,37 @@ impl ProductionCodeIndexQueryOwnersV1 {
         ))
     }
 
-    /// Continue paging past filter rejects until `limit` verified members exist.
-    fn verified_exact_clone_members(
+    fn verified_exact_clone_page(
         &self,
         source: &tracedecay_code_index::clones::CodeIndexCloneBodyV1,
         key: &tracedecay_code_index::clones::CloneExactKeyV1,
-        limit: usize,
+        request: &tracedecay_query::code_search::CodeIndexSimilarRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<
-        Vec<tracedecay_query::retrieval::lexical::CloneExactArtifactMemberV1>,
+        (
+            Vec<tracedecay_query::retrieval::lexical::CloneExactArtifactMemberV1>,
+            bool,
+            Option<tracedecay_query::retrieval::lexical::CloneArtifactCursorV1>,
+        ),
         RetrievalPortError,
     > {
         let mut members = Vec::new();
-        let mut cursor = None;
-        while members.len() < limit {
+        let mut cursor = request.cursor.clone();
+        let mut complete = false;
+        let mut remaining_work = request.work_limit - 1;
+        while members.len() < request.result_limit && remaining_work > 0 {
+            let page_limit = remaining_work.min(request.result_limit - members.len());
             let page = self
                 .hydration
-                .clone_exact_page(&source.occurrence, key, cursor.as_ref(), limit, control)
+                .clone_exact_page(
+                    &source.occurrence,
+                    key,
+                    cursor.as_ref(),
+                    page_limit,
+                    control,
+                )
                 .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+            remaining_work = remaining_work.saturating_sub(page.members.len());
             for member in page.members {
                 if member.occurrence.symbol_occurrence_id == source.occurrence.symbol_occurrence_id
                 {
@@ -592,16 +631,24 @@ impl ProductionCodeIndexQueryOwnersV1 {
                     continue;
                 }
                 members.push(member);
-                if members.len() >= limit {
+                if members.len() >= request.result_limit {
                     break;
                 }
             }
             match page.next_cursor {
-                Some(next) if members.len() < limit => cursor = Some(next),
-                _ => break,
+                Some(next) if members.len() < request.result_limit && remaining_work > 0 => {
+                    cursor = Some(next);
+                }
+                Some(next) => {
+                    return Ok((members, false, Some(next)));
+                }
+                None => {
+                    complete = true;
+                    break;
+                }
             }
         }
-        Ok(members)
+        Ok((members, complete, None))
     }
 
     #[cfg(test)]

@@ -375,8 +375,8 @@ pub(super) fn def_files() -> ToolDefinition {
 pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_similar",
-        "Similar Symbols",
-        "Find verified shared-code clones for a resolved symbol: exact and rename-normalized body groups plus verified near-duplicate pairs from source-bound clone facts. Not embedding search. Prefer tracedecay_search for ranked body/phrase hits; use this when you need clone families and near-pair evidence.",
+        "Shared Implementations",
+        "Find token-verified implementations that share exact, rename-normalized, or near-duplicate source with one symbol occurrence or source range. The operation accepts no free-text query and reports bounded coverage for each exact digest family.",
         input_schema,
     )
 }
