@@ -51,7 +51,7 @@ async fn retrieve_tool_returns_full_stored_response() {
     let markdown = handle_tool_call(
         &cg,
         "tracedecay_retrieve",
-        json!({"handle": stored.handle, "offset": 2, "max_chars": 7}),
+        json!({"format": "markdown", "handle": stored.handle, "offset": 2, "max_chars": 7}),
         None,
         None,
     )

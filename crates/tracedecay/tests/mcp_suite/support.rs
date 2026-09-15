@@ -120,20 +120,33 @@ pub(crate) async fn handle_real_server_tool_call(
     if let Some(text) = result["content"][0]["text"].as_str()
         && let Some(handle) = truncated_response_handle(text)
     {
-        let retrieved = handle_real_server_tool_call_raw(
-            server,
-            "tracedecay_retrieve",
-            json!({ "handle": handle }),
-        )
-        .await;
-        assert!(retrieved["error"].is_null(), "{retrieved}");
-        let record: Value = serde_json::from_str(
-            retrieved["result"]["content"][0]["text"]
-                .as_str()
-                .expect("retrieved response text"),
-        )
-        .expect("retrieved response JSON");
-        result["content"][0]["text"] = record["content"].clone();
+        let mut offset = 0_u64;
+        let mut content = String::new();
+        loop {
+            let retrieved = handle_real_server_tool_call_raw(
+                server,
+                "tracedecay_retrieve",
+                json!({ "handle": handle, "format": "json", "offset": offset }),
+            )
+            .await;
+            assert!(retrieved["error"].is_null(), "{retrieved}");
+            let record: Value = serde_json::from_str(
+                retrieved["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("retrieved response text"),
+            )
+            .expect("retrieved response JSON");
+            content.push_str(
+                record["content"]
+                    .as_str()
+                    .expect("retrieved response page content"),
+            );
+            let Some(next_offset) = record["next_offset"].as_u64() else {
+                break;
+            };
+            offset = next_offset;
+        }
+        result["content"][0]["text"] = Value::String(content);
     }
     // Retained tools answer with the versioned `schema.application.retained.*`
     // envelope; these tests assert the owner's payload, so unwrap evidence and
@@ -633,21 +646,34 @@ where
     if let Some(text) = result["content"][0]["text"].as_str()
         && let Some(handle) = truncated_response_handle(text)
     {
-        let retrieved = dispatch(
-            "tracedecay_retrieve".to_owned(),
-            json!({ "handle": handle, "format": "json" }),
-        )
-        .await?;
-        let record: Value =
-            serde_json::from_str(retrieved["content"][0]["text"].as_str().ok_or_else(|| {
+        let mut offset = 0_u64;
+        let mut content = String::new();
+        loop {
+            let retrieved = dispatch(
+                "tracedecay_retrieve".to_owned(),
+                json!({ "handle": handle, "format": "json", "offset": offset }),
+            )
+            .await?;
+            let record: Value =
+                serde_json::from_str(retrieved["content"][0]["text"].as_str().ok_or_else(
+                    || TraceDecayError::Config {
+                        message: format!("{tool_name} retrieve returned no text: {retrieved}"),
+                    },
+                )?)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("{tool_name} retrieve returned invalid JSON: {error}"),
+                })?;
+            content.push_str(record["content"].as_str().ok_or_else(|| {
                 TraceDecayError::Config {
-                    message: format!("{tool_name} retrieve returned no text: {retrieved}"),
+                    message: format!("{tool_name} retrieve returned no page content: {record}"),
                 }
-            })?)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("{tool_name} retrieve returned invalid JSON: {error}"),
-            })?;
-        result["content"][0]["text"] = record["content"].clone();
+            })?);
+            let Some(next_offset) = record["next_offset"].as_u64() else {
+                break;
+            };
+            offset = next_offset;
+        }
+        result["content"][0]["text"] = Value::String(content);
     }
     // The retained MCP contract is the versioned
     // `schema.application.retained.*` envelope. These handler tests assert

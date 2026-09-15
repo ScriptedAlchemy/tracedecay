@@ -265,6 +265,9 @@ pub struct McpServer {
     last_flushed_tokens: Option<AtomicU64>,
     /// UNIX timestamp of last worldwide flush (`0` = never).
     last_flush_at: AtomicI64,
+    /// Retains exclusive ownership for the complete worldwide flush, even
+    /// when configuration or cloud I/O crosses another time boundary.
+    worldwide_flush_in_flight: Arc<AtomicBool>,
     /// User-level database tracking all projects (best-effort). Wrapped in
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
@@ -1059,6 +1062,7 @@ impl McpServer {
             tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
             last_flushed_tokens: persisted_tokens_saved.map(AtomicU64::new),
             last_flush_at: AtomicI64::new(0),
+            worldwide_flush_in_flight: Arc::new(AtomicBool::new(false)),
             global_db,
             accounting_db,
             profile_root,
