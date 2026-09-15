@@ -784,6 +784,10 @@ fn bash_changed_region_reset_walk_does_not_copy_source() {
         canonical_digest(&cold),
         canonical_digest(&incremental.result)
     );
+    assert_eq!(
+        canonical_digest(&cold),
+        "76508d90a7d59faee962e7f556d49f80c06953c2ea3891516131bf65ee871437"
+    );
 }
 
 /// One migrated language: extractor, fixture item, grammar, and the canonical
