@@ -22,9 +22,9 @@ use crate::result::ResultContractRef;
 use crate::retrieval::primitive_surface::{
     CalleesResultV1, CalleesSurfaceRequestV1, ContextResultV1, ContextSurfaceRequestV1,
     ImpactResultV1, ImpactSurfaceRequestV1, NodeResultV1, NodeSurfaceRequestV1, PortOrderResultV1,
-    PortOrderSurfaceRequestV1, PortStatusResultV1, PortStatusSurfaceRequestV1,
-    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
+    PortOrderSurfaceRequestV1, PortStatusResultV1, PortStatusSurfaceRequestV1, RedundancyResultV1,
+    RedundancySurfaceRequestV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
+    SimilarResultV1, SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
 };
 use crate::retrieval::requests::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
@@ -156,6 +156,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     primitive_spec("callees"),
     primitive_spec("impact"),
     primitive_spec("similar"),
+    primitive_spec("redundancy"),
     primitive_spec("rename_preview"),
     primitive_spec("port_status"),
     primitive_spec("port_order"),
@@ -194,7 +195,7 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         // These established tool handlers retain their current wire schemas
         // and rendering across the generic CLI fallback and MCP, while using
         // this operation identity for canonical code-graph read admission.
-        "context" | "node" | "callees" | "impact" | "similar" | "rename_preview"
+        "context" | "node" | "callees" | "impact" | "similar" | "redundancy" | "rename_preview"
         | "port_status" | "port_order" | "todos" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
@@ -214,6 +215,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "code_callers" => {
             "Find symbols that call a known symbol node ID, up to the requested depth. Use call_chain when you need the shortest call path between two known node IDs."
+        }
+        "redundancy" => {
+            "Report bounded, token-verified exact and rename-normalized implementation families in the admitted repository. Results rank review candidates by repeated source bytes."
         }
         "session_lookup" => {
             "Return retrieval anchors for one exact session ID from the mounted session store. Use message_search when you need to find session content rather than look up a known session."
@@ -537,6 +541,7 @@ fn primitive_executable_schemas(
     add!("impact", ImpactSurfaceRequestV1, ImpactResultV1);
     add!("node", NodeSurfaceRequestV1, NodeResultV1);
     add!("similar", SimilarSurfaceRequestV1, SimilarResultV1);
+    add!("redundancy", RedundancySurfaceRequestV1, RedundancyResultV1);
     add!(
         "rename_preview",
         RenamePreviewPrimitiveRequestV1,
@@ -768,12 +773,13 @@ fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
 mod tests {
     use super::*;
 
-    const ESTABLISHED_TOOL_PRIMITIVES: [&str; 9] = [
+    const ESTABLISHED_TOOL_PRIMITIVES: [&str; 10] = [
         "context",
         "node",
         "callees",
         "impact",
         "similar",
+        "redundancy",
         "rename_preview",
         "port_status",
         "port_order",

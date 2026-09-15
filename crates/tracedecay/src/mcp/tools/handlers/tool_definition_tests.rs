@@ -32,6 +32,7 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
         ("impact", "tracedecay_impact", true),
         ("node", "tracedecay_node", true),
         ("similar", "tracedecay_similar", false),
+        ("redundancy", "tracedecay_redundancy", false),
         ("rename_preview", "tracedecay_rename_preview", false),
         ("port_status", "tracedecay_port_status", false),
         ("port_order", "tracedecay_port_order", false),

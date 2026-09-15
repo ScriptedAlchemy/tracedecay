@@ -40,8 +40,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_query::code_search::{
-    CodeIndexBranchDiffExecutor, CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor,
-    CodeIndexSimilarExecutor,
+    CodeIndexBranchDiffExecutor, CodeIndexRedundancyExecutor, CodeIndexSearchAuthorityV1,
+    CodeIndexSearchExecutor, CodeIndexSimilarExecutor,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
@@ -138,6 +138,7 @@ pub struct AdmittedCodeIndex<'a> {
     authority: &'a CodeIndexSearchAuthorityV1,
     search: Option<&'a CodeIndexSearchExecutor>,
     similar: Option<&'a CodeIndexSimilarExecutor>,
+    redundancy: Option<&'a CodeIndexRedundancyExecutor>,
     branch_diff: Option<&'a CodeIndexBranchDiffExecutor>,
 }
 
@@ -147,15 +148,17 @@ impl<'a> AdmittedCodeIndex<'a> {
         authority: &'a CodeIndexSearchAuthorityV1,
         search: Option<&'a CodeIndexSearchExecutor>,
         similar: Option<&'a CodeIndexSimilarExecutor>,
+        redundancy: Option<&'a CodeIndexRedundancyExecutor>,
         branch_diff: Option<&'a CodeIndexBranchDiffExecutor>,
     ) -> std::result::Result<Self, McpToolBindingError> {
-        if search.is_none() && similar.is_none() && branch_diff.is_none() {
+        if search.is_none() && similar.is_none() && redundancy.is_none() && branch_diff.is_none() {
             return Err(McpToolBindingError::CodeIndexWithoutExecutor);
         }
         Ok(Self {
             authority,
             search,
             similar,
+            redundancy,
             branch_diff,
         })
     }
@@ -394,6 +397,7 @@ pub struct McpToolContext<'a> {
     project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     code_index_search_executor: Option<&'a CodeIndexSearchExecutor>,
     code_index_similar_executor: Option<&'a CodeIndexSimilarExecutor>,
+    code_index_redundancy_executor: Option<&'a CodeIndexRedundancyExecutor>,
     code_index_branch_diff_executor: Option<&'a CodeIndexBranchDiffExecutor>,
     code_index_search_authority: Option<&'a CodeIndexSearchAuthorityV1>,
 }
@@ -441,6 +445,9 @@ impl<'a> McpToolContext<'a> {
             code_index_similar_executor: request
                 .code_index
                 .and_then(|code_index| code_index.similar),
+            code_index_redundancy_executor: request
+                .code_index
+                .and_then(|code_index| code_index.redundancy),
             code_index_branch_diff_executor: request
                 .code_index
                 .and_then(|code_index| code_index.branch_diff),
@@ -575,6 +582,11 @@ impl<'a> McpToolContext<'a> {
     }
 
     #[must_use]
+    pub fn code_index_redundancy_executor(&self) -> Option<&'a CodeIndexRedundancyExecutor> {
+        self.code_index_redundancy_executor
+    }
+
+    #[must_use]
     pub fn code_index_branch_diff_executor(&self) -> Option<&'a CodeIndexBranchDiffExecutor> {
         self.code_index_branch_diff_executor
     }
@@ -627,6 +639,10 @@ impl std::fmt::Debug for McpToolContext<'_> {
             .field(
                 "has_code_index_similar_executor",
                 &self.code_index_similar_executor.is_some(),
+            )
+            .field(
+                "has_code_index_redundancy_executor",
+                &self.code_index_redundancy_executor.is_some(),
             )
             .field(
                 "has_code_index_branch_diff_executor",
@@ -1011,7 +1027,7 @@ pub(crate) mod tests {
     fn a_code_index_admission_without_an_executor_is_refused() {
         let authority = authority();
 
-        let Err(error) = AdmittedCodeIndex::new(&authority, None, None, None) else {
+        let Err(error) = AdmittedCodeIndex::new(&authority, None, None, None, None) else {
             panic!("an executorless code index admission must be refused");
         };
 

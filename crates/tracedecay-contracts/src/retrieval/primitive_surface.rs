@@ -16,6 +16,9 @@ use tracedecay_domain::{
 
 use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
+pub const MAX_REDUNDANCY_FAMILIES_V1: u32 = 100;
+pub const MAX_REDUNDANCY_WORK_V1: u32 = 10_000;
+
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextModeV1 {
@@ -178,6 +181,20 @@ pub struct PortOrderSurfaceRequestV1 {
     pub source_dir: String,
     pub kinds: Option<Vec<String>>,
     pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedundancySurfaceRequestV1 {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub match_classes: Vec<SimilarMatchClassV1>,
+    pub path: Option<String>,
+    pub include_generated_paths: bool,
+    pub family_limit: u32,
+    pub member_limit: u32,
+    pub work_limit: u32,
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -450,6 +467,51 @@ pub struct SimilarResultV1 {
     pub families: Vec<SimilarFamilyV1>,
     pub source_generation: CodeGenerationId,
     pub coverage: SimilarCoverageV1,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedundancyRankingV1 {
+    ReviewableSourceBytes,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedundancyPartialReasonV1 {
+    FamilyLimit,
+    WorkLimit,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RedundancyCoverageV1 {
+    Complete {
+        examined_families: usize,
+        examined_members: usize,
+    },
+    Partial {
+        reason: RedundancyPartialReasonV1,
+        examined_families: usize,
+        examined_members: usize,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedundancyFamilyV1 {
+    pub family: SimilarFamilyV1,
+    pub total_member_count: usize,
+    pub reviewable_source_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedundancyResultV1 {
+    pub source_generation: CodeGenerationId,
+    pub ranked_by: RedundancyRankingV1,
+    pub families: Vec<RedundancyFamilyV1>,
+    pub coverage: RedundancyCoverageV1,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

@@ -334,6 +334,8 @@ pub struct McpServer {
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
     /// Daemon-owned, authority-gated clone similarity bridge.
     code_index_similar_executor: Option<CodeIndexSimilarExecutor>,
+    /// Daemon-owned, authority-gated repository clone-family bridge.
+    code_index_redundancy_executor: Option<CodeIndexRedundancyExecutor>,
     /// Daemon-owned exact sealed-generation branch comparison bridge.
     code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
     code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
@@ -781,6 +783,7 @@ impl McpServer {
             code_index_publication_identity,
             code_index_search_executor,
             code_index_similar_executor,
+            code_index_redundancy_executor,
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
             code_graph_read_admission_port,
@@ -1045,6 +1048,7 @@ impl McpServer {
             code_index_publication_identity,
             code_index_search_executor,
             code_index_similar_executor,
+            code_index_redundancy_executor,
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
             code_graph_read_admission_port,

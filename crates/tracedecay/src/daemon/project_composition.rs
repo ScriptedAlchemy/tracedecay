@@ -505,6 +505,7 @@ impl ComposedCoreServer {
             .with_code_index_publication_identity(Arc::clone(&code_index.publication_identity))
             .with_code_index_search_executor(Arc::clone(&code_index.search_executor))
             .with_code_index_similar_executor(Arc::clone(&code_index.similar_executor))
+            .with_code_index_redundancy_executor(Arc::clone(&code_index.redundancy_executor))
             .with_code_index_branch_diff_executor(Arc::clone(&code_index.branch_diff_executor))
             .with_code_graph_projection_read_port(Arc::clone(
                 &code_index.graph_projection_read_port,
@@ -1646,6 +1647,7 @@ struct ProjectCodeIndexAuthorities {
     search_authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
     search_executor: crate::mcp::server::CodeIndexSearchExecutor,
     similar_executor: crate::mcp::server::CodeIndexSimilarExecutor,
+    redundancy_executor: crate::mcp::server::CodeIndexRedundancyExecutor,
     branch_diff_executor: crate::mcp::server::CodeIndexBranchDiffExecutor,
 }
 
@@ -1725,6 +1727,12 @@ fn project_code_index_authorities(
         read_admission_provider.clone(),
         tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1,
     );
+    let redundancy_executor = code_index_redundancy_executor(
+        invocation.code_index_schedulers.clone(),
+        project_id.clone(),
+        read_admission_provider.clone(),
+        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1,
+    );
     let branch_diff_executor = code_index_branch_diff_executor(
         invocation.code_index_schedulers.clone(),
         project_id.clone(),
@@ -1742,6 +1750,7 @@ fn project_code_index_authorities(
         search_authority,
         search_executor,
         similar_executor,
+        redundancy_executor,
         branch_diff_executor,
     })
 }

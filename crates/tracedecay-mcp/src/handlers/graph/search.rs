@@ -10,10 +10,11 @@ use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
-    ContextSurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveRequestV1,
-    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
-    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, SimilarTargetV1,
+    ContextSurfaceRequestV1, RedundancyCoverageV1, RedundancyFamilyV1, RedundancyPartialReasonV1,
+    RedundancyRankingV1, RedundancyResultV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
+    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
+    RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
+    SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1,
 };
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -1191,6 +1192,177 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
     Ok(generic_tool_result(ctx, &args, &value, touched_files))
 }
 
+#[hotpath::measure(label = "mcp.graph.redundancy.total")]
+pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
+    let request: RedundancySurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_redundancy")?;
+    if request.project_id != ctx.admitted_scope().project_id
+        || request.repository_id != ctx.admitted_scope().repository_id
+    {
+        return Err(TraceDecayError::ProjectRoute {
+            reason_code: "redundancy-repository-not-authorized".to_owned(),
+            retryable: false,
+            detail: "the selected repository is outside the authorized repository scope".to_owned(),
+        });
+    }
+    let match_classes = request
+        .match_classes
+        .iter()
+        .map(|class| match class {
+            SimilarMatchClassV1::ConservativeExact => {
+                tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative
+            }
+            SimilarMatchClassV1::RenameNormalizedExact => {
+                tracedecay_code_index::clones::CloneNormalizationClassV1::Rename
+            }
+        })
+        .collect();
+    let cursor = request
+        .cursor
+        .as_deref()
+        .map(tracedecay_query::retrieval::lexical::CloneFamilyArtifactCursorV1::decode)
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid tracedecay_redundancy cursor: {error}"),
+        })?;
+    let executor =
+        ctx.code_index_redundancy_executor()
+            .ok_or_else(|| TraceDecayError::ProjectRoute {
+                reason_code: "verified-code-redundancy-unavailable".to_owned(),
+                retryable: false,
+                detail: "the maintained clone family lane is unavailable".to_owned(),
+            })?;
+    let outcome = executor(tracedecay_query::code_search::CodeIndexRedundancyQueryV1 {
+        project_root: ctx.project_root().to_path_buf(),
+        project_id: request.project_id,
+        repository_id: request.repository_id,
+        match_classes,
+        path: request.path,
+        include_generated_paths: request.include_generated_paths,
+        family_limit: request.family_limit as usize,
+        member_limit: request.member_limit as usize,
+        work_limit: request.work_limit as usize,
+        cursor,
+        authority: ctx.code_index_search_authority().cloned(),
+        deadline: ctx.deadline().cloned(),
+        cancellation: ctx.cancellation().cloned(),
+    })
+    .await;
+    let (source_generation, families, coverage, next_cursor) = match outcome {
+        tracedecay_query::code_search::CodeIndexRedundancyOutcomeV1::Complete(result) => {
+            let coverage = RedundancyCoverageV1::Complete {
+                examined_families: result.examined_families,
+                examined_members: result.examined_members,
+            };
+            (
+                result.source_generation,
+                result.families,
+                coverage,
+                result.next_cursor,
+            )
+        }
+        tracedecay_query::code_search::CodeIndexRedundancyOutcomeV1::Partial(result) => {
+            let reason = match result.reason {
+                tracedecay_query::code_search::CodeIndexRedundancyPartialReasonV1::FamilyLimit => {
+                    RedundancyPartialReasonV1::FamilyLimit
+                }
+                tracedecay_query::code_search::CodeIndexRedundancyPartialReasonV1::WorkLimit => {
+                    RedundancyPartialReasonV1::WorkLimit
+                }
+            };
+            let coverage = RedundancyCoverageV1::Partial {
+                reason,
+                examined_families: result.examined_families,
+                examined_members: result.examined_members,
+            };
+            (
+                result.source_generation,
+                result.families,
+                coverage,
+                result.next_cursor,
+            )
+        }
+        tracedecay_query::code_search::CodeIndexRedundancyOutcomeV1::Unavailable(reason) => {
+            return Err(TraceDecayError::ProjectRoute {
+                reason_code: "verified-code-redundancy-unavailable".to_owned(),
+                retryable: matches!(
+                    reason,
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled
+                        | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::TimedOut
+                        | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
+                ),
+                detail: format!("the maintained clone family lane is unavailable: {}", reason.as_str()),
+            });
+        }
+    };
+    let mut touched_files = Vec::new();
+    let families = families
+        .into_iter()
+        .map(|group| -> Result<RedundancyFamilyV1> {
+            let match_class = match group.key.class {
+                tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative => {
+                    SimilarMatchClassV1::ConservativeExact
+                }
+                tracedecay_code_index::clones::CloneNormalizationClassV1::Rename => {
+                    SimilarMatchClassV1::RenameNormalizedExact
+                }
+            };
+            let members = group
+                .members
+                .into_iter()
+                .map(|member| {
+                    let occurrence = similar_occurrence(&member.occurrence);
+                    touched_files.push(occurrence.path.clone());
+                    occurrence
+                })
+                .collect::<Vec<_>>();
+            let next_cursor = group
+                .next_cursor
+                .as_ref()
+                .map(tracedecay_query::retrieval::lexical::CloneArtifactCursorV1::encode)
+                .transpose()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("failed to encode redundancy family cursor: {error}"),
+                })?;
+            Ok(RedundancyFamilyV1 {
+                family: SimilarFamilyV1 {
+                    match_class,
+                    normalization_revision: group.key.normalization_revision,
+                    family_digest: group.key.digest,
+                    representative_payload_digest: group.representative_payload_digest,
+                    member_count: members.len(),
+                    members,
+                    complete: group.complete,
+                    next_cursor,
+                },
+                total_member_count: group.total_member_count,
+                reviewable_source_bytes: group.reviewable_source_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    touched_files.sort();
+    touched_files.dedup();
+    let next_cursor = next_cursor
+        .as_ref()
+        .map(tracedecay_query::retrieval::lexical::CloneFamilyArtifactCursorV1::encode)
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to encode tracedecay_redundancy cursor: {error}"),
+        })?;
+    let result = RedundancyResultV1 {
+        source_generation,
+        ranked_by: RedundancyRankingV1::ReviewableSourceBytes,
+        families,
+        coverage,
+        next_cursor,
+    };
+    let value = hotpath::measure_block!(
+        "mcp.graph.redundancy.serialize",
+        serde_json::to_value(result)?
+    );
+    Ok(generic_tool_result(ctx, &args, &value, touched_files))
+}
+
 fn similar_occurrence(
     occurrence: &tracedecay_code_index::clones::CloneBodyOccurrenceV1,
 ) -> SimilarOccurrenceV1 {
@@ -1665,8 +1837,9 @@ mod tests {
             )
             .expect("revision"),
         };
-        let code_index = crate::AdmittedCodeIndex::new(&authority, Some(&executor), None, None)
-            .expect("search executor admits");
+        let code_index =
+            crate::AdmittedCodeIndex::new(&authority, Some(&executor), None, None, None)
+                .expect("search executor admits");
         let ctx = crate::McpToolContext::bind(crate::McpToolBinding {
             project: &project,
             request: crate::McpRequestAuthoritiesV1 {
