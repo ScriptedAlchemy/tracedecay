@@ -543,7 +543,10 @@ impl ProductionCodeIndexQueryOwnersV1 {
         let Some(source) = source else {
             return Ok(None);
         };
-        let page_limit = request.result_limit.min(request.work_limit - 1);
+        // Request-wide budgets: share result_limit and work_limit across match
+        // classes instead of resetting a per-family page size on each key.
+        let mut remaining_results = request.result_limit;
+        let mut remaining_work = request.work_limit.saturating_sub(1);
         let mut exact_groups = Vec::new();
         for key in source
             .payload
@@ -551,6 +554,10 @@ impl ProductionCodeIndexQueryOwnersV1 {
             .into_iter()
             .filter(|key| request.match_classes.contains(&key.class))
         {
+            if remaining_results == 0 || remaining_work == 0 {
+                break;
+            }
+            let page_limit = remaining_results.min(remaining_work);
             let (members, complete, next_cursor) = self.verified_exact_clone_page(
                 &source,
                 &key,
@@ -558,6 +565,11 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 page_limit,
                 control,
             )?;
+            remaining_results = remaining_results.saturating_sub(members.len());
+            // Count verified members plus one lookahead slot consumed by the
+            // last exact-page fetch when the postings continue.
+            let work_spent = members.len() + usize::from(next_cursor.is_some());
+            remaining_work = remaining_work.saturating_sub(work_spent.max(1));
             if !members.is_empty() || !complete {
                 exact_groups.push(
                     tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 {

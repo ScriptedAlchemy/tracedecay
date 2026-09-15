@@ -377,7 +377,7 @@ pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_similar",
         "Shared Implementations",
-        "Find token-verified implementations that share exact, rename-normalized, or near-duplicate source with one symbol occurrence or source range. The operation accepts no free-text query and reports bounded coverage for each exact digest family.",
+        "Find token-verified implementations that share exact or rename-normalized source with one symbol occurrence or source range. The operation accepts no free-text query and reports bounded coverage for each digest family.",
         input_schema,
     )
 }

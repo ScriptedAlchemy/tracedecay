@@ -1201,18 +1201,8 @@ async fn test_module_api() {
 }
 
 #[tokio::test]
-async fn name_similarity_is_preserved_by_lexical_search_before_similar_cutover() {
+async fn name_first_lexical_search_discloses_preferred_symbol_route() {
     let (cg, _dir) = production_graph_query_fixture().await;
-    let legacy = call_production_tool(
-        &cg,
-        "tracedecay_similar",
-        json!({"symbol": "helper", "limit": 1}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let legacy: Value = serde_json::from_str(extract_text(&legacy.value)).unwrap();
     let search = call_production_tool(
         &cg,
         "tracedecay_search",
@@ -1223,20 +1213,13 @@ async fn name_similarity_is_preserved_by_lexical_search_before_similar_cutover()
     .await
     .unwrap();
     let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
-    let legacy_names = legacy
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["name"].as_str().unwrap())
-        .collect::<Vec<_>>();
     let search_names = search["results"]
         .as_array()
         .unwrap_or_else(|| panic!("lexical search results: {search}"))
         .iter()
         .filter_map(|item| item["display"]["name"].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(legacy_names, ["helper"]);
-    assert_eq!(search_names, legacy_names);
+    assert_eq!(search_names, ["helper"]);
     assert!(
         search["lexical_routes"]
             .as_array()
