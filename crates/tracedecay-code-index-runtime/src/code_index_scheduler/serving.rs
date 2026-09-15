@@ -2364,10 +2364,14 @@ impl LatestCodeTextGenerationV1 {
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition) => {
                     drop(builder);
                     store.discard_incompatible_staging(&staging_path, control)?;
-                    builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                    // Keep the same V14 admission writer as the cold create path.
+                    // Defaulting to V16 here would admit clone fingerprints on the
+                    // rebuild lane and diverge from the successor-backed cutover.
+                    builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget_and_format_revision(
                         &staging_path,
                         metadata,
                         builder_budget,
+                        CodeLexicalArtifactWriterRevisionV1::V14,
                     )
                     .map_err(map_text_artifact_error)?;
                     progress = builder.progress().map_err(map_text_artifact_error)?;
@@ -2801,16 +2805,18 @@ impl LatestCodeTextGenerationV1 {
         .map_err(map_text_artifact_error)?;
         let needs_clone_successor = !reader.has_clone_fingerprints();
         let prior = reader.verified_artifact().clone();
+        // Publish Ready before installing owners so status cannot observe
+        // query-ready owners while the last finalization wake still says
+        // Verification.
+        self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         self.install_artifact_owners(reader, reader_reservation)?;
         if needs_clone_successor {
             let source = store.open_sealed_source(&sealed_identity, control)?;
             let build =
                 self.begin_clone_successor(descriptor, prior, sealed_identity, source, control)?;
             drop(publish_claim.install(TextHeadOpenBuildV1::CloneSuccessor(build)));
-            self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
             return Ok(false);
         }
-        self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         Ok(true)
     }
 
