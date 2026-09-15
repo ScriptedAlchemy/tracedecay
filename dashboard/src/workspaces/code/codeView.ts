@@ -84,8 +84,6 @@ export function codeViewBlocker(
         detail: 'The fixed structural treemap projection is not mounted.',
       };
     case 'topology':
-    case 'shared-code':
-    case 'compare':
       return null;
     case 'trace': {
       switch (focus) {
@@ -115,6 +113,18 @@ export function codeViewBlocker(
         }
       }
     }
+    case 'shared-code':
+      return {
+        kind: 'unavailable',
+        title: 'Shared Code is unavailable',
+        detail: 'Exact and near-clone family projections are not mounted.',
+      };
+    case 'compare':
+      return {
+        kind: 'unavailable',
+        title: 'Compare is unavailable',
+        detail: 'Revision-pair identity and union-layout projections are not mounted.',
+      };
     default: {
       const unhandled: never = view;
       return unhandled;

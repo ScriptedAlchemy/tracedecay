@@ -22,7 +22,6 @@ import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { useActivationField } from '../../viz/graph/useActivationField.ts';
 import { CodeDiagnostics } from './CodeDiagnostics.tsx';
-import { CodeViewContent } from './CodeComparisonViews.tsx';
 import { CortexRelief } from './CortexRelief.tsx';
 import {
   CODE_VIEW_PANEL_ID,
@@ -205,7 +204,6 @@ export function CodePage() {
             kind={viewBlocker.kind}
           />
         ) : (
-          <CodeViewContent view={location.view} focus={resolvedFocus}>
           <ExplorerSplit
       filters={
         <div className="flex flex-col gap-3">
@@ -416,7 +414,6 @@ export function CodePage() {
         ) : undefined
       }
       />
-          </CodeViewContent>
         )}
       </div>
     </div>
