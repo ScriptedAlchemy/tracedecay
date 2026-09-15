@@ -286,6 +286,69 @@ async fn mount_installs_the_project_graph_binding_and_rebinds_stay_idempotent() 
 }
 
 #[tokio::test]
+async fn project_graph_engines_open_only_after_graph_demand() {
+    let fixture = ContractFixture::new("lazy-open").await;
+    let project_id = project_id("lazy-open");
+    let roots = fixture.project_roots(&project_id);
+    for root in &roots {
+        std::fs::create_dir_all(root).expect("worktree root");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+    }
+    let project_database = fixture
+        .registry
+        .project_memory(project_id.clone(), roots.clone())
+        .await
+        .expect("project graph database");
+    let project_shard = project_database.registered_binding().shard_id.clone();
+    assert!(
+        !fixture
+            .registry
+            .graph_registry
+            .shard_is_registered(&project_shard)
+            .expect("project graph registration state"),
+        "mounting relational project state must not eagerly open its graph engine"
+    );
+    assert!(matches!(
+        project_database.issue_memory_graph_runtime_operation(),
+        Err(tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable)
+    ));
+    drop(await_mounted_graph_operation(&project_database).await);
+    assert!(
+        fixture
+            .registry
+            .graph_registry
+            .shard_is_registered(&project_shard)
+            .expect("activated project graph registration state")
+    );
+
+    let sessions = fixture
+        .registry
+        .project_sessions(project_id.clone(), roots)
+        .await
+        .expect("project sessions database");
+    let sessions_shard = sessions.binding().shard_id.clone();
+    assert!(
+        !fixture
+            .registry
+            .graph_registry
+            .shard_is_registered(&sessions_shard)
+            .expect("session graph registration state"),
+        "mounting relational sessions must not eagerly open their relation graph"
+    );
+    assert!(sessions.session_relation_graph_identity().is_err());
+    fixture
+        .registry
+        .settle_project_session_graph(&project_id)
+        .await
+        .expect("session relation graph settles after demand");
+    assert!(sessions.session_relation_graph_identity().is_ok());
+}
+
+#[tokio::test]
 async fn memory_graph_operations_remain_isolated_by_exact_relational_identity() {
     let fixture = ContractFixture::new("memory-binding").await;
     let first_id = project_id("memory-binding-first");

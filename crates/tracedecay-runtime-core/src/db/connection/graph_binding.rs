@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use super::Database;
 use crate::store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
@@ -49,6 +49,32 @@ pub enum MemoryGraphRuntimeOperationErrorV1 {
 }
 
 impl Database {
+    /// Installs the daemon-owned one-shot request that starts this shard's
+    /// graph runtime on first graph use.
+    pub fn bind_memory_graph_activation(
+        &self,
+        activation: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<()> {
+        if !self.is_writable() {
+            return Err(TraceDecayError::Database {
+                operation: "bind verified memory graph activation".to_owned(),
+                message: "read-only memory databases cannot start a graph publisher".to_owned(),
+            });
+        }
+        let mounted = self
+            .inner
+            .memory_graph_activation
+            .get_or_init(|| Arc::downgrade(&activation));
+        if mounted.ptr_eq(&Arc::downgrade(&activation)) {
+            Ok(())
+        } else {
+            Err(TraceDecayError::Database {
+                operation: "bind verified memory graph activation".to_owned(),
+                message: "verified memory graph activation is already bound".to_owned(),
+            })
+        }
+    }
+
     /// Binds the exact registered Grafeo runtime paired with this memory
     /// shard. The binding is weak: its map owner retains the graph authority,
     /// while every caller must obtain a short-lived operation through
@@ -124,6 +150,8 @@ impl Database {
             self.registered_binding().clone(),
             self.registered_verified_locator().clone(),
             Arc::clone(&self.inner.memory_graph_runtime),
+            Arc::clone(&self.inner.memory_graph_activation),
+            Arc::clone(&self.inner.memory_graph_activation_requested),
         )
     }
 
@@ -174,11 +202,30 @@ impl Database {
         if !self.is_writable() {
             return Err(MemoryGraphRuntimeOperationErrorV1::Unbound);
         }
-        let bound = self
-            .inner
-            .memory_graph_runtime
-            .get()
-            .ok_or(MemoryGraphRuntimeOperationErrorV1::Unbound)?;
+        let bound = match self.inner.memory_graph_runtime.get() {
+            Some(bound) => bound,
+            None => {
+                if let Some(activation) = self
+                    .inner
+                    .memory_graph_activation
+                    .get()
+                    .and_then(std::sync::Weak::upgrade)
+                    && self
+                        .inner
+                        .memory_graph_activation_requested
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    activation();
+                    return Err(MemoryGraphRuntimeOperationErrorV1::Unavailable);
+                }
+                return Err(if self.inner.memory_graph_activation.get().is_some() {
+                    MemoryGraphRuntimeOperationErrorV1::Unavailable
+                } else {
+                    MemoryGraphRuntimeOperationErrorV1::Unbound
+                });
+            }
+        };
         let runtime = bound
             .upgrade()
             .ok_or(MemoryGraphRuntimeOperationErrorV1::Unavailable)?;
@@ -461,6 +508,48 @@ mod tests {
             .expect("activation publishes the resolved proxy");
         assert!(deferred.shares_runtime_with(&resolved));
         assert!(resolved.shares_runtime_with(&deferred));
+    }
+
+    #[tokio::test]
+    async fn deferred_graph_proxy_requests_lazy_activation_once() {
+        let directory = tempfile::tempdir().expect("lazy graph proxy directory");
+        let database_path = directory.path().join("memory.db");
+        let authority = DatabaseAuthority::acquire_test(&database_path, "lazy graph proxy")
+            .expect("database authority");
+        let (database, _) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("database runtime");
+        let activation_requests = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&activation_requests);
+        let activation: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            recorded.fetch_add(1, Ordering::AcqRel);
+        });
+        database
+            .bind_memory_graph_activation(Arc::clone(&activation))
+            .expect("bind lazy graph activation");
+        let deferred = database.deferred_memory_graph_runtime();
+        let projection = GraphProjectionIdentity::new(
+            tracedecay_graph_db::GraphNamespace::new("lazy-proxy")
+                .expect("valid lazy proxy namespace"),
+            tracedecay_graph_db::GraphProjectionId::new("activation")
+                .expect("valid lazy proxy projection"),
+        );
+
+        for _ in 0..2 {
+            assert!(matches!(
+                deferred.verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false))),
+                Err(GraphDbError::Unavailable { .. })
+            ));
+            assert!(matches!(
+                database.issue_memory_graph_runtime_operation(),
+                Err(MemoryGraphRuntimeOperationErrorV1::Unavailable)
+            ));
+        }
+        assert_eq!(activation_requests.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

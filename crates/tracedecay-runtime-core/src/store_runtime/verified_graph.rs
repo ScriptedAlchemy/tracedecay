@@ -1,4 +1,7 @@
-use std::sync::{Arc, OnceLock, Weak, atomic::AtomicBool};
+use std::sync::{
+    Arc, OnceLock, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
@@ -59,7 +62,11 @@ pub trait VerifiedGraphRuntimePortV1: Send + Sync {
 #[derive(Clone)]
 enum VerifiedGraphRuntimeSlotV1 {
     Bound(Weak<dyn VerifiedGraphRuntimePortV1>),
-    DeferredActivation(Arc<OnceLock<Weak<dyn VerifiedGraphRuntimePortV1>>>),
+    DeferredActivation {
+        runtime: Arc<OnceLock<Weak<dyn VerifiedGraphRuntimePortV1>>>,
+        activation: Arc<OnceLock<Weak<dyn Fn() + Send + Sync>>>,
+        requested: Arc<AtomicBool>,
+    },
 }
 
 /// Cloneable, non-retaining route to one exact verified graph runtime.
@@ -93,12 +100,18 @@ impl VerifiedGraphRuntimeWeakProxyV1 {
     pub(crate) fn new_deferred(
         relational_binding: StoreRuntimeBindingV1,
         relational_verified_locator: VerifiedStoreLocatorV1,
-        activation: Arc<OnceLock<Weak<dyn VerifiedGraphRuntimePortV1>>>,
+        runtime: Arc<OnceLock<Weak<dyn VerifiedGraphRuntimePortV1>>>,
+        activation: Arc<OnceLock<Weak<dyn Fn() + Send + Sync>>>,
+        requested: Arc<AtomicBool>,
     ) -> Self {
         Self {
             relational_binding,
             relational_verified_locator,
-            runtime: VerifiedGraphRuntimeSlotV1::DeferredActivation(activation),
+            runtime: VerifiedGraphRuntimeSlotV1::DeferredActivation {
+                runtime,
+                activation,
+                requested,
+            },
         }
     }
 
@@ -113,8 +126,10 @@ impl VerifiedGraphRuntimeWeakProxyV1 {
     #[must_use]
     pub fn shares_runtime_with(&self, other: &Self) -> bool {
         if let (
-            VerifiedGraphRuntimeSlotV1::DeferredActivation(own),
-            VerifiedGraphRuntimeSlotV1::DeferredActivation(theirs),
+            VerifiedGraphRuntimeSlotV1::DeferredActivation { runtime: own, .. },
+            VerifiedGraphRuntimeSlotV1::DeferredActivation {
+                runtime: theirs, ..
+            },
         ) = (&self.runtime, &other.runtime)
             && Arc::ptr_eq(own, theirs)
         {
@@ -129,11 +144,35 @@ impl VerifiedGraphRuntimeWeakProxyV1 {
     fn resolved_weak(&self) -> Option<&Weak<dyn VerifiedGraphRuntimePortV1>> {
         match &self.runtime {
             VerifiedGraphRuntimeSlotV1::Bound(runtime) => Some(runtime),
-            VerifiedGraphRuntimeSlotV1::DeferredActivation(activation) => activation.get(),
+            VerifiedGraphRuntimeSlotV1::DeferredActivation { runtime, .. } => runtime.get(),
+        }
+    }
+
+    fn request_activation(&self) {
+        let VerifiedGraphRuntimeSlotV1::DeferredActivation {
+            runtime,
+            activation,
+            requested,
+        } = &self.runtime
+        else {
+            return;
+        };
+        if runtime.get().is_some() {
+            return;
+        }
+        let Some(activation) = activation.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        if requested
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            activation();
         }
     }
 
     fn runtime(&self) -> Result<Arc<dyn VerifiedGraphRuntimePortV1>, GraphDbError> {
+        self.request_activation();
         self.resolved_weak()
             .ok_or_else(|| {
                 GraphDbError::unavailable(

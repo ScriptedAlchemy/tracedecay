@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use super::{RegisteredGlobalDb, registered_error};
@@ -6,6 +8,25 @@ use tracedecay_session_temporal_store::relations::{
 };
 
 impl RegisteredGlobalDb {
+    /// Installs the daemon-owned request that starts this session shard's
+    /// relation graph on first graph use.
+    pub fn bind_session_relation_graph_activation(
+        &self,
+        activation: Arc<dyn Fn() + Send + Sync>,
+    ) -> tracedecay_domain::errors::Result<()> {
+        let mounted = self
+            .session_relation_graph_activation
+            .get_or_init(|| Arc::downgrade(&activation));
+        if mounted.ptr_eq(&Arc::downgrade(&activation)) {
+            Ok(())
+        } else {
+            Err(registered_error(
+                "bind session relation graph activation",
+                "registered session shard already has a different graph activation",
+            ))
+        }
+    }
+
     /// Mounts the daemon-owned native graph handle for this exact session
     /// shard. Rebinding is accepted only for the same identity and allocation.
     pub fn bind_session_relation_graph(
@@ -73,6 +94,14 @@ impl RegisteredGlobalDb {
         &StoreRuntimeBindingV1,
         &VerifiedStoreLocatorV1,
     )> {
+        if self.session_relation_graph.get().is_none()
+            && let Some(activation) = self
+                .session_relation_graph_activation
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+        {
+            activation();
+        }
         self.session_relation_graph
             .get()
             .map(|(scope, graph, binding, locator)| (scope, graph, binding, locator))

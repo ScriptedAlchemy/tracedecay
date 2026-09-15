@@ -1115,6 +1115,56 @@ impl RetainedCodeGraphRuntimeV1 {
     /// mismatch fails before the returned snapshot becomes observable; callers
     /// may then keep graph coverage pending while the scheduler replays the
     /// canonical segments in the background.
+    fn has_verified_code_graph_head(&self) -> std::result::Result<bool, GraphDbError> {
+        let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+        let identity = self.generation_id.as_str();
+        let cancellation_identity = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new(format!("graph-head-probe:{identity}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            generation: 1,
+        };
+        let deadline_identity = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new(format!("graph-head-probe-deadline:{identity}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let request_cancellation: Arc<dyn GraphCancellation> = Arc::new(
+            AtomicGraphCancellationV1::new(Arc::new(AtomicBool::new(false))),
+        );
+        let probe = GraphPublicationProbeV1 {
+            request_cancellation,
+            lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
+            deadline_at,
+            cancellation: cancellation_identity.clone(),
+            deadline: deadline_identity.clone(),
+            commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: tracedecay_application::clock::now_micros(),
+            deadline: deadline_identity,
+            cancellation: cancellation_identity,
+        };
+        let context = GraphPublicationOperationContextV1::new(&control, &probe)
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+            self.authority.namespace().clone(),
+        )
+        .map_err(map_code_graph_error)?;
+        let relational_projection = GraphProjectionIdentityV1 {
+            shard_id: self.authority.binding().shard_id.clone(),
+            namespace: tracedecay_store::GraphNamespaceV1::new(projection.namespace.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            projection: GraphProjectionIdV1::new(projection.projection.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        self.project_database
+            .graph_publication_storage()
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?
+            .verified_head(&relational_projection, &context)
+            .map(|head| head.is_some())
+            .map_err(map_publication_error)
+    }
+
     #[hotpath::measure(label = "daemon.session_registry.recover_snapshot_from_head")]
     pub fn recover_verified_snapshot_from_head(
         &self,
@@ -2248,7 +2298,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.profile_id().clone(),
             project_id.clone(),
         );
-        self.ensure_code_graph_shard_attached(&project_shard).await;
+        let decoded_generation_present = decoded_generation.is_some();
         let code_scope = match reference {
             Some(ref_id) => CodeShardScopeV1::Branch {
                 worktree_id: worktree_id.clone(),
@@ -2284,15 +2334,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         // identity than the one reconstructed here, so heal the exact key
         // the lookup will use and name both identities when they diverge.
         let bound_shard = authority.binding().shard_id.clone();
-        if bound_shard != project_shard {
-            tracing::warn!(
-                event = "code_graph_lease_binding_shard_diverged",
-                probed = ?project_shard,
-                bound = ?bound_shard,
-                "code graph lease binding names a different shard than the reconstructed project shard"
-            );
-            self.ensure_code_graph_shard_attached(&bound_shard).await;
-        }
         // Offer the already-decoded seal before any publication or recovery can
         // reach the manifest provider. The offer is keyed by the exact shard the
         // provider resolves bindings under, and is only ever served on an exact
@@ -2320,7 +2361,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             Arc::clone(gates.entry(code_shard.clone()).or_default())
         };
-        Ok(RetainedCodeGraphRuntimeV1 {
+        let retained = RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
             graph_manifest_provider: Arc::clone(&self.graph_manifest_provider),
             authority,
@@ -2335,7 +2376,28 @@ impl DaemonSessionRuntimeRegistryV1 {
             sealed_state_digest: replay_binding.sealed_state_digest,
             lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
             publication_locks,
-        })
+        };
+        // An existing verified head can recover from its immutable sealed
+        // artifact without mounting the mutable staging graph. A fresh
+        // publication (or an activation carrying decoded rows to publish)
+        // still attaches the canonical staging authority before returning.
+        let mutable_graph_required = decoded_generation_present
+            || !retained.has_verified_code_graph_head().map_err(|error| {
+                session_registry_error("probe verified code graph head", error.to_string())
+            })?;
+        if mutable_graph_required {
+            self.ensure_code_graph_shard_attached(&project_shard).await;
+            if bound_shard != project_shard {
+                tracing::warn!(
+                    event = "code_graph_lease_binding_shard_diverged",
+                    probed = ?project_shard,
+                    bound = ?bound_shard,
+                    "code graph lease binding names a different shard than the reconstructed project shard"
+                );
+                self.ensure_code_graph_shard_attached(&bound_shard).await;
+            }
+        }
+        Ok(retained)
     }
 
     #[hotpath::measure(

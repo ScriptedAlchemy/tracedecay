@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicBool};
 
 use crate::db::{DatabaseAuthority, engine::Connection};
 use crate::profiled_lock::ProfiledMutex;
@@ -272,6 +272,12 @@ pub(super) struct DatabaseInner {
     /// resolve it at use time without retaining this inner allocation.
     pub(super) memory_graph_runtime:
         Arc<OnceLock<Weak<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>>>,
+    /// One-shot daemon callback that starts the graph owner only when a graph
+    /// operation first demands it. The callback itself retains no graph
+    /// authority; successful activation publishes through
+    /// `memory_graph_runtime` above.
+    pub(super) memory_graph_activation: Arc<OnceLock<Weak<dyn Fn() + Send + Sync>>>,
+    pub(super) memory_graph_activation_requested: Arc<AtomicBool>,
     /// Watermark of the projected memory-graph source, keyed by the exact
     /// append-only lineage stamp it was computed under. See
     /// [`super::graph_binding`] for the invariant that makes the stamp a
@@ -355,6 +361,8 @@ impl DatabaseInner {
             ),
             _authority: authority,
             memory_graph_runtime: Arc::new(OnceLock::new()),
+            memory_graph_activation: Arc::new(OnceLock::new()),
+            memory_graph_activation_requested: Arc::new(AtomicBool::new(false)),
             memory_graph_source_watermark: std::sync::Mutex::new(None),
         })
     }

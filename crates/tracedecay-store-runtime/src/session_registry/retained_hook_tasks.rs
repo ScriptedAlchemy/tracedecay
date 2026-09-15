@@ -20,7 +20,7 @@ struct RetainedHookTaskState {
 
 /// Daemon-owned terminal-hook work. A new terminal receipt for one provider
 /// session cancels its predecessor, and daemon retirement cancels every task.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct RetainedHookTasks {
     state: Arc<Mutex<RetainedHookTaskState>>,
 }

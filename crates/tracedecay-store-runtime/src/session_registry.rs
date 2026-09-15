@@ -206,6 +206,7 @@ struct RegisteredSessionOwnerV1 {
     relation_graph: Arc<StdMutex<SessionGraphAttachmentStateV1>>,
     graph_settled: Arc<tokio::sync::Notify>,
     graph_open_task_key: String,
+    graph_activation: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl RegisteredSessionOwnerV1 {
@@ -221,6 +222,7 @@ impl RegisteredSessionOwnerV1 {
             })),
             graph_settled: Arc::new(tokio::sync::Notify::new()),
             graph_open_task_key,
+            graph_activation: None,
         }
     }
 
@@ -231,6 +233,9 @@ impl RegisteredSessionOwnerV1 {
                 format!("{error:?}"),
             )
         })?;
+        if let Some(activation) = &self.graph_activation {
+            database.bind_session_relation_graph_activation(Arc::clone(activation))?;
+        }
         let state = self
             .relation_graph
             .lock()
@@ -377,7 +382,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
 
     #[hotpath::measure(label = "daemon.session_registry.wait_session_graph", future = true)]
     async fn wait_for_session_graph(&self, project_id: &ProjectId) -> Result<()> {
-        let (relation_graph, graph_settled) = {
+        let (relation_graph, graph_settled, graph_activation) = {
             let entries = self.lock().map_err(|_| {
                 session_registry_error(
                     "await project session relation graph",
@@ -407,8 +412,12 @@ impl ProjectRuntimeOwnerRegistryV1 {
             (
                 Arc::clone(&owner.relation_graph),
                 Arc::clone(&owner.graph_settled),
+                owner.graph_activation.clone(),
             )
         };
+        if let Some(activation) = graph_activation {
+            activation();
+        }
         loop {
             let notified = graph_settled.notified();
             let warming = matches!(
@@ -640,6 +649,7 @@ impl ProjectSessionRetirementOwnerV1 {
             })),
             graph_settled: Arc::new(tokio::sync::Notify::new()),
             graph_open_task_key: self.graph_open_task_key,
+            graph_activation: None,
         })
     }
 
@@ -671,6 +681,7 @@ struct MemoryStoreOwnerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
     graph: Arc<StdMutex<MemoryGraphAttachmentStateV1>>,
     graph_open_task_key: String,
+    _graph_activation: Arc<dyn Fn() + Send + Sync>,
 }
 
 enum MemoryGraphAttachmentStateV1 {
@@ -3014,12 +3025,16 @@ impl DaemonSessionRuntimeRegistryV1 {
                 (
                     Arc::clone(&owner.relation_graph),
                     Arc::clone(&owner.graph_settled),
+                    owner.graph_activation.clone(),
                 )
             })
         };
-        let Some((relation_graph, graph_settled)) = waiter else {
+        let Some((relation_graph, graph_settled, graph_activation)) = waiter else {
             return Ok(());
         };
+        if let Some(activation) = graph_activation {
+            activation();
+        }
         loop {
             let notified = graph_settled.notified();
             let warming = matches!(
