@@ -380,20 +380,21 @@ impl RmcpConnectionAdapter {
         connection: &mut ConnectionRouteState,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let pre_cancelled = request_cancellation.is_cancelled();
+        // Keep this retained pre-cutover route at the same dispatch ownership
+        // boundary as the measured typed route. The request semantics remain
+        // raw JSON-RPC; only the cancellation combinator no longer retains the
+        // complete catalog-dispatch future inline in rmcp's generated future.
+        let handling = Box::pin(self.server.handle_request_for_connection(
+            &request,
+            self.timings_enabled,
+            connection,
+            pre_cancelled,
+        ));
         let response = if pre_cancelled {
-            Some(
-                self.server
-                    .handle_request_for_connection(&request, self.timings_enabled, connection, true)
-                    .await,
-            )
+            Some(handling.await)
         } else {
             await_dispatch_with_cancellation(
-                self.server.handle_request_for_connection(
-                    &request,
-                    self.timings_enabled,
-                    connection,
-                    false,
-                ),
+                handling,
                 request_cancellation.cancelled(),
                 || {
                     self.server

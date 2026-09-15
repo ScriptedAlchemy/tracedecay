@@ -8,7 +8,9 @@
 //! routed connection to RMCP.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,10 +24,12 @@ use tokio::io::AsyncBufReadExt;
 use tracedecay_daemon_protocol::{
     BrokerListener, BrokerStream, DaemonEndpoint, default_loopback_endpoint,
 };
+use tracedecay_domain::ProjectId;
 
 use super::{BrokerStreamTransport, DaemonLifecycle, serve_routed_rmcp_connection};
-use crate::daemon::ProductionProjectCompositionHarnessV1;
+use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::McpServer;
+use crate::tracedecay::TraceDecayOpenOptions;
 
 pub const PERSISTENT_WARMUP_REQUESTS: usize = 8;
 pub const PERSISTENT_MEASURED_REQUESTS: usize = 64;
@@ -148,18 +152,19 @@ impl BenchmarkConnection {
 
 /// Measures persistent-call latency separately from full reconnect churn.
 ///
-/// The production composition and listener are created before sampling so the
-/// persistent distribution means exactly one typed `tools/call` round trip.
+/// The registered project authority and listener are created before sampling
+/// so the persistent distribution means exactly one typed `tools/call` round trip.
 /// A reconnect sample starts before socket connection and includes typed
 /// initialize, `tracedecay_status`, client close, and daemon-route teardown.
-pub async fn run_rmcp_connection_pipeline<F>(
+///
+/// The boxed fixture boundary keeps the Tokio benchmark entrypoint independent
+/// of the composition future's concrete layout while preserving its timing.
+pub fn run_rmcp_connection_pipeline<'a>(
     persistent_requests: usize,
     reconnect_rounds: usize,
-    before_measurement: F,
-) -> Result<RmcpConnectionPipelineMeasurement, String>
-where
-    F: FnOnce(),
-{
+    before_measurement: &'a mut dyn FnMut(),
+) -> Pin<Box<dyn Future<Output = Result<RmcpConnectionPipelineMeasurement, String>> + 'a>> {
+    Box::pin(async move {
     if persistent_requests == 0 || reconnect_rounds == 0 {
         return Err("RMCP benchmark requires non-zero persistent and reconnect samples".to_owned());
     }
@@ -168,13 +173,29 @@ where
     let sandbox =
         tempfile::TempDir::new().map_err(|error| format!("create benchmark sandbox: {error}"))?;
     let project = sandbox.path().join("project");
+    let profile = sandbox.path().join("profile");
     initialize_project(&project)?;
-    let harness = ProductionProjectCompositionHarnessV1::open(sandbox.path(), [project.clone()])
+    let runtime = HostAdmissionTestRuntimeV1::project_scoped(
+        &profile,
+        &project,
+        ProjectId::new("rmcp-connection-benchmark")
+            .map_err(|error| format!("create benchmark project identity: {error}"))?,
+    )
         .await
-        .map_err(|error| format!("open production benchmark composition: {error}"))?;
-    let server = harness
-        .server(&project)
-        .map_err(|error| format!("resolve production benchmark server: {error}"))?;
+        .map_err(|error| format!("open registered benchmark runtime: {error}"))?;
+    let graph = runtime
+        .initialize_project_graph_for_test(
+            &project,
+            TraceDecayOpenOptions {
+                profile_root: Some(profile),
+                global_db_path: None,
+            },
+        )
+        .await
+        .map_err(|error| format!("initialize registered benchmark graph: {error}"))?;
+    let server = McpServer::new_with_host_admission_test_runtime_for_test(graph, None, runtime)
+        .await
+        .map_err(|error| format!("open registered benchmark server: {error}"))?;
     let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
         .await
         .map_err(|error| format!("bind benchmark RMCP broker listener: {error}"))?;
@@ -210,17 +231,18 @@ where
         reconnect_samples.push(duration_ns(started.elapsed()));
     }
 
-    harness.shutdown().await;
-    Ok(RmcpConnectionPipelineMeasurement {
-        schema_version: 1,
-        workload: "rmcp-production-broker-connection-pipeline",
-        transport: "broker-framing+typed-rmcp-server+shared-dispatch-envelope",
-        persistent_warmup_requests: PERSISTENT_WARMUP_REQUESTS,
-        persistent_measured_requests: persistent_requests,
-        reconnect_warmup_rounds: RECONNECT_WARMUP_ROUNDS,
-        reconnect_measured_rounds: reconnect_rounds,
-        persistent_status_round_trip: distribution(persistent_samples),
-        reconnect_initialize_status_close: distribution(reconnect_samples),
+    server.shutdown().await;
+        Ok(RmcpConnectionPipelineMeasurement {
+            schema_version: 1,
+            workload: "rmcp-production-broker-connection-pipeline",
+            transport: "broker-framing+typed-rmcp-server+shared-dispatch-envelope",
+            persistent_warmup_requests: PERSISTENT_WARMUP_REQUESTS,
+            persistent_measured_requests: persistent_requests,
+            reconnect_warmup_rounds: RECONNECT_WARMUP_ROUNDS,
+            reconnect_measured_rounds: reconnect_rounds,
+            persistent_status_round_trip: distribution(persistent_samples),
+            reconnect_initialize_status_close: distribution(reconnect_samples),
+        })
     })
 }
 
