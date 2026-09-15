@@ -111,7 +111,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
     fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let transaction = self
             .handle()
-            .begin_immediate()
+            .begin_deferred()
             .map_err(run_journal_unavailable)?;
         let history = history_tx(&transaction, run_id)?;
         let _ = transaction.rollback();
@@ -150,7 +150,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
     fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
         let transaction = self
             .handle()
-            .begin_immediate()
+            .begin_deferred()
             .map_err(run_journal_unavailable)?;
         let rows = query_tx(
             &transaction,
@@ -183,7 +183,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
     ) -> Result<WorkflowActiveRunRecoveryPageV1, WorkflowRunStorageError> {
         let transaction = self
             .handle()
-            .begin_immediate()
+            .begin_deferred()
             .map_err(run_journal_unavailable)?;
         let page_limit = i64::try_from(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 + 1)
             .map_err(|_| WorkflowRunStorageError::Unavailable)?;
@@ -361,7 +361,7 @@ impl WorkflowArtifactStorePort for WorkflowSqliteAuthority {
     ) -> Result<WorkflowArtifactPayload, WorkflowArtifactStoreError> {
         let transaction = self
             .handle()
-            .begin_immediate()
+            .begin_deferred()
             .map_err(artifact_store_unavailable)?;
         let stored = stored_payload_tx(&transaction, artifact.digest().as_str());
         let _ = transaction.rollback();

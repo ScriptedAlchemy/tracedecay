@@ -270,6 +270,38 @@ fn durable_plan_releases_only_the_committed_parallel_frontier_after_rebuild() {
             .collect::<Vec<_>>(),
         released
     );
+    let planned_attempt = released[0].clone();
+    let replacement_attempt = tracedecay_domain::WorkAttemptIdentityV1::new(
+        planned_attempt.task_id().clone(),
+        planned_attempt.run_id().clone(),
+        id("attempt.workflow.runtime.retry"),
+    )
+    .unwrap();
+    let retry_rebound = rebuilt
+        .next_event(
+            tracedecay_domain::WorkflowRunCommand::RebindFanOutChildRetry {
+                step_id: durable.step_id.clone(),
+                planned_attempt: planned_attempt.clone(),
+                prior_attempt: planned_attempt.clone(),
+                replacement_attempt: replacement_attempt.clone(),
+                retry_receipt_digest: digest('9'),
+            },
+            tracedecay_domain::WorkflowRunEventContext {
+                command_id: id("workflow.fan-out.retry-rebind"),
+                input_digest: digest('8'),
+                occurred_at: UtcMicros(102),
+            },
+        )
+        .and_then(|event| rebuilt.apply(&event))
+        .unwrap();
+    let encoded =
+        serde_json::to_value(retry_rebound).expect("retry-rebound projection remains transportable");
+    let decoded: tracedecay_domain::WorkflowRunProjection =
+        serde_json::from_value(encoded).expect("retry-rebound projection remains decodable");
+    assert_eq!(
+        decoded.active_fan_out_attempt(&planned_attempt),
+        &replacement_attempt
+    );
 
     let third = durable.children[2].attempt_identity.clone();
     assert_eq!(

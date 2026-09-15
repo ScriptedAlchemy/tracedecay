@@ -71,7 +71,7 @@ mod task_session;
 
 use daemon_fixture::{
     sdk_client, spawn_project_daemon, wait_for_application_mount, wait_for_work_mount,
-    workflow_tempdir,
+    wait_for_workflow_mount, workflow_tempdir,
 };
 
 const DAEMON_ACTOR: &str = "actor.tracedecay-daemon.project-open";
@@ -967,6 +967,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let client = sdk_client(&home, project_id.as_str());
     let _ = wait_for_application_mount(&client);
     wait_for_work_mount(&client);
+    wait_for_workflow_mount(&client, &run_id);
     let recovered_identity = fan_out_identities[1].clone();
     let recovered = wait_until("fenced recovery-required workflow child", || {
         attempt_status(&client, &recovered_identity)
