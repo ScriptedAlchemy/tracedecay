@@ -1,5 +1,5 @@
 /**
- * The CORTEX relief sheet, against a wire-true `StructureReadV1<Strata>`.
+ * The Topology relief sheet, against a wire-true `StructureReadV1<Strata>`.
  *
  * jsdom has no 2D context and draws nothing, so what this suite protects is not
  * the picture but the three claims that make the picture admissible: every
@@ -154,7 +154,7 @@ describe('CortexRelief', () => {
     expect(
       screen.getByText(/the symbol this workspace is focused on lives in/i).textContent,
     ).toContain('src/mod2');
-    expect(screen.getByText(/Move the lens to TRACE to flood it/i)).toBeTruthy();
+    expect(screen.getByText(/Open Trace to inspect its call neighborhood/i)).toBeTruthy();
   });
 
   it('says so when the focused directory is not a drawn region', async () => {

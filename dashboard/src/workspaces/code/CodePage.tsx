@@ -23,18 +23,23 @@ import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { useActivationField } from '../../viz/graph/useActivationField.ts';
 import { CodeDiagnostics } from './CodeDiagnostics.tsx';
 import { CortexRelief } from './CortexRelief.tsx';
+import {
+  CODE_VIEW_PANEL_ID,
+  CodeViewSwitcher,
+  codeViewControlId,
+  codeViewNote,
+} from './CodeViewSwitcher.tsx';
 import { IndexFreshness } from './IndexFreshness.tsx';
 import { Strata } from './Strata.tsx';
 import { SymbolPath } from './SymbolPath.tsx';
 import type { TraceFocus } from './TraceView.tsx';
-import { CoreSample } from './CoreSample.tsx';
-import { StructureLensRuler } from './StructureLensRuler.tsx';
 import { TraceChunkFallback } from './TraceChunkFallback.tsx';
 import {
-  readStructureLocation,
-  writeStructureLocation,
-  type StructureLens,
-} from './structureLens.ts';
+  codeViewBlocker,
+  readCodeLocation,
+  writeCodeLocation,
+  type CodeView,
+} from './codeView.ts';
 import {
   type GraphNodeV1,
   type GraphOverviewPayloadV1,
@@ -64,7 +69,7 @@ const BASE = '/api/plugins/graph';
  * its accessible equivalent. */
 export function CodePage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const structure = readStructureLocation(searchParams);
+  const location = readCodeLocation(searchParams);
   const overview = useEnvelope(
     ['graph', 'overview'],
     `${BASE}/overview`,
@@ -92,7 +97,7 @@ export function CodePage() {
   // The URL identity is authoritative. Every local selection writes it in the
   // same gesture, so a back/forward navigation or a pasted deep link can never
   // be silently retargeted by an older in-memory row.
-  const focusId = structure.focusId;
+  const focusId = location.focusId;
   const subgraph = useEnvelope(
     ['graph', 'subgraph', focusId ?? ''],
     `${BASE}/subgraph${focusId ? `?node_id=${encodeURIComponent(focusId)}` : ''}`,
@@ -103,23 +108,18 @@ export function CodePage() {
     selected !== null && selected.id === focusId
       ? selected
       : (subgraphPayload?.nodes.find((node) => node.id === focusId) ?? null);
-  const coreAvailable =
-    resolvedFocus?.file_path != null &&
-    resolvedFocus.start_line != null &&
-    resolvedFocus.end_line != null &&
-    subgraphPayload !== undefined;
-  const navigateStructure = useCallback(
-    (lens: StructureLens, node: TraceFocus | null = resolvedFocus) => {
-      const nextFocus = node?.id ?? structure.focusId;
+  const navigateView = useCallback(
+    (view: CodeView, node: TraceFocus | null = resolvedFocus) => {
+      const nextFocus = node?.id ?? location.focusId;
       setSearchParams(
-        writeStructureLocation(searchParams, {
-          lens: lens === 'cortex' || nextFocus !== null ? lens : 'cortex',
+        writeCodeLocation(searchParams, {
+          view,
           focusId: nextFocus,
         }),
         { replace: true },
       );
     },
-    [resolvedFocus, searchParams, setSearchParams, structure.focusId],
+    [location.focusId, resolvedFocus, searchParams, setSearchParams],
   );
   const canvasNodes = useMemo(() => {
     const payload = envelopePayload(subgraph.data);
@@ -153,7 +153,7 @@ export function CodePage() {
       if (id == null) {
         setSelected(null);
         setSearchParams(
-          writeStructureLocation(searchParams, { lens: 'cortex', focusId: null }),
+          writeCodeLocation(searchParams, { view: 'topology', focusId: null }),
           { replace: true },
         );
         return;
@@ -163,13 +163,22 @@ export function CodePage() {
       if (node) {
         setSelected(node);
         setSearchParams(
-          writeStructureLocation(searchParams, { lens: 'cortex', focusId: node.id }),
+          writeCodeLocation(searchParams, { view: 'topology', focusId: node.id }),
           { replace: true },
         );
       }
     },
     [searchParams, setSearchParams, subgraph.data],
   );
+  const focusState =
+    focusId === null
+      ? 'absent'
+      : resolvedFocus !== null
+        ? 'available'
+        : subgraph.isPending
+          ? 'loading'
+          : 'unavailable';
+  const viewBlocker = codeViewBlocker(location.view, focusState);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -178,7 +187,28 @@ export function CodePage() {
         title="Code"
         note="indexed symbols and relations under one sealed graph generation"
       />
-      <ExplorerSplit
+      <CodeViewSwitcher
+        active={location.view}
+        traceAvailable={focusState === 'available'}
+        onSelect={navigateView}
+      />
+      <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs text-text-muted">
+        {codeViewNote(location.view)}
+      </p>
+      <div
+        id={CODE_VIEW_PANEL_ID}
+        role="region"
+        aria-labelledby={codeViewControlId(location.view)}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        {viewBlocker !== null ? (
+          <CenteredState
+            title={viewBlocker.title}
+            detail={viewBlocker.detail}
+            kind={viewBlocker.kind}
+          />
+        ) : (
+          <ExplorerSplit
       filters={
         <div className="flex flex-col gap-3">
           <SearchField
@@ -280,65 +310,26 @@ export function CodePage() {
       }
       list={
         <div className="flex h-full min-h-0 flex-col">
-          <StructureLensRuler
-            lens={structure.lens}
-            focusAvailable={resolvedFocus !== null}
-            coreAvailable={coreAvailable}
-            onChange={navigateStructure}
-          />
-          {structure.lens === 'trace' && resolvedFocus !== null ? (
+          {location.view === 'trace' && resolvedFocus !== null ? (
             <Suspense
               fallback={
                 <TraceChunkFallback
                   focus={resolvedFocus}
-                  onClose={() => navigateStructure('cortex')}
+                  onClose={() => navigateView('topology')}
                 />
               }
             >
               <TraceView
                 focus={resolvedFocus}
-                onClose={() => navigateStructure('cortex')}
+                onClose={() => navigateView('topology')}
                 onFocusChange={(node) => {
                   setSelected(node);
-                  navigateStructure('trace', node);
+                  navigateView('trace', node);
                 }}
               />
             </Suspense>
-          ) : structure.lens === 'core' &&
-            resolvedFocus !== null &&
-            subgraphPayload !== undefined ? (
-            <CoreSample payload={subgraphPayload} focusId={resolvedFocus.id} />
-          ) : structure.lens !== 'cortex' ? (
-            <CenteredState
-              title={
-                subgraph.isPending
-                  ? 'Resolving the exact structure focus'
-                  : 'The requested lens is unavailable for this graph identity'
-              }
-              kind={subgraph.isPending ? 'loading' : 'unavailable'}
-            />
           ) : (
-          // ONE scroll for the whole cortex position, at every width.
-          //
-          // This pane used to divide `h-full` from `md` up between a pinned
-          // canvas and a separately scrolling hub list, because there were
-          // exactly two blocks to divide (below `md` the canvas alone was
-          // taller than the pane, the hub list resolved to `height: 0`, and it
-          // took its scrollbar with it — "top 12 of 12,873" over nothing).
-          // There are three blocks now, and they are three altitudes on ONE
-          // aggregation continuum rather than a pair of panes: the CORTEX
-          // relief over the whole clustering, then the graph slice over the
-          // busiest connected region of it, then the ranked symbols. A
-          // continuum cannot be pinned in halves, so the pane grows to its
-          // content and the archetype's scroller carries the column — which is
-          // the behaviour that already applied below `md` and is what makes
-          // reading down the column mean "aggregation decreases", the same
-          // sentence the lens ruler above prints.
           <div className="flex min-h-full flex-col">
-            {/* Far = CORTEX. The macro underlay comes first
-              * because it is the farthest position on the continuum, and it is
-              * handed the current focus so the terrain can ring the region the
-              * traced symbol actually lives in. */}
             <CortexRelief focusPath={resolvedFocus?.file_path ?? null} />
             <div className="flex flex-col gap-1.5 border-b border-edge-subtle p-3">
               <GraphSlicePane
@@ -359,12 +350,8 @@ export function CodePage() {
                   overviewPending={overview.isPending}
                   overviewResult={overview.data}
                   onSelect={(node) => {
-                    // A hub card is the entry to TRACE: selecting the symbol and
-                    // flooding its topography are one gesture, because "touch a
-                    // symbol = TRACE floods" is the navigation model, not a
-                    // secondary action hidden behind a second click.
                     setSelected(node);
-                    navigateStructure('trace', node);
+                    navigateView('trace', node);
                   }}
                   selected={resolvedFocus}
                 />
@@ -376,7 +363,7 @@ export function CodePage() {
                   selected={resolvedFocus}
                   onSelect={(node) => {
                     setSelected(node);
-                    navigateStructure('cortex', node);
+                    navigateView('topology', node);
                   }}
                 />
               )}
@@ -392,8 +379,8 @@ export function CodePage() {
             onClose={() => {
               setSelected(null);
               setSearchParams(
-                writeStructureLocation(searchParams, {
-                  lens: 'cortex',
+                writeCodeLocation(searchParams, {
+                  view: 'topology',
                   focusId: null,
                 }),
                 { replace: true },
@@ -407,12 +394,12 @@ export function CodePage() {
                * rather than ranked. */}
               <button
                 type="button"
-                onClick={() => navigateStructure('trace', resolvedFocus)}
-                disabled={structure.lens === 'trace'}
+                onClick={() => navigateView('trace', resolvedFocus)}
+                disabled={location.view === 'trace'}
                 className="flex items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-2 py-1 text-2xs text-text-secondary hover:bg-surface-2 hover:text-text-primary disabled:cursor-default disabled:text-text-muted"
               >
                 <Waypoints aria-hidden size={12} />
-                {structure.lens === 'trace' ? 'Tracing this symbol' : 'Trace call topography'}
+                {location.view === 'trace' ? 'Tracing this symbol' : 'Trace call topography'}
               </button>
               {resolvedFocus.signature ? (
                 <pre className="overflow-x-auto rounded-[var(--radius-standard)] bg-surface-2 p-2 font-mono text-2xs leading-relaxed">
@@ -431,6 +418,8 @@ export function CodePage() {
         ) : undefined
       }
       />
+        )}
+      </div>
     </div>
   );
 }
