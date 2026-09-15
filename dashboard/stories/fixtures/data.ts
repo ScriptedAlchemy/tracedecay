@@ -1134,11 +1134,12 @@ function similarOccurrence(i: number, generation: string): Record<string, unknow
 
 /**
  * `GET /api/plugins/graph/shared-code/family` — wire-true against
- * `code_read_api::family_response`: one digest group per class, the selected
- * source (`sym-0`) among its own members, `member_count` the authorized total
- * and `members` the page. The conservative family pages (`complete: false`)
- * so the "load more" journey has a cursor to follow; the rename family is
- * whole.
+ * `code_reads.rs::shared_family_result`: one digest group per class, the
+ * selected source (`sym-0`) among its own members, `member_count` the count of
+ * authorized members on this page (never a family total), and `coverage`
+ * `partial` whenever a family is incomplete. The conservative family pages
+ * (`complete: false`, cursor) so the "load more" journey has a cursor to
+ * follow; the rename family is whole.
  */
 function sharedCodeFamilyPayload(matchClass: string, cursor: string | null): Record<string, unknown> {
   const generation = 'generation.2f8c41ab';
@@ -1146,20 +1147,21 @@ function sharedCodeFamilyPayload(matchClass: string, cursor: string | null): Rec
   const members = cursor === null
     ? [similarOccurrence(0, generation), similarOccurrence(7, generation), similarOccurrence(14, generation)]
     : [similarOccurrence(21, generation), similarOccurrence(28, generation)];
+  const complete = !conservative || cursor !== null;
   return {
     source: similarOccurrence(0, generation),
     source_generation: generation,
-    coverage: { status: 'complete' },
+    coverage: { status: complete ? 'complete' : 'partial' },
     families: [
       {
         family_digest: hexDigest(`family-${matchClass}`),
         representative_payload_digest: hexDigest(`payload-${matchClass}`),
         match_class: matchClass,
         normalization_revision: conservative ? 3 : 4,
-        member_count: conservative ? 5 : 3,
-        members: conservative ? members : members.slice(0, 3),
-        complete: !conservative || cursor !== null,
-        next_cursor: conservative && cursor === null ? 'cursor.family.page-2' : null,
+        member_count: members.length,
+        members,
+        complete,
+        next_cursor: complete ? null : 'cursor.family.page-2',
       },
     ],
   };

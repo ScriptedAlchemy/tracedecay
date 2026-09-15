@@ -262,14 +262,14 @@ function UnionLayoutReading({ selection }: { selection: CompareSelection }) {
               <RevisionIdentity side="base" revision={layout.base} />
               <RevisionIdentity side="head" revision={layout.head} />
             </div>
-            {layout.files.length === 0 ? (
+            {layout.files.length === 0 && layout.symbols.length === 0 ? (
               <CenteredState
-                title="No file regions in this union"
+                title="No regions in this union"
                 kind="complete_zero_findings"
                 detail={
                   selection.file !== '' || selection.kind !== ''
                     ? 'Both generations were read; nothing matched the active filters.'
-                    : 'Both generations were read and contain no indexed files.'
+                    : 'Both generations were read and contain no indexed files or symbols.'
                 }
               />
             ) : (

@@ -183,7 +183,9 @@ function FamilyPage({
       },
     },
   );
-  const [followed, setFollowed] = useState<string | null>(null);
+  // Every family that carries a cursor may be followed, each once; the daemon
+  // mints one cursor per incomplete family, so one page may hand out several.
+  const [followed, setFollowed] = useState<ReadonlyArray<string>>([]);
   return (
     <ReadSection
       title={cursor === null ? 'Families' : 'More members'}
@@ -211,10 +213,18 @@ function FamilyPage({
             {coverage.kind === 'excluded' ? (
               <CenteredState title={coverage.title} kind="complete_zero_findings" detail={coverage.sentence} />
             ) : result.families.length === 0 ? (
-              <CenteredState
-                title="No verified copies of this body are indexed"
-                kind="complete_zero_findings"
-              />
+              coverage.kind === 'complete' && cursor === null ? (
+                <CenteredState
+                  title="No verified copies of this body are indexed"
+                  kind="complete_zero_findings"
+                />
+              ) : (
+                // A partial or continuation page with no families is not a
+                // measured zero; it is a page the budget or cursor left empty.
+                <p className="text-3xs leading-relaxed text-text-muted">
+                  No further families on this page.
+                </p>
+              )
             ) : (
               <ol className="flex flex-col gap-2">
                 {result.families.map((family) => (
@@ -226,8 +236,8 @@ function FamilyPage({
                     onFocusMember={onFocusMember}
                     onTraceMember={onTraceMember}
                     onFollow={
-                      family.next_cursor !== null && followed === null
-                        ? () => setFollowed(family.next_cursor)
+                      family.next_cursor !== null && !followed.includes(family.next_cursor)
+                        ? () => setFollowed([...followed, family.next_cursor as string])
                         : null
                     }
                   />
@@ -237,16 +247,17 @@ function FamilyPage({
             {coverage.kind === 'partial' ? (
               <p className="text-3xs leading-relaxed text-text-muted">{coverage.sentence}</p>
             ) : null}
-            {followed !== null ? (
+            {followed.map((next) => (
               <FamilyPage
+                key={next}
                 focus={focus}
                 matchClass={matchClass}
                 stitch={stitch}
-                cursor={followed}
+                cursor={next}
                 onFocusMember={onFocusMember}
                 onTraceMember={onTraceMember}
               />
-            ) : null}
+            ))}
           </div>
         );
       }}
@@ -292,10 +303,10 @@ function FamilyGroup({
   onFollow: (() => void) | null;
 }) {
   const copies = copiesOf(family.members, sourceId);
-  // `member_count` is the daemon's authorized count for the whole family;
-  // `members` is this page. The two differ on a paged family, and the header
-  // says so rather than presenting the page as the total.
-  const listed = family.members.length;
+  // `member_count` is the daemon's count of the authorized members *on this
+  // page* (code_reads.rs sets it from the filtered page), not a family total.
+  // The header therefore never claims a total: a complete family is counted,
+  // an incomplete one is counted "on this page" with more to follow.
   return (
     <li
       className="td-raised flex flex-col border border-edge-subtle"
@@ -310,13 +321,16 @@ function FamilyGroup({
         <span aria-hidden className="td-rule" />
         <span className="td-value shrink-0 text-2xs text-text-secondary" data-cell="numeric">
           {family.member_count.toLocaleString()}
-          <span className="td-unit ml-1">{family.member_count === 1 ? 'member' : 'members'}</span>
-        </span>
-        {listed < family.member_count ? (
-          <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
-            {listed.toLocaleString()} listed on this page
+          <span className="td-unit ml-1">
+            {family.member_count === 1 ? 'member' : 'members'}
+            {family.complete ? '' : ' on this page'}
           </span>
-        ) : null}
+        </span>
+        {family.complete ? null : (
+          <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
+            family incomplete · more members follow
+          </span>
+        )}
         <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
           normalization rev {family.normalization_revision}
         </span>
