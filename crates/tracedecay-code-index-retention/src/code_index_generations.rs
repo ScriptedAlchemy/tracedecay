@@ -62,7 +62,8 @@ pub use scope_roots::{
     resolve_live_code_index_roots,
 };
 pub use text_artifacts::{
-    attach_verified_text_artifact_under_lock, withdraw_verified_text_artifact_under_lock,
+    attach_verified_text_artifact_under_lock, replace_verified_text_artifact_under_lock,
+    withdraw_verified_text_artifact_under_lock,
 };
 
 use generation_transactions::{

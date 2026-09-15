@@ -536,7 +536,7 @@ impl CodeGraphActivationAuthorityV1 {
                         CodeGraphProjectionError::DeadlineExceeded,
                     ));
                 }
-                latest.warm_serving_caches();
+                latest.prewarm_serving_derivations();
                 Ok(())
             }
         }

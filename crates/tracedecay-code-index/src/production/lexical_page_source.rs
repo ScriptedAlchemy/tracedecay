@@ -2832,7 +2832,14 @@ impl LayoutScanner {
                 self.capture_state_digest =
                     self.pending_key == Some(LayoutKey::StateDigest) && self.brace_depth == 1;
             }
-            b':' => self.pending_key = self.completed_key.take(),
+            b':' => {
+                self.pending_key = self.completed_key.take();
+                if self.pending_key == Some(LayoutKey::FormatRevision)
+                    && self.generation_depth == Some(self.brace_depth)
+                {
+                    self.format_revision = None;
+                }
+            }
             b'{' => {
                 if self.pending_key == Some(LayoutKey::Generation) && self.brace_depth == 1 {
                     self.generation_depth = Some(self.brace_depth + 1);
@@ -2945,8 +2952,17 @@ impl LayoutScanner {
                 if self.pending_key == Some(LayoutKey::FormatRevision)
                     && self.generation_depth == Some(self.brace_depth) =>
             {
-                self.format_revision = Some(u32::from(byte - b'0'));
-                self.pending_key = None;
+                self.format_revision = Some(
+                    self.format_revision
+                        .unwrap_or_default()
+                        .checked_mul(10)
+                        .and_then(|revision| revision.checked_add(u32::from(byte - b'0')))
+                        .ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed generation format revision exceeds u32".to_owned(),
+                            )
+                        })?,
+                );
             }
             b',' => {
                 self.completed_key = None;

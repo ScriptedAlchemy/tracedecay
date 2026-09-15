@@ -2004,7 +2004,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Self::wait_for_published_text_projection_gate(&project_root).await;
         }
         let mut advances = 0_usize;
-        while text.text_serving_needs_work() {
+        while text.text_projection_needs_work() {
             if shutting_down.load(Ordering::Acquire) {
                 return PublishedTextProjectionOutcomeV1::Shutdown;
             }
@@ -2106,7 +2106,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         // Readiness, not "nothing left to advance": a latched failed owner
         // also has no work left, and it must not seat.
-        if text.text_serving_is_ready() {
+        if text.query_owners_are_ready() {
             PublishedTextProjectionOutcomeV1::Finished
         } else {
             PublishedTextProjectionOutcomeV1::Unfinished

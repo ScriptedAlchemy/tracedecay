@@ -1106,7 +1106,7 @@ fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_waterma
         .advance_text_serving(super::super::TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)
         .expect("drain successor through durable text publication")
     {}
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     let settled_rss_bytes = sampled_process_resident_bytes_v1();
     #[cfg(target_os = "linux")]
     let peak_rss_bytes = {
@@ -2018,7 +2018,7 @@ fn source_epoch_advance_does_not_discard_immutable_text_progress() {
         matches!(
             &*latest.text_projection_build.lock_slot(),
             super::super::CodeTextProjectionSlotV1::Building(_)
-        ) || latest.query_owners_are_warm(),
+        ) || latest.query_owners_are_ready(),
         "the bounded pass must retain or complete its generation-owned progress"
     );
 }
@@ -7558,7 +7558,7 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         if let Some((current, true)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await
-            && current.query_owners_are_warm()
+            && current.query_owners_are_ready()
         {
             break current;
         }
@@ -7803,7 +7803,7 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let latest = loop {
         if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await
-            && latest.query_owners_are_warm()
+            && latest.query_owners_are_ready()
         {
             break latest;
         }
@@ -8656,7 +8656,7 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         if let Some((latest, current)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await
-            && latest.query_owners_are_warm()
+            && latest.query_owners_are_ready()
             && current
             && let Some(identity) = <CodeIndexSchedulerRegistryV1 as tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1>::resolve_current_for_scope(
                 &registry,
@@ -8730,7 +8730,7 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
             .get(&RetrieverKind::Graph),
         Some(&PublicRetrieverStatus::Unavailable)
     );
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     assert!(latest.production_query_owners().is_ok());
     assert!(
         registry
@@ -8804,7 +8804,7 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
         if let Some((latest, _)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await
-            && latest.query_owners_are_warm()
+            && latest.query_owners_are_ready()
         {
             break latest;
         }
@@ -8822,7 +8822,7 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
         "graph-off remount must leave the complete serving slot empty"
     );
     assert!(
-        latest.query_owners_are_warm(),
+        latest.query_owners_are_ready(),
         "same-root graph refusal must preserve retained text hydration"
     );
     assert!(latest.production_query_owners().is_ok());
@@ -8877,7 +8877,7 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
         let text_ready = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await
-            .is_some_and(|(latest, _)| latest.query_owners_are_warm());
+            .is_some_and(|(latest, _)| latest.query_owners_are_ready());
         if text_ready
             && !registry
                 .reconcile_in_progress_for_test(fixture.path())
@@ -9103,7 +9103,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
             registry.latest_text_serving_for_scope(&scope).await,
             generation_id,
         ) && generation_id != sealed_generation_id
-            && text.query_owners_are_warm()
+            && text.query_owners_are_ready()
         {
             break (text, generation_id);
         }
@@ -9224,7 +9224,7 @@ fn dashboard_graph_readiness_follows_the_current_text_generation() {
     );
     published(scheduler.reconcile_now().expect("seed generation"));
     let old_ready = scheduler.latest_complete().expect("seeded generation");
-    old_ready.warm_serving_caches();
+    old_ready.prewarm_serving_derivations();
     assert_eq!(
         old_ready.code_graph_serving_readiness(),
         tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
@@ -9331,7 +9331,7 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
         if registry
             .latest_text_serving_for_scope(&scope)
             .await
-            .is_some_and(|text| text.query_owners_are_warm())
+            .is_some_and(|text| text.query_owners_are_ready())
         {
             break;
         }
@@ -9389,7 +9389,7 @@ async fn graph_decode_does_not_block_text_freshness() {
             if registry
                 .latest_text_serving_freshness_for_scope(&scope)
                 .await
-                .is_some_and(|(text, current)| text.query_owners_are_warm() && current)
+                .is_some_and(|(text, current)| text.query_owners_are_ready() && current)
             {
                 break;
             }
@@ -9884,7 +9884,7 @@ async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
                  text_open={} text_warm={:?}",
                 registry.latest_generation_id(fixture.path()).await,
                 text.is_some(),
-                text.map(|text| text.query_owners_are_warm()),
+                text.map(|text| text.query_owners_are_ready()),
             );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

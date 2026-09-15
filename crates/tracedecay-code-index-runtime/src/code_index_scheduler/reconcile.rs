@@ -726,7 +726,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
         LatestCodeTextGenerationV1 {
             metadata: Arc::new(metadata),
             sealed_format_revision,
-            query_owners: Arc::new(OnceLock::new()),
+            query_owners: Arc::new(RwLock::new(None)),
             graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
             text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
             text_projection_failed: Arc::new(AtomicBool::new(false)),
@@ -2262,7 +2262,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             LatestCodeTextGenerationV1 {
                 metadata,
                 sealed_format_revision,
-                query_owners: Arc::new(OnceLock::new()),
+                query_owners: Arc::new(RwLock::new(None)),
                 graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
                 text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
                 text_projection_failed: Arc::new(AtomicBool::new(false)),
@@ -3125,7 +3125,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                                 .replace_generation(generation_id.clone())
                         );
                         (
-                            Arc::new(OnceLock::new()),
+                            Arc::new(RwLock::new(None)),
                             Arc::new(CodeTextProjectionStateV1::new()),
                             Arc::new(AtomicBool::new(false)),
                             GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
@@ -3213,7 +3213,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     #[cfg(test)]
     pub(super) fn prime_serving_caches(&self) {
         if let Some(latest) = self.latest_complete() {
-            latest.warm_serving_caches();
+            latest.prewarm_serving_derivations();
         }
     }
 

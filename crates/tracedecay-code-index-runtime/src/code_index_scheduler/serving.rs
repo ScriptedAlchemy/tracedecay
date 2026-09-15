@@ -20,7 +20,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     DurableCodeTextArtifactDescriptorV1, DurablePublicationPointerV1,
     DurableSealedCodeGenerationIdentityV1, acquire_code_generation_store_lock,
     attach_verified_text_artifact_under_lock, code_text_artifact_path, code_text_artifacts_root,
-    withdraw_verified_text_artifact_under_lock,
+    replace_verified_text_artifact_under_lock, withdraw_verified_text_artifact_under_lock,
 };
 use tracedecay_contracts::{
     code_index_freshness::{
@@ -49,9 +49,10 @@ use crate::{
             CodeIndexExecutionControlV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
             SealedGenerationSegmentReadV1, VerifiedSealedLexicalCursorRestoreErrorV1,
-            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
-            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
-            VerifiedSealedTextGenerationMetadataV1,
+            VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
+            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
+            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+            VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
         },
     },
     query::retrieval::{
@@ -66,6 +67,7 @@ use crate::{
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
             CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
             CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
+            CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
             CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
             LexicalLaneRetriever, code_lexical_artifact_build_memory_budget_for,
         },
@@ -79,6 +81,7 @@ use super::{DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries};
 /// text artifact. One page is one bounded unit of background build progress.
 pub(super) const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
+const CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1: usize = 128 * 1024 * 1024;
 const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
 const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
@@ -105,30 +108,15 @@ pub(super) fn text_artifact_source_batch_limits(
 /// as `Cancelled` even while the owning open is inside one long read or
 /// digest call that has not yet reached its own checkpoint.
 const TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1: Duration = Duration::from_millis(100);
-/// Anti-livelock ceiling on the advances owner-warmup will drive.
-///
-/// A single `TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1` advance never
-/// finalizes even a one-file generation, so [`LatestCodeTextGenerationV1::production_query_owners`]
-/// keeps advancing until the build reports completion. Each advance is
-/// guaranteed to make progress -- it either finalizes or consumes its full
-/// page/finalization budget -- so this is a bound against a source that never
-/// reports completion, not a work budget or a tunable. Exceeding it still
-/// yields the same retryable warming error the caller already handles.
-/// Activation itself stays one bounded advance so graph warm and oversized
-/// hints never wait on the text projection.
-const TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
+const TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1: usize = 10_000;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
-/// The lazily built serving caches shared by every handle bound to one sealed
-/// generation: the exact/lexical/graph lane owners, the record lookup index,
-/// and the retained interactive graph store. All are rebuilt only when a new
-/// generation is loaded.
 pub(super) type GenerationServingCachesV1 = (
     CodeGenerationId,
-    Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
+    Arc<RwLock<Option<Arc<ProductionCodeIndexQueryOwnersV1>>>>,
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
     Arc<CodeTextProjectionStateV1>,
     Arc<AtomicBool>,
@@ -398,16 +386,12 @@ pub struct LatestCompleteCodeIndexV1 {
 pub struct LatestCodeTextGenerationV1 {
     pub(super) metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
     pub(super) sealed_format_revision: u32,
-    pub(super) query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
+    pub(super) query_owners: Arc<RwLock<Option<Arc<ProductionCodeIndexQueryOwnersV1>>>>,
     /// Native-graph readiness for this exact sealed text generation. Status
     /// reads this authority even while an older generation still owns the
     /// graph-serving slot, so old Ready state cannot mask current Pending or
     /// terminal Unavailable state.
     pub(super) graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
-    /// Generation-owned singleflight state for the durable text projection:
-    /// the resumable partial build plus the head-open claim. Only the
-    /// background scheduler advances it; foreground queries observe typed
-    /// warming until the immutable owners are installed.
     pub(super) text_projection_build: Arc<CodeTextProjectionStateV1>,
     pub(super) text_projection_failed: Arc<AtomicBool>,
     pub(super) text_control: GenerationTextControlV1,
@@ -545,6 +529,12 @@ impl ProductionCodeIndexQueryOwnersV1 {
     }
 }
 
+pub(super) enum CodeTextQueryOwnerReadinessV1 {
+    Ready(Arc<ProductionCodeIndexQueryOwnersV1>),
+    Pending,
+    Invalid,
+}
+
 /// Partial durable-artifact build: the staging `SQLite` builder plus the
 /// verified page source over this generation's durable sealed file.
 pub(super) struct CodeTextArtifactBuildV1 {
@@ -556,6 +546,23 @@ pub(super) struct CodeTextArtifactBuildV1 {
     /// Holds the builder's advertised memory ceiling reserved in the
     /// process resident-memory authority for the lifetime of the build.
     _build_reservation: ResidentMemoryReservationV1,
+}
+
+pub(super) struct CodeTextCloneSuccessorBuildV1 {
+    builder: Option<CodeLexicalCloneSuccessorV1>,
+    source: VerifiedSealedLexicalPageSourceV1<File>,
+    source_position: CloneSuccessorSourcePositionV1,
+    sealed_identity: DurableSealedCodeGenerationIdentityV1,
+    source_receipt: Option<VerifiedSealedLexicalSourceReceiptV1>,
+    prior: tracedecay_query::retrieval::lexical::VerifiedCodeLexicalArtifactV1,
+    prior_descriptor: DurableCodeTextArtifactDescriptorV1,
+    staging_path: PathBuf,
+    build_reservation: Option<ResidentMemoryReservationV1>,
+}
+
+enum CloneSuccessorSourcePositionV1 {
+    Appending,
+    Revalidating(VerifiedSealedLexicalCursorV1),
 }
 
 /// Singleflight authority for one generation's durable text projection.
@@ -585,6 +592,8 @@ pub(super) enum CodeTextProjectionSlotV1 {
     /// The resumable staging build; each wake advances one bounded slice
     /// under the slot lock.
     Building(Box<CodeTextArtifactBuildV1>),
+    CloneSuccessorPending,
+    BuildingCloneSuccessor(Box<CodeTextCloneSuccessorBuildV1>),
 }
 
 impl CodeTextProjectionStateV1 {
@@ -600,6 +609,17 @@ impl CodeTextProjectionStateV1 {
             self.slot.lock().unwrap_or_else(PoisonError::into_inner)
         })
     }
+
+    fn retain_clone_successor_retry(&self) -> Result<(), RetrievalPortError> {
+        let mut slot = self.lock_slot();
+        if !matches!(&*slot, CodeTextProjectionSlotV1::HeadOpening) {
+            return Err(RetrievalPortError::Contract(
+                "clone-successor retry requires an active head-open claim".to_owned(),
+            ));
+        }
+        *slot = CodeTextProjectionSlotV1::CloneSuccessorPending;
+        Ok(())
+    }
 }
 
 /// One wake's exclusive claim on a corpus-sized verified head open.
@@ -612,6 +632,11 @@ struct TextHeadOpenClaimV1<'a> {
     armed: bool,
 }
 
+enum TextHeadOpenBuildV1 {
+    Artifact(Box<CodeTextArtifactBuildV1>),
+    CloneSuccessor(Box<CodeTextCloneSuccessorBuildV1>),
+}
+
 impl<'a> TextHeadOpenClaimV1<'a> {
     /// The caller must already have transitioned the slot to `HeadOpening`
     /// and released the lock; this guard owns restoring it.
@@ -619,16 +644,15 @@ impl<'a> TextHeadOpenClaimV1<'a> {
         Self { state, armed: true }
     }
 
-    /// Install the initialized staging build and hand the locked slot back
-    /// to the claiming wake so it advances the first bounded slice
-    /// immediately.
-    fn install_build(
-        &mut self,
-        build: Box<CodeTextArtifactBuildV1>,
-    ) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
+    fn install(&mut self, build: TextHeadOpenBuildV1) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
         self.armed = false;
         let mut slot = self.state.lock_slot();
-        *slot = CodeTextProjectionSlotV1::Building(build);
+        *slot = match build {
+            TextHeadOpenBuildV1::Artifact(build) => CodeTextProjectionSlotV1::Building(build),
+            TextHeadOpenBuildV1::CloneSuccessor(build) => {
+                CodeTextProjectionSlotV1::BuildingCloneSuccessor(build)
+            }
+        };
         self.state.ready.notify_all();
         slot
     }
@@ -657,6 +681,7 @@ pub(super) enum TextHeadOpenOutcomeV1 {
     /// No published head was servable; the resumable staging build begins
     /// (or resumes) from its durable staging file.
     Build(Box<CodeTextArtifactBuildV1>),
+    BuildCloneSuccessor(Box<CodeTextCloneSuccessorBuildV1>),
 }
 
 fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
@@ -1066,6 +1091,17 @@ impl DaemonCodeTextArtifactStoreV1 {
         sealed_identity: &DurableSealedCodeGenerationIdentityV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
+        self.publish_with_prior(staging_path, generation_id, sealed_identity, None, control)
+    }
+
+    fn publish_with_prior(
+        &self,
+        staging_path: &Path,
+        generation_id: &CodeGenerationId,
+        sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+        prior: Option<&DurableCodeTextArtifactDescriptorV1>,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
         hotpath::measure_block!("query.artifact.store.publish", {
             let artifacts_root = code_text_artifacts_root(&self.store_root);
             ensure_private_text_artifacts_root(&artifacts_root)?;
@@ -1136,16 +1172,24 @@ impl DaemonCodeTextArtifactStoreV1 {
                             .to_owned(),
                     )
                 })?;
-            hotpath::measure_block!(
-                "query.artifact.store.pointer_commit",
-                attach_verified_text_artifact_under_lock(
-                    &lock,
-                    &pointer,
-                    sealed_identity,
-                    descriptor.clone(),
-                )
+            hotpath::measure_block!("query.artifact.store.pointer_commit", {
+                match prior {
+                    Some(prior) => replace_verified_text_artifact_under_lock(
+                        &lock,
+                        &pointer,
+                        sealed_identity,
+                        prior,
+                        descriptor.clone(),
+                    ),
+                    None => attach_verified_text_artifact_under_lock(
+                        &lock,
+                        &pointer,
+                        sealed_identity,
+                        descriptor.clone(),
+                    ),
+                }
                 .map_err(text_artifact_unavailable)
-            )?;
+            })?;
             Ok(descriptor)
         })
     }
@@ -1181,8 +1225,7 @@ impl LatestCompleteCodeIndexV1 {
         self.text.clone()
     }
 
-    /// Drive the retained text lane to completion so tests can assert exact
-    /// and lexical owners without depending on a request-path warm.
+    /// Install exact and lexical owners without waiting for clone backfill.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn production_query_owners(
@@ -1215,33 +1258,11 @@ impl LatestCompleteCodeIndexV1 {
             .get_or_init(|| queries::GenerationRecordIndexV1::build(self.generation.as_ref()))
     }
 
-    /// Build every per-generation serving derivation now, off the request path.
-    ///
-    /// A sealed generation is immutable, so its exact-admission sweep, record
-    /// lookup indices, lane owners, and test-attribution join are pure functions
-    /// of it. Each is memoized behind a `OnceLock` that would otherwise be
-    /// initialized by whichever request arrives first — charging one query an
-    /// O(store) canonical sweep over every chunk. Warming them where the
-    /// generation is activated makes the FIRST query O(result), like every later
-    /// one.
-    ///
-    /// Failures are deliberately discarded: this is a pre-warm, not a gate. Only
-    /// success is memoized, so every serving path still runs — and still fails
-    /// closed on — the exact same checks.
+    /// Best-effort prewarm of the generation's query and graph derivations.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn warm_serving_caches(&self) {
-        // Completion, not one bounded advance: the exact/lexical lane owners
-        // install only when the resumable text build finishes, so activation
-        // must drive the loop or the first request inherits a warming
-        // abstention instead of warm owners. Each advance inside stays
-        // bounded and cancellation-checkpointed.
+    pub fn prewarm_serving_derivations(&self) {
         let _ = self.production_query_owners();
-        // Mirror the persistent-graph activation warm set: the record lookup
-        // indices and the test-attribution join are pure functions of the
-        // sealed generation and must exist before the first request, not be
-        // charged to it. Neither touches exact-admission staging, so the
-        // released staging corpus stays released.
         let _ = self.record_index();
         let _ = self.generation.test_attribution_authority();
         let generation_id = self.generation.manifest().generation_id.clone();
@@ -1295,18 +1316,35 @@ impl LatestCompleteCodeIndexV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
-    /// Whether the exact/lexical lane owners are already built.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn query_owners_are_warm(&self) -> bool {
-        self.text_serving_is_ready()
+    pub fn query_owners_are_ready(&self) -> bool {
+        matches!(
+            self.query_owner_readiness(),
+            CodeTextQueryOwnerReadinessV1::Ready(_)
+        )
     }
 
-    pub(super) fn text_serving_is_ready(&self) -> bool {
-        self.query_owners.get().is_some()
+    pub(super) fn query_owner_readiness(&self) -> CodeTextQueryOwnerReadinessV1 {
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return CodeTextQueryOwnerReadinessV1::Invalid;
+        }
+        self.query_owners
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone)
+            .map_or(
+                CodeTextQueryOwnerReadinessV1::Pending,
+                CodeTextQueryOwnerReadinessV1::Ready,
+            )
     }
 
-    pub(super) fn text_serving_needs_work(&self) -> bool {
-        !self.text_serving_is_ready() && !self.text_projection_failed.load(Ordering::Acquire)
+    pub(super) fn text_projection_needs_work(&self) -> bool {
+        !self.text_projection_failed.load(Ordering::Acquire)
+            && (!self.query_owners_are_ready()
+                || !matches!(
+                    &*self.text_projection_build.lock_slot(),
+                    CodeTextProjectionSlotV1::Idle
+                ))
     }
 
     pub(super) fn same_text_owner(&self, other: &Self) -> bool {
@@ -1355,24 +1393,17 @@ impl LatestCompleteCodeIndexV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
-    /// Return exact and lexical query owners bound to the latest complete
-    /// published generation, driving the resumable text-artifact build to
-    /// completion first.
-    ///
-    /// One bounded advance cannot finalize even a one-file generation, so
-    /// this owner-warmup entry keeps advancing until the build reports
-    /// completion. Every advance stays bounded and
-    /// cancellation-checkpointed, so a shutdown or epoch bump still surfaces
-    /// immediately through `?` rather than being absorbed by this loop.
+    /// Return exact and lexical owners without waiting for clone backfill.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
         let mut advances = 0_usize;
-        while !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
+        while !self.query_owners_are_ready() {
+            self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)?;
             advances += 1;
-            if advances >= TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
                 return Err(RetrievalPortError::AuthorityUnavailable(
                     "code-index text serving owners are warming".to_owned(),
                 ));
@@ -1381,21 +1412,18 @@ impl LatestCodeTextGenerationV1 {
         self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
     }
 
-    /// Finish the durable text projection for an explicitly selected sealed
-    /// generation while retaining both generation and request cancellation.
-    /// Historical branch generations have no scheduler-owned background wake,
-    /// so their first query owns this resumable completion.
-    pub(super) fn finish_text_serving_for_request(
+    pub(super) fn finish_query_owner_warmup_for_request(
         &self,
         request_control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
         let mut advances = 0_usize;
-        while !self.advance_text_serving_for_request(
-            TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1,
-            request_control,
-        )? {
+        while !self.query_owners_are_ready() {
+            self.advance_text_serving_for_request(
+                TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1,
+                request_control,
+            )?;
             advances += 1;
-            if advances >= TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
                 return Ok(false);
             }
         }
@@ -1406,16 +1434,19 @@ impl LatestCodeTextGenerationV1 {
         &self,
         _build_budget: &RetrievalBudget,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
-        if self.text_projection_failed.load(Ordering::Acquire) {
-            return Err(RetrievalPortError::AuthorityUnavailable(
-                "code-index text serving projection failed".to_owned(),
-            ));
+        match self.query_owner_readiness() {
+            CodeTextQueryOwnerReadinessV1::Ready(owners) => Ok(owners),
+            CodeTextQueryOwnerReadinessV1::Pending => {
+                Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving owners are warming".to_owned(),
+                ))
+            }
+            CodeTextQueryOwnerReadinessV1::Invalid => {
+                Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving projection failed".to_owned(),
+                ))
+            }
         }
-        self.query_owners.get().map(Arc::clone).ok_or_else(|| {
-            RetrievalPortError::AuthorityUnavailable(
-                "code-index text serving owners are warming".to_owned(),
-            )
-        })
     }
 }
 
@@ -1928,9 +1959,6 @@ impl LatestCodeTextGenerationV1 {
                 return Err(RetrievalPortError::Cancelled);
             }
         }
-        if self.query_owners.get().is_some() {
-            return Ok(true);
-        }
         self.advance_artifact_text_serving(maximum_work, control)
     }
 
@@ -1965,6 +1993,152 @@ impl LatestCodeTextGenerationV1 {
         Ok(source)
     }
 
+    fn begin_clone_successor(
+        &self,
+        prior_descriptor: DurableCodeTextArtifactDescriptorV1,
+        prior: tracedecay_query::retrieval::lexical::VerifiedCodeLexicalArtifactV1,
+        sealed_identity: DurableSealedCodeGenerationIdentityV1,
+        source: VerifiedSealedLexicalPageSourceV1<File>,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Box<CodeTextCloneSuccessorBuildV1>, RetrievalPortError> {
+        let generation_id = &self.metadata.manifest().generation_id;
+        let reservation = self.text_artifact_store.reserve_resident_memory(
+            generation_id,
+            "code-text-clone-successor",
+            CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1,
+        )?;
+        let artifacts_root = code_text_artifacts_root(self.text_artifact_store.store_root());
+        ensure_private_text_artifacts_root(&artifacts_root)?;
+        let prior_path =
+            code_text_artifact_path(self.text_artifact_store.store_root(), &prior_descriptor)
+                .map_err(text_artifact_unavailable)?;
+        let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "clone-successor sealed generation digest is not SHA-256".to_owned(),
+            )
+        })?;
+        let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
+        let metadata = self.text_projection_metadata()?;
+        let open_builder = || {
+            CodeLexicalCloneSuccessorV1::open_or_create(
+                &prior_path,
+                &staging_path,
+                prior.clone(),
+                metadata.clone(),
+                CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1,
+            )
+        };
+        let mut builder = match open_builder() {
+            Ok(builder) => builder,
+            Err(
+                CodeLexicalArtifactErrorV1::Incompatible(_)
+                | CodeLexicalArtifactErrorV1::Corrupt(_),
+            ) => {
+                self.text_artifact_store
+                    .discard_incompatible_staging(&staging_path, control)?;
+                open_builder().map_err(map_text_artifact_error)?
+            }
+            Err(error) => return Err(map_text_artifact_error(error)),
+        };
+        let source_position = match builder.next_cursor() {
+            Ok(Some(cursor)) => CloneSuccessorSourcePositionV1::Revalidating(cursor),
+            Ok(None) => CloneSuccessorSourcePositionV1::Appending,
+            Err(
+                CodeLexicalArtifactErrorV1::Incompatible(_)
+                | CodeLexicalArtifactErrorV1::Corrupt(_),
+            ) => {
+                drop(builder);
+                self.text_artifact_store
+                    .discard_incompatible_staging(&staging_path, control)?;
+                builder = open_builder().map_err(map_text_artifact_error)?;
+                CloneSuccessorSourcePositionV1::Appending
+            }
+            Err(error) => return Err(map_text_artifact_error(error)),
+        };
+        Ok(Box::new(CodeTextCloneSuccessorBuildV1 {
+            builder: Some(builder),
+            source,
+            source_position,
+            sealed_identity,
+            source_receipt: None,
+            prior,
+            prior_descriptor,
+            staging_path,
+            build_reservation: Some(reservation),
+        }))
+    }
+
+    fn open_published_text_artifact(
+        &self,
+        generation_id: &CodeGenerationId,
+        descriptor: DurableCodeTextArtifactDescriptorV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<TextHeadOpenOutcomeV1>, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        let reader_reservation = store.reserve_resident_memory(
+            generation_id,
+            "code-text-artifact-reader",
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        )?;
+        let path = code_text_artifact_path(store.store_root(), &descriptor)
+            .map_err(text_artifact_unavailable)?;
+        let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
+            path,
+            &descriptor.artifact_digest,
+            descriptor.artifact_size_bytes,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            control,
+        )
+        .and_then(|reader| {
+            let expected_metadata = self
+                .text_projection_metadata()
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+            if reader.metadata() != &expected_metadata {
+                return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                    "published lexical metadata does not match the current projection".to_owned(),
+                ));
+            }
+            Ok(reader)
+        });
+        match reader {
+            Ok(reader) => {
+                let sealed_identity = store.sealed_identity(generation_id)?;
+                let source = self.take_preopened_source_or_open(&sealed_identity, control)?;
+                let ready_progress =
+                    self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
+                let needs_clone_successor = !reader.has_clone_index();
+                let prior = reader.verified_artifact().clone();
+                self.install_artifact_owners(reader, reader_reservation)?;
+                self.publish_text_progress_snapshot(ready_progress);
+                if needs_clone_successor {
+                    self.text_projection_build.retain_clone_successor_retry()?;
+                    return self
+                        .begin_clone_successor(descriptor, prior, sealed_identity, source, control)
+                        .map(TextHeadOpenOutcomeV1::BuildCloneSuccessor)
+                        .map(Some);
+                }
+                drop(source);
+                Ok(Some(TextHeadOpenOutcomeV1::Served))
+            }
+            Err(CodeLexicalArtifactErrorV1::Missing(_)) => {
+                drop(reader_reservation);
+                store.withdraw_unavailable_descriptor(&descriptor, false)?;
+                Ok(None)
+            }
+            Err(CodeLexicalArtifactErrorV1::Corrupt(_)) => {
+                drop(reader_reservation);
+                store.withdraw_unavailable_descriptor(&descriptor, true)?;
+                Ok(None)
+            }
+            Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+                drop(reader_reservation);
+                store.withdraw_unavailable_descriptor(&descriptor, false)?;
+                Ok(None)
+            }
+            Err(error) => Err(map_text_artifact_error(error)),
+        }
+    }
+
     /// One claimed head-open pass, run with the slot lock released: reopen
     /// the published durable head when one exists, otherwise authenticate the
     /// sealed source and begin (or resume) the staging build. Fail-closed:
@@ -1985,61 +2159,11 @@ impl LatestCodeTextGenerationV1 {
         hotpath::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages);
         hotpath::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes);
         let generation_id = self.metadata.manifest().generation_id.clone();
-        if let Some(descriptor) = store.published_descriptor(&generation_id)? {
-            // Durable-head reopen: a restart serves the published
-            // artifact without rebuilding it. Reserve the complete reader
-            // ceiling before even resolving or touching the artifact path.
-            let reader_reservation = store.reserve_resident_memory(
-                &generation_id,
-                "code-text-artifact-reader",
-                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-            )?;
-            let path = code_text_artifact_path(store.store_root(), &descriptor)
-                .map_err(text_artifact_unavailable)?;
-            let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
-                path,
-                &descriptor.artifact_digest,
-                descriptor.artifact_size_bytes,
-                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-                control,
-            )
-            .and_then(|reader| {
-                let expected_metadata = self
-                    .text_projection_metadata()
-                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-                if reader.metadata() != &expected_metadata {
-                    return Err(CodeLexicalArtifactErrorV1::Incompatible(
-                        "published lexical metadata does not match the current projection"
-                            .to_owned(),
-                    ));
-                }
-                Ok(reader)
-            });
-            match reader {
-                Ok(reader) => {
-                    let sealed_identity = store.sealed_identity(&generation_id)?;
-                    let source = self.take_preopened_source_or_open(&sealed_identity, control)?;
-                    let ready_progress =
-                        self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
-                    drop(source);
-                    self.install_artifact_owners(reader, reader_reservation)?;
-                    self.publish_text_progress_snapshot(ready_progress);
-                    return Ok(TextHeadOpenOutcomeV1::Served);
-                }
-                Err(CodeLexicalArtifactErrorV1::Missing(_)) => {
-                    drop(reader_reservation);
-                    store.withdraw_unavailable_descriptor(&descriptor, false)?;
-                }
-                Err(CodeLexicalArtifactErrorV1::Corrupt(_)) => {
-                    drop(reader_reservation);
-                    store.withdraw_unavailable_descriptor(&descriptor, true)?;
-                }
-                Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
-                    drop(reader_reservation);
-                    store.withdraw_unavailable_descriptor(&descriptor, false)?;
-                }
-                Err(error) => return Err(map_text_artifact_error(error)),
-            }
+        if let Some(descriptor) = store.published_descriptor(&generation_id)?
+            && let Some(outcome) =
+                self.open_published_text_artifact(&generation_id, descriptor, control)?
+        {
+            return Ok(outcome);
         }
         // The builder's advertised memory ceiling is reserved through the
         // process resident-memory authority before the build allocates.
@@ -2071,19 +2195,21 @@ impl LatestCodeTextGenerationV1 {
                 Ok(builder) => Ok(builder),
                 Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
                     store.discard_incompatible_staging(&staging_path, control)?;
-                    CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                    CodeLexicalArtifactBuilderV1::create_with_memory_budget_and_format_revision(
                         &staging_path,
                         metadata.clone(),
                         builder_budget,
+                        CodeLexicalArtifactWriterRevisionV1::V14,
                     )
                 }
                 Err(error) => Err(error),
             }
         } else {
-            CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+            CodeLexicalArtifactBuilderV1::create_with_memory_budget_and_format_revision(
                 &staging_path,
                 metadata.clone(),
                 builder_budget,
+                CodeLexicalArtifactWriterRevisionV1::V14,
             )
         }
         .map_err(map_text_artifact_error)?;
@@ -2127,10 +2253,6 @@ impl LatestCodeTextGenerationV1 {
         Ok(TextHeadOpenOutcomeV1::Build(Box::new(initialized)))
     }
 
-    /// The durable-artifact journey: reopen a published head when one exists,
-    /// otherwise stream the sealed generation through the staging builder one
-    /// bounded page window at a time, finalize, publish, and reopen.
-    ///
     /// Corpus-sized verified opens (the published-head reopen and the
     /// publication tail's reopen) run under a `HeadOpening` claim with the
     /// slot lock released, so a concurrent wake parks with typed cancellation
@@ -2144,9 +2266,6 @@ impl LatestCodeTextGenerationV1 {
         let store = &self.text_artifact_store;
         let mut parked = false;
         let mut slot = loop {
-            if self.query_owners.get().is_some() {
-                return Ok(true);
-            }
             // A first arrival lets the batch/open work itself observe the
             // control (its cancellation checkpoints are the historical
             // authority); a parked arrival owns no work, so it must
@@ -2156,7 +2275,10 @@ impl LatestCodeTextGenerationV1 {
             }
             let guard = self.text_projection_build.lock_slot();
             match &*guard {
-                CodeTextProjectionSlotV1::Idle | CodeTextProjectionSlotV1::Building(_) => {
+                CodeTextProjectionSlotV1::Idle
+                | CodeTextProjectionSlotV1::CloneSuccessorPending
+                | CodeTextProjectionSlotV1::Building(_)
+                | CodeTextProjectionSlotV1::BuildingCloneSuccessor(_) => {
                     break guard;
                 }
                 CodeTextProjectionSlotV1::HeadOpening => {
@@ -2176,11 +2298,11 @@ impl LatestCodeTextGenerationV1 {
                 }
             }
         };
-        if matches!(&*slot, CodeTextProjectionSlotV1::Idle) {
-            // Owners are installed only under a `HeadOpening` claim, so an
-            // `Idle` slot with owners already set means a prior claim
-            // finished between this wake's owners check and its lock.
-            if self.query_owners.get().is_some() {
+        if matches!(
+            &*slot,
+            CodeTextProjectionSlotV1::Idle | CodeTextProjectionSlotV1::CloneSuccessorPending
+        ) {
+            if matches!(&*slot, CodeTextProjectionSlotV1::Idle) && self.query_owners_are_ready() {
                 return Ok(true);
             }
             *slot = CodeTextProjectionSlotV1::HeadOpening;
@@ -2193,9 +2315,29 @@ impl LatestCodeTextGenerationV1 {
             match outcome {
                 TextHeadOpenOutcomeV1::Served => return Ok(true),
                 TextHeadOpenOutcomeV1::Build(initialized) => {
-                    slot = claim.install_build(initialized);
+                    slot = claim.install(TextHeadOpenBuildV1::Artifact(initialized));
+                }
+                TextHeadOpenOutcomeV1::BuildCloneSuccessor(initialized) => {
+                    slot = claim.install(TextHeadOpenBuildV1::CloneSuccessor(initialized));
                 }
             }
+        }
+        if matches!(&*slot, CodeTextProjectionSlotV1::BuildingCloneSuccessor(_)) {
+            let done = match &mut *slot {
+                CodeTextProjectionSlotV1::BuildingCloneSuccessor(successor) => {
+                    self.advance_clone_successor(successor, maximum_work, control)?
+                }
+                _ => {
+                    return Err(RetrievalPortError::Contract(
+                        "clone-successor build state changed under its lock".to_owned(),
+                    ));
+                }
+            };
+            if done {
+                *slot = CodeTextProjectionSlotV1::Idle;
+                self.text_projection_build.ready.notify_all();
+            }
+            return Ok(done);
         }
         let CodeTextProjectionSlotV1::Building(artifact_build) = &mut *slot else {
             return Err(RetrievalPortError::Contract(
@@ -2475,7 +2617,7 @@ impl LatestCodeTextGenerationV1 {
             ));
         };
         drop(slot);
-        let _publish_claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
+        let mut publish_claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
         let CodeTextArtifactBuildV1 {
             builder,
             source,
@@ -2513,9 +2655,171 @@ impl LatestCodeTextGenerationV1 {
             control,
         )
         .map_err(map_text_artifact_error)?;
+        let needs_clone_successor = !reader.has_clone_index();
+        let prior = reader.verified_artifact().clone();
         self.install_artifact_owners(reader, reader_reservation)?;
+        if needs_clone_successor {
+            let source = store.open_sealed_source(&sealed_identity, control)?;
+            let build =
+                self.begin_clone_successor(descriptor, prior, sealed_identity, source, control)?;
+            drop(publish_claim.install(TextHeadOpenBuildV1::CloneSuccessor(build)));
+            self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
+            return Ok(false);
+        }
         self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         Ok(true)
+    }
+
+    fn advance_clone_successor(
+        &self,
+        build: &mut CodeTextCloneSuccessorBuildV1,
+        maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        if build.builder.is_none() {
+            self.rebuild_clone_successor(build, control)?;
+        }
+        let mut remaining = maximum_work.max(1);
+        while remaining > 0 && build.source_receipt.is_none() {
+            match build
+                .source
+                .next_page(control)
+                .map_err(map_sealed_page_source_error)?
+            {
+                VerifiedSealedLexicalPageReadV1::Page(page) => {
+                    if !self.advance_clone_successor_page(build, &page, control)? {
+                        return Ok(false);
+                    }
+                    remaining -= 1;
+                }
+                VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
+                    if matches!(
+                        build.source_position,
+                        CloneSuccessorSourcePositionV1::Revalidating(_)
+                    ) {
+                        self.rebuild_clone_successor(build, control)?;
+                        return Ok(false);
+                    }
+                    build.source_receipt = Some(receipt);
+                }
+            }
+        }
+        let Some(source_receipt) = build.source_receipt.as_ref() else {
+            return Ok(false);
+        };
+        if remaining == 0 {
+            return Ok(false);
+        }
+        let _receipt = build
+            .builder
+            .as_mut()
+            .ok_or_else(|| {
+                RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
+            })?
+            .finish(source_receipt, control)
+            .map_err(map_text_artifact_error)?;
+        drop(build.builder.take());
+        drop(build.build_reservation.take());
+        let descriptor = self.text_artifact_store.publish_with_prior(
+            &build.staging_path,
+            &self.metadata.manifest().generation_id,
+            &build.sealed_identity,
+            Some(&build.prior_descriptor),
+            control,
+        )?;
+        let reader_reservation = self.text_artifact_store.reserve_resident_memory(
+            &self.metadata.manifest().generation_id,
+            "code-text-artifact-reader",
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        )?;
+        let final_path =
+            code_text_artifact_path(self.text_artifact_store.store_root(), &descriptor)
+                .map_err(text_artifact_unavailable)?;
+        let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
+            final_path,
+            &descriptor.artifact_digest,
+            descriptor.artifact_size_bytes,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            control,
+        )
+        .map_err(map_text_artifact_error)?;
+        self.install_artifact_owners(reader, reader_reservation)?;
+        Ok(true)
+    }
+
+    fn advance_clone_successor_page(
+        &self,
+        build: &mut CodeTextCloneSuccessorBuildV1,
+        page: &VerifiedSealedLexicalPageV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let CloneSuccessorSourcePositionV1::Revalidating(target) = &build.source_position else {
+            build
+                .builder
+                .as_mut()
+                .ok_or_else(|| {
+                    RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
+                })?
+                .append_page(page, control)
+                .map_err(map_text_artifact_error)?;
+            return Ok(true);
+        };
+        let target = target.clone();
+        let verification = build
+            .builder
+            .as_ref()
+            .ok_or_else(|| {
+                RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
+            })?
+            .verify_resumed_page(page, control);
+        if matches!(
+            verification,
+            Err(CodeLexicalArtifactErrorV1::Incompatible(_)
+                | CodeLexicalArtifactErrorV1::Corrupt(_))
+        ) || page.next_cursor().next_page_ordinal() > target.next_page_ordinal()
+        {
+            self.rebuild_clone_successor(build, control)?;
+            return Ok(false);
+        }
+        verification.map_err(map_text_artifact_error)?;
+        if page.next_cursor().next_page_ordinal() == target.next_page_ordinal() {
+            if page.next_cursor() != &target {
+                self.rebuild_clone_successor(build, control)?;
+                return Ok(false);
+            }
+            build.source_position = CloneSuccessorSourcePositionV1::Appending;
+        }
+        Ok(true)
+    }
+
+    fn rebuild_clone_successor(
+        &self,
+        build: &mut CodeTextCloneSuccessorBuildV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), RetrievalPortError> {
+        drop(build.builder.take());
+        self.text_artifact_store
+            .discard_incompatible_staging(&build.staging_path, control)?;
+        let prior_path = code_text_artifact_path(
+            self.text_artifact_store.store_root(),
+            &build.prior_descriptor,
+        )
+        .map_err(text_artifact_unavailable)?;
+        let builder = CodeLexicalCloneSuccessorV1::open_or_create(
+            prior_path,
+            &build.staging_path,
+            build.prior.clone(),
+            self.text_projection_metadata()?,
+            CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1,
+        )
+        .map_err(map_text_artifact_error)?;
+        build.source = self
+            .text_artifact_store
+            .open_sealed_source(&build.sealed_identity, control)?;
+        build.source_position = CloneSuccessorSourcePositionV1::Appending;
+        build.source_receipt = None;
+        build.builder = Some(builder);
+        Ok(())
     }
 
     fn install_artifact_owners(
@@ -2554,7 +2858,10 @@ impl LatestCodeTextGenerationV1 {
             hydration,
             reader_reservation,
         ));
-        let _ = self.query_owners.set(owners);
+        *self
+            .query_owners
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(owners);
         Ok(())
     }
 }

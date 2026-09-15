@@ -595,30 +595,46 @@ fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
     (store, generations)
 }
 
+struct TextArtifactMutationFixtureV1 {
+    store: tempfile::TempDir,
+    generation_id: CodeGenerationId,
+    pointer: DurablePublicationPointerV1,
+    sealed_identity: DurableSealedCodeGenerationIdentityV1,
+}
+
+fn text_artifact_mutation_fixture() -> TextArtifactMutationFixtureV1 {
+    let (store, mut generations) = fixture_store(1);
+    let active = generations.pop().expect("active generation");
+    TextArtifactMutationFixtureV1 {
+        pointer: read_active_pointer(store.path()).expect("active pointer"),
+        sealed_identity: DurableSealedCodeGenerationIdentityV1 {
+            locator: active.file,
+            digest: ManifestDigest::new(active.state_digest).expect("sealed digest"),
+            size_bytes: active.size_bytes,
+        },
+        generation_id: active.id,
+        store,
+    }
+}
+
 #[test]
 fn verified_text_artifact_attachment_is_durable_and_idempotent_under_the_store_lock() {
-    let (store, generations) = fixture_store(1);
-    let expected = read_active_pointer(store.path()).expect("active pointer");
-    let active = generations.last().expect("active generation");
-    let sealed_identity = DurableSealedCodeGenerationIdentityV1 {
-        locator: active.file.clone(),
-        digest: ManifestDigest::new(active.state_digest.clone()).expect("sealed digest"),
-        size_bytes: active.size_bytes,
-    };
-    let descriptor = text_artifact(&active.id, 7, 4096);
-    let lock = acquire_code_generation_store_lock(store.path()).expect("generation store lock");
+    let fixture = text_artifact_mutation_fixture();
+    let descriptor = text_artifact(&fixture.generation_id, 7, 4096);
+    let lock =
+        acquire_code_generation_store_lock(fixture.store.path()).expect("generation store lock");
 
     let updated = attach_verified_text_artifact_under_lock(
         &lock,
-        &expected,
-        &sealed_identity,
+        &fixture.pointer,
+        &fixture.sealed_identity,
         descriptor.clone(),
     )
     .expect("attach verified artifact");
     let repeated = attach_verified_text_artifact_under_lock(
         &lock,
         &updated,
-        &sealed_identity,
+        &fixture.sealed_identity,
         descriptor.clone(),
     )
     .expect("repeat exact attachment");
@@ -626,11 +642,55 @@ fn verified_text_artifact_attachment_is_durable_and_idempotent_under_the_store_l
 
     assert_eq!(repeated, updated);
     assert_eq!(
-        read_active_pointer(store.path())
+        read_active_pointer(fixture.store.path())
             .expect("durable active pointer")
             .generation_index[0]
             .text_artifact,
         Some(descriptor)
+    );
+}
+
+#[test]
+fn verified_text_artifact_replacement_is_exact_durable_and_never_clears_the_head() {
+    let fixture = text_artifact_mutation_fixture();
+    let prior = text_artifact(&fixture.generation_id, 7, 4096);
+    let replacement = text_artifact(&fixture.generation_id, 8, 8192);
+    let lock =
+        acquire_code_generation_store_lock(fixture.store.path()).expect("generation store lock");
+    let attached = attach_verified_text_artifact_under_lock(
+        &lock,
+        &fixture.pointer,
+        &fixture.sealed_identity,
+        prior.clone(),
+    )
+    .expect("attach prior artifact");
+
+    let replaced = replace_verified_text_artifact_under_lock(
+        &lock,
+        &attached,
+        &fixture.sealed_identity,
+        &prior,
+        replacement.clone(),
+    )
+    .expect("replace exact artifact");
+    let repeated = replace_verified_text_artifact_under_lock(
+        &lock,
+        &replaced,
+        &fixture.sealed_identity,
+        &prior,
+        replacement.clone(),
+    )
+    .expect("repeat replacement");
+    drop(lock);
+
+    assert_eq!(repeated, replaced);
+    assert_eq!(
+        replaced.generation_index[0].text_artifact,
+        Some(replacement)
+    );
+    assert_eq!(
+        read_active_pointer(fixture.store.path()).expect("durable pointer"),
+        replaced
     );
 }
 
@@ -703,20 +763,14 @@ fn verified_text_artifact_attachment_retires_history_before_enforcing_byte_bound
 
 #[test]
 fn verified_text_artifact_withdrawal_is_exact_durable_and_idempotent() {
-    let (store, generations) = fixture_store(1);
-    let expected = read_active_pointer(store.path()).expect("active pointer");
-    let active = generations.last().expect("active generation");
-    let sealed_identity = DurableSealedCodeGenerationIdentityV1 {
-        locator: active.file.clone(),
-        digest: ManifestDigest::new(active.state_digest.clone()).expect("sealed digest"),
-        size_bytes: active.size_bytes,
-    };
-    let descriptor = text_artifact(&active.id, 11, 4096);
-    let lock = acquire_code_generation_store_lock(store.path()).expect("generation store lock");
+    let fixture = text_artifact_mutation_fixture();
+    let descriptor = text_artifact(&fixture.generation_id, 11, 4096);
+    let lock =
+        acquire_code_generation_store_lock(fixture.store.path()).expect("generation store lock");
     let attached = attach_verified_text_artifact_under_lock(
         &lock,
-        &expected,
-        &sealed_identity,
+        &fixture.pointer,
+        &fixture.sealed_identity,
         descriptor.clone(),
     )
     .expect("attach verified artifact");
@@ -730,7 +784,7 @@ fn verified_text_artifact_withdrawal_is_exact_durable_and_idempotent() {
     assert_eq!(repeated, withdrawn);
     assert_eq!(withdrawn.generation_index[0].text_artifact, None);
     assert_eq!(
-        read_active_pointer(store.path()).expect("durable pointer"),
+        read_active_pointer(fixture.store.path()).expect("durable pointer"),
         withdrawn
     );
 }

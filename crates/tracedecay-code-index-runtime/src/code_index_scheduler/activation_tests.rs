@@ -232,7 +232,7 @@ fn activation_releases_exact_staging_without_cooling_query_owners() {
         "activation must build the record lookup indices"
     );
     assert!(
-        latest.query_owners_are_warm(),
+        latest.query_owners_are_ready(),
         "activation must build the exact/lexical/graph lane owners"
     );
 

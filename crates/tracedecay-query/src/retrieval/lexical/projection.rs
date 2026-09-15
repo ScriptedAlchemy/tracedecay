@@ -28,9 +28,10 @@ pub use artifact::{
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
-    CodeLexicalImportMembershipWitnessV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
-    PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
-    VerifiedCodeLexicalArtifactV1, code_lexical_artifact_build_memory_budget_for,
+    CodeLexicalCloneSuccessorV1, CodeLexicalImportMembershipWitnessV1,
+    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, PreparedCodeLexicalArtifactBatchV1,
+    PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
+    code_lexical_artifact_build_memory_budget_for,
 };
 #[cfg(feature = "search-eval")]
 pub use in_memory::{
