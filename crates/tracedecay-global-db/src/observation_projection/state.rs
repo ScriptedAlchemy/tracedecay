@@ -7,7 +7,8 @@ use tracedecay_store::{
     SessionMessageProjection, SessionMessageRecord, SessionRecord,
 };
 
-use tracedecay_lcm::retrieval_content::projected_content_hash;
+use tracedecay_lcm::LcmStorageKind;
+use tracedecay_lcm::retrieval_content::{derived_text_for_index, projected_content_hash};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
 
@@ -1273,6 +1274,9 @@ pub(super) async fn protected_message_rows_compatible(
     actual: &SessionMessageRecord,
     expected: &SessionMessageRecord,
 ) -> ProjectionStoreResult<bool> {
+    if actual == expected {
+        return Ok(false);
+    }
     if actual.provider != expected.provider
         || actual.message_id != expected.message_id
         || actual.session_id != expected.session_id
@@ -1294,23 +1298,42 @@ pub(super) async fn protected_message_rows_compatible(
     else {
         return Ok(false);
     };
-    let Some(payload_ref) = metadata
+    let payload_ref = metadata
         .get("payload_ref")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return Ok(false);
-    };
+        .and_then(serde_json::Value::as_str);
     let expected_hash = projected_content_hash(&expected.text);
-    if metadata
+    let external = metadata
         .get("external_payload")
         .and_then(serde_json::Value::as_bool)
-        != Some(true)
-        || metadata.get("sha256").and_then(serde_json::Value::as_str)
-            != Some(expected_hash.as_str())
-        || !actual.text.contains(payload_ref)
-    {
-        return Ok(false);
+        == Some(true)
+        && metadata.get("sha256").and_then(serde_json::Value::as_str)
+            == Some(expected_hash.as_str())
+        && payload_ref.is_some_and(|payload_ref| actual.text.contains(payload_ref));
+    if !external {
+        let raw =
+            tracedecay_lcm::schema::load_raw_message(conn, &actual.provider, &actual.message_id)
+                .await
+                .map_err(|error| storage("read protected projection output", error))?;
+        let Some(raw) = raw else {
+            return Ok(false);
+        };
+        let Ok(protected) = tracedecay_privacy::sanitize_lcm_payload_text(&expected.text) else {
+            return Ok(false);
+        };
+        return Ok(raw.storage_kind == LcmStorageKind::Inline
+            && raw.provider == actual.provider
+            && raw.message_id == actual.message_id
+            && raw.session_id == actual.session_id
+            && raw.role == actual.role
+            && raw.timestamp == actual.timestamp
+            && raw.ordinal == actual.ordinal
+            && raw.content == protected.sanitized_text()
+            && actual.text == derived_text_for_index(&raw.content)
+            && actual.metadata_json == raw.metadata_json);
     }
+    let Some(payload_ref) = payload_ref else {
+        return Ok(false);
+    };
     let mut rows = conn
         .query(
             "SELECT CAST(COALESCE(content, '') AS TEXT),
