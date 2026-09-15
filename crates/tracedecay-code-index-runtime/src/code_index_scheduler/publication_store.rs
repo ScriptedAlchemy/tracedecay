@@ -1803,6 +1803,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
             if released.is_some() {
                 state.active_epoch = state.active_epoch.wrapping_add(1);
             }
+            self.active_encoded_bytes.store(0, Ordering::Release);
+            hotpath::gauge!("daemon.code_index.generation.decode.bytes").set(0_u64);
             released
         };
         drop(released);
@@ -2023,6 +2025,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn sealed_decode_count(&self) -> u64 {
         self.cache.decode_count()
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn poison_decoded_cache_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self
+                .cache
+                .lock_state()
+                .expect("decoded cache lock before poison");
+            panic!("poison decoded-generation cache");
+        }));
     }
 
     pub(super) fn take_unpublished(&self) -> Option<Arc<CodeIndexPublishedGenerationV1>> {

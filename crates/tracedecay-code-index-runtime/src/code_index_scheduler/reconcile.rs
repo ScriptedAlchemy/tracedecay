@@ -50,9 +50,9 @@ use crate::code_index::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
         CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
-        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1,
-        CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
-        VerifiedSealedTextGenerationMetadataV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        DAEMON_CODE_INDEX_CHUNKER_REVISION, VerifiedSealedTextGenerationMetadataV1,
     },
 };
 
@@ -609,6 +609,7 @@ pub(super) enum FreshnessProbeVerdictV1 {
 pub(super) enum RetainedTextGenerationRestoreV1 {
     Servable(LatestCodeTextGenerationV1),
     Refused(VerifiedSealedTextGenerationMetadataV1),
+    Failed(CodeIndexPublicationStoreErrorV1),
 }
 
 pub struct CodeIndexWorktreeSchedulerV1 {
@@ -2249,13 +2250,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_control.retire();
             return None;
         }
-        if self
-            .publication
-            .release_decoded_active_after_seal()
-            .is_err()
-        {
+        if let Err(error) = self.publication.release_decoded_active_after_seal() {
             text_control.retire();
-            return None;
+            return Some(RetainedTextGenerationRestoreV1::Failed(error));
         }
         let metadata = Arc::new(metadata);
         Some(RetainedTextGenerationRestoreV1::Servable(
@@ -2286,10 +2283,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         ))
     }
 
-    pub fn servable_retained_text_generation(&mut self) -> Option<LatestCodeTextGenerationV1> {
-        match self.restore_retained_text_generation()? {
-            RetainedTextGenerationRestoreV1::Servable(generation) => Some(generation),
-            RetainedTextGenerationRestoreV1::Refused(_) => None,
+    pub fn servable_retained_text_generation(
+        &mut self,
+    ) -> Result<Option<LatestCodeTextGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        match self.restore_retained_text_generation() {
+            Some(RetainedTextGenerationRestoreV1::Servable(generation)) => Ok(Some(generation)),
+            Some(RetainedTextGenerationRestoreV1::Refused(_)) | None => Ok(None),
+            Some(RetainedTextGenerationRestoreV1::Failed(error)) => Err(error),
         }
     }
 
@@ -3222,6 +3222,11 @@ impl CodeIndexWorktreeSchedulerV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn sealed_decode_count(&self) -> u64 {
         self.publication.sealed_decode_count()
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn poison_decoded_publication_cache_for_test(&self) {
+        self.publication.poison_decoded_cache_for_test();
     }
 
     /// Occupy this worktree's active-generation decode barrier, reproducing the

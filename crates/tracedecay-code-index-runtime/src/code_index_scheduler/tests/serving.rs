@@ -428,6 +428,7 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
     assert_eq!(reopened.sealed_decode_count(), 0);
     let text = reopened
         .servable_retained_text_generation()
+        .expect("publication store")
         .expect("active durable text generation");
     let binding = text
         .publication_binding
@@ -503,13 +504,28 @@ fn same_process_text_restore_releases_the_decoded_generation_before_projection()
         "seal installs the built generation so reconcile does not encode then decode"
     );
     assert_eq!(scheduler.sealed_decode_count(), 0);
+    assert!(
+        scheduler
+            .active_generation_encoded_bytes()
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0,
+        "seal records encoded bytes for the installed generation"
+    );
 
     let text = scheduler
         .servable_retained_text_generation()
+        .expect("publication store")
         .expect("same-process text restore");
     assert!(
         scheduler.latest_complete_already_decoded().is_none(),
         "pre-seat text projection must drop the build-phase generation before pages start"
+    );
+    assert_eq!(
+        scheduler
+            .active_generation_encoded_bytes()
+            .load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "release must clear retained encoded-byte accounting"
     );
     assert_eq!(
         scheduler.sealed_decode_count(),
@@ -543,7 +559,15 @@ fn same_process_text_restore_releases_the_decoded_generation_before_projection()
     );
     let incremental_text = scheduler
         .servable_retained_text_generation()
+        .expect("publication store")
         .expect("incremental text restore");
+    assert_eq!(
+        scheduler
+            .active_generation_encoded_bytes()
+            .load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "incremental release must clear retained encoded-byte accounting"
+    );
     assert!(
         scheduler.latest_complete_already_decoded().is_none(),
         "incremental text restore must release the successor before projection"
@@ -553,6 +577,26 @@ fn same_process_text_restore_releases_the_decoded_generation_before_projection()
         .expect("advance incremental text projection")
     {}
     assert!(incremental_text.query_owners_are_ready());
+}
+
+#[test]
+fn poisoned_decoded_cache_release_is_a_typed_publication_failure() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed generation"));
+    scheduler.poison_decoded_publication_cache_for_test();
+    match scheduler.servable_retained_text_generation() {
+        Err(error) => {
+            assert!(error.to_string().contains("poisoned"), "{error}");
+        }
+        Ok(None) => panic!("poisoned release returned ordinary absence"),
+        Ok(Some(_)) => panic!("poisoned release returned a servable generation"),
+    }
 }
 
 #[test]
