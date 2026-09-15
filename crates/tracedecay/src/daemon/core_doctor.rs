@@ -1,3 +1,4 @@
+#![warn(clippy::too_many_lines)]
 //! Read-only doctor runtime telemetry: cold store probes and typed
 //! `tracedecay_runtime` responses served without opening project stores.
 

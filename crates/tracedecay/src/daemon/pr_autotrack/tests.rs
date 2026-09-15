@@ -569,6 +569,10 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keeps the granted parent mutation, linked-worktree admission, and exact refusal assertions in one lifecycle scenario"
+)]
 async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexSchedulerRegistryV1, identity::IndexingIdentityV1,
@@ -776,6 +780,10 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keeps both published generations and original-worktree assertions together so staging cannot hide replacement"
+)]
 async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
@@ -1129,6 +1137,10 @@ async fn manual_branch_missing_ref_is_typed_failure() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The FIFO setup, cancellation, competing lease, and cleanup assertions form one ordered lifecycle regression"
+)]
 async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_exact_read() {
     use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 

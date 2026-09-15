@@ -1,3 +1,4 @@
+#![warn(clippy::too_many_lines)]
 //! Daemon adaptation for PR-branch activation and reconciliation.
 //!
 //! [`tracedecay_application::pr_tracking`] owns Git discovery and managed state.
@@ -234,24 +235,16 @@ async fn activate_manual_branch_with_administration(
     }
     let artifacts = ManualBranchArtifactsV1::for_head(data_root, branch, &head_sha);
     let worktree = artifacts.worktree.clone();
-    if worktree.try_exists().map_err(|error| {
-        ManualBranchActivationError::git_unavailable(format!(
-            "cannot inspect manual worktree '{}': {error}",
-            worktree.display()
-        ))
-    })? && manual_branch_artifacts_match_off_runtime(
+    if remount_matching_manual_branch(
         repo_root,
         &artifacts,
         &head_sha,
+        schedulers,
+        graph,
         administration.command_control.clone(),
     )
     .await?
     {
-        if !schedulers.is_worktree_mounted(&worktree).await {
-            activate_linked_worktree(schedulers, graph, &worktree)
-                .await
-                .map_err(ManualBranchActivationError::activation_failed)?;
-        }
         return Ok(ManualBranchActivation {
             branch: branch.to_string(),
             head_sha,
@@ -273,7 +266,7 @@ async fn activate_manual_branch_with_administration(
             worktree.display()
         )));
     }
-    if let Err(reason) = prepare_manual_branch_off_runtime(
+    let activation = match prepare_manual_branch_off_runtime(
         repo_root,
         &artifacts,
         &head_sha,
@@ -281,19 +274,10 @@ async fn activate_manual_branch_with_administration(
     )
     .await
     {
-        return cleanup_failed_manual_track(
-            repo_root,
-            &worktree,
-            &tracking_ref,
-            &label,
-            &head_sha,
-            administration,
-            ManualBranchActivationError::activation_failed(reason),
-        )
-        .await;
-    }
-
-    match activate_linked_worktree(schedulers, graph, &worktree).await {
+        Ok(()) => activate_linked_worktree(schedulers, graph, &worktree).await,
+        Err(reason) => Err(reason),
+    };
+    match activation {
         Ok(()) => Ok(ManualBranchActivation {
             branch: branch.to_string(),
             head_sha,
@@ -313,6 +297,40 @@ async fn activate_manual_branch_with_administration(
             .await
         }
     }
+}
+
+/// Reuse only the requested generation's exact owned artifacts, restoring its
+/// scheduler mount when the daemon has restarted since their creation.
+async fn remount_matching_manual_branch(
+    repo_root: &Path,
+    artifacts: &ManualBranchArtifactsV1,
+    head_sha: &str,
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    graph: &Arc<crate::tracedecay::TraceDecay>,
+    command_control: PrCommandControl,
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    let worktree = &artifacts.worktree;
+    if !worktree.try_exists().map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot inspect manual worktree '{}': {error}",
+            worktree.display()
+        ))
+    })? || !manual_branch_artifacts_match_off_runtime(
+        repo_root,
+        artifacts,
+        head_sha,
+        command_control,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    if !schedulers.is_worktree_mounted(worktree).await {
+        activate_linked_worktree(schedulers, graph, worktree)
+            .await
+            .map_err(ManualBranchActivationError::activation_failed)?;
+    }
+    Ok(true)
 }
 
 async fn prepare_manual_branch_off_runtime(
