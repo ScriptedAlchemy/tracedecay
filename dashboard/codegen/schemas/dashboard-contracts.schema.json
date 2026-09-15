@@ -8287,7 +8287,7 @@
       ]
     },
     "DoctorFindingFamilyV1": {
-      "description": "Stable Doctor finding families.\n\nThe initial list covers advisory findings from\nBrain, Explorer, Loom, Code, and Observatory, plus the legacy\n`core_doctor` checks (graph quick-check, temporal/migration health,\nconfiguration compatibility drift, semantic runtime, session ingest).\nEach family maps to one audited typed input surface. The set is kept small\nand honest; new families are added through a future versioned enum rather\nthan by widening the meaning of an existing variant.",
+      "description": "Stable Doctor finding families.\n\nThe initial list covers advisory findings from\nBrain, Explorer, Loom, Code, and Observatory, plus the legacy\n`core_doctor` checks (graph quick-check, temporal/migration health,\nconfiguration compatibility drift, code-index mount state, session ingest).\nEach family maps to one audited typed input surface. The set is kept small\nand honest; new families are added through a future versioned enum rather\nthan by widening the meaning of an existing variant.",
       "oneOf": [
         {
           "const": "advisory",
@@ -8315,8 +8315,8 @@
           "type": "string"
         },
         {
-          "const": "semantic_index",
-          "description": "Code index mount state (mounted, indexing, stale, unmounted,\nincompatible, parked). The wire label stays `semantic_index`.",
+          "const": "code_index",
+          "description": "Code index mount state (mounted, indexing, stale, unmounted,\nincompatible, parked).",
           "type": "string"
         },
         {

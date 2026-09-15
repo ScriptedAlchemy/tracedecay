@@ -23,7 +23,7 @@
 //!   host-capability/conformance evidence)
 //! - mounted canonical feedback owner → [`DoctorFindingFamilyV1::Advisory`]
 //!   (finding/scope/generation/provider/evidence/coverage identity)
-//! - code-index mount state → [`DoctorFindingFamilyV1::SemanticIndex`]
+//! - code-index mount state → [`DoctorFindingFamilyV1::CodeIndex`]
 //! - live language-server/analyzer state → [`DoctorFindingFamilyV1::LanguageServer`]
 //! - durable feedback observations → [`DoctorFindingFamilyV1::Observability`]
 //! - storage retention/size → [`DoctorFindingFamilyV1::Storage`] (producers in
@@ -1062,12 +1062,12 @@ pub enum CodeIndexMountReadV1 {
     Unknown,
 }
 
-/// Map a code-index mount read into its `SemanticIndex`-family finding.
+/// Map a code-index mount read into its `CodeIndex`-family finding.
 #[hotpath::measure(label = "application.doctor_sources.code_index")]
 pub fn code_index_finding(
     read: &CodeIndexMountReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
-    let family = DoctorFindingFamilyV1::SemanticIndex;
+    let family = DoctorFindingFamilyV1::CodeIndex;
     match read {
         CodeIndexMountReadV1::Observed { state, coverage } => match state {
             CodeIndexMountStateV1::Mounted => clean_finding(

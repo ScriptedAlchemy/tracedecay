@@ -13,7 +13,6 @@ use crate::handlers::ApplicationOperation;
 use crate::result::OpaqueCursor;
 use crate::retrieval::grep_analysis::{
     AstGrepRequestV1, ComplexityRequestV1, DependencyDepthRequestV1, GrepRequestV1,
-    RedundancyRequestV1,
 };
 use crate::retrieval::source_read::SourceReadPrimitiveRequest;
 use crate::retrieval::symbol_graph::{
@@ -468,7 +467,6 @@ pub enum PrimitiveRequest {
     LexicalGrep(GrepRequestV1),
     AstGrep(AstGrepRequestV1),
     Complexity(ComplexityRequestV1),
-    Redundancy(RedundancyRequestV1),
     DependencyDepth(DependencyDepthRequestV1),
     SessionLookup(SessionLookupRequest),
     QualifiedName(QualifiedNamePrimitiveRequest),

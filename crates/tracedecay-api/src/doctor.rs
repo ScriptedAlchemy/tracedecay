@@ -47,7 +47,7 @@ pub const STORAGE_FINDINGS_ROUTE_PATH: &str = "/api/storage/findings";
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct DoctorFindingsQueryV1 {
     /// Optional per-family filter (`advisory`, `configuration`,
-    /// `storage_runtime`, `storage`, `language_server`, `semantic_index`,
+    /// `storage_runtime`, `storage`, `language_server`, `code_index`,
     /// `observability`).
     #[serde(default)]
     pub family: Option<String>,

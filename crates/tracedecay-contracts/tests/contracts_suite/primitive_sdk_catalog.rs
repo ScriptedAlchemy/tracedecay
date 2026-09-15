@@ -3,14 +3,13 @@ use std::collections::BTreeSet;
 use tracedecay_contracts::sdk_executable_binding_registry;
 use tracedecay_tool_catalog::{OperationId, SdkTransportBindingV1};
 
-const TYPED_PRIMITIVE_OPERATIONS: [&str; 10] = [
+const TYPED_PRIMITIVE_OPERATIONS: [&str; 9] = [
     "callees",
     "context",
     "impact",
     "node",
     "port_order",
     "port_status",
-    "redundancy",
     "rename_preview",
     "similar",
     "todos",

@@ -211,7 +211,7 @@ fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
 #[test]
 fn keyed_and_process_shared_reservations_compete_for_one_ceiling() {
     let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
-    let keyed = key("project-a", "worktree-a", "generation-a", "semantic-index");
+    let keyed = key("project-a", "worktree-a", "generation-a", "code-index");
     let shared = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
     let _keyed_reservation = authority
         .reserve(keyed.clone(), bytes(60))

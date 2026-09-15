@@ -85,7 +85,7 @@ active one. token-savior caches a single working-tree index.
 
 The graph itself carries richer edges (`calls`, `uses`, `type_of`,
 `implements`, `extends`, `annotates`, `returns`, `receives`), and tracedecay
-exposes 11 health-focused MCP tools that have no token-savior equivalent:
+exposes health-focused MCP tools that have no token-savior equivalent:
 
 | Tool | Purpose |
 |---|---|
@@ -97,7 +97,6 @@ exposes 11 health-focused MCP tools that have no token-savior equivalent:
 | `tracedecay_dsm` | Design-structure matrix |
 | `tracedecay_inheritance_depth` | Deep / fragile class hierarchies |
 | `tracedecay_recursion` | Direct and indirect cycles in the call graph |
-| `tracedecay_redundancy` | Semantic-similarity duplicate detection |
 | `tracedecay_gini` | Imbalance metric across files / modules |
 | `tracedecay_health` | Composite scorecard (rolls up the above) |
 | `tracedecay_test_risk` | Files at risk for the next regression |
@@ -354,7 +353,7 @@ Our adaptation:
 | TASK-008 | audit | 0/2 | `tracedecay_dead_code` returns a different candidate set than token-savior's `find_dead_code` — semantic mismatch with the ground-truth `DEAD-*` IDs |
 | TASK-015 | edit | 0/2 | `tracedecay_insert_at_symbol` places the new function differently than `insert_near_symbol` would have — both succeed, but the grader expects token-savior's placement convention |
 | TASK-007 | explanation | 1/2 | Entry-point answer missing one rubric keyword |
-| TASK-018 | debug | 1/2 | **Self-inflicted**: `tracedecay_redundancy` correctly flagged our `bench_tracedecay.py` fork as a real duplicate of `bench.py`; the grader expected only the curated `DUP-*` pairs |
+| TASK-018 | debug | 1/2 | The retired `tracedecay_redundancy` scan flagged the `bench_tracedecay.py` fork as a duplicate of `bench.py`; the grader expected only the curated `DUP-*` pairs. |
 | TASK-086 | documentation | 1/2 | Module README missing rubric keywords |
 | TASK-087 | documentation | 1/2 | Same class — token-savior's BENCHMARK-SUMMARY lists TASK-087 as one of their own known 1/2 misses |
 

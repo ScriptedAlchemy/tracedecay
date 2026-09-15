@@ -883,14 +883,6 @@ unknown models, unavailable observations, or unavailable pricing remain typed
 unknown/unavailable results; TraceDecay never fills them with zero or a stale
 fallback estimate.
 
-### Semantic-model acquisition
-
-When semantic auto-download is enabled, TraceDecay can download missing,
-revision-pinned semantic-model artifacts from Hugging Face hosts. Artifacts are
-verified against catalog-pinned lengths and SHA-256 digests before publication.
-If acquisition is unavailable or disabled, semantic retrieval reports its model
-state or failure while exact, lexical, and graph retrieval remain available.
-
 ### Configured remote authority
 
 An explicitly configured, authenticated remote authority can perform

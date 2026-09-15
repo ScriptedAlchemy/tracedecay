@@ -267,7 +267,7 @@ pub struct DoctorKernelInputsV1 {
     pub advisory_feedback: AdvisoryFeedbackReadV1,
     /// Live language-server/analyzer read (`LanguageServer` family).
     pub language_server: LanguageServerReadV1,
-    /// Code-index mount read (`SemanticIndex` family).
+    /// Code-index mount read (`CodeIndex` family).
     pub code_index: CodeIndexMountReadV1,
     /// Canonical durable Plan-26 feedback read (`Observability` family).
     pub observability: ObservabilityReadV1,

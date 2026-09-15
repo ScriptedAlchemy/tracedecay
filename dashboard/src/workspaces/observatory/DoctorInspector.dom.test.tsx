@@ -58,7 +58,7 @@ describe('DoctorInspector', () => {
       families: [
         { family: 'storage', consultation: { status: 'unavailable', reason: 'unavailable' } },
         {
-          family: 'semantic_index',
+          family: 'code_index',
           consultation: { status: 'unavailable', reason: 'reset_required' },
         },
         { family: 'storage_runtime', consultation: { status: 'unavailable', reason: 'corrupt' } },

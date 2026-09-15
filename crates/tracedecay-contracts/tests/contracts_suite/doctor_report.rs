@@ -165,7 +165,7 @@ fn doctor_report_composes_all_families_from_mixed_sources() {
         DoctorFindingFamilyV1::StorageRuntime,
         DoctorFindingFamilyV1::Storage,
         DoctorFindingFamilyV1::LanguageServer,
-        DoctorFindingFamilyV1::SemanticIndex,
+        DoctorFindingFamilyV1::CodeIndex,
         DoctorFindingFamilyV1::Observability,
     ] {
         assert!(families.contains(&family), "family {family:?} missing");
@@ -425,7 +425,7 @@ fn doctor_report_healthy_only_under_genuinely_complete_coverage() {
         DoctorFindingFamilyV1::Configuration,
         DoctorFindingFamilyV1::StorageRuntime,
         DoctorFindingFamilyV1::Advisory,
-        DoctorFindingFamilyV1::SemanticIndex,
+        DoctorFindingFamilyV1::CodeIndex,
         DoctorFindingFamilyV1::Storage,
     ] {
         let finding = report
@@ -503,7 +503,7 @@ fn doctor_regression_unavailable_and_drift_families_are_distinct_states() {
         DoctorEvidenceStateV1::Degraded
     );
     assert_eq!(
-        state(DoctorFindingFamilyV1::SemanticIndex),
+        state(DoctorFindingFamilyV1::CodeIndex),
         DoctorEvidenceStateV1::Degraded
     );
     assert_eq!(

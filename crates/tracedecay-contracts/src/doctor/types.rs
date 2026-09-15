@@ -17,7 +17,7 @@ use crate::identity::application_identifier;
 /// The initial list covers advisory findings from
 /// Brain, Explorer, Loom, Code, and Observatory, plus the legacy
 /// `core_doctor` checks (graph quick-check, temporal/migration health,
-/// configuration compatibility drift, semantic runtime, session ingest).
+/// configuration compatibility drift, code-index mount state, session ingest).
 /// Each family maps to one audited typed input surface. The set is kept small
 /// and honest; new families are added through a future versioned enum rather
 /// than by widening the meaning of an existing variant.
@@ -45,8 +45,8 @@ pub enum DoctorFindingFamilyV1 {
     /// `AnalyzerState`.
     LanguageServer,
     /// Code index mount state (mounted, indexing, stale, unmounted,
-    /// incompatible, parked). The wire label stays `semantic_index`.
-    SemanticIndex,
+    /// incompatible, parked).
+    CodeIndex,
     /// Denominator-safe measurement and telemetry health from analytics,
     /// accounting read models, and session ingest.
     Observability,
@@ -459,17 +459,11 @@ mod tests {
     #[test]
     fn doctor_finding_rejects_duplicate_evidence_references() {
         let error = DoctorFindingV1::new(
-            DoctorFindingFamilyV1::SemanticIndex,
+            DoctorFindingFamilyV1::CodeIndex,
             DoctorEvidenceStateV1::Stale,
             vec![
-                evidence(
-                    DoctorFindingFamilyV1::SemanticIndex,
-                    "semantic.generation.7",
-                ),
-                evidence(
-                    DoctorFindingFamilyV1::SemanticIndex,
-                    "semantic.generation.7",
-                ),
+                evidence(DoctorFindingFamilyV1::CodeIndex, "code-index.generation.7"),
+                evidence(DoctorFindingFamilyV1::CodeIndex, "code-index.generation.7"),
             ],
             partial_coverage(),
         )

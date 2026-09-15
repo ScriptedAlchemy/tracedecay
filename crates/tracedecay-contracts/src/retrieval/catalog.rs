@@ -19,13 +19,12 @@ use crate::capability_manifest::{
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::retrieval::grep_analysis::RedundancyResultV1;
 use crate::retrieval::primitive_surface::{
     CalleesResultV1, CalleesSurfaceRequestV1, ContextResultV1, ContextSurfaceRequestV1,
     ImpactResultV1, ImpactSurfaceRequestV1, NodeResultV1, NodeSurfaceRequestV1, PortOrderResultV1,
     PortOrderSurfaceRequestV1, PortStatusResultV1, PortStatusSurfaceRequestV1,
-    RedundancySurfaceRequestV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
-    SimilarResultV1, SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
+    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1, SimilarResultV1,
+    SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
 };
 use crate::retrieval::requests::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
@@ -153,7 +152,6 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     primitive_spec("code_type_hierarchy"),
     primitive_spec("code_callers"),
     primitive_spec("context"),
-    primitive_spec("redundancy"),
     primitive_spec("node"),
     primitive_spec("callees"),
     primitive_spec("impact"),
@@ -196,7 +194,7 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         // These established tool handlers retain their current wire schemas
         // and rendering across the generic CLI fallback and MCP, while using
         // this operation identity for canonical code-graph read admission.
-        "context" | "redundancy" | "node" | "callees" | "impact" | "similar" | "rename_preview"
+        "context" | "node" | "callees" | "impact" | "similar" | "rename_preview"
         | "port_status" | "port_order" | "todos" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
@@ -550,7 +548,6 @@ fn primitive_executable_schemas(
         PortStatusResultV1
     );
     add!("port_order", PortOrderSurfaceRequestV1, PortOrderResultV1);
-    add!("redundancy", RedundancySurfaceRequestV1, RedundancyResultV1);
     add!("todos", TodosSurfaceRequestV1, TodosResultV1);
     Ok(schemas)
 }
@@ -771,9 +768,8 @@ fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
 mod tests {
     use super::*;
 
-    const ESTABLISHED_TOOL_PRIMITIVES: [&str; 10] = [
+    const ESTABLISHED_TOOL_PRIMITIVES: [&str; 9] = [
         "context",
-        "redundancy",
         "node",
         "callees",
         "impact",

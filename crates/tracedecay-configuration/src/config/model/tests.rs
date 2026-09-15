@@ -472,13 +472,8 @@ fn implicit_discovery_never_selects_the_user_profile_root() {
 // ---------------------------------------------------------------------------
 // Shared generated/vendored segment list
 //
-// GENERATED_DIR_SEGMENTS unifies what used to be four independently
-// hand-maintained lists: this module's own DEFAULT_EXCLUDE_PATTERNS,
-// tracedecay::scan's is_skipped_dir_hint, migrate::inventory's
-// should_prune_dir, and mcp::tools::handlers::redundancy's
-// is_generated_path. These tests pin the union those four call sites need
-// and spot-check that segments unique to one of the formerly-separate lists
-// are now recognized everywhere.
+// GENERATED_DIR_SEGMENTS is the one list shared by this module's
+// DEFAULT_EXCLUDE_PATTERNS, scan, and migrate inventory paths.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -506,7 +501,7 @@ fn generated_dir_segments_cover_the_union_all_call_sites_need() {
     }
     // Formerly migrate::inventory-only addition beyond the scan.rs set.
     assert!(GENERATED_DIR_SEGMENTS.contains(&"target"));
-    // Formerly redundancy.rs-only addition beyond the scan.rs set.
+    // Worktree build directories are generated paths too.
     assert!(GENERATED_DIR_SEGMENTS.contains(&".worktrees"));
     // `.git` is intentionally NOT part of the shared list — it stays a
     // site-local addition in migrate::inventory::should_prune_dir (see its
@@ -534,7 +529,7 @@ fn is_generated_path_segment_matches_segments_and_minified_suffix() {
     assert!(is_generated_path_segment(".worktrees/feature/src/lib.rs"));
     assert!(is_generated_path_segment("assets/app.min.js"));
     assert!(is_generated_path_segment("assets/app.min.css"));
-    assert!(!is_generated_path_segment("src/redundancy.rs"));
+    assert!(!is_generated_path_segment("src/helpers.rs"));
     assert!(!is_generated_path_segment("builder/mod.rs"));
 }
 

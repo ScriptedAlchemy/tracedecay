@@ -1810,7 +1810,7 @@ const DOCTOR_FAMILIES = [
   'storage_runtime',
   'storage',
   'language_server',
-  'semantic_index',
+  'code_index',
   'observability',
 ] as const;
 
@@ -1879,11 +1879,11 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       ['store:sessions:size-observation:wm-38'],
     ),
     entry(
-      'semantic_index',
+      'code_index',
       'unknown',
       'unknown',
-      'the semantic index did not report a mount state, so its freshness is unknown',
-      ['semantic-index:mount-probe:absent'],
+      'the code index did not report a mount state, so its freshness is unknown',
+      ['code-index:mount-probe:absent'],
     ),
     entry(
       'storage_runtime',
@@ -1918,7 +1918,7 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
   // Two families answered nothing. These render as coverage-gap chips above the
   // cards, which is the report saying which sources it never reached — a report
   // that dropped them would read as a clean bill of health for all seven.
-  const consulted = ['advisory', 'configuration', 'storage_runtime', 'storage', 'semantic_index'];
+  const consulted = ['advisory', 'configuration', 'storage_runtime', 'storage', 'code_index'];
   const payload = {
     family_filter: null,
     entries,
@@ -2259,7 +2259,7 @@ const storageFindings = envelope({
     'storage_runtime',
     'storage',
     'language_server',
-    'semantic_index',
+    'code_index',
     'observability',
   ],
   schema_convergences: [],

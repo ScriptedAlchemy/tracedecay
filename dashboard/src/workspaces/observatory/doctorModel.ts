@@ -10,7 +10,7 @@ const FAMILY_LABELS: Record<DoctorFindingFamilyV1, string> = {
   storage_runtime: 'Storage runtime',
   storage: 'Storage',
   language_server: 'Language server',
-  semantic_index: 'Semantic index',
+  code_index: 'Code index',
   observability: 'Observability',
 };
 

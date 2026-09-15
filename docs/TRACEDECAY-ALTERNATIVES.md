@@ -5,8 +5,8 @@ one local daemon authority. It registers a project, captures exact code
 generations, and returns typed results with provenance and coverage instead of
 requiring clients to inspect or synchronize a database themselves.
 
-The persisted split is intentional: embedded Grafeo owns the admitted
-graph/vector query projection, while canonical events, facts, content,
+The persisted split is intentional: embedded Grafeo owns the admitted graph
+query projection, while canonical events, facts, content,
 reconstruction manifests, journals, leases, receipts, and verified watermarks
 remain in their domain/relational stores. A Grafeo projection is served only
 after recovered-state verification. Clients never choose a store by path or

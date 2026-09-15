@@ -87,7 +87,6 @@ pub use git_topology_anchor::{
     GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorResolutionV2,
     MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION_V2,
 };
-pub use grep_analysis::RedundancyResultV1;
 pub use ports::{
     AffectedTestsRetrievalPort, OperationalRetrievalPort, RetrievalPortContext,
     RetrievalPortOutcome, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
@@ -105,11 +104,10 @@ pub use primitive_surface::{
     PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1,
     PrimitiveNotFoundV1, PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
     PrimitiveSymbolLocationV1, PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
-    RedundancySurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1,
-    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
-    RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
-    SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1, TodoMarkerV1,
-    TodosResultV1, TodosSurfaceRequestV1,
+    RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
+    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
+    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
+    SimilarSurfaceRequestV1, SimilarTargetV1, TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

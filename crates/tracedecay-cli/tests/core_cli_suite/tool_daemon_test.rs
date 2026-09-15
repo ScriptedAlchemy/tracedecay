@@ -1403,7 +1403,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    // Doctor's SemanticIndex family reports an unmounted code index as an
+    // Doctor's CodeIndex family reports an unmounted code index as an
     // issue, and `doctor` exits nonzero on any issue. The index is git-backed,
     // so a non-repository fixture would fail this journey on the fixture's own
     // shape rather than on anything doctor did to the live database.

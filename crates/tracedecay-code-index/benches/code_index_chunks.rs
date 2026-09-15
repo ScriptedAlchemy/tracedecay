@@ -240,8 +240,6 @@ struct RawSample {
     queue_delay_ns: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
-    embedding_batches: Option<u64>,
-    embedding_chunks: Option<u64>,
     projection_operations: u64,
     invalidation_amplification_per_changed_range: Option<f64>,
     projection_amplification_per_changed_range: Option<f64>,
@@ -331,8 +329,6 @@ struct CaseResult {
     projection_calls: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
-    embedding_batches: Option<u64>,
-    embedding_chunks: Option<u64>,
     projection_operations: u64,
     invalidation_amplification_per_changed_range: Option<f64>,
     projection_amplification_per_changed_range: Option<f64>,
@@ -783,8 +779,6 @@ fn execute_case(
         queue_delay_ns: 0,
         changed_ranges,
         invalidated_chunks,
-        embedding_batches: None,
-        embedding_chunks: None,
         projection_operations,
         invalidation_amplification_per_changed_range,
         projection_amplification_per_changed_range,
@@ -1304,8 +1298,6 @@ fn summarize_case(
     if samples.iter().any(|sample| {
         sample.changed_ranges != first.changed_ranges
             || sample.invalidated_chunks != first.invalidated_chunks
-            || sample.embedding_batches != first.embedding_batches
-            || sample.embedding_chunks != first.embedding_chunks
             || sample.projection_operations != first.projection_operations
             || sample.invalidation_amplification_per_changed_range
                 != first.invalidation_amplification_per_changed_range
@@ -1363,8 +1355,6 @@ fn summarize_case(
         projection_calls: expected.projection_calls,
         changed_ranges: first.changed_ranges,
         invalidated_chunks: first.invalidated_chunks,
-        embedding_batches: first.embedding_batches,
-        embedding_chunks: first.embedding_chunks,
         projection_operations: first.projection_operations,
         invalidation_amplification_per_changed_range: first
             .invalidation_amplification_per_changed_range,

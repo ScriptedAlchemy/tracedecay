@@ -156,39 +156,7 @@ interference window through swap. So:
   therefore 2 (enough to overlap one worktree's git/store/publication I/O
   with another's extraction), not "half the cores".
 
-Embedding a published generation is batch work with a finish line too, and it
-gets the same treatment — but its width has two knobs that must not be
-confused:
-
-- **Intra-op threads** are how many CPUs ONNX Runtime uses inside one tensor
-  invocation. Changing this changes how a GEMM is partitioned and can change
-  floating-point reduction order, so it is *numerics*: pinned by the artifact
-  manifest, never inferred from the host, and moved only together with a
-  re-embed.
-- **Session width** is how many independent batches are in flight. Each batch
-  is a separate invocation of the same graph over the same tensor shape, so
-  results are bit-identical at any width. This is the knob that scales with
-  the host, sized to `indexing_worker_target / intra_threads` so embedding
-  lives inside the *same* reservation as extraction rather than stacking a
-  second full-machine pool beside it. Chunk grouping is a fixed constant for
-  the same reason a batch barrier is forbidden above: regrouping changes the
-  padded tensor shape, which is semantics, not sizing.
-
-Before this split the embedder ran one session at four intra-op threads on
-every host — roughly 400% CPU on a 96-core box — which made local rebuild
-windows run tens of minutes.
-
-GPU is not enabled. `fastembed`'s `InitOptionsUserDefined` does accept
-`with_execution_providers`, so wiring CUDA/DirectML is mechanical, but three
-things must land first: the `ort` EP feature must be added to the bundled
-runtime build (it changes `FASTEMBED_RUNTIME_BUILD_REVISION_V1`, which is part
-of the artifact compatibility pin), device availability must be *detected* and
-opt-in by env rather than assumed, and — the blocking one — a GPU EP changes
-kernel selection and therefore vector bytes, so `EmbeddingDeviceClassV1` has
-to participate in the projection key and force a re-embed rather than silently
-mixing CPU- and GPU-produced vectors in one generation.
-
-**Open-ended sweeps** — redundancy scanning, retention, projection refresh —
+**Open-ended sweeps** — retention and projection refresh —
 have no finish line, so they stay paced:
 
 - Bounded work per tick (a work budget plus a fairness cursor; the retention

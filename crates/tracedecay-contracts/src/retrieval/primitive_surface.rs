@@ -180,17 +180,6 @@ pub struct PortOrderSurfaceRequestV1 {
     pub limit: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RedundancySurfaceRequestV1 {
-    pub path: Option<String>,
-    pub min_lines: Option<u32>,
-    pub max_pairs: Option<u32>,
-    pub similarity_threshold: Option<f64>,
-    pub include_naming_only: Option<bool>,
-    pub include_generated_paths: Option<bool>,
-}
-
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TodosSurfaceRequestV1 {
