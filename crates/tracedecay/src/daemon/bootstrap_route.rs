@@ -6,6 +6,7 @@
 
 use std::sync::OnceLock;
 
+use crate::mcp::server::{McpResponse, McpResponseBody};
 use tracedecay_mcp::ToolDefinition;
 
 use super::*;
@@ -115,7 +116,9 @@ pub(super) fn daemon_bootstrap_response(
     match classify_mcp_method(&request.method) {
         McpMethod::Initialize => Some(request.id.clone().map(|id| {
             let mut response = match initialize_result(SERVER_INSTRUCTIONS) {
-                Ok(result) => JsonRpcResponse::success(id, result),
+                Ok(result) => {
+                    McpResponse::typed(id, McpResponseBody::Initialize(result)).into_legacy()
+                }
                 Err(error) => {
                     return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
                 }

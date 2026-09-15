@@ -3,19 +3,26 @@
 
 use std::path::Component;
 
+use ::rmcp::model::{ReadResourceResult, ResourceContents};
+
 use super::dispatch_settlement::{
     ApplicationCancellationRegistration, DispatchControl, DispatchSettlement,
     PreparedDispatchControl, dispatch_cancelled_error,
 };
+use super::protocol::McpResponse as JsonRpcResponse;
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::{
-    ToolResult, mark_semantic_tool_error, semantic_failure_reason, tool_error_response,
-    tool_result_has_semantic_error,
+    ToolResult, mark_semantic_tool_error, semantic_failure_reason,
+    tool_error_response as legacy_tool_error_response, tool_result_has_semantic_error,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod tool_dispatch;
+
+fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) -> JsonRpcResponse {
+    JsonRpcResponse::from_legacy(legacy_tool_error_response(id, tool_name, error))
+}
 
 struct PreparedToolCall {
     tool_name: String,
@@ -305,7 +312,10 @@ impl McpServer {
 
     /// Returns `None` for notifications (requests without an `id`).
     #[hotpath::skip]
-    pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+    pub(crate) async fn handle_request(
+        &self,
+        request: &JsonRpcRequest,
+    ) -> Option<tracedecay_mcp::JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
         // exactly like the live connection loop. These callers never dispatch
@@ -317,7 +327,7 @@ impl McpServer {
                 return request
                     .id
                     .clone()
-                    .map(|id| tool_error_response(id, &request.method, &error));
+                    .map(|id| legacy_tool_error_response(id, &request.method, &error));
             }
         };
         Box::pin(self.handle_request_for_connection(
@@ -327,6 +337,7 @@ impl McpServer {
             false,
         ))
         .await
+        .map(JsonRpcResponse::into_legacy)
     }
 
     /// Builds a fresh per-connection routing/identity context. Each call
@@ -621,7 +632,7 @@ impl McpServer {
             *recover_lock(&self.client_name) = client_name;
         }
         match initialize_result(SERVER_INSTRUCTIONS) {
-            Ok(result) => JsonRpcResponse::success(id, result),
+            Ok(result) => JsonRpcResponse::typed(id, McpResponseBody::Initialize(result)),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         }
     }
@@ -667,13 +678,7 @@ impl McpServer {
                 ToolRegistryMode::HostAvailable,
             )
         ) {
-            Ok(tools) => {
-                let payload = hotpath::measure_block!(
-                    "mcp.server.tools_list.compose_payload",
-                    json!({ "tools": tools })
-                );
-                JsonRpcResponse::success(id, payload)
-            }
+            Ok(tools) => JsonRpcResponse::typed(id, McpResponseBody::ToolsList(tools)),
             Err(error) => JsonRpcResponse::error(
                 id,
                 ErrorCode::InternalError,
@@ -684,7 +689,7 @@ impl McpServer {
 
     #[hotpath::measure(label = "mcp.server.resources_list")]
     pub(crate) fn handle_resources_list(id: Value) -> JsonRpcResponse {
-        JsonRpcResponse::success(id, resources_list_result())
+        JsonRpcResponse::typed(id, McpResponseBody::ResourcesList(resources_list_result()))
     }
 
     #[hotpath::measure(label = "mcp.server.resources_read", future = true)]
@@ -727,16 +732,14 @@ impl McpServer {
         mime: &str,
         text: &str,
     ) -> JsonRpcResponse {
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "contents": [{
-                    "uri": uri,
-                    "mimeType": mime,
-                    "text": text
-                }]
-            }),
-        )
+        let mut result = ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
+            uri: uri.to_owned(),
+            mime_type: Some(mime.to_owned()),
+            text: text.to_owned(),
+            meta: None,
+        }]);
+        result.result_type = None;
+        JsonRpcResponse::typed(id, McpResponseBody::ResourcesRead(result))
     }
 
     /// Returns the `SQLite` schema documentation as a markdown resource.
@@ -1284,7 +1287,7 @@ impl McpServer {
                     .await;
                 hotpath::measure_block!(
                     "mcp.server.tools_call.complete.response",
-                    JsonRpcResponse::success(id, result.value)
+                    JsonRpcResponse::typed(id, McpResponseBody::ToolsCall(result))
                 )
             }
             Err(error) => {
@@ -1371,7 +1374,7 @@ impl McpServer {
             Ok(mut result) => {
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 mark_semantic_tool_error(&mut result);
-                JsonRpcResponse::success(id, result.value)
+                JsonRpcResponse::typed(id, McpResponseBody::ToolsCall(result))
             }
             Err(error) => tool_error_response(id, tool_name, &error),
         }

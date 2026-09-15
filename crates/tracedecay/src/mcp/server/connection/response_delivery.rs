@@ -1,10 +1,10 @@
 use serde_json::Value;
 
-use crate::mcp::server::McpServer;
 use crate::mcp::server::routing::SelectedProjectResponseLease;
+use crate::mcp::server::{McpResponse, McpServer};
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::serialize_response_line;
-use tracedecay_mcp::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::transport::{ErrorCode, JsonRpcRequest, McpTransport};
 
 impl McpServer {
     /// Process a single raw JSON-RPC line and write the response. The
@@ -31,7 +31,7 @@ impl McpServer {
         let response = if !project_request_admitted {
             parsed.as_ref().ok().and_then(|request| {
                 request.id.clone().map(|id| {
-                    JsonRpcResponse::error_with_data(
+                    McpResponse::error_with_data(
                         id,
                         ErrorCode::InternalError,
                         "tool project route failed: project server was retired".to_owned(),
@@ -54,7 +54,7 @@ impl McpServer {
                     ))
                     .await
                 }
-                Err(error) => Some(JsonRpcResponse::error(
+                Err(error) => Some(McpResponse::error(
                     Value::Null,
                     ErrorCode::ParseError,
                     format!("failed to parse JSON-RPC request: {error}"),
@@ -66,6 +66,7 @@ impl McpServer {
             .as_ref()
             .map(SelectedProjectResponseLease::revoked);
         if let Some(response) = response {
+            let response = response.into_legacy();
             let mut json_line = hotpath::measure_block!(
                 "mcp.server.response.serialize",
                 serialize_response_line(&response)

@@ -132,8 +132,8 @@ fn serve_routed_rmcp_connection_inner(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let initialize_response_decorator = initialize_route.map(|route| {
-            Arc::new(move |response: &mut JsonRpcResponse| {
-                attach_initialize_route_metadata(response, &route);
+            Arc::new(move |response: &mut crate::mcp::server::McpResponse| {
+                response.insert_result_meta("tracedecayInitializeRoute", json!(route));
             }) as RmcpInitializeResponseDecorator
         });
         let mut transport =
