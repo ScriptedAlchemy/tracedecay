@@ -2,8 +2,10 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use tracedecay_code_extraction::LanguageRegistry;
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::intake::content_digest;
 use tracedecay_contracts::{ApplicationProblem, ResultContractRef, RetainedSurfaceOperation};
+use tracedecay_domain::code_intelligence::Node;
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
@@ -129,18 +131,10 @@ fn extract_doc_nodes(
     Ok((bytes, nodes))
 }
 
-#[hotpath::measure(label = "mcp.analysis.doc_coverage.total")]
-fn handle_verified_doc_coverage(
-    cg: &TraceDecay,
+fn documentation_candidates(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    args: Value,
-    scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let path_prefix = effective_path(&args, scope_prefix);
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .map_or(50, |value| value.min(500) as usize);
+    path_prefix: Option<&str>,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
     let page = graph.symbols_page(None, DOC_COVERAGE_SYMBOL_BUDGET)?;
     if page.has_more {
         return Err(doc_coverage_unavailable(
@@ -192,6 +186,23 @@ fn handle_verified_doc_coverage(
             .then_with(|| left.occurrence.cmp(&right.occurrence))
     });
 
+    Ok(candidates)
+}
+
+#[hotpath::measure(label = "mcp.analysis.doc_coverage.total")]
+fn handle_verified_doc_coverage(
+    cg: &TraceDecay,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    args: Value,
+    scope_prefix: Option<&str>,
+) -> Result<ToolResult> {
+    let path_prefix = effective_path(&args, scope_prefix);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(50, |value| value.min(500) as usize);
+    let candidates = documentation_candidates(graph, path_prefix)?;
+
     let registry = LanguageRegistry::new();
     let mut extracted_path = None::<String>;
     let mut extracted_bytes = Vec::new();
@@ -216,53 +227,8 @@ fn handle_verified_doc_coverage(
                 extract_doc_nodes(cg.project_root(), path, &registry)?;
             extracted_path = Some(path.to_owned());
         }
-        let source_span = symbol
-            .binding
-            .as_ref()
-            .and_then(|binding| binding.source_span)
-            .ok_or_else(|| {
-                doc_coverage_unavailable(format!(
-                    "public symbol {} has no admitted source span",
-                    symbol.occurrence.as_str()
-                ))
-            })?;
-        let start = usize::try_from(source_span.start_byte).map_err(|error| {
-            doc_coverage_unavailable(format!(
-                "public symbol {} source start does not fit this host: {error}",
-                symbol.occurrence.as_str()
-            ))
-        })?;
-        let end = usize::try_from(source_span.end_byte).map_err(|error| {
-            doc_coverage_unavailable(format!(
-                "public symbol {} source end does not fit this host: {error}",
-                symbol.occurrence.as_str()
-            ))
-        })?;
-        let admitted_symbol_source = extracted_bytes.get(start..end).ok_or_else(|| {
-            doc_coverage_unavailable(format!(
-                "public symbol {} source span is outside `{path}`",
-                symbol.occurrence.as_str()
-            ))
-        })?;
-        if content_digest(admitted_symbol_source) != metadata.content_digest {
-            return Err(doc_coverage_unavailable(format!(
-                "documentation source for symbol {} no longer matches the admitted graph generation",
-                symbol.occurrence.as_str()
-            )));
-        }
-        let extracted = extracted_nodes
-            .iter()
-            .find(|node| {
-                node.qualified_name == metadata.qualified_name
-                    && node.kind.as_str() == metadata.kind
-                    && node.start_line == metadata.start_line
-            })
-            .ok_or_else(|| {
-                doc_coverage_unavailable(format!(
-                    "public symbol {} is absent from the re-admitted documentation source `{path}`",
-                    symbol.occurrence.as_str()
-                ))
-            })?;
+        let extracted =
+            verified_documentation_node(&symbol, path, &extracted_bytes, &extracted_nodes)?;
         if extracted
             .docstring
             .as_deref()
@@ -317,6 +283,66 @@ fn handle_verified_doc_coverage(
         &output,
         touched_files,
     ))
+}
+
+fn verified_documentation_node<'a>(
+    symbol: &CodeGraphSymbolSummaryV1,
+    path: &str,
+    extracted_bytes: &[u8],
+    extracted_nodes: &'a [Node],
+) -> Result<&'a Node> {
+    let metadata = symbol
+        .metadata
+        .as_ref()
+        .ok_or_else(|| doc_coverage_unavailable("documentation candidate metadata disappeared"))?;
+    let source_span = symbol
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.source_span)
+        .ok_or_else(|| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} has no admitted source span",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+    let start = usize::try_from(source_span.start_byte).map_err(|error| {
+        doc_coverage_unavailable(format!(
+            "public symbol {} source start does not fit this host: {error}",
+            symbol.occurrence.as_str()
+        ))
+    })?;
+    let end = usize::try_from(source_span.end_byte).map_err(|error| {
+        doc_coverage_unavailable(format!(
+            "public symbol {} source end does not fit this host: {error}",
+            symbol.occurrence.as_str()
+        ))
+    })?;
+    let admitted_symbol_source = extracted_bytes.get(start..end).ok_or_else(|| {
+        doc_coverage_unavailable(format!(
+            "public symbol {} source span is outside `{path}`",
+            symbol.occurrence.as_str()
+        ))
+    })?;
+    if content_digest(admitted_symbol_source) != metadata.content_digest {
+        return Err(doc_coverage_unavailable(format!(
+            "documentation source for symbol {} no longer matches the admitted graph generation",
+            symbol.occurrence.as_str()
+        )));
+    }
+    let extracted = extracted_nodes
+        .iter()
+        .find(|node| {
+            node.qualified_name == metadata.qualified_name
+                && node.kind.as_str() == metadata.kind
+                && node.start_line == metadata.start_line
+        })
+        .ok_or_else(|| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} is absent from the re-admitted documentation source `{path}`",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+    Ok(extracted)
 }
 
 async fn admitted_graph_query(
@@ -545,22 +571,7 @@ fn dispatch_graph_tools_inner<'a>(
                 )
                 .await
             }
-            "tracedecay_callers" => {
-                let graph_query = admitted_graph_query(cg, &options, "code_callers").await?;
-                portable_graph::handle_callers(&graph_query, args).await
-            }
-            "tracedecay_callees" => {
-                let graph_query = admitted_graph_query(cg, &options, "callees").await?;
-                portable_graph::handle_callees(&graph_query, args).await
-            }
-            "tracedecay_impact" => {
-                let graph_query = admitted_graph_query(cg, &options, "impact").await?;
-                portable_graph::handle_impact(&graph_query, args).await
-            }
-            "tracedecay_node" => {
-                let graph_query = admitted_graph_query(cg, &options, "node").await?;
-                portable_graph::handle_node(&graph_query, args).await
-            }
+
             "tracedecay_similar" => {
                 let graph_query = admitted_graph_query(cg, &options, "similar").await?;
                 graph::handle_similar(
@@ -578,16 +589,7 @@ fn dispatch_graph_tools_inner<'a>(
                 let graph_query = admitted_graph_query(cg, &options, "rename_preview").await?;
                 graph::handle_rename_preview(cg, &graph_query, args).await
             }
-            "tracedecay_implementations" => {
-                let graph_query =
-                    admitted_graph_query(cg, &options, "code_implementations").await?;
-                portable_graph::handle_implementations(&graph_query, args, selected_scope_prefix)
-                    .await
-            }
-            "tracedecay_callers_for" => {
-                let graph_query = admitted_graph_query(cg, &options, "code_callers").await?;
-                portable_graph::handle_callers_for(&graph_query, args).await
-            }
+
             "tracedecay_find_exact_symbol" => {
                 let graph_query = admitted_graph_query(cg, &options, "qualified_name").await?;
                 graph::handle_find_exact_symbol(
@@ -600,27 +602,65 @@ fn dispatch_graph_tools_inner<'a>(
                 )
                 .await
             }
-            "tracedecay_by_qualified_name" => {
-                let graph_query = admitted_graph_query(cg, &options, "qualified_name").await?;
-                portable_graph::handle_by_qualified_name(&graph_query, args).await
+
+            _ => {
+                dispatch_portable_graph_read(tool_name, cg, args, selected_scope_prefix, options)
+                    .await
             }
-            "tracedecay_signature" => {
-                let graph_query =
-                    admitted_graph_query(cg, &options, "code_signature_search").await?;
-                portable_graph::handle_signature(&graph_query, args).await
-            }
-            "tracedecay_impls" => {
-                let graph_query =
-                    admitted_graph_query(cg, &options, "code_implementations").await?;
-                portable_graph::handle_impls(&graph_query, args).await
-            }
-            "tracedecay_derives" => {
-                let graph_query = admitted_graph_query(cg, &options, "code_type_hierarchy").await?;
-                portable_graph::handle_derives(&graph_query, args).await
-            }
-            _ => Err(unknown_tool_error(tool_name)),
         }
     })
+}
+
+async fn dispatch_portable_graph_read(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: Value,
+    selected_scope_prefix: Option<&str>,
+    options: ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    match tool_name {
+        "tracedecay_callers" => {
+            let graph_query = admitted_graph_query(cg, &options, "code_callers").await?;
+            portable_graph::handle_callers(&graph_query, args).await
+        }
+        "tracedecay_callees" => {
+            let graph_query = admitted_graph_query(cg, &options, "callees").await?;
+            portable_graph::handle_callees(&graph_query, args).await
+        }
+        "tracedecay_impact" => {
+            let graph_query = admitted_graph_query(cg, &options, "impact").await?;
+            portable_graph::handle_impact(&graph_query, args).await
+        }
+        "tracedecay_node" => {
+            let graph_query = admitted_graph_query(cg, &options, "node").await?;
+            portable_graph::handle_node(&graph_query, args).await
+        }
+        "tracedecay_implementations" => {
+            let graph_query = admitted_graph_query(cg, &options, "code_implementations").await?;
+            portable_graph::handle_implementations(&graph_query, args, selected_scope_prefix).await
+        }
+        "tracedecay_callers_for" => {
+            let graph_query = admitted_graph_query(cg, &options, "code_callers").await?;
+            portable_graph::handle_callers_for(&graph_query, args).await
+        }
+        "tracedecay_by_qualified_name" => {
+            let graph_query = admitted_graph_query(cg, &options, "qualified_name").await?;
+            portable_graph::handle_by_qualified_name(&graph_query, args).await
+        }
+        "tracedecay_signature" => {
+            let graph_query = admitted_graph_query(cg, &options, "code_signature_search").await?;
+            portable_graph::handle_signature(&graph_query, args).await
+        }
+        "tracedecay_impls" => {
+            let graph_query = admitted_graph_query(cg, &options, "code_implementations").await?;
+            portable_graph::handle_impls(&graph_query, args).await
+        }
+        "tracedecay_derives" => {
+            let graph_query = admitted_graph_query(cg, &options, "code_type_hierarchy").await?;
+            portable_graph::handle_derives(&graph_query, args).await
+        }
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch project-info, registry, and file-inspection tools
@@ -1270,89 +1310,21 @@ fn dispatch_retained_application_tools_inner<'a>(
                 message: format!("retained application request does not match {tool_name}"),
             });
         }
-        let request_id = match options.application_request_id {
+        let request_id = match options.application_request_id.clone() {
             Some(request_id) => request_id,
             None => application_surface::request_id()?,
         };
         let result_contract = ResultContractRef::from_schema(&binding.result_schema);
         let selected_scope_contract = result_contract.clone();
         let selected_scope_request_id = request_id.clone();
-        let result = match options.application_invocation_executor {
-            Some(executor) => {
-                let (deadline, cancellation) =
-                    application_surface::complete_retained_protocol_controls(
-                        retained_operation,
-                        &request_id,
-                        options.application_deadline,
-                        options.application_cancellation,
-                    )?
-                    .ok_or_else(|| {
-                        TraceDecayError::project_route(
-                            "retained_application_controls_unavailable",
-                            true,
-                            "retained application protocol controls are unavailable",
-                        )
-                    })?;
-                let invocation =
-                    tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
-                        request_id.as_str(),
-                        request,
-                        tracedecay_contracts::now_micros(),
-                        deadline.clone(),
-                        cancellation.context(),
-                    );
-                let policy =
-                    if tracedecay_contracts::retained_surfaces::retained_surface_operation_is_effect(
-                        retained_operation,
-                    ) {
-                        InvocationCancellationPolicy::AuthoritativeEffect
-                    } else {
-                        InvocationCancellationPolicy::ReadOnly
-                    };
-                match hotpath::future!(
-                    executor.invoke_controlled(invocation, deadline, cancellation, policy),
-                    label = "mcp.retained.invoke"
-                )
-                .await
-                {
-                    Ok(response)
-                        if response.protocol
-                            == tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL
-                            && response.revision
-                                == tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION
-                            && response.request_id == request_id.as_str() =>
-                    {
-                        validated_retained_response(
-                            response.outcome,
-                            retained_operation,
-                            &request_id,
-                            &result_contract,
-                        )?
-                    }
-                    Ok(_) => Err(retained_problem_envelope(
-                        result_contract.clone(),
-                        request_id.clone(),
-                        ApplicationProblem::unavailable(retained_safe_diagnostic(
-                            "application.surface.invalid_response",
-                            "The daemon returned an invalid retained application envelope",
-                        )?),
-                    )?),
-                    Err(error) => Err(retained_problem_envelope(
-                        result_contract.clone(),
-                        request_id.clone(),
-                        error.into_application_problem(),
-                    )?),
-                }
-            }
-            None => Err(retained_problem_envelope(
-                result_contract,
-                request_id,
-                ApplicationProblem::unavailable(retained_safe_diagnostic(
-                    "application.transport.unavailable",
-                    "The daemon retained application transport is unavailable",
-                )?),
-            )?),
-        };
+        let result = invoke_retained_application(
+            &options,
+            request,
+            retained_operation,
+            request_id,
+            result_contract,
+        )
+        .await?;
         let result = match selected_project_id {
             Some(selected_project_id) => {
                 restate_selected_project_scope(
@@ -1376,6 +1348,95 @@ fn dispatch_retained_application_tools_inner<'a>(
                 requested_format,
             )
         )
+    })
+}
+
+async fn invoke_retained_application(
+    options: &ToolCallRegistryOptions<'_>,
+    request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
+    retained_operation: RetainedSurfaceOperation,
+    request_id: tracedecay_contracts::RequestId,
+    result_contract: ResultContractRef,
+) -> Result<
+    tracedecay_contracts::ApplicationResult<
+        tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1,
+    >,
+> {
+    Ok(match options.application_invocation_executor.as_ref() {
+        Some(executor) => {
+            let (deadline, cancellation) =
+                application_surface::complete_retained_protocol_controls(
+                    retained_operation,
+                    &request_id,
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                )?
+                .ok_or_else(|| {
+                    TraceDecayError::project_route(
+                        "retained_application_controls_unavailable",
+                        true,
+                        "retained application protocol controls are unavailable",
+                    )
+                })?;
+            let invocation =
+                tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
+                    request_id.as_str(),
+                    request,
+                    tracedecay_contracts::now_micros(),
+                    deadline.clone(),
+                    cancellation.context(),
+                );
+            let policy =
+                if tracedecay_contracts::retained_surfaces::retained_surface_operation_is_effect(
+                    retained_operation,
+                ) {
+                    InvocationCancellationPolicy::AuthoritativeEffect
+                } else {
+                    InvocationCancellationPolicy::ReadOnly
+                };
+            match hotpath::future!(
+                executor.invoke_controlled(invocation, deadline, cancellation, policy),
+                label = "mcp.retained.invoke"
+            )
+            .await
+            {
+                Ok(response)
+                    if response.protocol
+                        == tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL
+                        && response.revision
+                            == tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION
+                        && response.request_id == request_id.as_str() =>
+                {
+                    validated_retained_response(
+                        response.outcome,
+                        retained_operation,
+                        &request_id,
+                        &result_contract,
+                    )?
+                }
+                Ok(_) => Err(retained_problem_envelope(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    ApplicationProblem::unavailable(retained_safe_diagnostic(
+                        "application.surface.invalid_response",
+                        "The daemon returned an invalid retained application envelope",
+                    )?),
+                )?),
+                Err(error) => Err(retained_problem_envelope(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    error.into_application_problem(),
+                )?),
+            }
+        }
+        None => Err(retained_problem_envelope(
+            result_contract,
+            request_id,
+            ApplicationProblem::unavailable(retained_safe_diagnostic(
+                "application.transport.unavailable",
+                "The daemon retained application transport is unavailable",
+            )?),
+        )?),
     })
 }
 

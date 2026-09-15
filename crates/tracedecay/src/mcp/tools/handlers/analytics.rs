@@ -417,47 +417,8 @@ pub(super) async fn handle_analytics(
     });
 
     if section.is_none() {
-        let observatory = hotpath::future!(
-            tracedecay_application::observability::observatory_read_model(
-                gdb,
-                scope.filter.as_deref(),
-                since,
-            ),
-            label = "mcp.analytics.report.observatory"
-        )
-        .await;
-        let observatory =
-            tracedecay_application::observability::observatory_mcp_value(&observatory)
-                .map_err(config_error)?;
-        let provider_scope = if all_projects {
-            None
-        } else {
-            project_sessions.and_then(|sessions| {
-                let StoreShardScopeV1::ProjectSessions { project_id } =
-                    &sessions.binding().shard_id.scope
-                else {
-                    return None;
-                };
-                (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str()))
-                    .then(|| ObservationScopeV1::Project {
-                        project_id: project_id.clone(),
-                    })
-            })
-        };
-        let provider_usage_db = if all_projects { None } else { project_sessions };
-        let costs = hotpath::future!(
-            tracedecay_application::observability::costs_read_model(
-                gdb,
-                provider_usage_db,
-                provider_scope.as_ref(),
-                scope.filter.as_deref(),
-                since,
-            ),
-            label = "mcp.analytics.report.costs"
-        )
-        .await;
-        let costs =
-            tracedecay_application::observability::costs_mcp_value(&costs).map_err(config_error)?;
+        let (observatory, costs) =
+            analytics_overview(cg, gdb, project_sessions, all_projects, &scope, since).await?;
         let object = value
             .as_object_mut()
             .ok_or_else(|| config_error("analytics response must be a JSON object"))?;
@@ -512,6 +473,58 @@ pub(super) async fn handle_analytics(
     Ok(tool_json_with_md(Some(&scope.root), &args, &value, || {
         renderers::analytics_md(&value)
     }))
+}
+
+async fn analytics_overview(
+    cg: &TraceDecay,
+    gdb: &RegisteredGlobalDb,
+    project_sessions: Option<&RegisteredGlobalDb>,
+    all_projects: bool,
+    scope: &ResolvedScope,
+    since: i64,
+) -> Result<(Value, Value)> {
+    let observatory = hotpath::future!(
+        tracedecay_application::observability::observatory_read_model(
+            gdb,
+            scope.filter.as_deref(),
+            since,
+        ),
+        label = "mcp.analytics.report.observatory"
+    )
+    .await;
+    let observatory = tracedecay_application::observability::observatory_mcp_value(&observatory)
+        .map_err(config_error)?;
+    let provider_scope = if all_projects {
+        None
+    } else {
+        project_sessions.and_then(|sessions| {
+            let StoreShardScopeV1::ProjectSessions { project_id } =
+                &sessions.binding().shard_id.scope
+            else {
+                return None;
+            };
+            (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str())).then(
+                || ObservationScopeV1::Project {
+                    project_id: project_id.clone(),
+                },
+            )
+        })
+    };
+    let provider_usage_db = if all_projects { None } else { project_sessions };
+    let costs = hotpath::future!(
+        tracedecay_application::observability::costs_read_model(
+            gdb,
+            provider_usage_db,
+            provider_scope.as_ref(),
+            scope.filter.as_deref(),
+            since,
+        ),
+        label = "mcp.analytics.report.costs"
+    )
+    .await;
+    let costs =
+        tracedecay_application::observability::costs_mcp_value(&costs).map_err(config_error)?;
+    Ok((observatory, costs))
 }
 
 fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
@@ -589,8 +602,58 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         logical_counts.errors += counts.errors;
     }
 
+    let (tiers, top_tools) = tool_usage_rankings(&logical_tool_counts);
+
+    let zero_call_tools = zero_call_tool_sample(&available_defined, &called_available_defined);
+
+    Ok(json!({
+        "available": !rows.is_empty(),
+        "tiers": tiers,
+        "top_tools": top_tools,
+        "raw_distinct_event_name_count": per_tool.len(),
+        // Deprecated shipped key: this was always a count of raw persisted
+        // event names, not a public-catalog adoption numerator.
+        "distinct_tools_called": per_tool.len(),
+        "called_available_defined_tool_count": called_available_defined.len(),
+        "available_defined_tool_count": available_defined.len(),
+        // Deprecated shipped key: it remains the current host-available
+        // catalog count, which the explicit field above now names directly.
+        "defined_tool_count": available_defined.len(),
+        "maximal_defined_tool_count": maximal_defined.len(),
+        "aliased_call_names": aliased_call_names,
+        "bound_internal_call_names": bound_internal_call_names,
+        "unavailable_public_call_names": unavailable_public_call_names,
+        "unknown_or_retired_call_names": unknown_or_retired_call_names,
+        // Deprecated shipped key preserved as an exact object alias.
+        "zero_call_tools": zero_call_tools.clone(),
+        "zero_call_available_defined_tools": zero_call_tools,
+    }))
+}
+
+fn zero_call_tool_sample(
+    available_defined: &[String],
+    called_available_defined: &BTreeSet<String>,
+) -> Value {
+    let mut zero_call: Vec<&String> = available_defined
+        .iter()
+        .filter(|name| !called_available_defined.contains(*name))
+        .collect();
+    zero_call.sort();
+    let zero_call_count = zero_call.len();
+    let zero_call_sample: Vec<&String> =
+        zero_call.into_iter().take(ZERO_CALL_SAMPLE_LIMIT).collect();
+    json!({
+        "count": zero_call_count,
+        "sample": zero_call_sample,
+        "sample_truncated": zero_call_count > zero_call_sample.len(),
+    })
+}
+
+fn tool_usage_rankings(
+    logical_tool_counts: &BTreeMap<String, ToolCallCounts>,
+) -> (Vec<Value>, Vec<Value>) {
     let mut per_tier: BTreeMap<&'static str, ToolCallCounts> = BTreeMap::new();
-    for (tool_name, counts) in &logical_tool_counts {
+    for (tool_name, counts) in logical_tool_counts {
         let tier = per_tier.entry(tool_tier(tool_name)).or_default();
         tier.calls += counts.calls;
         tier.errors += counts.errors;
@@ -621,42 +684,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         })
         .collect();
 
-    let mut zero_call: Vec<&String> = available_defined
-        .iter()
-        .filter(|name| !called_available_defined.contains(*name))
-        .collect();
-    zero_call.sort();
-    let zero_call_count = zero_call.len();
-    let zero_call_sample: Vec<&String> =
-        zero_call.into_iter().take(ZERO_CALL_SAMPLE_LIMIT).collect();
-    let zero_call_tools = json!({
-        "count": zero_call_count,
-        "sample": zero_call_sample,
-        "sample_truncated": zero_call_count > zero_call_sample.len(),
-    });
-
-    Ok(json!({
-        "available": !rows.is_empty(),
-        "tiers": tiers,
-        "top_tools": top_tools,
-        "raw_distinct_event_name_count": per_tool.len(),
-        // Deprecated shipped key: this was always a count of raw persisted
-        // event names, not a public-catalog adoption numerator.
-        "distinct_tools_called": per_tool.len(),
-        "called_available_defined_tool_count": called_available_defined.len(),
-        "available_defined_tool_count": available_defined.len(),
-        // Deprecated shipped key: it remains the current host-available
-        // catalog count, which the explicit field above now names directly.
-        "defined_tool_count": available_defined.len(),
-        "maximal_defined_tool_count": maximal_defined.len(),
-        "aliased_call_names": aliased_call_names,
-        "bound_internal_call_names": bound_internal_call_names,
-        "unavailable_public_call_names": unavailable_public_call_names,
-        "unknown_or_retired_call_names": unknown_or_retired_call_names,
-        // Deprecated shipped key preserved as an exact object alias.
-        "zero_call_tools": zero_call_tools.clone(),
-        "zero_call_available_defined_tools": zero_call_tools,
-    }))
+    (tiers, top_tools)
 }
 
 async fn facts_section(
