@@ -2008,6 +2008,15 @@ impl CodeIndexSchedulerRegistryV1 {
             if shutting_down.load(Ordering::Acquire) {
                 return PublishedTextProjectionOutcomeV1::Shutdown;
             }
+            // A publication's pass waits only for the owners the seat needs.
+            // Once the admission artifact serves exact and lexical, the slot
+            // may still hold the clone-fingerprint successor: that backfill
+            // re-decodes the whole sealed source into a second artifact and
+            // is not a seat precondition, so it continues on the retained
+            // driver of a later pass instead of holding graph activation.
+            if installed.is_none() && text.query_owners_are_ready() {
+                break;
+            }
             advances += 1;
             if advances > TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1 {
                 tracing::warn!(

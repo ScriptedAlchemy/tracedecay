@@ -237,11 +237,7 @@ impl ProjectedChunkV1 {
                 .push(canonical.clone());
             match term.kind() {
                 ExactTechnicalTermKindV1::WholeSymbol
-                    if matches!(
-                        chunk.anchor.grain,
-                        CodeSearchChunkGrainV1::SymbolSignature
-                            | CodeSearchChunkGrainV1::SymbolMember
-                    ) =>
+                    if whole_symbol_term_is_name_bearing(chunk) =>
                 {
                     fields
                         .entry(LexicalFieldV1::SymbolName)
@@ -711,6 +707,18 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack
             .windows(needle.len())
             .any(|window| window == needle)
+}
+
+fn whole_symbol_term_is_name_bearing(chunk: &CodeSearchChunkV1) -> bool {
+    match chunk.anchor.grain {
+        CodeSearchChunkGrainV1::SymbolSignature | CodeSearchChunkGrainV1::SymbolMember => true,
+        CodeSearchChunkGrainV1::SymbolBody => !chunk
+            .sanitized_text
+            .as_str()
+            .trim_end_matches(['\n', '\r'])
+            .contains('\n'),
+        CodeSearchChunkGrainV1::FilePreamble | CodeSearchChunkGrainV1::FileWindow => false,
+    }
 }
 
 fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, score: u64) {

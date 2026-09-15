@@ -108,7 +108,9 @@ pub use sealed_codec::{
 ///
 /// `v4` attributes whitespace-only FileWindow ranges to a neighboring
 /// retrievable grain instead of minting unreachable rows.
-pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v4";
+/// `v5` omits a SymbolSignature grain whose span is the whole body, so a
+/// one-line declaration is one retrievable row instead of two identical ones.
+pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v5";
 
 /// Immutable configuration retained by one production index owner.
 #[derive(Clone, Debug)]
