@@ -27,6 +27,7 @@ use tracedecay_query::retrieval::{
     QueryAuthorityV1, fusion::RetrievalCursorKeyringV1, lexical::LexicalRoutingV1,
     ports::RetrievalExecutionControl,
 };
+use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use crate::code_index_scheduler::{
     CodeIndexHintPolicyV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
@@ -189,8 +190,8 @@ fn git(root: &Path, args: &[&str]) {
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
     )
-    .current_dir(root)
-    .args(args)
+    .current_dir(plain_host_path(root))
+    .args(plain_git_args(args))
     .status()
     .expect("run git fixture command");
     assert!(status.success(), "git fixture command failed: {args:?}");
@@ -201,8 +202,8 @@ fn git_stdout(root: &Path, args: &[&str]) -> String {
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
     )
-    .current_dir(root)
-    .args(args)
+    .current_dir(plain_host_path(root))
+    .args(plain_git_args(args))
     .output()
     .expect("run git fixture command");
     assert!(
