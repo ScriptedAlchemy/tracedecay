@@ -8,7 +8,7 @@ use super::{
 
 pub mod harness;
 #[cfg(test)]
-mod lcm_privacy_rescan;
+pub(crate) mod lcm_privacy_rescan;
 #[cfg(test)]
 mod lcm_schema;
 #[cfg(test)]

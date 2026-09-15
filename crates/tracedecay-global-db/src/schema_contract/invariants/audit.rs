@@ -1772,15 +1772,18 @@ mod tests {
     use serde_json::Value;
     use tempfile::TempDir;
     use tracedecay_domain::{
-        CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1, ObservationId,
-        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-        ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-        ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
+        CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
+        DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+        PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-        SanitizerDispositionV1, SensitivityV1, UtcMicros,
+        SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
     };
     use tracedecay_store::{
-        AnchoredObservationWrite, ObservationProjection, ObservationStore, ObservationWrite,
+        AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjection,
+        ObservationProjectionStore, ObservationStore, ObservationWrite,
         SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
         build_observation_retrieval_anchor_v2,
     };
@@ -2514,6 +2517,218 @@ mod tests {
             observations.push(observation);
         }
         observations
+    }
+
+    const CURSOR_COLLISION_MESSAGE_ID: &str = "fixture-session:0:generation:5552477573209801791";
+
+    async fn seed_projected_cursor_message(
+        runtime: &crate::tests::harness::HostAdmissionTestRuntimeV1,
+        text: &str,
+    ) -> DurableObservationV1 {
+        let provider = ProviderId::new("cursor").unwrap();
+        let session_id = SessionId::new("fixture-session").unwrap();
+        let record = ObservationId::new("cursor.native.fixture-collision").unwrap();
+        let range = ObservationSourceRangeV1::new(0, 100).unwrap();
+        let relations = CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_message_id(ObservationId::new(CURSOR_COLLISION_MESSAGE_ID).unwrap());
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider.clone(),
+            "message",
+            record.clone(),
+            relations,
+            vec![
+                CanonicalObservationFactV1::Session {
+                    project_path: None,
+                    location_path: None,
+                    transcript_path: Some("/fixture/cursor/session.jsonl".to_owned()),
+                    title: None,
+                    started_at: None,
+                    ended_at: None,
+                    source: Some("cursor_transcript".to_owned()),
+                    native_source: Some("cursor".to_owned()),
+                    profile: None,
+                    location_provenance: None,
+                },
+                CanonicalObservationFactV1::Message {
+                    role: CanonicalMessageRoleV1::User,
+                    content: serde_json::json!({ "text": text }),
+                    model: None,
+                    timestamp: Some(1_750_000_000),
+                },
+            ],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+        )
+        .unwrap();
+        let payload = serde_json::to_value(envelope).unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.cursor-fixture-collision").unwrap(),
+                ComponentVersion::new("sanitizer.cursor-fixture.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        let source =
+            ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap();
+        let generation = ObservationSourceGenerationV1::new(5_552_477_573_209_801_791).unwrap();
+        let observation = DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source,
+                ObservationScopeV1::Profile,
+                generation,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                record,
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.cursor-fixture").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            generation,
+            observation.identity().ordering_domain(),
+            range.end(),
+        )
+        .unwrap();
+        let write = ObservationWrite::new(observation.clone(), None, next_cursor).unwrap();
+        let projection_generation =
+            ProjectionGenerationId::new("projection.cursor-fixture.v1").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(write.observation(), "cursor-fixture")
+                .unwrap();
+        let anchor = build_observation_retrieval_anchor_v2(
+            write.observation(),
+            projection_generation.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .unwrap();
+        let anchored = AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap();
+        let store = runtime
+            .observation_store(crate::tests::harness::HostAdmissionScope::Profile)
+            .unwrap();
+        assert!(matches!(
+            store.persist_observation(anchored).await.unwrap(),
+            ObservationPersistOutcome::Committed(_)
+        ));
+        store
+            .project_observation(observation.observation_id())
+            .await
+            .unwrap();
+        observation
+    }
+
+    #[tokio::test]
+    async fn projection_audit_preserves_receipt_bound_cursor_collision() {
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        let original = [
+            "fixture credential api_key=sk-cursor-collision-",
+            "1234567890abcdef",
+        ]
+        .concat();
+        let protected =
+            tracedecay_privacy::sanitize_lcm_payload_text(&original).expect("sanitize fixture");
+        assert_ne!(protected.sanitized_text(), original);
+        let observation = seed_projected_cursor_message(&runtime, &original).await;
+        let projection = crate::observation_projection::derive_projection(&observation)
+            .unwrap()
+            .message()
+            .unwrap()
+            .clone();
+        assert_eq!(projection.message().message_id, CURSOR_COLLISION_MESSAGE_ID);
+
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let legacy_metadata = serde_json::json!({
+            "ingest_protection": {
+                "sanitization_receipt":
+                    crate::tests::lcm_privacy_rescan::legacy_receipt(&original)
+            }
+        })
+        .to_string();
+        let transaction = database.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET content = ?3, content_hash = ?4, storage_kind = 'inline',
+                     payload_ref = NULL, snippet_text = ?3, index_text = ?3,
+                     metadata_json = ?5
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![
+                    "cursor",
+                    CURSOR_COLLISION_MESSAGE_ID,
+                    original.as_str(),
+                    tracedecay_lcm::retrieval_content::projected_content_hash(&original),
+                    legacy_metadata
+                ],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        database
+            .lcm_privacy_rescan_raw_messages()
+            .await
+            .expect("privacy rescan");
+
+        let stored_before = database
+            .get_session_message("cursor", CURSOR_COLLISION_MESSAGE_ID)
+            .await
+            .expect("read receipt-bound stored message")
+            .expect("receipt-bound stored message");
+        assert_eq!(
+            stored_before.text,
+            tracedecay_lcm::retrieval_content::derived_text_for_index(protected.sanitized_text())
+        );
+        assert_ne!(stored_before, *projection.message());
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("receipt-bound protected row must not degrade convergence");
+
+        let stored_after = database
+            .get_session_message("cursor", CURSOR_COLLISION_MESSAGE_ID)
+            .await
+            .expect("read preserved stored message")
+            .expect("preserved stored message");
+        assert_eq!(
+            stored_after, stored_before,
+            "convergence must not overwrite the colliding stored evidence"
+        );
+        let snapshot = database.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT output_digest, message_created
+                 FROM observation_projection_provenance
+                 WHERE projector_version = ?1 AND observation_id = ?2",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    observation.observation_id().as_str()
+                ],
+            )
+            .await
+            .unwrap();
+        let row = rows
+            .next()
+            .await
+            .unwrap()
+            .expect("preserved deterministic provenance");
+        assert_eq!(
+            row.get::<String>(0).unwrap(),
+            projection.output_digest().unwrap().as_str()
+        );
+        assert_eq!(row.get::<i64>(1).unwrap(), 1);
+        assert!(rows.next().await.unwrap().is_none());
     }
 
     /// The audit's message path must stay correct while resolving each chunk's
