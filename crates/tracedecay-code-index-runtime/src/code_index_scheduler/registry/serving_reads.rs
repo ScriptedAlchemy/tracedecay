@@ -11,12 +11,11 @@ use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::CodeGenerationId;
 
-#[cfg(feature = "hotpath")]
-use super::super::now_micros;
 use super::super::{
     CodeIndexCadenceTriggerV1, CodeIndexSchedulerErrorV1, GenerationDecodeAdmissionV1,
-    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
+    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, now_micros,
 };
+use super::graph_cursor_retention::GraphCursorRetentionV1;
 use super::scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 use super::{
     CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1, CodeIndexServingScopeV1,
@@ -1091,10 +1090,26 @@ impl CodeIndexSchedulerRegistryV1 {
             .then_some(latest)
     }
 
+    /// The cursor-bound retention of one mounted scope, if it is mounted.
+    pub(crate) async fn graph_cursor_retention_for_scope(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<Arc<GraphCursorRetentionV1>> {
+        let mounted = self.mounted.lock().await;
+        unique_mounted_for_scope(&mounted, scope)
+            .unique()
+            .map(|(_, worktree)| Arc::clone(&worktree.graph_cursor_retention))
+    }
+
     /// Recover one retained persistent graph generation for an authenticated
     /// immutable query. The retained publication metadata and verified graph
     /// head are generation-addressed, so this does not admit the generation's
     /// lexical artifact or alias the currently serving graph.
+    ///
+    /// A generation still pinned by an unexpired graph cursor is answered
+    /// from its held serving owner: that owner is what keeps the generation's
+    /// replay retained, so replaying it from the journal again would only
+    /// race the retirement the hold exists to fence.
     pub(crate) async fn retained_graph_generation_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -1103,6 +1118,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let (
             historical_generation_owner,
             graph_activation,
+            graph_cursor_retention,
             project_id,
             repository_id,
             worktree_id,
@@ -1115,12 +1131,16 @@ impl CodeIndexSchedulerRegistryV1 {
             (
                 worktree.historical_generation_owner.clone(),
                 worktree.graph_activation.clone(),
+                Arc::clone(&worktree.graph_cursor_retention),
                 worktree.historical_generation_owner.project_id.clone(),
                 worktree.repository_id.clone(),
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.shutting_down),
             )
         };
+        if let Some(held) = graph_cursor_retention.held(generation_id, now_micros()) {
+            return Ok(Some(held));
+        }
         let Some(latest) = historical_generation_owner.published_text_generation(generation_id)?
         else {
             return Ok(None);

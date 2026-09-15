@@ -5078,6 +5078,108 @@ async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slic
     registry.shutdown().await;
 }
 
+/// A graph cursor pins its generation, so the mounted scope must hold that
+/// generation's serving owner for exactly the cursor's authenticated
+/// lifetime: present until the page's `expires_at`, absent once it lapses.
+/// Without the hold nothing keeps the generation's graph replay retained
+/// between two pages (issue #1244).
+#[tokio::test]
+async fn graph_cursor_holds_its_generation_until_the_cursor_expires() {
+    let sources = caller_star_sources();
+    let files = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    install_verified_graph_store(&latest);
+    let generation = latest.generation.manifest().generation_id.clone();
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let hub = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("hub"))
+        .expect("hub symbol");
+    let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let retention = registry
+        .graph_cursor_retention_for_scope(context.scope())
+        .await
+        .expect("mounted scope retention");
+    assert_eq!(
+        retention.held_until(&generation),
+        None,
+        "nothing pins the generation before a cursor exists"
+    );
+
+    let request = CodeRelationRequest {
+        node_id: hub.occurrence.as_str().to_owned(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope: CodeQueryScope::new(generation.clone(), None).expect("query scope"),
+        meta: callers_page_meta(CALLER_PAGE, None),
+    };
+    let first = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+    let (page, expires_at) = match first {
+        RetrievalPortOutcome::Partial(evidence) => {
+            let expires_at = evidence.page.expires_at.expect("minted cursor expiry");
+            (evidence.payload.expect("first callers page"), expires_at)
+        }
+        other => panic!("expected capped callers page, got {other:?}"),
+    };
+    assert!(page.next_cursor.is_some(), "page 1 must mint a cursor");
+    assert_eq!(
+        retention.held_until(&generation),
+        Some(expires_at),
+        "the minted cursor must hold its generation for the cursor lifetime"
+    );
+    assert!(
+        retention
+            .held(&generation, UtcMicros(expires_at.0 - 1))
+            .is_some_and(|held| held.metadata().manifest().generation_id == generation),
+        "an unexpired cursor resolves the held generation owner"
+    );
+    assert!(
+        retention.held(&generation, expires_at).is_none(),
+        "the hold lapses with the cursor"
+    );
+    assert_eq!(retention.held_until(&generation), None);
+    registry.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Worktree-aware incremental indexing: identity, gix classification, the
 // hook-driven + lazy-reconcile freshness ladder.

@@ -45,7 +45,10 @@ use tracedecay_tool_catalog::SortContractId;
 use super::{
     CodeIndexSchedulerRegistryV1, DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1,
     LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
-    registry::{UniqueMountedWorktree, latest_matches_scope_identity, unique_mounted_for_scope},
+    registry::{
+        UniqueMountedWorktree, graph_cursor_retention::GraphCursorRetentionV1,
+        latest_matches_scope_identity, unique_mounted_for_scope,
+    },
 };
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
@@ -1734,11 +1737,18 @@ struct PreparedGraphCallableQueryV1 {
     latest: LatestCodeTextGenerationV1,
     reader: CodeGraphInteractiveReader,
     query: PreparedQueryV1,
+    /// Absent only when the scope unmounted between resolving `latest` and
+    /// preparing the query; the page still serves, and no cursor it mints
+    /// can be continued against an unmounted scope anyway.
+    cursor_retention: Option<Arc<GraphCursorRetentionV1>>,
 }
 
 trait PreparedCallableQueryStateV1 {
     fn generation(&self) -> &CodeGenerationId;
     fn query(&self) -> &PreparedQueryV1;
+    /// A cursor pinned to this generation was minted and stays valid until
+    /// `expires_at`. Graph queries bind replay retention to that lifetime.
+    fn retain_cursor_generation(&self, _expires_at: UtcMicros, _now: UtcMicros) {}
 }
 
 impl PreparedCallableQueryStateV1 for PreparedCallableQueryV1 {
@@ -1768,6 +1778,12 @@ impl PreparedCallableQueryStateV1 for PreparedGraphCallableQueryV1 {
 
     fn query(&self) -> &PreparedQueryV1 {
         &self.query
+    }
+
+    fn retain_cursor_generation(&self, expires_at: UtcMicros, now: UtcMicros) {
+        if let Some(retention) = &self.cursor_retention {
+            retention.retain(&self.latest, expires_at, now);
+        }
     }
 }
 
@@ -1999,10 +2015,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::new(tracedecay_graph_db::NeverCancelled),
             )
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
+        let cursor_retention = self
+            .graph_cursor_retention_for_scope(context.request.scope())
+            .await;
         Ok(PreparedGraphCallableQueryV1 {
             latest,
             reader,
             query,
+            cursor_retention,
         })
     }
 }
@@ -2122,6 +2142,9 @@ where
             let Ok(next_cursor) = next_cursor else {
                 return rejected_cursor(finished_at, generation, PreparedQueryErrorV1::Unavailable);
             };
+            if let (Some(_), Some(expires_at)) = (&next_cursor, cursor_expires_at) {
+                prepared.retain_cursor_generation(expires_at, finished_at);
+            }
             let page = match CodeQueryPage::new(
                 generation.clone(),
                 pagination.items,
@@ -2197,6 +2220,9 @@ fn finish_query_with_coverage<T: serde::Serialize>(
             let Ok(next_cursor) = next_cursor else {
                 return rejected_cursor(finished_at, generation, PreparedQueryErrorV1::Unavailable);
             };
+            if let (Some(_), Some(expires_at)) = (&next_cursor, cursor_expires_at) {
+                prepared.retain_cursor_generation(expires_at, finished_at);
+            }
             // `pagination.total` and the served generation identity are both
             // store readings, so a page that fails the contract is a stale or
             // inconsistent read. Answer with the typed evidence this surface
