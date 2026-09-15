@@ -160,6 +160,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_freshness_probe_sink: Option<super::CodeIndexFreshnessProbeSink>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
+    pub(crate) code_index_similar_executor: Option<super::CodeIndexSimilarExecutor>,
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
     pub(crate) code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
@@ -286,6 +287,7 @@ impl McpServerConstructionContext {
             code_index_freshness_probe_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_similar_executor: None,
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
@@ -392,6 +394,7 @@ impl McpServerConstructionContext {
             code_index_freshness_probe_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_similar_executor: None,
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
@@ -459,6 +462,7 @@ impl McpServerConstructionContext {
             code_index_freshness_probe_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_similar_executor: None,
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
@@ -514,6 +518,14 @@ impl McpServerConstructionContext {
         executor: super::CodeIndexSearchExecutor,
     ) -> Self {
         self.code_index_search_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_code_index_similar_executor(
+        mut self,
+        executor: super::CodeIndexSimilarExecutor,
+    ) -> Self {
+        self.code_index_similar_executor = Some(executor);
         self
     }
 
