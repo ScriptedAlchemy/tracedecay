@@ -22,10 +22,10 @@ use tracedecay_domain::ExactFieldV1;
 /// entries and referenced by content-addressed id. Revision 15 adds
 /// content-addressed clone payloads, source-bound occurrences, and exact
 /// conservative/rename postings. Revision 16 adds signature and documentation
-/// fields without changing the shipped revision-14/15 row codec, positional
-/// winnowed fingerprint postings, and stored posting-list counts. Readers
-/// accept all shipped layouts; writers emit 16 unless an explicit benchmark
-/// revision is selected.
+/// fields with a tagged row codec. Revision 17 adds positional winnowed
+/// fingerprint postings and stored posting-list counts. Readers accept all
+/// shipped layouts; writers emit 17 unless an explicit benchmark revision is
+/// selected.
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10: u32 = 10;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11: u32 = 11;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12: u32 = 12;
@@ -33,8 +33,9 @@ pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13: u32 = 13;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14: u32 = 14;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15: u32 = 15;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16: u32 = 16;
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V17: u32 = 17;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 =
-    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16;
+    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V17;
 
 const DIGEST_DOMAIN_V10: &[u8] = b"tracedecay.code-lexical-artifact.v10\0";
 const DIGEST_DOMAIN_V11: &[u8] = b"tracedecay.code-lexical-artifact.v11\0";
@@ -43,6 +44,7 @@ const DIGEST_DOMAIN_V13: &[u8] = b"tracedecay.code-lexical-artifact.v13\0";
 const DIGEST_DOMAIN_V14: &[u8] = b"tracedecay.code-lexical-artifact.v14\0";
 const DIGEST_DOMAIN_V15: &[u8] = b"tracedecay.code-lexical-artifact.v15\0";
 const DIGEST_DOMAIN_V16: &[u8] = b"tracedecay.code-lexical-artifact.v16\0";
+const DIGEST_DOMAIN_V17: &[u8] = b"tracedecay.code-lexical-artifact.v17\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -161,8 +163,9 @@ pub enum CodeLexicalArtifactWriterRevisionV1 {
     V13,
     V14,
     V15,
-    #[default]
     V16,
+    #[default]
+    V17,
 }
 
 impl CodeLexicalArtifactWriterRevisionV1 {
@@ -174,6 +177,7 @@ impl CodeLexicalArtifactWriterRevisionV1 {
             Self::V14 => LexicalArtifactLayoutV1::V14,
             Self::V15 => LexicalArtifactLayoutV1::V15,
             Self::V16 => LexicalArtifactLayoutV1::V16,
+            Self::V17 => LexicalArtifactLayoutV1::V17,
         }
     }
 }
@@ -187,6 +191,7 @@ pub(super) enum LexicalArtifactLayoutV1 {
     V14,
     V15,
     V16,
+    V17,
 }
 
 impl LexicalArtifactLayoutV1 {
@@ -199,6 +204,7 @@ impl LexicalArtifactLayoutV1 {
             CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14 => Ok(Self::V14),
             CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15 => Ok(Self::V15),
             CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16 => Ok(Self::V16),
+            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V17 => Ok(Self::V17),
             _ => Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
                 "format revision {revision} is unsupported"
             ))),
@@ -214,6 +220,7 @@ impl LexicalArtifactLayoutV1 {
             Self::V14 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14,
             Self::V15 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15,
             Self::V16 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16,
+            Self::V17 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V17,
         }
     }
 
@@ -226,6 +233,7 @@ impl LexicalArtifactLayoutV1 {
             Self::V14 => DIGEST_DOMAIN_V14,
             Self::V15 => DIGEST_DOMAIN_V15,
             Self::V16 => DIGEST_DOMAIN_V16,
+            Self::V17 => DIGEST_DOMAIN_V17,
         }
     }
 
@@ -238,7 +246,9 @@ impl LexicalArtifactLayoutV1 {
             Self::V12 => &REQUIRED_ARTIFACT_INDEXES_V12,
             // Revision 14 changes only the row payload and its string
             // dictionary; the serving indexes are revision 13's.
-            Self::V13 | Self::V14 | Self::V15 | Self::V16 => &REQUIRED_ARTIFACT_INDEXES_V13,
+            Self::V13 | Self::V14 | Self::V15 | Self::V16 | Self::V17 => {
+                &REQUIRED_ARTIFACT_INDEXES_V13
+            }
         }
     }
 
@@ -246,35 +256,38 @@ impl LexicalArtifactLayoutV1 {
     pub(super) fn interns_exact_terms(self) -> bool {
         matches!(
             self,
-            Self::V12 | Self::V13 | Self::V14 | Self::V15 | Self::V16
+            Self::V12 | Self::V13 | Self::V14 | Self::V15 | Self::V16 | Self::V17
         )
     }
 
     /// Revisions 13 and later cluster `term_postings` by `(document_id,
     /// term_id, field)`; every earlier interned layout clusters by term.
     pub(super) fn clusters_term_postings_by_document(self) -> bool {
-        matches!(self, Self::V13 | Self::V14 | Self::V15 | Self::V16)
+        matches!(
+            self,
+            Self::V13 | Self::V14 | Self::V15 | Self::V16 | Self::V17
+        )
     }
 
     /// Revision 14 rows reference `row_dictionary` entries for their per-file
     /// and per-symbol strings instead of carrying the text per chunk.
     pub(super) fn interns_row_dictionary(self) -> bool {
-        matches!(self, Self::V14 | Self::V15 | Self::V16)
+        matches!(self, Self::V14 | Self::V15 | Self::V16 | Self::V17)
     }
 
     /// Revision 14 keeps `document_integrity` as `(document_id, digest
     /// BLOB)`: the chunk id already lives in `rows` under the same key, and
     /// the 32 digest bytes replace their 71-byte tagged hex form.
     pub(super) fn stores_document_integrity_bytes(self) -> bool {
-        matches!(self, Self::V14 | Self::V15 | Self::V16)
+        matches!(self, Self::V14 | Self::V15 | Self::V16 | Self::V17)
     }
 
     pub(super) fn has_clone_index(self) -> bool {
-        matches!(self, Self::V15 | Self::V16)
+        matches!(self, Self::V15 | Self::V16 | Self::V17)
     }
 
     pub(super) fn has_clone_fingerprints(self) -> bool {
-        self == Self::V16
+        self == Self::V17
     }
 }
 
@@ -562,7 +575,8 @@ mod tests {
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15,
-        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16, CodeLexicalArtifactErrorV1,
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16,
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V17, CodeLexicalArtifactErrorV1,
         LexicalArtifactLayoutV1, exact_field_code, field_code, field_from_code,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
@@ -644,8 +658,13 @@ mod tests {
                 .expect("v16"),
             LexicalArtifactLayoutV1::V16
         );
+        assert_eq!(
+            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V17)
+                .expect("v17"),
+            LexicalArtifactLayoutV1::V17
+        );
         assert!(LexicalArtifactLayoutV1::from_revision(9).is_err());
-        assert!(LexicalArtifactLayoutV1::from_revision(17).is_err());
+        assert!(LexicalArtifactLayoutV1::from_revision(18).is_err());
     }
 
     #[test]

@@ -1405,7 +1405,8 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
 
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let legacy_path = directory.path().join("lexical-artifact-v14.sqlite");
-    let artifact_path = directory.path().join("lexical-artifact-v16.sqlite");
+    let v16_path = directory.path().join("lexical-artifact-v16.sqlite");
+    let artifact_path = directory.path().join("lexical-artifact-v17.sqlite");
     let control = ArtifactControl { cancelled: false };
     let legacy_verified = {
         let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
@@ -1432,43 +1433,57 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         legacy_reader.clone_exact_page(&authority, &key, None, 1, &control,),
         Err(CodeLexicalArtifactErrorV1::Incompatible(_))
     ));
+    let v16_verified = {
+        let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+            &v16_path,
+            fixture.metadata.clone(),
+            CodeLexicalArtifactWriterRevisionV1::V16,
+        )
+        .expect("create V16 text artifact");
+        for page in &pages {
+            builder
+                .append_page(page, &control)
+                .expect("append V16 text page");
+        }
+        finish_staged_artifact(&mut builder, &receipt, &control)
+    };
     let verified = {
         let mut builder =
             CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
-                .expect("create V16 artifact");
+                .expect("create V17 artifact");
         for page in &pages {
             builder.append_page(page, &control).expect("append page");
         }
         finish_staged_artifact(&mut builder, &receipt, &control)
     };
     assert_eq!(
-        legacy_verified.section_digests(),
-        &verified.section_digests()[..legacy_verified.section_digests().len()],
-        "V16 clone sections must not rewrite lexical section identities"
+        v16_verified.section_digests(),
+        &verified.section_digests()[..v16_verified.section_digests().len()],
+        "V17 fingerprint sections must not rewrite V16 text section identities"
     );
     let successor_path = directory
         .path()
-        .join("lexical-artifact-successor-v16.sqlite");
+        .join("lexical-artifact-successor-v17.sqlite");
     let mut successor = CodeLexicalCloneSuccessorV1::open_or_create(
-        &legacy_path,
+        &v16_path,
         &successor_path,
-        legacy_verified.clone(),
+        v16_verified.clone(),
         fixture.metadata.clone(),
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     )
-    .expect("create clone-only successor");
+    .expect("create fingerprint successor");
     successor
         .append_page(&pages[0], &control)
         .expect("append first clone page");
     drop(successor);
     let mut successor = CodeLexicalCloneSuccessorV1::open_or_create(
-        &legacy_path,
+        &v16_path,
         &successor_path,
-        legacy_verified,
+        v16_verified,
         fixture.metadata.clone(),
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     )
-    .expect("resume clone-only successor");
+    .expect("resume fingerprint successor");
     assert_eq!(
         successor
             .next_cursor()
@@ -1498,63 +1513,7 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("open clone-only successor");
-    let v15_path = directory.path().join("lexical-artifact-v15.sqlite");
-    let v15_verified = {
-        let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
-            &v15_path,
-            fixture.metadata.clone(),
-            CodeLexicalArtifactWriterRevisionV1::V15,
-        )
-        .expect("create V15 artifact");
-        for page in &pages {
-            builder
-                .append_page(page, &control)
-                .expect("append V15 page");
-        }
-        finish_staged_artifact(&mut builder, &receipt, &control)
-    };
-    let v15_reader = CodeLexicalArtifactReaderV1::open_with_control(
-        &v15_path,
-        &v15_verified,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        &control,
-    )
-    .expect("open V15 serving owner");
-    let v16_from_v15_path = directory
-        .path()
-        .join("lexical-artifact-v16-from-v15.sqlite");
-    let mut v16_from_v15 = CodeLexicalCloneSuccessorV1::open_or_create(
-        &v15_path,
-        &v16_from_v15_path,
-        v15_verified,
-        fixture.metadata.clone(),
-        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-    )
-    .expect("create V16 successor from V15");
-    v16_from_v15
-        .append_page(&pages[0], &control)
-        .expect("append V16 successor page");
-    assert_eq!(
-        v15_reader
-            .clone_exact_page(&authority, &key, None, 1, &control)
-            .expect("V15 owner serves during successor work")
-            .members
-            .len(),
-        1
-    );
-    for page in &pages[1..] {
-        v16_from_v15
-            .append_page(page, &control)
-            .expect("append remaining V16 successor page");
-    }
-    let v16_from_v15_verified = v16_from_v15
-        .finish(&receipt, &control)
-        .expect("finish V16 successor from V15");
-    assert_eq!(
-        v16_from_v15_verified.artifact_digest(),
-        verified.artifact_digest()
-    );
+    .expect("open fingerprint successor");
     let connection = rusqlite::Connection::open(&artifact_path).expect("inspect V16 artifact");
     assert_eq!(
         connection
@@ -1589,7 +1548,7 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("open V16 artifact");
+    .expect("open V17 artifact");
     let excluded_page = reader
         .clone_fingerprint_page(&excluded.occurrence, &excluded.payload, None, 10, &control)
         .expect("excluded fingerprint read");
@@ -1660,11 +1619,15 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         .clone_exact_page(&authority, &key, None, 1, &control)
         .expect("first clone page");
     assert_eq!(first.members.len(), 1);
+    let exact_cursor = first
+        .next_cursor
+        .as_ref()
+        .expect("limited exact page has a continuation");
     assert!(matches!(
         reader.clone_fingerprint_page(
             &authority,
             &clone_bodies[0].payload,
-            first.next_cursor.as_ref(),
+            Some(exact_cursor),
             1,
             &control,
         ),
@@ -1680,7 +1643,7 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         reader.clone_exact_page(
             &authority,
             &rename_key,
-            first.next_cursor.as_ref(),
+            Some(exact_cursor),
             1,
             &control,
         ),

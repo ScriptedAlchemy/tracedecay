@@ -45,6 +45,8 @@ pub(super) use super::schema::{
 // stores exact posting keys as collision-checked content-addressed term IDs.
 // Revision 15 adds independently digested clone payload, occurrence, and
 // exact-posting sections without changing lexical document integrity.
+// Revision 16 extends the tagged lexical row payload with signature and
+// documentation fields. Revision 17 adds clone fingerprint sections.
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
 pub(super) const SECTION_NAMES: [&str; 16] = [
     "source_pages",
@@ -823,7 +825,8 @@ pub(super) fn encode_ngram_bitmap(
         | LexicalArtifactLayoutV1::V13
         | LexicalArtifactLayoutV1::V14
         | LexicalArtifactLayoutV1::V15
-        | LexicalArtifactLayoutV1::V16 => encode_ngram_delta_varints_v12(bitmap),
+    | LexicalArtifactLayoutV1::V16
+    | LexicalArtifactLayoutV1::V17 => encode_ngram_delta_varints_v12(bitmap),
     }
 }
 
@@ -913,7 +916,8 @@ pub(super) fn decode_ngram_bitmap(
         | LexicalArtifactLayoutV1::V13
         | LexicalArtifactLayoutV1::V14
         | LexicalArtifactLayoutV1::V15
-        | LexicalArtifactLayoutV1::V16 => decode_ngram_delta_varints_v12(encoded),
+    | LexicalArtifactLayoutV1::V16
+    | LexicalArtifactLayoutV1::V17 => decode_ngram_delta_varints_v12(encoded),
     }
 }
 

@@ -39,6 +39,11 @@ impl CodeLexicalCloneSuccessorV1 {
         metadata: CodeLexicalProjectionMetadataV1,
         memory_budget_bytes: usize,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        if prior.format_revision() != LexicalArtifactLayoutV1::V16.revision() {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "clone successor requires a revision 16 lexical text base".to_owned(),
+            ));
+        }
         let staging_path = staging_path.as_ref();
         if staging_path.exists() {
             return Self::open(staging_path, prior, metadata, memory_budget_bytes);
@@ -189,7 +194,7 @@ impl CodeLexicalCloneSuccessorV1 {
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
         derive_clone_fingerprint_counts(&transaction)?;
         verify_clone_rows(&transaction, source)?;
-        install_clone_freeze(&transaction, LexicalArtifactLayoutV1::V16)?;
+        install_clone_freeze(&transaction, LexicalArtifactLayoutV1::V17)?;
         transaction
             .execute("DROP TABLE clone_successor_state", [])
             .map_err(sqlite_error)?;
@@ -208,7 +213,7 @@ impl CodeLexicalCloneSuccessorV1 {
         sections.extend(compute_clone_section_digests(
             &transaction,
             control,
-            LexicalArtifactLayoutV1::V16,
+            LexicalArtifactLayoutV1::V17,
         )?);
         let metadata_digest = metadata_digest(&self.metadata)?;
         let digest = artifact_digest(
@@ -233,7 +238,7 @@ impl CodeLexicalCloneSuccessorV1 {
             digest,
             sections,
             file_size,
-            LexicalArtifactLayoutV1::V16,
+            LexicalArtifactLayoutV1::V17,
         );
         let encoded = padded_receipt(&receipt)?;
         transaction
