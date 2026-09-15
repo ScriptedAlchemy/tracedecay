@@ -1,9 +1,7 @@
 //! Transport-neutral ports and contracts for TraceDecay.
 //!
 //! This bottom layer defines request and result types, service contracts, and
-//! the traits implemented by storage and runtime crates, including
-//! [`WorkStoragePort`], [`WorkflowDefinitionAuthorityPort`], and
-//! [`StoreSizeTelemetryPort`].
+//! the traits implemented by storage and runtime crates.
 //! `tracedecay-application` depends on these contracts to orchestrate product
 //! workflows; this crate never depends on that orchestration layer.
 //!
@@ -79,7 +77,6 @@ pub mod work_leak_adjudication;
 pub mod work_owner_observation;
 pub mod work_placement;
 pub mod work_product;
-pub mod work_read;
 pub mod work_retry;
 pub mod work_run_control;
 pub mod work_synthesis;
@@ -438,11 +435,8 @@ pub use surface_contracts::{
     NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest, primitive_code_into_primitive,
 };
 pub use work::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, CreateWorkCommand,
-    ReplanDependenciesCommand, ReviewProposalCommand, ReviewProposalDispositionV1,
-    ReviewProposalRequestV1, WorkAppendOutcome, WorkAppendRequest, WorkReadiness,
-    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkService,
-    WorkStorageError, WorkStoragePort,
+    ReviewProposalDispositionV1, WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1,
+    WorkRoutingSnapshotV1,
 };
 pub use work_artifact_hydration::{
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationService, WorkArtifactHydrationV1,
@@ -553,10 +547,6 @@ pub use work_product::{
     WorkProductPortContextV1, WorkProductReadServiceV1, WorkProductRetryAdmissionV1,
     WorkProductRevisionPinsV1, WorkProductSelectionScopeV1, WorkProductSynthesisAdmissionV1,
     WorkRelationScopeV1, work_product_projection_generation,
-};
-pub use work_read::{
-    MAX_WORK_PROJECTION_PAGE_SIZE, WorkProjectionApplicationError, WorkProjectionPortError,
-    WorkProjectionReadPort, WorkProjectionReadService,
 };
 pub use work_retry::{
     RetryWorkAttemptCommandV1, RuntimeWorkRetryEvidenceV1, VerifiedWorkRetryFailureV1,

@@ -199,7 +199,6 @@ pub async fn run_code_generation_retention(
     let replay_reconcile_attemptable = match graph_replay::reconcile_graph_replay_releases(
         lease,
         &store_root,
-        &repository_id,
         observations,
         cancellation,
     )
@@ -300,7 +299,6 @@ pub async fn run_code_generation_retention(
                 match graph_replay::reconcile_graph_replay_releases(
                     lease,
                     &store_root,
-                    &repository_id,
                     observations,
                     cancellation,
                 )
@@ -320,6 +318,7 @@ pub async fn run_code_generation_retention(
             if release_reconcile_failed {
                 CodeGenerationRetentionOutcomeV1::Failed
             } else if release_backlog_remains
+                || report.generation_segment_batch_exhausted
                 || !report.deleted_generations.is_empty()
                 || !report.deleted_text_artifacts.is_empty()
             {

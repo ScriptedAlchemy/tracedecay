@@ -755,6 +755,14 @@ impl CodeIndexSchedulerRegistryV1 {
                         Ok(Ok(Some(RetainedTextGenerationRestoreV1::Refused(metadata)))) => {
                             Some(metadata)
                         }
+                        Ok(Ok(Some(RetainedTextGenerationRestoreV1::Failed(error)))) => {
+                            tracing::error!(
+                                event = "code_index_retained_text_restore_failed",
+                                error = %error,
+                                "retained text restore failed at decoded-cache release"
+                            );
+                            None
+                        }
                         _ => None,
                     }
                 } else {
@@ -1010,14 +1018,23 @@ impl CodeIndexSchedulerRegistryV1 {
                         .await;
                         return;
                     }
-                    graph_text = if let Ok(Ok(Some(published_text))) = published_text {
-                        *worker_text_generation
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(published_text.clone());
-                        Some(published_text)
-                    } else {
-                        None
+                    graph_text = match published_text {
+                        Ok(Ok(Ok(Some(published_text)))) => {
+                            *worker_text_generation
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(published_text.clone());
+                            Some(published_text)
+                        }
+                        Ok(Ok(Err(error))) => {
+                            tracing::error!(
+                                event = "code_index_published_text_reopen_failed",
+                                error = %error,
+                                "published text restore failed at decoded-cache release"
+                            );
+                            None
+                        }
+                        Ok(Ok(Ok(None)) | Err(_)) | Err(_) => None,
                     };
                     // Finish the replacement text owner before optional
                     // O(store) graph work below. Exact and lexical are the

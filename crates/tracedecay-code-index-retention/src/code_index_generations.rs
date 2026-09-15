@@ -712,6 +712,7 @@ pub struct CodeGenerationRetentionReportV1 {
     pub receipt: Option<CodeGenerationRetentionReceiptV1>,
     pub deleted_text_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
     pub text_artifact_receipt: Option<CodeTextArtifactRetentionReceiptV1>,
+    pub generation_segment_batch_exhausted: bool,
 }
 
 #[must_use]
@@ -1154,11 +1155,13 @@ fn sweep_unreferenced_generation_segments(
     graph_replay_pool_root: Option<&Path>,
     apply: bool,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<(bool, u64), CodeGenerationRetentionErrorV1> {
+) -> Result<(bool, u64, bool), CodeGenerationRetentionErrorV1> {
     let segments_root = store_root.join(GENERATION_SEGMENTS_DIRECTORY);
     let entries = match std::fs::read_dir(&segments_root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((false, 0)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((false, 0, false));
+        }
         Err(error) => return Err(storage(error)),
     };
     let mut live_segments = BTreeSet::new();
@@ -1256,6 +1259,7 @@ fn sweep_unreferenced_generation_segments(
 
     let mut found = false;
     let mut reclaimed = 0_u64;
+    let mut reclaimed_segments = 0_usize;
     for entry in entries {
         if observe_cancel(is_cancelled) {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -1284,15 +1288,23 @@ fn sweep_unreferenced_generation_segments(
         }
         found = true;
         if !apply {
-            return Ok((true, 0));
+            return Ok((true, 0, false));
         }
         std::fs::remove_file(&path).map_err(storage)?;
         reclaimed = reclaimed.saturating_add(metadata.len());
+        reclaimed_segments += 1;
+        if reclaimed_segments == MAX_CODE_GENERATION_RETENTION_BATCH_V1 {
+            break;
+        }
     }
     if reclaimed > 0 {
         sync_directory(&segments_root)?;
     }
-    Ok((found, reclaimed))
+    Ok((
+        found,
+        reclaimed,
+        reclaimed_segments == MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+    ))
 }
 
 fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
@@ -1337,16 +1349,16 @@ fn has_unreferenced_generation_segments(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
     sweep_unreferenced_generation_segments(store_root, graph_replay_pool_root, false, is_cancelled)
-        .map(|(found, _)| found)
+        .map(|(found, _, _)| found)
 }
 
 fn collect_unreferenced_generation_segments(
     store_root: &Path,
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<u64, CodeGenerationRetentionErrorV1> {
+) -> Result<(u64, bool), CodeGenerationRetentionErrorV1> {
     sweep_unreferenced_generation_segments(store_root, graph_replay_pool_root, true, is_cancelled)
-        .map(|(_, reclaimed)| reclaimed)
+        .map(|(_, reclaimed, batch_exhausted)| (reclaimed, batch_exhausted))
 }
 
 /// `graph_replay_pool_root` is the project graph's replay pool. When present,
@@ -1398,6 +1410,7 @@ pub fn execute_code_generation_retention_cancellable(
             receipt: None,
             deleted_text_artifacts: Vec::new(),
             text_artifact_receipt: None,
+            generation_segment_batch_exhausted: false,
         });
     }
     // A metadata-only census trusts file names for content digests. That is
@@ -1425,27 +1438,28 @@ pub fn execute_code_generation_retention_cancellable(
             "active generation changed after the retention mark phase".to_owned(),
         ));
     }
-    let mut reclaimed_segment_bytes = if plan.collectable_generations.is_empty()
-        && plan.collectable_generation_segments == GenerationSegmentCensusV1::Present
-    {
-        let graph_replay_pool_lock = match graph_replay_pool_root {
-            Some(pool_root) => Some(acquire_graph_replay_pool_lock_checked(
-                pool_root,
-                Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+    let (mut reclaimed_segment_bytes, mut generation_segment_batch_exhausted) =
+        if plan.collectable_generations.is_empty()
+            && plan.collectable_generation_segments == GenerationSegmentCensusV1::Present
+        {
+            let graph_replay_pool_lock = match graph_replay_pool_root {
+                Some(pool_root) => Some(acquire_graph_replay_pool_lock_checked(
+                    pool_root,
+                    Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+                    is_cancelled,
+                )?),
+                None => None,
+            };
+            let reclaimed = collect_unreferenced_generation_segments(
+                store_root,
+                graph_replay_pool_root,
                 is_cancelled,
-            )?),
-            None => None,
+            )?;
+            drop(graph_replay_pool_lock);
+            reclaimed
+        } else {
+            (0, false)
         };
-        let reclaimed = collect_unreferenced_generation_segments(
-            store_root,
-            graph_replay_pool_root,
-            is_cancelled,
-        )?;
-        drop(graph_replay_pool_lock);
-        reclaimed
-    } else {
-        0
-    };
     let (deleted_generations, receipt) = if plan.collectable_generations.is_empty() {
         (Vec::new(), None)
     } else {
@@ -1523,11 +1537,12 @@ pub fn execute_code_generation_retention_cancellable(
                 &vector_readable_sources,
                 graph_replay_pool_lock.as_ref(),
             )?;
-            reclaimed_segment_bytes = collect_unreferenced_generation_segments(
-                store_root,
-                graph_replay_pool_root,
-                is_cancelled,
-            )?;
+            (reclaimed_segment_bytes, generation_segment_batch_exhausted) =
+                collect_unreferenced_generation_segments(
+                    store_root,
+                    graph_replay_pool_root,
+                    is_cancelled,
+                )?;
             clear_transaction(store_root)
         })();
         if let Err(error) = result {
@@ -1578,6 +1593,7 @@ pub fn execute_code_generation_retention_cancellable(
         receipt,
         deleted_text_artifacts,
         text_artifact_receipt,
+        generation_segment_batch_exhausted,
     })
 }
 

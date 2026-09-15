@@ -27,10 +27,16 @@ mod projection;
 mod routes;
 
 pub use self::projection::{
-    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
+    CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneExactArtifactCursorV1,
-    CloneExactArtifactMemberV1, CloneExactArtifactPageV1, CodeExactLexicalArtifactReaderV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneArtifactCursorV1, CloneArtifactPageV1,
+    CloneExactArtifactMemberV1, CloneFingerprintArtifactAnchorV1,
+    CloneFingerprintArtifactCandidateV1, CloneFingerprintArtifactReadV1,
+    CloneFingerprintCancellationPointV1, CloneFingerprintPartialReasonV1,
+    CloneFingerprintReadAccountingV1, CloneFingerprintStreamDescriptorV1,
+    CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
+    CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1, CodeExactLexicalArtifactReaderV1,
     CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuildProgressV1,
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
@@ -38,8 +44,9 @@ pub use self::projection::{
     CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
     CodeLexicalCloneSuccessorV1, CodeLexicalImportMembershipWitnessV1,
     CodeLexicalProjectionMetadataV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
-    PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
-    VerifiedCodeLexicalArtifactV1, code_lexical_artifact_build_memory_budget_for,
+    MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1, PreparedCodeLexicalArtifactBatchV1,
+    PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
+    code_lexical_artifact_build_memory_budget_for,
 };
 #[cfg(feature = "search-eval")]
 pub use self::projection::{

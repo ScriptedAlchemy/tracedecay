@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, params};
+use tracedecay_code_index::clones::CodeIndexCloneBodyV1;
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
@@ -13,13 +14,13 @@ use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 use super::super::CodeLexicalProjectionMetadataV1;
 use super::builder::{
     BuilderMutationGuardV1, compute_clone_section_digests, install_clone_freeze,
-    register_builder_mutation_gate, sqlite_file_size,
+    register_builder_mutation_gate, sqlite_file_size, verify_clone_rows,
 };
 use super::format::{
     RECEIPT_RESERVATION_BYTES, VerifiedCodeLexicalArtifactV1, artifact_digest,
     decode_padded_receipt, metadata_digest, new_verified_receipt, padded_receipt,
 };
-use super::schema::{CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15, LexicalArtifactLayoutV1};
+use super::schema::{CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, LexicalArtifactLayoutV1};
 use super::{CodeLexicalArtifactErrorV1, checkpoint, open_builder_connection, sqlite_error};
 
 pub struct CodeLexicalCloneSuccessorV1 {
@@ -72,7 +73,7 @@ impl CodeLexicalCloneSuccessorV1 {
                 ))
             })?;
         if prior_digest != prior.artifact_digest().as_str()
-            || format_revision != i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15)
+            || format_revision != i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1)
             || metadata_digest(&metadata)? != *prior.metadata_digest()
         {
             return Err(CodeLexicalArtifactErrorV1::Incompatible(
@@ -186,13 +187,29 @@ impl CodeLexicalCloneSuccessorV1 {
             ));
         }
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
+        derive_clone_fingerprint_counts(&transaction)?;
         verify_clone_rows(&transaction, source)?;
-        install_clone_freeze(&transaction, LexicalArtifactLayoutV1::V15)?;
+        install_clone_freeze(&transaction, LexicalArtifactLayoutV1::V16)?;
         transaction
             .execute("DROP TABLE clone_successor_state", [])
             .map_err(sqlite_error)?;
-        let mut sections = self.prior.section_digests().to_vec();
-        sections.extend(compute_clone_section_digests(&transaction, control)?);
+        let mut sections = self
+            .prior
+            .section_digests()
+            .iter()
+            .take(11)
+            .cloned()
+            .collect::<Vec<_>>();
+        if sections.len() != 11 {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone successor prior is missing lexical section digests".to_owned(),
+            ));
+        }
+        sections.extend(compute_clone_section_digests(
+            &transaction,
+            control,
+            LexicalArtifactLayoutV1::V16,
+        )?);
         let metadata_digest = metadata_digest(&self.metadata)?;
         let digest = artifact_digest(
             &metadata_digest,
@@ -206,7 +223,7 @@ impl CodeLexicalCloneSuccessorV1 {
             source.import_dictionary_digest(),
             source.cumulative_digest(),
             &sections,
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15,
+            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
         )?;
         let file_size = sqlite_file_size(&transaction)?;
         let receipt = new_verified_receipt(
@@ -216,16 +233,13 @@ impl CodeLexicalCloneSuccessorV1 {
             digest,
             sections,
             file_size,
-            LexicalArtifactLayoutV1::V15,
+            LexicalArtifactLayoutV1::V16,
         );
         let encoded = padded_receipt(&receipt)?;
         transaction
             .execute(
                 "UPDATE artifact_state SET format_revision = ?1, receipt = ?2 WHERE singleton = 1",
-                params![
-                    i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15),
-                    encoded,
-                ],
+                params![i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1), encoded,],
             )
             .map_err(sqlite_error)?;
         checkpoint(control)?;
@@ -291,7 +305,7 @@ fn initialize_successor(
         .execute(
             "UPDATE artifact_state SET format_revision = ?1, receipt = ?2 WHERE singleton = 1",
             params![
-                i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15),
+                i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1),
                 vec![0u8; RECEIPT_RESERVATION_BYTES],
             ],
         )
@@ -307,21 +321,28 @@ fn initialize_successor(
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))
 }
 
-fn reset_clone_tables(connection: &Connection) -> Result<(), CodeLexicalArtifactErrorV1> {
-    connection
-        .execute_batch(
-            "DROP TRIGGER IF EXISTS frozen_clone_body_payloads_insert;
+const RESET_CLONE_TABLES_SQL: &str =
+    "DROP TRIGGER IF EXISTS frozen_clone_body_payloads_insert;
              DROP TRIGGER IF EXISTS frozen_clone_occurrences_insert;
              DROP TRIGGER IF EXISTS frozen_clone_exact_postings_insert;
+             DROP TRIGGER IF EXISTS frozen_clone_fingerprint_counts_insert;
+             DROP TRIGGER IF EXISTS frozen_clone_fingerprint_postings_insert;
              DROP TRIGGER IF EXISTS builder_gate_clone_body_payloads_insert;
              DROP TRIGGER IF EXISTS builder_gate_clone_occurrences_insert;
              DROP TRIGGER IF EXISTS builder_gate_clone_exact_postings_insert;
+             DROP TRIGGER IF EXISTS builder_gate_clone_fingerprint_postings_insert;
              DROP TRIGGER IF EXISTS immutable_clone_body_payloads_update;
              DROP TRIGGER IF EXISTS immutable_clone_body_payloads_delete;
              DROP TRIGGER IF EXISTS immutable_clone_occurrences_update;
              DROP TRIGGER IF EXISTS immutable_clone_occurrences_delete;
              DROP TRIGGER IF EXISTS immutable_clone_exact_postings_update;
              DROP TRIGGER IF EXISTS immutable_clone_exact_postings_delete;
+             DROP TRIGGER IF EXISTS immutable_clone_fingerprint_postings_update;
+             DROP TRIGGER IF EXISTS immutable_clone_fingerprint_postings_delete;
+             DROP TRIGGER IF EXISTS immutable_clone_fingerprint_counts_update;
+             DROP TRIGGER IF EXISTS immutable_clone_fingerprint_counts_delete;
+             DROP TABLE IF EXISTS clone_fingerprint_counts;
+             DROP TABLE IF EXISTS clone_fingerprint_postings;
              DROP TABLE IF EXISTS clone_exact_postings;
              DROP TABLE IF EXISTS clone_occurrences;
              DROP TABLE IF EXISTS clone_body_payloads;
@@ -345,16 +366,43 @@ fn reset_clone_tables(connection: &Connection) -> Result<(), CodeLexicalArtifact
                 payload_digest TEXT NOT NULL,
                 PRIMARY KEY(class, normalization_revision, digest, symbol_occurrence_id)
              ) WITHOUT ROWID;
+             CREATE TABLE clone_fingerprint_counts (
+                language TEXT NOT NULL,
+                class INTEGER NOT NULL,
+                normalization_revision INTEGER NOT NULL,
+                fingerprint INTEGER NOT NULL,
+                posting_count INTEGER NOT NULL,
+                PRIMARY KEY(language, class, normalization_revision, fingerprint)
+             ) WITHOUT ROWID;
+             CREATE TABLE clone_fingerprint_postings (
+                language TEXT NOT NULL,
+                class INTEGER NOT NULL,
+                normalization_revision INTEGER NOT NULL,
+                fingerprint INTEGER NOT NULL,
+                symbol_occurrence_id TEXT NOT NULL,
+                token_position INTEGER NOT NULL,
+                payload_digest TEXT NOT NULL,
+                body_digest TEXT NOT NULL,
+                PRIMARY KEY(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position)
+             ) WITHOUT ROWID;
              CREATE TRIGGER builder_gate_clone_body_payloads_insert BEFORE INSERT ON clone_body_payloads WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
              CREATE TRIGGER builder_gate_clone_occurrences_insert BEFORE INSERT ON clone_occurrences WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
              CREATE TRIGGER builder_gate_clone_exact_postings_insert BEFORE INSERT ON clone_exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+             CREATE TRIGGER builder_gate_clone_fingerprint_postings_insert BEFORE INSERT ON clone_fingerprint_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
              CREATE TRIGGER immutable_clone_body_payloads_update BEFORE UPDATE ON clone_body_payloads BEGIN SELECT RAISE(ABORT, 'immutable clone body payloads'); END;
              CREATE TRIGGER immutable_clone_body_payloads_delete BEFORE DELETE ON clone_body_payloads BEGIN SELECT RAISE(ABORT, 'immutable clone body payloads'); END;
              CREATE TRIGGER immutable_clone_occurrences_update BEFORE UPDATE ON clone_occurrences BEGIN SELECT RAISE(ABORT, 'immutable clone occurrences'); END;
              CREATE TRIGGER immutable_clone_occurrences_delete BEFORE DELETE ON clone_occurrences BEGIN SELECT RAISE(ABORT, 'immutable clone occurrences'); END;
              CREATE TRIGGER immutable_clone_exact_postings_update BEFORE UPDATE ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'immutable clone exact postings'); END;
-             CREATE TRIGGER immutable_clone_exact_postings_delete BEFORE DELETE ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'immutable clone exact postings'); END;",
-        )
+             CREATE TRIGGER immutable_clone_exact_postings_delete BEFORE DELETE ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'immutable clone exact postings'); END;
+             CREATE TRIGGER immutable_clone_fingerprint_postings_update BEFORE UPDATE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
+             CREATE TRIGGER immutable_clone_fingerprint_postings_delete BEFORE DELETE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
+             CREATE TRIGGER immutable_clone_fingerprint_counts_update BEFORE UPDATE ON clone_fingerprint_counts BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint counts'); END;
+             CREATE TRIGGER immutable_clone_fingerprint_counts_delete BEFORE DELETE ON clone_fingerprint_counts BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint counts'); END;";
+
+fn reset_clone_tables(connection: &Connection) -> Result<(), CodeLexicalArtifactErrorV1> {
+    connection
+        .execute_batch(RESET_CLONE_TABLES_SQL)
         .map_err(sqlite_error)
 }
 
@@ -419,6 +467,39 @@ fn append_clone_rows(
                 )
                 .map_err(sqlite_error)?;
         }
+        append_clone_fingerprints(transaction, body)?;
+    }
+    Ok(())
+}
+
+fn append_clone_fingerprints(
+    transaction: &rusqlite::Transaction<'_>,
+    body: &CodeIndexCloneBodyV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let Some(stream) = body.payload.fingerprint_stream(body.occurrence.eligibility) else {
+        return Ok(());
+    };
+    for position in body
+        .payload
+        .fingerprint_positions(body.occurrence.eligibility)
+        .map_err(CodeLexicalArtifactErrorV1::Contract)?
+    {
+        transaction
+            .execute(
+                "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    body.payload.language,
+                    i64::from(stream.class as u8),
+                    i64::from(stream.normalization_revision),
+                    i64::try_from(position.fingerprint)
+                        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+                    body.occurrence.symbol_occurrence_id.as_str(),
+                    i64::from(position.token_position),
+                    body.occurrence.payload_digest.as_str(),
+                    body.payload.body_digest.as_str(),
+                ],
+            )
+            .map_err(sqlite_error)?;
     }
     Ok(())
 }
@@ -543,6 +624,61 @@ fn verify_clone_page_rows(
                 "resumed clone postings differ from their sealed source page".to_owned(),
             ));
         }
+        verify_clone_fingerprint_page_rows(connection, body)?;
+    }
+    Ok(())
+}
+
+type CloneFingerprintRowV1 = (String, i64, i64, i64, i64, String, String);
+
+fn verify_clone_fingerprint_page_rows(
+    connection: &Connection,
+    body: &CodeIndexCloneBodyV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut expected = Vec::new();
+    if let Some(stream) = body.payload.fingerprint_stream(body.occurrence.eligibility) {
+        for position in body
+            .payload
+            .fingerprint_positions(body.occurrence.eligibility)
+            .map_err(CodeLexicalArtifactErrorV1::Contract)?
+        {
+            expected.push((
+                body.payload.language.clone(),
+                i64::from(stream.class as u8),
+                i64::from(stream.normalization_revision),
+                i64::try_from(position.fingerprint)
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+                i64::from(position.token_position),
+                body.occurrence.payload_digest.as_str().to_owned(),
+                body.payload.body_digest.as_str().to_owned(),
+            ));
+        }
+    }
+    expected.sort();
+    let mut statement = connection
+        .prepare(
+            "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE symbol_occurrence_id = ?1 ORDER BY language, class, normalization_revision, fingerprint, token_position",
+        )
+        .map_err(sqlite_error)?;
+    let stored = statement
+        .query_map([body.occurrence.symbol_occurrence_id.as_str()], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .map_err(sqlite_error)?
+        .collect::<Result<Vec<CloneFingerprintRowV1>, _>>()
+        .map_err(sqlite_error)?;
+    if stored != expected {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "resumed clone fingerprints differ from their sealed source page".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -567,30 +703,15 @@ fn verify_source_receipt(
     Ok(())
 }
 
-fn verify_clone_rows(
-    connection: &Connection,
-    source: &VerifiedSealedLexicalSourceReceiptV1,
+fn derive_clone_fingerprint_counts(
+    transaction: &rusqlite::Transaction<'_>,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let (occurrences, missing_payloads, orphan_payloads, dangling_postings): (i64, i64, i64, i64) =
-        connection
-        .query_row(
-            "SELECT
-             (SELECT COUNT(*) FROM clone_occurrences),
-             (SELECT COUNT(*) FROM clone_occurrences AS occurrence LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = occurrence.payload_digest WHERE payload.payload_digest IS NULL),
-             (SELECT COUNT(*) FROM clone_body_payloads AS payload LEFT JOIN clone_occurrences AS occurrence ON occurrence.payload_digest = payload.payload_digest WHERE occurrence.symbol_occurrence_id IS NULL),
-             (SELECT COUNT(*) FROM clone_exact_postings AS posting LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest WHERE occurrence.symbol_occurrence_id IS NULL OR payload.payload_digest IS NULL OR occurrence.payload_digest != posting.payload_digest)",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    transaction
+        .execute_batch(
+            "INSERT INTO clone_fingerprint_counts(language, class, normalization_revision, fingerprint, posting_count)
+             SELECT language, class, normalization_revision, fingerprint, COUNT(*)
+             FROM clone_fingerprint_postings
+             GROUP BY language, class, normalization_revision, fingerprint;",
         )
-        .map_err(sqlite_error)?;
-    if u64::try_from(occurrences).ok() != Some(source.total_clone_bodies())
-        || missing_payloads != 0
-        || orphan_payloads != 0
-        || dangling_postings != 0
-    {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "clone successor rows do not match their source receipt".to_owned(),
-        ));
-    }
-    Ok(())
+        .map_err(sqlite_error)
 }

@@ -14,7 +14,9 @@ use rusqlite::StatementStatus;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
-use tracedecay_code_index::clones::{CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1};
+use tracedecay_code_index::clones::{
+    CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
+};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
@@ -26,6 +28,11 @@ use tracedecay_domain::{
 use tracedecay_private_fs::open_private_file;
 
 use super::builder::compute_section_digests;
+use super::fingerprints::{
+    CloneFingerprintArtifactReadV1, CloneFingerprintReadRequestV1,
+    CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
+    read_clone_fingerprint_page,
+};
 use super::format::{
     ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, CodeLexicalImportMembershipWitnessV1,
     VerifiedCodeLexicalArtifactV1, artifact_digest, decode_ngram_bitmap, decode_padded_receipt,
@@ -118,18 +125,26 @@ pub struct CloneExactArtifactMemberV1 {
 pub const MAX_CLONE_EXACT_PAGE_MEMBERS_V1: usize = 1_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloneExactArtifactCursorV1 {
-    artifact_digest: ManifestDigest,
-    generation: CodeGenerationId,
-    key: CloneExactKeyV1,
-    authority_digest: ManifestDigest,
-    last_symbol_occurrence_id: SymbolOccurrenceId,
+pub struct CloneArtifactCursorV1 {
+    pub(super) artifact_digest: ManifestDigest,
+    pub(super) generation: CodeGenerationId,
+    pub(super) request_digest: ManifestDigest,
+    pub(super) after: CloneArtifactCursorPositionV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloneExactArtifactPageV1 {
-    pub members: Vec<CloneExactArtifactMemberV1>,
-    pub next_cursor: Option<CloneExactArtifactCursorV1>,
+pub(super) enum CloneArtifactCursorPositionV1 {
+    Exact(SymbolOccurrenceId),
+    Fingerprint {
+        body_digest: ManifestDigest,
+        payload_digest: ManifestDigest,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneArtifactPageV1<T> {
+    pub members: Vec<T>,
+    pub next_cursor: Option<CloneArtifactCursorV1>,
 }
 
 fn clone_authority_digest(
@@ -193,6 +208,10 @@ impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
 impl CodeLexicalArtifactReaderV1 {
     pub fn has_clone_index(&self) -> bool {
         self.layout.has_clone_index()
+    }
+
+    pub fn has_clone_fingerprints(&self) -> bool {
+        self.layout.has_clone_fingerprints()
     }
 
     /// Open a published artifact whose trust anchor is its content address:
@@ -618,10 +637,10 @@ impl CodeLexicalArtifactReaderV1 {
         &self,
         authority: &CloneBodyOccurrenceV1,
         key: &CloneExactKeyV1,
-        cursor: Option<&CloneExactArtifactCursorV1>,
+        cursor: Option<&CloneArtifactCursorV1>,
         limit: usize,
         control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<CloneExactArtifactPageV1, CodeLexicalArtifactErrorV1> {
+    ) -> Result<CloneArtifactPageV1<CloneExactArtifactMemberV1>, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
             || self.metadata.generation != authority.source_generation
@@ -641,7 +660,14 @@ impl CodeLexicalArtifactReaderV1 {
             )));
         }
         let authority_digest = clone_authority_digest(authority)?;
-        let after = self.clone_exact_after(key, cursor, &authority_digest)?;
+        let request_digest = canonical_sha256(&(
+            "tracedecay.clone-exact-request.v1",
+            self.receipt.artifact_digest(),
+            &authority_digest,
+            key,
+        ))
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let after = self.clone_exact_after(cursor, &request_digest)?;
         let fetch = limit.checked_add(1).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract("clone exact page limit overflowed".to_owned())
         })?;
@@ -674,38 +700,144 @@ impl CodeLexicalArtifactReaderV1 {
         }
         let next_cursor = (members.len() > limit)
             .then(|| {
-                members
-                    .get(limit - 1)
-                    .map(|member| CloneExactArtifactCursorV1 {
-                        artifact_digest: self.receipt.artifact_digest().clone(),
-                        generation: self.metadata.generation.clone(),
-                        key: key.clone(),
-                        authority_digest,
-                        last_symbol_occurrence_id: member.occurrence.symbol_occurrence_id.clone(),
-                    })
+                members.get(limit - 1).map(|member| CloneArtifactCursorV1 {
+                    artifact_digest: self.receipt.artifact_digest().clone(),
+                    generation: self.metadata.generation.clone(),
+                    request_digest,
+                    after: CloneArtifactCursorPositionV1::Exact(
+                        member.occurrence.symbol_occurrence_id.clone(),
+                    ),
+                })
             })
             .flatten();
         members.truncate(limit);
-        Ok(CloneExactArtifactPageV1 {
+        Ok(CloneArtifactPageV1 {
             members,
             next_cursor,
         })
     }
 
+    pub fn clone_fingerprint_page(
+        &self,
+        authority: &CloneBodyOccurrenceV1,
+        source: &CloneBodyPayloadV1,
+        cursor: Option<&CloneArtifactCursorV1>,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CloneFingerprintArtifactReadV1, CodeLexicalArtifactErrorV1> {
+        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
+            || self.metadata.generation != authority.source_generation
+        {
+            return Err(CodeLexicalArtifactErrorV1::Missing(
+                "clone lookup authority is unavailable".to_owned(),
+            ));
+        }
+        let authority_digest = clone_authority_digest(authority)?;
+        let connection = self.lock_connection()?;
+        read_clone_fingerprint_page(
+            &connection,
+            CloneFingerprintReadRequestV1 {
+                layout: self.layout,
+                receipt: &self.receipt,
+                authority_digest: &authority_digest,
+                authority,
+                source,
+                selected_block: None,
+                cursor,
+                limit,
+                control,
+            },
+        )
+    }
+
+    pub fn clone_selected_block_page(
+        &self,
+        authority: &CloneBodyOccurrenceV1,
+        source: &CloneBodyPayloadV1,
+        selected_block: &CloneSelectedBlockV1,
+        cursor: Option<&CloneArtifactCursorV1>,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CloneSelectedBlockArtifactReadV1, CodeLexicalArtifactErrorV1> {
+        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
+            || self.metadata.generation != authority.source_generation
+        {
+            return Err(CodeLexicalArtifactErrorV1::Missing(
+                "clone lookup authority is unavailable".to_owned(),
+            ));
+        }
+        let authority_digest = clone_authority_digest(authority)?;
+        let connection = self.lock_connection()?;
+        let read = read_clone_fingerprint_page(
+            &connection,
+            CloneFingerprintReadRequestV1 {
+                layout: self.layout,
+                receipt: &self.receipt,
+                authority_digest: &authority_digest,
+                authority,
+                source,
+                selected_block: Some(selected_block),
+                cursor,
+                limit,
+                control,
+            },
+        )?;
+        let stream = read.stream.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "selected clone block has no fingerprint stream".to_owned(),
+            )
+        })?;
+        let members = read
+            .page
+            .members
+            .into_iter()
+            .map(|candidate| {
+                let containment = candidate.selected_block_containment.ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "selected clone block candidate has no containment class".to_owned(),
+                    )
+                })?;
+                Ok(CloneSelectedBlockArtifactCandidateV1 {
+                    payload: candidate.payload,
+                    occurrences: candidate.occurrences,
+                    anchors: candidate.anchors,
+                    containment,
+                })
+            })
+            .collect::<Result<Vec<_>, CodeLexicalArtifactErrorV1>>()?;
+        Ok(CloneSelectedBlockArtifactReadV1 {
+            page: CloneArtifactPageV1 {
+                members,
+                next_cursor: read.page.next_cursor,
+            },
+            stream,
+            coverage: read.coverage,
+            partial_reasons: read.partial_reasons,
+            accounting: read.accounting,
+        })
+    }
+
     fn clone_exact_after<'a>(
         &self,
-        key: &CloneExactKeyV1,
-        cursor: Option<&'a CloneExactArtifactCursorV1>,
-        authority_digest: &ManifestDigest,
+        cursor: Option<&'a CloneArtifactCursorV1>,
+        request_digest: &ManifestDigest,
     ) -> Result<&'a str, CodeLexicalArtifactErrorV1> {
         match cursor {
             Some(cursor)
                 if cursor.artifact_digest == *self.receipt.artifact_digest()
                     && cursor.generation == self.metadata.generation
-                    && cursor.key == *key
-                    && cursor.authority_digest == *authority_digest =>
+                    && cursor.request_digest == *request_digest =>
             {
-                Ok(cursor.last_symbol_occurrence_id.as_str())
+                match &cursor.after {
+                    CloneArtifactCursorPositionV1::Exact(symbol_occurrence_id) => {
+                        Ok(symbol_occurrence_id.as_str())
+                    }
+                    CloneArtifactCursorPositionV1::Fingerprint { .. } => {
+                        Err(CodeLexicalArtifactErrorV1::Contract(
+                            "clone cursor position does not match an exact read".to_owned(),
+                        ))
+                    }
+                }
             }
             Some(_) => Err(CodeLexicalArtifactErrorV1::Contract(
                 "clone exact cursor does not match its artifact, key, or authority".to_owned(),

@@ -29,7 +29,8 @@ impl BashExtractor {
             crate::parsed_extraction::ParsedExtractionScope::ChangedRegions(_)
         ) {
             // Bash reextracts the whole file on incremental edits because its script module
-            // spans and parents the whole document.
+            // spans the document and owns script-level call binding. A region walk would
+            // drop calls and children that sit outside the edit.
             let full = Self::extract_tree(
                 file_path,
                 source,

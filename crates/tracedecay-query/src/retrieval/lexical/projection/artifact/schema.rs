@@ -22,7 +22,8 @@ use tracedecay_domain::ExactFieldV1;
 /// entries and referenced by content-addressed id. Revision 15 adds
 /// content-addressed clone payloads, source-bound occurrences, and exact
 /// conservative/rename postings. Revision 16 adds signature and documentation
-/// fields without changing the shipped revision-14/15 row codec. Readers
+/// fields without changing the shipped revision-14/15 row codec, positional
+/// winnowed fingerprint postings, and stored posting-list counts. Readers
 /// accept all shipped layouts; writers emit 16 unless an explicit benchmark
 /// revision is selected.
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10: u32 = 10;
@@ -270,6 +271,10 @@ impl LexicalArtifactLayoutV1 {
 
     pub(super) fn has_clone_index(self) -> bool {
         matches!(self, Self::V15 | Self::V16)
+    }
+
+    pub(super) fn has_clone_fingerprints(self) -> bool {
+        self == Self::V16
     }
 }
 

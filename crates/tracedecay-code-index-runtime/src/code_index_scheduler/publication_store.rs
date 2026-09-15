@@ -1788,6 +1788,29 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(self.cache.lock_state()?.active.as_ref().map(Arc::clone))
     }
 
+    /// Drop the build-phase decoded active generation after the seal is durable.
+    ///
+    /// Text projection reads authenticated sealed pages. Keeping the in-memory
+    /// generation pinned here is the overlapping whole-generation owner that
+    /// sits beside the artifact builder for the entire pre-seat text pass.
+    /// Incremental rebuild and graph seat decode on demand.
+    pub(super) fn release_decoded_active_after_seal(
+        &self,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let released = {
+            let mut state = self.cache.lock_state()?;
+            let released = state.active.take();
+            if released.is_some() {
+                state.active_epoch = state.active_epoch.wrapping_add(1);
+            }
+            self.active_encoded_bytes.store(0, Ordering::Release);
+            hotpath::gauge!("daemon.code_index.generation.decode.bytes").set(0_u64);
+            released
+        };
+        drop(released);
+        Ok(())
+    }
+
     /// Prove that an already-decoded serving handle still names the durable
     /// active publication without reading or decoding its sealed payload.
     pub(super) fn active_pointer_matches_generation(
@@ -2002,6 +2025,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn sealed_decode_count(&self) -> u64 {
         self.cache.decode_count()
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn poison_decoded_cache_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self
+                .cache
+                .lock_state()
+                .expect("decoded cache lock before poison");
+            panic!("poison decoded-generation cache");
+        }));
     }
 
     pub(super) fn take_unpublished(&self) -> Option<Arc<CodeIndexPublishedGenerationV1>> {

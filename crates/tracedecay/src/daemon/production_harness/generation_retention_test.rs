@@ -5,12 +5,15 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_contracts::doctor::DoctorStorageFamilyReadV1;
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
-use tracedecay_domain::CodeGenerationId;
+use tracedecay_domain::{CodeGenerationId, canonical_text::sha256_hex};
 
 use super::journey_test_support::git;
 use super::*;
 use crate::daemon::maintenance::project_store_maintenance_lease;
-use tracedecay_code_index_retention::code_index_generations::prepare_next_code_generation_retention_cancellable;
+use tracedecay_code_index_retention::code_index_generations::{
+    MAX_CODE_GENERATION_RETENTION_BATCH_V1, prepare_next_code_generation_retention_cancellable,
+};
+use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 
 fn initialize_git_project(root: &Path) {
     git(root, &["init", "-q", "-b", "main"]);
@@ -73,7 +76,7 @@ async fn publish_code_edit(
 /// maintenance cadence collects them, and the Doctor census reads the same
 /// store through the retained daemon-service signature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mounted_code_generation_retention_collects_superseded_sources() {
+async fn mounted_code_generation_retention_continues_capped_segment_reclamation() {
     let compaction = CompactionThresholdConfig::default();
     let isolation = TempDir::new().expect("isolated production composition");
     let project_root = isolation.path().join("project");
@@ -188,6 +191,35 @@ async fn mounted_code_generation_retention_collects_superseded_sources() {
         .await
         .expect("serving code generation survives retention");
     assert_eq!(serving, latest);
+
+    let segment_root = code_store_root.join("code-generation-segments-v1");
+    let orphan_segments = (0..=MAX_CODE_GENERATION_RETENTION_BATCH_V1)
+        .map(|index| {
+            let bytes = format!("unreferenced production segment {index}");
+            let path = segment_root.join(format!("segment-{}.json", sha256_hex(bytes.as_bytes())));
+            std::fs::write(&path, bytes).expect("write unreferenced segment");
+            path
+        })
+        .collect::<Vec<_>>();
+    let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
+        &project_store_maintenance_lease(graph.as_ref()),
+        schedulers,
+        &observations,
+        &cancellation,
+        Some(&compaction),
+        None,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention),
+        "a capped segment-only pass must keep the production maintenance cadence short"
+    );
+    assert_eq!(
+        orphan_segments.iter().filter(|path| path.exists()).count(),
+        1,
+        "one bounded maintenance pass must reclaim exactly one segment batch"
+    );
 
     let findings_after =
         tracedecay_daemon_service::doctor_kernel::collect_code_generation_retention_findings(

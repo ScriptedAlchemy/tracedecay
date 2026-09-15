@@ -363,6 +363,11 @@ const CLONE_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
         "INSERT",
     ),
 ];
+const CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 1] = [(
+    "builder_gate_clone_fingerprint_postings_insert",
+    "clone_fingerprint_postings",
+    "INSERT",
+)];
 const CLONE_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 6] = [
     (
         "immutable_clone_body_payloads_update",
@@ -399,6 +404,32 @@ const CLONE_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 6] = [
         "clone_exact_postings",
         "DELETE",
         "immutable clone exact postings",
+    ),
+];
+const CLONE_FINGERPRINT_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 4] = [
+    (
+        "immutable_clone_fingerprint_postings_update",
+        "clone_fingerprint_postings",
+        "UPDATE",
+        "immutable clone fingerprint postings",
+    ),
+    (
+        "immutable_clone_fingerprint_postings_delete",
+        "clone_fingerprint_postings",
+        "DELETE",
+        "immutable clone fingerprint postings",
+    ),
+    (
+        "immutable_clone_fingerprint_counts_update",
+        "clone_fingerprint_counts",
+        "UPDATE",
+        "immutable clone fingerprint counts",
+    ),
+    (
+        "immutable_clone_fingerprint_counts_delete",
+        "clone_fingerprint_counts",
+        "DELETE",
+        "immutable clone fingerprint counts",
     ),
 ];
 const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 10] = [
@@ -624,10 +655,12 @@ enum FinalizationSectionV1 {
     CloneOccurrences,
     CloneExactPostings,
     CloneBodyPayloads,
+    CloneFingerprintCounts,
+    CloneFingerprintPostings,
 }
 
 impl FinalizationSectionV1 {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 16] = [
         Self::SourcePages,
         Self::DocumentIntegrity,
         Self::ImportIntegrity,
@@ -642,6 +675,8 @@ impl FinalizationSectionV1 {
         Self::CloneOccurrences,
         Self::CloneExactPostings,
         Self::CloneBodyPayloads,
+        Self::CloneFingerprintCounts,
+        Self::CloneFingerprintPostings,
     ];
 
     fn from_ordinal(ordinal: usize) -> Result<Self, CodeLexicalArtifactErrorV1> {
@@ -666,6 +701,8 @@ impl FinalizationSectionV1 {
             Self::CloneOccurrences => "clone_occurrences",
             Self::CloneExactPostings => "clone_exact_postings",
             Self::CloneBodyPayloads => "clone_body_payloads",
+            Self::CloneFingerprintCounts => "clone_fingerprint_counts",
+            Self::CloneFingerprintPostings => "clone_fingerprint_postings",
             Self::FieldStatistics => "field_stats",
             Self::TermStatistics => "term_stats",
             Self::Vocabulary => "vocabulary",
@@ -722,6 +759,12 @@ impl FinalizationSectionV1 {
             }
             (Self::CloneBodyPayloads, _) => {
                 "SELECT payload_digest, payload FROM clone_body_payloads ORDER BY payload_digest"
+            }
+            (Self::CloneFingerprintCounts, _) => {
+                "SELECT language, class, normalization_revision, fingerprint, posting_count FROM clone_fingerprint_counts ORDER BY language, class, normalization_revision, fingerprint"
+            }
+            (Self::CloneFingerprintPostings, _) => {
+                "SELECT language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position"
             }
             (Self::FieldStatistics, _) => {
                 "SELECT field, total_length FROM field_stats ORDER BY field"
@@ -848,7 +891,14 @@ impl FinalizationSectionV1 {
             (Self::Vocabulary, true) => {
                 "SELECT term_id, term, in_fuzzy FROM vocabulary WHERE term_id > ?1 ORDER BY term_id LIMIT ?2"
             }
-            (Self::CloneOccurrences | Self::CloneExactPostings | Self::CloneBodyPayloads, _) => {
+            (
+                Self::CloneOccurrences
+                | Self::CloneExactPostings
+                | Self::CloneBodyPayloads
+                | Self::CloneFingerprintCounts
+                | Self::CloneFingerprintPostings,
+                _,
+            ) => {
                 unreachable!()
             }
         }
@@ -873,6 +923,18 @@ impl FinalizationSectionV1 {
             ),
             (Self::CloneBodyPayloads, true) => Some(
                 "SELECT payload_digest, payload FROM clone_body_payloads WHERE payload_digest > ?1 ORDER BY payload_digest LIMIT ?2",
+            ),
+            (Self::CloneFingerprintCounts, false) => Some(
+                "SELECT language, class, normalization_revision, fingerprint, posting_count FROM clone_fingerprint_counts ORDER BY language, class, normalization_revision, fingerprint LIMIT ?1",
+            ),
+            (Self::CloneFingerprintCounts, true) => Some(
+                "SELECT language, class, normalization_revision, fingerprint, posting_count FROM clone_fingerprint_counts WHERE (language, class, normalization_revision, fingerprint) > (?1, ?2, ?3, ?4) ORDER BY language, class, normalization_revision, fingerprint LIMIT ?5",
+            ),
+            (Self::CloneFingerprintPostings, false) => Some(
+                "SELECT language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position LIMIT ?1",
+            ),
+            (Self::CloneFingerprintPostings, true) => Some(
+                "SELECT language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE (language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position) > (?1, ?2, ?3, ?4, ?5, ?6) ORDER BY language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position LIMIT ?7",
             ),
             _ => None,
         }
@@ -914,6 +976,20 @@ enum PersistedFinalizationKeyV1 {
         digest: String,
         symbol_occurrence_id: String,
     },
+    FingerprintCount {
+        language: String,
+        class: i64,
+        normalization_revision: i64,
+        fingerprint: i64,
+    },
+    FingerprintPosting {
+        language: String,
+        class: i64,
+        normalization_revision: i64,
+        fingerprint: i64,
+        symbol_occurrence_id: String,
+        token_position: i64,
+    },
 }
 
 impl PersistedFinalizationKeyV1 {
@@ -946,6 +1022,12 @@ impl PersistedFinalizationKeyV1 {
             ) | (
                 Self::ClonePosting { .. },
                 FinalizationSectionV1::CloneExactPostings
+            ) | (
+                Self::FingerprintCount { .. },
+                FinalizationSectionV1::CloneFingerprintCounts
+            ) | (
+                Self::FingerprintPosting { .. },
+                FinalizationSectionV1::CloneFingerprintPostings
             )
         )
     }
@@ -1127,6 +1209,16 @@ impl FinalizationWakeMetricsV1 {
             FinalizationSectionV1::CloneBodyPayloads => {
                 hotpath::gauge!("query.artifact.finalization.phase.clone_body_payloads_total")
                     .inc(1u64);
+            }
+            FinalizationSectionV1::CloneFingerprintCounts => {
+                hotpath::gauge!("query.artifact.finalization.phase.clone_fingerprint_counts_total")
+                    .inc(1u64);
+            }
+            FinalizationSectionV1::CloneFingerprintPostings => {
+                hotpath::gauge!(
+                    "query.artifact.finalization.phase.clone_fingerprint_postings_total"
+                )
+                .inc(1u64);
             }
             FinalizationSectionV1::FieldStatistics => {
                 hotpath::gauge!("query.artifact.finalization.phase.field_stats_total").inc(1u64);
@@ -1893,6 +1985,11 @@ impl CodeLexicalArtifactBuilderV1 {
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
             let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
             verify_staged_source_chain(&transaction, source, control)?;
+            if self.layout.has_clone_fingerprints() {
+                with_cancellable_sqlite_statement(&transaction, control, || {
+                    derive_clone_fingerprint_counts(&transaction)
+                })?;
+            }
             let content_epoch = authenticated_authority_epoch(&transaction, source)?;
             install_base_freeze(&transaction, self.layout)?;
             store_finalization_state(
@@ -3651,6 +3748,46 @@ fn append_prepared_clone_bodies(
             }
         }
     }
+    append_prepared_clone_fingerprints(transaction, pages, control)
+}
+
+fn append_prepared_clone_fingerprints(
+    transaction: &Transaction<'_>,
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    if !pages.iter().any(|page| {
+        page.clone_bodies
+            .iter()
+            .any(|body| body.fingerprint_stream.is_some())
+    }) {
+        return Ok(());
+    }
+    let mut insert = transaction
+        .prepare_cached(
+            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .map_err(sqlite_error)?;
+    for body in pages.iter().flat_map(|page| &page.clone_bodies) {
+        checkpoint(control)?;
+        let Some(stream) = &body.fingerprint_stream else {
+            continue;
+        };
+        for position in &stream.positions {
+            insert
+                .execute(params![
+                    stream.language,
+                    i64::from(stream.class as u8),
+                    i64::from(stream.normalization_revision),
+                    i64::try_from(position.fingerprint).map_err(contract_number)?,
+                    body.symbol_occurrence_id,
+                    i64::from(position.token_position),
+                    body.payload_digest,
+                    stream.body_digest,
+                ])
+                .map_err(sqlite_error)?;
+        }
+    }
     Ok(())
 }
 
@@ -3678,6 +3815,19 @@ fn append_prepared_imports(
             .map_err(sqlite_error)?;
     }
     Ok(())
+}
+
+fn derive_clone_fingerprint_counts(
+    transaction: &Transaction<'_>,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    transaction
+        .execute_batch(
+            "INSERT INTO clone_fingerprint_counts(language, class, normalization_revision, fingerprint, posting_count)
+             SELECT language, class, normalization_revision, fingerprint, COUNT(*)
+             FROM clone_fingerprint_postings
+             GROUP BY language, class, normalization_revision, fingerprint;",
+        )
+        .map_err(sqlite_error)
 }
 
 fn append_prepared_postings(
@@ -4194,6 +4344,38 @@ fn create_schema(
             )
             .map_err(sqlite_error)?;
     }
+    if layout.has_clone_fingerprints() {
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE clone_fingerprint_counts (
+                    language TEXT NOT NULL,
+                    class INTEGER NOT NULL,
+                    normalization_revision INTEGER NOT NULL,
+                    fingerprint INTEGER NOT NULL,
+                    posting_count INTEGER NOT NULL,
+                    PRIMARY KEY(language, class, normalization_revision, fingerprint)
+                ) WITHOUT ROWID;
+                CREATE TABLE clone_fingerprint_postings (
+                    language TEXT NOT NULL,
+                    class INTEGER NOT NULL,
+                    normalization_revision INTEGER NOT NULL,
+                    fingerprint INTEGER NOT NULL,
+                    symbol_occurrence_id TEXT NOT NULL,
+                    token_position INTEGER NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    body_digest TEXT NOT NULL,
+                    PRIMARY KEY(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position)
+                ) WITHOUT ROWID;
+                CREATE TRIGGER builder_gate_clone_fingerprint_postings_insert BEFORE INSERT ON clone_fingerprint_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER immutable_clone_fingerprint_postings_update BEFORE UPDATE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
+                CREATE TRIGGER immutable_clone_fingerprint_postings_delete BEFORE DELETE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
+                CREATE TRIGGER immutable_clone_fingerprint_counts_update BEFORE UPDATE ON clone_fingerprint_counts BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint counts'); END;
+                CREATE TRIGGER immutable_clone_fingerprint_counts_delete BEFORE DELETE ON clone_fingerprint_counts BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint counts'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
     Ok(())
 }
 
@@ -4229,7 +4411,8 @@ fn verify_layout_dependent_triggers(
     let has_row_dictionary_pages = table_exists(connection, "row_dictionary_pages")?;
     let has_field_stats_staging = table_exists(connection, "field_stats_staging")?;
     let has_clone_index = table_exists(connection, "clone_body_payloads")?;
-    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 4] = [
+    let has_clone_fingerprints = table_exists(connection, "clone_fingerprint_postings")?;
+    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 5] = [
         (
             has_exact_vocabulary,
             &EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT,
@@ -4243,18 +4426,12 @@ fn verify_layout_dependent_triggers(
             &FIELD_STATS_STAGING_BUILDER_GATE_TRIGGER_LAYOUT,
         ),
         (has_clone_index, &CLONE_BUILDER_GATE_TRIGGER_LAYOUT),
+        (
+            has_clone_fingerprints,
+            &CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
     ];
-    for (name, table, operation) in gated_layouts
-        .into_iter()
-        .filter(|(present, _)| *present)
-        .flat_map(|(_, layout)| layout.iter().copied())
-    {
-        let expected = format!(
-            "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
-        );
-        verify_trigger_schema(connection, name, table, &expected)?;
-    }
-    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 4] = [
+    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 5] = [
         (true, &IMMUTABLE_TRIGGER_LAYOUT),
         (
             has_exact_vocabulary,
@@ -4265,15 +4442,43 @@ fn verify_layout_dependent_triggers(
             &ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
         ),
         (has_clone_index, &CLONE_IMMUTABLE_TRIGGER_LAYOUT),
+        (
+            has_clone_fingerprints,
+            &CLONE_FINGERPRINT_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
     ];
-    for (name, table, operation, message) in immutable_layouts
-        .into_iter()
-        .filter(|(present, _)| *present)
-        .flat_map(|(_, layout)| layout.iter().copied())
-    {
-        let expected = format!(
-            "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
-        );
+    verify_trigger_layouts(
+        connection,
+        gated_layouts
+            .iter()
+            .filter(|(present, _)| *present)
+            .flat_map(|(_, layout)| layout.iter().copied())
+            .map(|(name, table, operation)| (name, table, operation, None))
+            .chain(
+                immutable_layouts
+                    .iter()
+                    .filter(|(present, _)| *present)
+                    .flat_map(|(_, layout)| layout.iter().copied())
+                    .map(|(name, table, operation, message)| {
+                        (name, table, operation, Some(message))
+                    }),
+            ),
+    )
+}
+
+fn verify_trigger_layouts<'a>(
+    connection: &Connection,
+    layouts: impl Iterator<Item = (&'a str, &'a str, &'a str, Option<&'a str>)>,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    for (name, table, operation, message) in layouts {
+        let expected = match message {
+            Some(message) => format!(
+                "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
+            ),
+            None => format!(
+                "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
+            ),
+        };
         verify_trigger_schema(connection, name, table, &expected)?;
     }
     Ok(())
@@ -4378,6 +4583,16 @@ pub(super) fn install_clone_freeze(
             )
             .map_err(sqlite_error)?;
     }
+    if layout.has_clone_fingerprints() {
+        transaction
+            .execute_batch(
+                "
+                CREATE TRIGGER frozen_clone_fingerprint_counts_insert BEFORE INSERT ON clone_fingerprint_counts BEGIN SELECT RAISE(ABORT, 'frozen clone fingerprint counts'); END;
+                CREATE TRIGGER frozen_clone_fingerprint_postings_insert BEFORE INSERT ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'frozen clone fingerprint postings'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
     Ok(())
 }
 
@@ -4414,30 +4629,91 @@ fn authenticated_authority_epoch(
         ));
     }
     if layout_has_clone_index(transaction)? {
-        let (occurrences, missing_payloads, dangling_postings): (i64, i64, i64) = transaction
-            .query_row(
-                "SELECT \
-                 (SELECT COUNT(*) FROM clone_occurrences), \
-                 (SELECT COUNT(*) FROM clone_occurrences AS occurrence LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = occurrence.payload_digest WHERE payload.payload_digest IS NULL), \
-                 (SELECT COUNT(*) FROM clone_exact_postings AS posting LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest WHERE occurrence.symbol_occurrence_id IS NULL OR payload.payload_digest IS NULL OR occurrence.payload_digest != posting.payload_digest)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(sqlite_error)?;
-        if u64::try_from(occurrences).map_err(contract_number)? != source.total_clone_bodies()
-            || missing_payloads != 0
-            || dangling_postings != 0
-        {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "clone rows disagree with their source receipt or payload bindings".to_owned(),
-            ));
-        }
+        verify_clone_rows(transaction, source)?;
     }
     Ok(actual_epoch)
 }
 
+pub(super) fn verify_clone_rows(
+    connection: &Connection,
+    source: &VerifiedSealedLexicalSourceReceiptV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let (occurrences, missing_payloads, orphan_payloads, dangling_postings): (
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = connection
+        .query_row(
+            "SELECT
+             (SELECT COUNT(*) FROM clone_occurrences),
+             (SELECT COUNT(*) FROM clone_occurrences AS occurrence LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = occurrence.payload_digest WHERE payload.payload_digest IS NULL),
+             (SELECT COUNT(*) FROM clone_body_payloads AS payload LEFT JOIN clone_occurrences AS occurrence ON occurrence.payload_digest = payload.payload_digest WHERE occurrence.symbol_occurrence_id IS NULL),
+             (SELECT COUNT(*) FROM clone_exact_postings AS posting LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest WHERE occurrence.symbol_occurrence_id IS NULL OR payload.payload_digest IS NULL OR occurrence.payload_digest != posting.payload_digest)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(sqlite_error)?;
+    if u64::try_from(occurrences).map_err(contract_number)? != source.total_clone_bodies()
+        || missing_payloads != 0
+        || orphan_payloads != 0
+        || dangling_postings != 0
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "clone rows disagree with their source receipt or payload bindings".to_owned(),
+        ));
+    }
+    if !layout_has_clone_fingerprints(connection)? {
+        return Ok(());
+    }
+    let (dangling, count_mismatch): (i64, bool) = connection
+        .query_row(
+            "WITH actual(language, class, normalization_revision, fingerprint, posting_count) AS (
+                SELECT language, class, normalization_revision, fingerprint, COUNT(*)
+                FROM clone_fingerprint_postings
+                GROUP BY language, class, normalization_revision, fingerprint
+             ),
+             mismatched AS (
+                SELECT * FROM actual
+                EXCEPT
+                SELECT language, class, normalization_revision, fingerprint, posting_count
+                FROM clone_fingerprint_counts
+                UNION ALL
+                SELECT language, class, normalization_revision, fingerprint, posting_count
+                FROM clone_fingerprint_counts
+                EXCEPT
+                SELECT * FROM actual
+             )
+             SELECT
+                (SELECT COUNT(*) FROM clone_fingerprint_postings AS posting
+                 LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id
+                 LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest
+                 WHERE occurrence.symbol_occurrence_id IS NULL
+                    OR payload.payload_digest IS NULL
+                    OR occurrence.payload_digest != posting.payload_digest
+                    OR posting.token_position < 0),
+                EXISTS(SELECT 1 FROM mismatched)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(sqlite_error)?;
+    if dangling != 0 || count_mismatch {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "clone fingerprint postings disagree with their payload bindings or stored counts"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn layout_has_clone_index(connection: &Connection) -> Result<bool, CodeLexicalArtifactErrorV1> {
     Ok(read_staged_artifact_layout(connection)?.has_clone_index())
+}
+
+fn layout_has_clone_fingerprints(
+    connection: &Connection,
+) -> Result<bool, CodeLexicalArtifactErrorV1> {
+    Ok(read_staged_artifact_layout(connection)?.has_clone_fingerprints())
 }
 
 fn advance_pre_digest_work(
@@ -5068,6 +5344,8 @@ fn advance_section_rows(
         FinalizationSectionV1::CloneOccurrences
             | FinalizationSectionV1::CloneExactPostings
             | FinalizationSectionV1::CloneBodyPayloads
+            | FinalizationSectionV1::CloneFingerprintCounts
+            | FinalizationSectionV1::CloneFingerprintPostings
     ) {
         return advance_clone_section_rows(
             transaction,
@@ -5199,7 +5477,9 @@ fn advance_clone_section_rows(
         (
             FinalizationSectionV1::CloneOccurrences
             | FinalizationSectionV1::CloneExactPostings
-            | FinalizationSectionV1::CloneBodyPayloads,
+            | FinalizationSectionV1::CloneBodyPayloads
+            | FinalizationSectionV1::CloneFingerprintCounts
+            | FinalizationSectionV1::CloneFingerprintPostings,
             None,
         ) => advance_native_section_rows(
             transaction,
@@ -5237,6 +5517,48 @@ fn advance_clone_section_rows(
                 normalization_revision,
                 digest,
                 symbol_occurrence_id,
+                limit
+            ],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::CloneFingerprintCounts,
+            Some(PersistedFinalizationKeyV1::FingerprintCount {
+                language,
+                class,
+                normalization_revision,
+                fingerprint,
+            }),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(layout, true),
+            params![language, class, normalization_revision, fingerprint, limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::CloneFingerprintPostings,
+            Some(PersistedFinalizationKeyV1::FingerprintPosting {
+                language,
+                class,
+                normalization_revision,
+                fingerprint,
+                symbol_occurrence_id,
+                token_position,
+            }),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(layout, true),
+            params![
+                language,
+                class,
+                normalization_revision,
+                fingerprint,
+                symbol_occurrence_id,
+                token_position,
                 limit
             ],
             state,
@@ -5320,6 +5642,16 @@ fn native_row_key(
     section: FinalizationSectionV1,
     row: &rusqlite::Row<'_>,
 ) -> Result<PersistedFinalizationKeyV1, CodeLexicalArtifactErrorV1> {
+    if matches!(
+        section,
+        FinalizationSectionV1::CloneOccurrences
+            | FinalizationSectionV1::CloneExactPostings
+            | FinalizationSectionV1::CloneBodyPayloads
+            | FinalizationSectionV1::CloneFingerprintCounts
+            | FinalizationSectionV1::CloneFingerprintPostings
+    ) {
+        return clone_row_key(section, row);
+    }
     match section {
         FinalizationSectionV1::SourcePages
         | FinalizationSectionV1::DocumentIntegrity
@@ -5348,15 +5680,15 @@ fn native_row_key(
                 ngram: row.get(2).map_err(sqlite_error)?,
             })
         }
-        FinalizationSectionV1::CloneOccurrences | FinalizationSectionV1::CloneBodyPayloads => Ok(
-            PersistedFinalizationKeyV1::Text(row.get(0).map_err(sqlite_error)?),
-        ),
-        FinalizationSectionV1::CloneExactPostings => Ok(PersistedFinalizationKeyV1::ClonePosting {
-            class: row.get(0).map_err(sqlite_error)?,
-            normalization_revision: row.get(1).map_err(sqlite_error)?,
-            digest: row.get(2).map_err(sqlite_error)?,
-            symbol_occurrence_id: row.get(3).map_err(sqlite_error)?,
-        }),
+        FinalizationSectionV1::CloneOccurrences
+        | FinalizationSectionV1::CloneExactPostings
+        | FinalizationSectionV1::CloneBodyPayloads
+        | FinalizationSectionV1::CloneFingerprintCounts
+        | FinalizationSectionV1::CloneFingerprintPostings => {
+            Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone row key bypassed its dedicated decoder".to_owned(),
+            ))
+        }
         FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary => Ok(
             PersistedFinalizationKeyV1::Integer(row.get(0).map_err(sqlite_error)?),
         ),
@@ -5364,6 +5696,55 @@ fn native_row_key(
             first: row.get(0).map_err(sqlite_error)?,
             second: row.get(1).map_err(sqlite_error)?,
         }),
+    }
+}
+
+fn clone_row_key(
+    section: FinalizationSectionV1,
+    row: &rusqlite::Row<'_>,
+) -> Result<PersistedFinalizationKeyV1, CodeLexicalArtifactErrorV1> {
+    if matches!(
+        section,
+        FinalizationSectionV1::CloneOccurrences | FinalizationSectionV1::CloneBodyPayloads
+    ) {
+        return Ok(PersistedFinalizationKeyV1::Text(
+            row.get(0).map_err(sqlite_error)?,
+        ));
+    }
+    if section == FinalizationSectionV1::CloneExactPostings {
+        return Ok(PersistedFinalizationKeyV1::ClonePosting {
+            class: row.get(0).map_err(sqlite_error)?,
+            normalization_revision: row.get(1).map_err(sqlite_error)?,
+            digest: row.get(2).map_err(sqlite_error)?,
+            symbol_occurrence_id: row.get(3).map_err(sqlite_error)?,
+        });
+    }
+    let language = row.get(0).map_err(sqlite_error)?;
+    let class = row.get(1).map_err(sqlite_error)?;
+    let normalization_revision = row.get(2).map_err(sqlite_error)?;
+    let fingerprint = row.get(3).map_err(sqlite_error)?;
+    match section {
+        FinalizationSectionV1::CloneFingerprintCounts => {
+            Ok(PersistedFinalizationKeyV1::FingerprintCount {
+                language,
+                class,
+                normalization_revision,
+                fingerprint,
+            })
+        }
+        FinalizationSectionV1::CloneFingerprintPostings => {
+            Ok(PersistedFinalizationKeyV1::FingerprintPosting {
+                language,
+                class,
+                normalization_revision,
+                fingerprint,
+                symbol_occurrence_id: row.get(4).map_err(sqlite_error)?,
+                token_position: row.get(5).map_err(sqlite_error)?,
+            })
+        }
+        _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "non-fingerprint section requested a fingerprint row key".to_owned(),
+        )),
     }
 }
 
@@ -5751,21 +6132,39 @@ pub(super) fn compute_section_digests(
             sections.push(digest_query(connection, section, control, layout)?);
         }
     }
+    if layout.has_clone_fingerprints() {
+        for section in [
+            FinalizationSectionV1::CloneFingerprintCounts,
+            FinalizationSectionV1::CloneFingerprintPostings,
+        ] {
+            sections.push(digest_query(connection, section, control, layout)?);
+        }
+    }
     Ok(sections)
 }
 
 pub(super) fn compute_clone_section_digests(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
+    layout: LexicalArtifactLayoutV1,
 ) -> Result<Vec<CodeLexicalArtifactSectionDigestV1>, CodeLexicalArtifactErrorV1> {
-    [
+    let mut sections = [
         FinalizationSectionV1::CloneOccurrences,
         FinalizationSectionV1::CloneExactPostings,
         FinalizationSectionV1::CloneBodyPayloads,
     ]
     .into_iter()
-    .map(|section| digest_query(connection, section, control, LexicalArtifactLayoutV1::V15))
-    .collect()
+    .map(|section| digest_query(connection, section, control, layout))
+    .collect::<Result<Vec<_>, _>>()?;
+    if layout.has_clone_fingerprints() {
+        for section in [
+            FinalizationSectionV1::CloneFingerprintCounts,
+            FinalizationSectionV1::CloneFingerprintPostings,
+        ] {
+            sections.push(digest_query(connection, section, control, layout)?);
+        }
+    }
+    Ok(sections)
 }
 
 fn digest_source_pages_and_base_receipts(
@@ -6963,6 +7362,12 @@ mod tests {
             }
             FinalizationSectionV1::CloneExactPostings => {
                 statement.query(params![0i64, 0i64, "", "", 1i64])
+            }
+            FinalizationSectionV1::CloneFingerprintCounts => {
+                statement.query(params!["", 0i64, 0i64, 0i64, 1i64])
+            }
+            FinalizationSectionV1::CloneFingerprintPostings => {
+                statement.query(params!["", 0i64, 0i64, 0i64, "", 0i64, 1i64])
             }
         }
         .map_err(sqlite_error)?;

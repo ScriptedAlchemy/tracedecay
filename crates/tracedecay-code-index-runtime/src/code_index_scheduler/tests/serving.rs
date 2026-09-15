@@ -45,7 +45,7 @@ use tracedecay_runtime_core::resident_memory::{
 };
 
 use super::{
-    CALLER_PAGE, GitFixture, ReadyRetrievalControlV1, active_text_artifact_path,
+    ALPHA_LIB_V1, CALLER_PAGE, GitFixture, ReadyRetrievalControlV1, active_text_artifact_path,
     application_context, build_progress_snapshot, caller_star_sources, callers_page_meta,
     core_search_request, decode_hex, git, install_verified_graph_store,
     install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
@@ -429,6 +429,7 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
     assert_eq!(reopened.sealed_decode_count(), 0);
     let text = reopened
         .servable_retained_text_generation()
+        .expect("publication store")
         .expect("active durable text generation");
     let binding = text
         .publication_binding
@@ -487,6 +488,116 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
         text.advance_text_serving(1),
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
     ));
+}
+
+#[test]
+fn same_process_text_restore_releases_the_decoded_generation_before_projection() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed generation"));
+    assert!(
+        scheduler.latest_complete_already_decoded().is_some(),
+        "seal installs the built generation so reconcile does not encode then decode"
+    );
+    assert_eq!(scheduler.sealed_decode_count(), 0);
+    assert!(
+        scheduler
+            .active_generation_encoded_bytes()
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0,
+        "seal records encoded bytes for the installed generation"
+    );
+
+    let text = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("same-process text restore");
+    assert!(
+        scheduler.latest_complete_already_decoded().is_none(),
+        "pre-seat text projection must drop the build-phase generation before pages start"
+    );
+    assert_eq!(
+        scheduler
+            .active_generation_encoded_bytes()
+            .load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "release must clear retained encoded-byte accounting"
+    );
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        0,
+        "text restore must not replace the released pin with a sealed-byte decode"
+    );
+    while !text
+        .advance_text_serving(64)
+        .expect("advance same-process text projection")
+    {}
+    assert!(text.query_owners_are_ready());
+    assert!(
+        scheduler.latest_complete_already_decoded().is_none(),
+        "ready exact and lexical owners must not re-pin the decoded generation"
+    );
+    assert_eq!(scheduler.sealed_decode_count(), 0);
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("one-file incremental seal"),
+    );
+    assert!(
+        scheduler.latest_complete_already_decoded().is_some(),
+        "incremental seal must decode the parent and install the successor"
+    );
+    assert!(
+        scheduler.sealed_decode_count() >= 1,
+        "releasing the pin forces the next increment to decode on demand"
+    );
+    let incremental_text = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("incremental text restore");
+    assert_eq!(
+        scheduler
+            .active_generation_encoded_bytes()
+            .load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "incremental release must clear retained encoded-byte accounting"
+    );
+    assert!(
+        scheduler.latest_complete_already_decoded().is_none(),
+        "incremental text restore must release the successor before projection"
+    );
+    while !incremental_text
+        .advance_text_serving(64)
+        .expect("advance incremental text projection")
+    {}
+    assert!(incremental_text.query_owners_are_ready());
+}
+
+#[test]
+fn poisoned_decoded_cache_release_is_a_typed_publication_failure() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed generation"));
+    scheduler.poison_decoded_publication_cache_for_test();
+    match scheduler.servable_retained_text_generation() {
+        Err(error) => {
+            assert!(error.to_string().contains("poisoned"), "{error}");
+        }
+        Ok(None) => panic!("poisoned release returned ordinary absence"),
+        Ok(Some(_)) => panic!("poisoned release returned a servable generation"),
+    }
 }
 
 #[test]
@@ -687,17 +798,17 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
             .expect("advance clone successor");
     }
     assert!(latest.query_owners_are_ready());
-    let v15_path = active_text_artifact_path(store.path());
-    assert_ne!(v15_path, v14_path);
-    let v15_revision: i64 = rusqlite::Connection::open(v15_path)
-        .expect("open V15 artifact")
+    let v16_path = active_text_artifact_path(store.path());
+    assert_ne!(v16_path, v14_path);
+    let v16_revision: i64 = rusqlite::Connection::open(v16_path)
+        .expect("open V16 artifact")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
             [],
             |row| row.get(0),
         )
-        .expect("read V15 revision");
-    assert_eq!(v15_revision, 15);
+        .expect("read V16 revision");
+    assert_eq!(v16_revision, 16);
 }
 
 #[tokio::test]
@@ -835,7 +946,7 @@ fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_own
             |row| row.get(0),
         )
         .expect("read successor revision");
-    assert_eq!(revision, 15);
+    assert_eq!(revision, 16);
 }
 
 fn start_partial_clone_successor(
@@ -1001,11 +1112,31 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .expect("read staged clone posting");
+    let original_fingerprint: (String, i64, i64, i64, String, i64, String, String) = connection
+        .query_row(
+            "SELECT language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("read staged clone fingerprint");
     connection
         .execute_batch(
             "DROP TRIGGER immutable_clone_occurrences_update;
              DROP TRIGGER immutable_clone_exact_postings_delete;
-             DROP TRIGGER builder_gate_clone_exact_postings_insert;",
+             DROP TRIGGER builder_gate_clone_exact_postings_insert;
+             DROP TRIGGER immutable_clone_fingerprint_postings_delete;
+             DROP TRIGGER builder_gate_clone_fingerprint_postings_insert;",
         )
         .expect("remove staging mutation guards for tamper injection");
     connection
@@ -1037,6 +1168,34 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
             ],
         )
         .expect("replace the posting while preserving counts and references");
+    connection
+        .execute(
+            "DELETE FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4 AND symbol_occurrence_id = ?5 AND token_position = ?6",
+            rusqlite::params![
+                original_fingerprint.0,
+                original_fingerprint.1,
+                original_fingerprint.2,
+                original_fingerprint.3,
+                original_fingerprint.4,
+                original_fingerprint.5,
+            ],
+        )
+        .expect("delete one persisted fingerprint");
+    connection
+        .execute(
+            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                original_fingerprint.0,
+                original_fingerprint.1,
+                original_fingerprint.2,
+                original_fingerprint.3,
+                original_fingerprint.4,
+                original_fingerprint.5 + 1,
+                original_fingerprint.6,
+                original_fingerprint.7,
+            ],
+        )
+        .expect("replace fingerprint at another position");
     drop(connection);
 
     let scheduler = scheduler(
@@ -1051,7 +1210,7 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
             .expect("revalidate or rebuild resumed clone rows");
     }
     let published =
-        rusqlite::Connection::open(active_text_artifact_path(store.path())).expect("open V15 head");
+        rusqlite::Connection::open(active_text_artifact_path(store.path())).expect("open V16 head");
     let occurrence: Vec<u8> = published
         .query_row(
             "SELECT occurrence FROM clone_occurrences WHERE symbol_occurrence_id = ?1",
@@ -1074,6 +1233,25 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("read rebuilt clone posting"),
+        1
+    );
+    assert_eq!(
+        published
+            .query_row(
+                "SELECT COUNT(*) FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4 AND symbol_occurrence_id = ?5 AND token_position = ?6 AND payload_digest = ?7 AND body_digest = ?8",
+                rusqlite::params![
+                    original_fingerprint.0,
+                    original_fingerprint.1,
+                    original_fingerprint.2,
+                    original_fingerprint.3,
+                    original_fingerprint.4,
+                    original_fingerprint.5,
+                    original_fingerprint.6,
+                    original_fingerprint.7,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read rebuilt clone fingerprint"),
         1
     );
 }
