@@ -13,6 +13,7 @@ const REOBSERVATION_UNIT_DEADLINE: Duration = Duration::from_secs(15);
 const REOBSERVATION_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 const REOBSERVATION_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
+#[hotpath::measure]
 fn should_reconcile_ready_event(
     handled_epoch: Option<u64>,
     event: &SemanticLifecycleVerifiedReadyEventV1,
@@ -30,6 +31,7 @@ pub struct DaemonSemanticActivationReconcilerV1 {
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[hotpath::measure_all]
 impl DaemonSemanticActivationReconcilerV1 {
     pub fn spawn(
         coordinator: Arc<ProductionSemanticActivationCoordinatorV1>,

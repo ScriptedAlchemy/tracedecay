@@ -172,6 +172,7 @@ pub struct CodeIndexDisplayPathIndexV1 {
     by_identity: HashMap<String, String>,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexDisplayPathIndexV1 {
     pub fn for_generation(
         generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
@@ -418,6 +419,7 @@ enum CodeIndexSearchDisplaySourceV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl CodeIndexSearchDisplaySourceV1 {
     fn binding(
         &self,
@@ -441,6 +443,7 @@ impl CodeIndexSearchDisplaySourceV1 {
     }
 }
 
+#[hotpath::measure]
 fn code_index_symbol_display(
     symbol: &crate::code_index::lineage::LineageSymbolRecordV1,
     display_paths: &CodeIndexDisplayPathIndexV1,
@@ -467,6 +470,7 @@ fn code_index_symbol_display(
     })
 }
 
+#[hotpath::measure]
 fn code_index_search_display_bytes(
     display: &code_search::CodeIndexSearchDisplayV1,
 ) -> std::result::Result<u64, tracedecay_query::retrieval::hydrate::HydrationUnavailableV1> {

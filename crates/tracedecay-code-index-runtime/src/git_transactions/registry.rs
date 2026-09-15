@@ -38,6 +38,7 @@ impl Default for GitIndexTransactionStoreRegistry {
     }
 }
 
+#[hotpath::measure_all]
 impl GitIndexTransactionStoreRegistry {
     /// Returns the existing actor for `database`, or opens exactly one.
     #[hotpath::measure(label = "daemon.git.tx.store_ensure")]

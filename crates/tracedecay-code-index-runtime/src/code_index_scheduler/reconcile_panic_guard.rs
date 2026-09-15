@@ -68,7 +68,9 @@ impl Default for ReconcilePanicGuardV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ReconcilePanicGuardV1 {
+    #[hotpath::skip]
     pub const fn new() -> Self {
         Self {
             consecutive_panics: 0,
@@ -112,6 +114,7 @@ impl ReconcilePanicGuardV1 {
     /// Consecutive panics observed since the last progressing pass. Reported
     /// on the warn path so an operator sees a bounded counter rather than an
     /// undifferentiated repeating line.
+    #[hotpath::skip]
     pub const fn consecutive_panics(&self) -> u32 {
         self.consecutive_panics
     }
@@ -299,7 +302,9 @@ impl Default for ReconcileCapacityRetryV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ReconcileCapacityRetryV1 {
+    #[hotpath::skip]
     pub const fn new() -> Self {
         Self {
             consecutive: 0,
@@ -331,6 +336,7 @@ impl ReconcileCapacityRetryV1 {
     }
 
     /// Consecutive capacity refusals since the last non-capacity pass.
+    #[hotpath::skip]
     pub const fn consecutive(&self) -> u32 {
         self.consecutive
     }

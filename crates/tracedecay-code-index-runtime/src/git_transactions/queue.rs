@@ -26,6 +26,7 @@ struct RepositoryGate {
     available: Condvar,
 }
 
+#[hotpath::measure_all]
 impl RepositoryGate {
     fn new() -> Self {
         Self {
@@ -79,6 +80,7 @@ impl Drop for MutationAdmission<'_> {
     }
 }
 
+#[hotpath::measure_all]
 impl RepositoryMutationQueue {
     #[cfg(test)]
     pub fn with_capacity_for_test(capacity: usize) -> Self {

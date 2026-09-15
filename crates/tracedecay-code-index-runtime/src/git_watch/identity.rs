@@ -52,6 +52,7 @@ pub async fn resolve_watch_identity(
 /// Bounded typed discovery-outcome counters. `Unknown` (a bounded git
 /// timeout) drives the admission backoff retry owner, so its rate versus
 /// `resolved` separates discovery churn from healthy admission cost.
+#[hotpath::measure]
 fn record_identity_resolution(resolution: &WatchIdentityResolution) {
     match resolution {
         WatchIdentityResolution::Ready(_) => {

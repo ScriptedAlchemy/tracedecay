@@ -27,6 +27,7 @@ pub struct AdmissionFlightKeyV1 {
     imports_digest: String,
 }
 
+#[hotpath::measure_all]
 impl AdmissionFlightKeyV1 {
     fn for_request(
         request: &CodeIndexIgnoredDependencyRequestV1,
@@ -55,6 +56,7 @@ impl Clone for AdmissionFlightCompletionV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl AdmissionFlightCompletionV1 {
     fn from_result(
         result: &Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1>,
@@ -75,6 +77,7 @@ impl AdmissionFlightCompletionV1 {
     }
 }
 
+#[hotpath::measure]
 fn clone_scheduler_error(error: &CodeIndexSchedulerErrorV1) -> CodeIndexSchedulerErrorV1 {
     match error {
         CodeIndexSchedulerErrorV1::Git(error) => CodeIndexSchedulerErrorV1::Git(error.clone()),
@@ -180,6 +183,7 @@ pub struct AdmissionFlightV1 {
     completed: tokio::sync::Notify,
 }
 
+#[hotpath::measure_all]
 impl AdmissionFlightV1 {
     fn new() -> Self {
         Self {
@@ -220,6 +224,7 @@ struct AdmissionFlightOwnerV1 {
     finished: bool,
 }
 
+#[hotpath::measure_all]
 impl AdmissionFlightOwnerV1 {
     fn finish(
         mut self,
@@ -288,6 +293,7 @@ struct AdmissionControlBridgeV1 {
     deadline_exceeded: AtomicBool,
 }
 
+#[hotpath::measure_all]
 impl AdmissionControlBridgeV1 {
     fn new() -> Self {
         Self {
@@ -324,6 +330,7 @@ impl CodeIndexExecutionControlV1 for AdmissionControlBridgeV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeIndexSchedulerRegistryV1 {
     pub async fn index_verified_ignored_dependency(
         &self,
@@ -616,6 +623,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_serving_request(
     request: &CodeIndexIgnoredDependencyRequestV1,
     repository_id: &tracedecay_domain::RepositoryId,
@@ -735,6 +743,7 @@ async fn acquire_daemon_admission(
     }
 }
 
+#[hotpath::measure]
 fn refuse_if_interrupted(
     control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
     shutting_down: &AtomicBool,

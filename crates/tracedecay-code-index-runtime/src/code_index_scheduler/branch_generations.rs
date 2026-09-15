@@ -17,6 +17,7 @@ pub struct BranchGenerationReadControlV1 {
     pub cancellation: Option<tracedecay_application::CancellationSignal>,
 }
 
+#[hotpath::measure_all]
 impl BranchGenerationReadControlV1 {
     pub fn termination(&self) -> Option<CodeIndexSearchUnavailableReasonV1> {
         if self
@@ -47,6 +48,7 @@ pub struct BranchGenerationCardinalityBoundsV1 {
     pub maximum_symbols: usize,
 }
 
+#[hotpath::measure_all]
 impl BranchGenerationCardinalityBoundsV1 {
     fn admits(
         self,
@@ -90,6 +92,7 @@ enum ExactGenerationPairV1 {
     Missing(ExactGenerationMissV1),
 }
 
+#[hotpath::measure_all]
 impl DaemonCodeIndexPublicationStoreV1 {
     pub fn exact_read_error(
         error: crate::code_index::production::CodeIndexPublicationStoreErrorV1,
@@ -228,6 +231,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeIndexSchedulerRegistryV1 {
     pub async fn generations_for_revisions(
         &self,

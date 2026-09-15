@@ -194,7 +194,9 @@ pub enum CodeGraphActivationPolicyV1 {
     RefusedByConfiguration,
 }
 
+#[hotpath::measure_all]
 impl CodeGraphActivationPolicyV1 {
+    #[hotpath::skip]
     pub const fn from_enabled(enabled: bool) -> Self {
         if enabled {
             Self::Enabled
@@ -203,11 +205,13 @@ impl CodeGraphActivationPolicyV1 {
         }
     }
 
+    #[hotpath::skip]
     pub const fn is_enabled(self) -> bool {
         matches!(self, Self::Enabled)
     }
 }
 
+#[hotpath::measure_all]
 impl CodeGraphActivationAuthorityV1 {
     fn policy_cell(&self) -> &Arc<AtomicBool> {
         match self {
@@ -331,6 +335,7 @@ impl CodeGraphActivationAuthorityV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonCodeIndexPublicationStoreV1 {
     pub fn sealed_replay_binding(
         &self,
@@ -366,6 +371,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeIndexWorktreeSchedulerV1 {
     pub fn code_graph_replay_binding(
         &self,
@@ -393,6 +399,7 @@ struct PendingInteractiveCatalogWarmV1 {
     cancellation: Arc<dyn GraphCancellation>,
 }
 
+#[hotpath::measure_all]
 impl PendingInteractiveCatalogWarmV1 {
     #[hotpath::measure(label = "code_graph.catalog.background_warm")]
     fn run(self) -> Result<(), CodeGraphProjectionError> {
@@ -457,6 +464,7 @@ impl PendingInteractiveCatalogWarmV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl LatestCompleteCodeIndexV1 {
     #[hotpath::measure(label = "code_graph.activation.persistent")]
     fn activate_persistent_graph(

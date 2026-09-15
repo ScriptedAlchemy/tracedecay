@@ -43,6 +43,7 @@ pub struct OverflowRoster {
     entries: BTreeMap<PathBuf, OverflowEntry>,
 }
 
+#[hotpath::measure_all]
 impl OverflowRoster {
     pub fn admit(
         &mut self,
@@ -120,11 +121,13 @@ impl OverflowRoster {
 /// The next coverage instant for one entry: the same per-root backstop
 /// interval registered roots use. A zero interval disables the backstop and
 /// therefore overflow coverage with it.
+#[hotpath::measure]
 fn next_due(now: Instant, config: &SyncConfig) -> Instant {
     let mins = config.backstop_interval_mins.max(1);
     now + Duration::from_secs(mins.saturating_mul(60))
 }
 
+#[hotpath::measure_all]
 impl GitWatcher {
     /// Retains a capacity-refused repository on the bounded overflow roster,
     /// logging the typed outcome. Saturation is truthful: the repository gets

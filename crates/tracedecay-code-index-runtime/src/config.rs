@@ -20,6 +20,7 @@ pub fn is_generated_path_segment(path: &str) -> bool {
     has_minified_suffix(path) || path.split('/').any(is_generated_dir_segment)
 }
 
+#[hotpath::measure]
 fn has_minified_suffix(path: &str) -> bool {
     path.rfind(".min.").is_some_and(|idx| idx + 5 < path.len())
 }

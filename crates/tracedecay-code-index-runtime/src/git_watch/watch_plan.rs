@@ -34,6 +34,7 @@ impl fmt::Display for WatchInstallFailure {
     }
 }
 
+#[hotpath::measure]
 fn insert_directory(
     directories: &mut BTreeSet<PathBuf>,
     path: PathBuf,
@@ -46,6 +47,7 @@ fn insert_directory(
     }
 }
 
+#[hotpath::measure]
 fn enumerate_tree_directories(
     root: &Path,
     directories: &mut BTreeSet<PathBuf>,

@@ -43,6 +43,7 @@ struct PendingHookPathsV1 {
     overflow: bool,
 }
 
+#[hotpath::measure_all]
 impl PendingHookPathsV1 {
     fn extend(&mut self, paths: impl IntoIterator<Item = String>) {
         for path in paths {
@@ -69,6 +70,7 @@ struct CodeIndexActivationRetirementV1 {
     callbacks: Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexActivationRetirementV1 {
     fn new() -> Self {
         Self {

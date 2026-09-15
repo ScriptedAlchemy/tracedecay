@@ -4,6 +4,7 @@ pub(crate) fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
     eprintln!("{}", format_daemon_log_line(event, fields));
 }
 
+#[hotpath::measure]
 fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
     let mut line = event.to_owned();
     for (key, value) in fields {
@@ -15,6 +16,7 @@ fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
     line
 }
 
+#[hotpath::measure]
 fn escape_field(value: &str) -> String {
     if value.bytes().all(|byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')

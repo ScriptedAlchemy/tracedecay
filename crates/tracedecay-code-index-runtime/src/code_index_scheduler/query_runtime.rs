@@ -310,6 +310,7 @@ pub struct QuerySearchExecutionRequestV1 {
     pub cursor: Option<RetrievalCursor>,
 }
 
+#[hotpath::measure_all]
 impl QuerySearchExecutionRequestV1 {
     pub fn new(query: impl Into<String>, policy: QuerySearchExecutionPolicyV1) -> Self {
         Self {
@@ -379,6 +380,7 @@ pub enum QuerySearchExecutionErrorV1 {
     Authority(#[from] QueryAuthorityErrorV1),
 }
 
+#[hotpath::measure_all]
 impl CodeIndexSchedulerRegistryV1 {
     /// Execute exact, lexical, and graph independently against the newest
     /// complete generation for one exact scope, then pass their typed outcomes
@@ -727,6 +729,7 @@ where
     })
 }
 
+#[hotpath::measure]
 fn validate_search_policy(
     input: &QuerySearchExecutionRequestV1,
 ) -> Result<(), QuerySearchExecutionErrorV1> {
@@ -777,6 +780,7 @@ fn validate_search_policy(
     Ok(())
 }
 
+#[hotpath::measure]
 fn graph_seeds_from_outcomes(
     exact: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<ExactLaneEvidence>>,
     lexical: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<LexicalLaneEvidence>>,

@@ -123,6 +123,7 @@ pub async fn retire_one_project_vector_generation(
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn observe_retention_step(step: &ProjectSemanticVectorRetentionStep) {
     match step {
         ProjectSemanticVectorRetentionStep::Ready(census) => {
@@ -312,6 +313,7 @@ async fn converge_one_project_vector_generation(
     }
 }
 
+#[hotpath::measure]
 fn release_vector_reservation(
     store: &GraphVectorGenerationStoreV1,
     reservation: Option<tracedecay_graph_db::SemanticVectorRetirementReservation>,
