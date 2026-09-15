@@ -37,6 +37,52 @@ pub(super) async fn terminal_failure(
     if let Some(output) = &mut partial {
         output.exit_code = output.exit_code.or(failure_exit_code);
     }
+    let (termination, output_bytes, error) = test_failure_disposition(failure, timeout_secs);
+    let results = partial.as_ref().map_or_else(Vec::new, |output| {
+        hotpath::measure_block!(
+            "mcp.workflow.affected_tests.parse",
+            parse_libtest_output(&output.stdout)
+        )
+    });
+    emit_observed_test_results(emitter, &results, test_names.len()).await?;
+    let receipt = finish_test_run(
+        emitter,
+        started_at,
+        effective_deadline,
+        termination,
+        output_bytes,
+    )
+    .await?;
+    let partial = partial.unwrap_or(TestRunOutput {
+        exit_code: failure_exit_code,
+        stdout: String::new(),
+        stderr: String::new(),
+        output_bytes,
+    });
+    let body = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
+        let mut body = run_affected_tests_body(
+            &partial,
+            &results,
+            test_names,
+            truncated,
+            selected_targets,
+            managed_test_terminal(emitter, &receipt),
+        );
+        body["error"] = error;
+        body
+    });
+    Ok(super::super::support::generic_tool_result(
+        None,
+        args,
+        &body,
+        vec![],
+    ))
+}
+
+fn test_failure_disposition(
+    failure: TestRunFailure,
+    timeout_secs: u64,
+) -> (OperationTermination, u64, Value) {
     let (termination, output_bytes, kind, operation, message) = match failure {
         TestRunFailure::Spawn(error) => (
             OperationTermination::Failed,
@@ -107,47 +153,13 @@ pub(super) async fn terminal_failure(
             format!("test identity `{test_identity}` is not executable"),
         ),
     };
-    let results = partial.as_ref().map_or_else(Vec::new, |output| {
-        hotpath::measure_block!(
-            "mcp.workflow.affected_tests.parse",
-            parse_libtest_output(&output.stdout)
-        )
-    });
-    emit_observed_test_results(emitter, &results, test_names.len()).await?;
-    let receipt = finish_test_run(
-        emitter,
-        started_at,
-        effective_deadline,
+    (
         termination,
         output_bytes,
-    )
-    .await?;
-    let partial = partial.unwrap_or(TestRunOutput {
-        exit_code: failure_exit_code,
-        stdout: String::new(),
-        stderr: String::new(),
-        output_bytes,
-    });
-    let body = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
-        let mut body = run_affected_tests_body(
-            &partial,
-            &results,
-            test_names,
-            truncated,
-            selected_targets,
-            managed_test_terminal(emitter, &receipt),
-        );
-        body["error"] = json!({
+        json!({
             "kind": kind,
             "operation": operation,
             "message": message,
-        });
-        body
-    });
-    Ok(super::super::support::generic_tool_result(
-        None,
-        args,
-        &body,
-        vec![],
-    ))
+        }),
+    )
 }

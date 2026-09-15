@@ -263,6 +263,10 @@ fn push_fixture_symbol(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep manifest-backed graph setup, exact dispatch, and retained receipt/budget assertions together as one ordered journey"
+)]
 async fn directly_changed_test_file_dispatches_each_full_test_identity() {
     let _profile = crate::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
