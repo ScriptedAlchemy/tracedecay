@@ -1478,6 +1478,29 @@ impl LatestCodeTextGenerationV1 {
         Ok(true)
     }
 
+    /// Advance text projection until clone successor fingerprints are sealed.
+    ///
+    /// Lexical owners can be Ready while clone backfill is still background
+    /// work. `tracedecay_similar` needs those postings; ordinary search does not
+    /// wait here.
+    pub(crate) fn finish_clone_similarity_warmup_for_request(
+        &self,
+        request_control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let mut advances = 0_usize;
+        while self.text_projection_needs_work() {
+            self.advance_text_serving_for_request(
+                TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1,
+                request_control,
+            )?;
+            advances += 1;
+            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn production_query_owners_with_budget(
         &self,
         _build_budget: &RetrievalBudget,

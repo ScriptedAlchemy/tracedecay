@@ -404,7 +404,37 @@ pub struct SimilarSymbolV1 {
     pub utility_micros: u64,
 }
 
-pub type SimilarResultV1 = Vec<SimilarSymbolV1>;
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimilarExactGroupV1 {
+    pub class: String,
+    pub members: Vec<SimilarSymbolV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimilarAlignedDifferenceV1 {
+    pub left_token_count: usize,
+    pub right_token_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimilarNearPairV1 {
+    pub source: SimilarSymbolV1,
+    pub candidate: SimilarSymbolV1,
+    pub source_coverage_millionths: u32,
+    pub candidate_coverage_millionths: u32,
+    pub differences: Vec<SimilarAlignedDifferenceV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimilarResultV1 {
+    pub source: SimilarSymbolV1,
+    pub exact_groups: Vec<SimilarExactGroupV1>,
+    pub near_pairs: Vec<SimilarNearPairV1>,
+}
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]

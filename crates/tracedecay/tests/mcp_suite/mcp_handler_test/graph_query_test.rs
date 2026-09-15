@@ -1202,37 +1202,44 @@ async fn test_module_api() {
 
 #[tokio::test]
 async fn similar_serves_exact_groups_and_verified_near_pair_edges() {
+    // Clone bodies below the 30-token eligibility floor never post exact/near
+    // peers; pad with identical keep_* calls so rename/near verification can run.
+    let pad = (0..24)
+        .map(|ordinal| format!("keep_step_{ordinal}();\n"))
+        .collect::<String>();
     let (cg, _dir) = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/lib.rs"),
-            r#"
-pub fn sum_alpha(values: &[i32]) -> i32 {
-    let mut total = 0;
-    for value in values {
+            format!(
+                r#"
+pub fn sum_alpha(values: &[i32]) -> i32 {{
+    {pad}let mut total = 0;
+    for value in values {{
         total += value;
-    }
+    }}
     total
-}
+}}
 
-pub fn sum_beta(items: &[i32]) -> i32 {
-    let mut result = 0;
-    for item in items {
+pub fn sum_beta(items: &[i32]) -> i32 {{
+    {pad}let mut result = 0;
+    for item in items {{
         result += item;
-    }
+    }}
     result
-}
+}}
 
-pub fn sum_positive(values: &[i32]) -> i32 {
-    let mut total = 0;
-    for value in values {
-        if *value > 0 {
+pub fn sum_positive(values: &[i32]) -> i32 {{
+    {pad}let mut total = 0;
+    for value in values {{
+        if *value > 0 {{
             total += value;
-        }
-    }
+        }}
+    }}
     total
-}
-"#,
+}}
+"#
+            ),
         )
         .unwrap();
     })
