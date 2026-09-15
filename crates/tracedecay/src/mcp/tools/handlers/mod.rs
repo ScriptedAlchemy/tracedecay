@@ -407,371 +407,417 @@ pub fn handle_tool_call_with_registry_options<'a>(
     let dispatch = async move {
         #[cfg(feature = "hotpath")]
         hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
-        for removed in ["hermes_home"] {
-            if args.get(removed).is_some() {
-                return Err(TraceDecayError::Config {
-                    message: format!("unknown parameter `{removed}` for `{tool_name}`"),
-                });
-            }
-        }
-        if args.get("memory_scope").and_then(Value::as_str) == Some("user")
-            && matches!(
-                RetainedSurfaceOperation::from_tool_name(tool_name),
-                Some(
-                    RetainedSurfaceOperation::FactStoreAdd
-                        | RetainedSurfaceOperation::FactStoreSearch
-                        | RetainedSurfaceOperation::FactStoreProbe
-                        | RetainedSurfaceOperation::FactStoreRelated
-                        | RetainedSurfaceOperation::FactStoreReason
-                        | RetainedSurfaceOperation::FactStoreContradict
-                        | RetainedSurfaceOperation::FactStoreGet
-                        | RetainedSurfaceOperation::FactStoreUpdate
-                        | RetainedSurfaceOperation::FactStoreRemove
-                        | RetainedSurfaceOperation::FactStoreSupersede
-                        | RetainedSurfaceOperation::FactStoreList
-                        | RetainedSurfaceOperation::FactFeedback
-                        | RetainedSurfaceOperation::MemoryStatus
-                )
-            )
-        {
-            if args.get("storage_scope").is_some() {
-                return Err(TraceDecayError::Config {
-                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
-                });
-            }
-            ensure_mcp_dispatch_available(tool_name)?;
-            let operation =
-                RetainedSurfaceOperation::from_tool_name(tool_name).ok_or_else(|| {
-                    TraceDecayError::Config {
-                        message: format!("{tool_name} requires a supported retained action"),
-                    }
-                })?;
+        if let Some(operation) = profile_retained_operation(tool_name, &mut args)? {
             return dispatch_profile_retained_application_tool(
                 operation, tool_name, cg, args, options,
             )
             .await;
         }
-        // A profile-scoped session refresh names its owner in the canonical
-        // request; like `memory_scope=user`, that selects the profile session
-        // authority and never the active project's session store.
-        if crate::mcp::tools::session_refresh_profile_scope_requested(tool_name, &args) {
-            if args.get("storage_scope").is_some() {
-                return Err(TraceDecayError::Config {
-                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
-                });
-            }
-            ensure_mcp_dispatch_available(tool_name)?;
-            let operation = RetainedSurfaceOperation::from_tool_name(tool_name)
-                .ok_or_else(|| unknown_tool_error(tool_name))?;
-            return dispatch_profile_retained_application_tool(
-                operation, tool_name, cg, args, options,
-            )
-            .await;
-        }
-        if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
-            if !tool_name.starts_with("tracedecay_lcm_") && tool_name != "tracedecay_message_search"
-            {
-                return Err(TraceDecayError::Config {
-                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
-                });
-            }
-            match storage_scope {
-                "user" => {
-                    // User-scoped retained/LCM calls return before the root
-                    // dispatch guard below. Keep the canonical availability
-                    // decision ahead of every profile handler and store effect.
-                    if RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
-                        || tool_name == "tracedecay_message_search"
-                    {
-                        ensure_mcp_dispatch_available(tool_name)?;
-                    }
-                    if let Some(operation) = RetainedSurfaceOperation::from_tool_name(tool_name) {
-                        let dispatch: std::pin::Pin<
-                            Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
-                        > = Box::pin(dispatch_profile_retained_application_tool(
-                            operation, tool_name, cg, args, options,
-                        ));
-                        return dispatch.await;
-                    }
-                    return Err(TraceDecayError::Config {
-                        message: format!(
-                            "storage_scope=user is unavailable for non-retained tool `{tool_name}`"
-                        ),
-                    });
-                }
-                "project" => {
-                    if let Some(object) = args.as_object_mut() {
-                        object.remove("storage_scope");
-                    }
-                }
-                _ => {
-                    return Err(TraceDecayError::Config {
-                        message: "storage_scope must be one of project, user".to_string(),
-                    });
-                }
-            }
-        }
-        if tool_accepts_registered_project_selector(tool_name) {
-            support::validate_registered_project_selector_aliases(
-                &args,
-                crate::mcp::project_route::semantic_route_argument_fields(tool_name),
-            )?;
-        } else if rejected_tool_project_selector_present(tool_name, &args) {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "{tool_name} is scoped to the active project and does not accept project selectors"
-                ),
-            });
-        }
-        if tool_dispatches_registered_project_reader(tool_name)
-            && crate::mcp::project_route::arguments_have_project_selector(tool_name, &args)
-            && options.resolved_project_route.is_none()
-        {
-            return Err(TraceDecayError::project_route(
-                "project_route_unavailable",
-                true,
-                "registered project selection was not resolved before handler dispatch",
-            ));
-        }
-        let selected_scope_prefix = scope_prefix;
-        // Classify before moving `args` so large payloads are not cloned into every
-        // group probe. Application-surface tools still run before catalog checks.
+        validate_tool_project_scope(tool_name, &args, options.resolved_project_route.is_some())?;
         let dispatch_group = classify_mcp_tool_dispatch_group(tool_name);
-        if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
-            // Application-surface tools return before the root guard below.
-            // Reject unavailable effects before parsing, routing, or invoking
-            // the canonical application handler.
-            ensure_mcp_dispatch_available(tool_name)?;
-            return boxed_send(dispatch_application_surface_tools(
-                tool_name, cg, args, options,
-            ))
-            .await;
-        }
-        if dispatch_group == Some(McpToolDispatchGroup::MultiRoot) {
-            // Multi-root tools are daemon-owned: they carry no application
-            // surface binding, so they return here rather than falling through
-            // to the catalog resolution below.
-            ensure_mcp_dispatch_available(tool_name)?;
-            return boxed_send(handle_multi_root(
-                tool_name,
-                args,
-                options.application_invocation_executor,
-                options.application_request_id,
-                options.application_deadline,
-                options.application_cancellation,
-            ))
-            .await;
-        }
-        if dispatch_group == Some(McpToolDispatchGroup::Work) {
-            // Work routes through the same canonical owner as HTTP rather than
-            // entering compatibility dispatch below.
-            ensure_mcp_dispatch_available(tool_name)?;
-            return boxed_send(handle_work(
-                tool_name,
-                args,
-                options.application_invocation_executor,
-                options.application_request_id,
-                options.application_deadline,
-                options.application_cancellation,
-            ))
-            .await;
-        }
-        if dispatch_group == Some(McpToolDispatchGroup::Workflow) {
-            // Workflow is Work's sibling closed family and reaches the same
-            // canonical owner HTTP and the CLI reach, for the same reason.
-            ensure_mcp_dispatch_available(tool_name)?;
-            return boxed_send(handle_workflow(
-                tool_name,
-                args,
-                options.application_invocation_executor,
-                options.application_request_id,
-                options.application_deadline,
-                options.application_cancellation,
-            ))
-            .await;
-        }
-        // Catalog-declared compatibility operations must resolve the MCP binding
-        // before reaching their retained typed handler. Operations without an
-        // application-catalog contract remain under the explicit root MCP
-        // migration owner until their family receives one.
-        if let Err(error) = resolve_catalog_tool_binding(BindingSurface::Mcp, tool_name) {
-            return Err(TraceDecayError::Config {
-                message: error.to_string(),
-            });
-        }
-        let compatibility_owned =
-            LegacyToolCompatibilityOwner::admits(tool_name).map_err(|error| {
-                TraceDecayError::project_route(
-                    "mcp.catalog_discovery_unavailable",
-                    false,
-                    format!("MCP tool discovery is unavailable: {error}"),
-                )
-            })?;
-        if !compatibility_owned && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
-            return Err(unknown_tool_error(tool_name));
-        }
-        ensure_mcp_dispatch_available(tool_name)?;
-        // The universal ceiling. Every dispatch group below runs inside this one
-        // bound, so a group added later inherits it without opting in and no
-        // handler can be reached unbounded. Per-group wraps (git, memory) stay:
-        // they report a nicer domain-shaped result and a shorter bound, and this
-        // is only the backstop beneath them.
-        let dispatch_budget =
-            dispatch_groups::tool_dispatch_budget(tool_name, options.application_deadline.as_ref());
-        let Some(dispatch_budget) = dispatch_budget else {
-            // `deadline_remaining` yields `None` only for an already-elapsed
-            // carried deadline, which must be rejected rather than dispatched.
-            return Err(dispatch_groups::tool_dispatch_deadline_error(
-                tool_name,
-                std::time::Duration::ZERO,
-            ));
-        };
-        // The lease is cloned out of `options` (one field, not the whole
-        // struct) so the dispatch arms below can take `options` by value.
-        let project_session_db_lease = options.registered_project_session_db.clone();
-        let served_stale_graph_generation = Arc::clone(&options.served_stale_graph_generation);
-        let project_session_db = project_session_db_lease
-            .as_ref()
-            .or(options.session_authorities.project);
-        let dispatched = async {
-            match dispatch_group {
-                Some(McpToolDispatchGroup::Graph) => {
-                    boxed_send(dispatch_graph_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        selected_scope_prefix,
-                        options,
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::Info) => {
-                    boxed_send(dispatch_info_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        server_stats,
-                        scope_prefix,
-                        selected_scope_prefix,
-                        project_session_db,
-                        options,
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::Admin) => {
-                    boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
-                }
-                Some(McpToolDispatchGroup::Analysis) => {
-                    boxed_send(dispatch_analysis_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        scope_prefix,
-                        options,
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::Git) => {
-                    boxed_send(dispatch_git_tools(tool_name, cg, args, options)).await
-                }
-                Some(McpToolDispatchGroup::Edit) => {
-                    boxed_send(dispatch_edit_tools(tool_name, cg, args, options)).await
-                }
-                Some(McpToolDispatchGroup::Health) => {
-                    boxed_send(dispatch_health_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        scope_prefix,
-                        project_session_db,
-                        options,
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::RetainedApplication) => {
-                    boxed_send(dispatch_retained_application_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        scope_prefix,
-                        project_session_db,
-                        options,
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::Memory) => {
-                    boxed_send(dispatch_memory_tools(tool_name, cg, args, options)).await
-                }
-                Some(McpToolDispatchGroup::SessionWorkflow) => {
-                    boxed_send(dispatch_session_workflow_tools(
-                        tool_name, cg, args, options,
-                    ))
-                    .await
-                }
-                // Typed daemon surface tools already returned above; reaching here means
-                // the name resolves to no reachable dispatch entry.
-                Some(
-                    McpToolDispatchGroup::ApplicationSurface
+        if matches!(
+            dispatch_group,
+            Some(
+                McpToolDispatchGroup::ApplicationSurface
                     | McpToolDispatchGroup::MultiRoot
                     | McpToolDispatchGroup::Work
-                    | McpToolDispatchGroup::Workflow,
-                )
-                | None => Err(unknown_tool_error(tool_name)),
-            }
-        };
-        let result = if matches!(
-            dispatch_group,
-            Some(McpToolDispatchGroup::RetainedApplication)
-        ) || super::binding::tool_requires_canonical_effect_settlement(tool_name)
-        {
-            // Canonically settled effects complete their own deadline and
-            // cancellation protocol before this adapter receives a terminal.
-            // Dropping that terminal in the generic transport timeout would
-            // erase an admitted Effect or PartialEffect receipt.
-            dispatched.await
-        } else {
-            match tokio::time::timeout(dispatch_budget, dispatched).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(dispatch_groups::tool_dispatch_deadline_error(
-                    tool_name,
-                    dispatch_budget,
-                )),
-            }
-        };
-        match result {
-            Ok(mut result) => {
-                // The verified-graph open funnel reports serve-old-while-
-                // rebuilding through the one-shot options slot; the answer is
-                // sound for the served generation but may trail the live
-                // worktree, and the response must say so — including whether
-                // a rebuild is actually in motion, so a wedged route serving
-                // days-old answers is visibly wedged, not "rebuilding".
-                if let Some(served) = served_stale_graph_generation.get()
-                    && let Some(content) = result
-                        .value
-                        .get_mut("content")
-                        .and_then(|content| content.as_array_mut())
-                {
-                    let generation = &served.generation;
-                    let age = seated_generation_age_label(served.sealed_at);
-                    let remedy = if served.rebuild_in_flight {
-                        "while the code index rebuilds"
-                    } else {
-                        "with no rebuild pass in flight — the scheduler is not \
-                         replacing this generation"
-                    };
-                    content.push(json!({"type": "text", "text": format!(
-                        "\ncode_graph_freshness: stale — serving the last complete generation \
-                         {generation} (sealed {age} ago) {remedy}; results may trail the \
-                         live worktree"
-                    )}));
-                }
-                Ok(result)
-            }
-            Err(error) => Err(error),
+                    | McpToolDispatchGroup::Workflow
+            )
+        ) {
+            ensure_mcp_dispatch_available(tool_name)?;
+            return dispatch_daemon_tool(dispatch_group, cg, tool_name, args, options).await;
         }
+        dispatch_catalog_tool(
+            dispatch_group,
+            cg,
+            tool_name,
+            args,
+            server_stats,
+            scope_prefix,
+            options,
+        )
+        .await
     };
     Box::pin(hotpath::future!(dispatch, label = "mcp.tool_call"))
+}
+
+/// Resolve profile-owned requests before any active-project authority is read.
+fn profile_retained_operation(
+    tool_name: &str,
+    args: &mut Value,
+) -> Result<Option<RetainedSurfaceOperation>> {
+    for removed in ["hermes_home"] {
+        if args.get(removed).is_some() {
+            return Err(TraceDecayError::Config {
+                message: format!("unknown parameter `{removed}` for `{tool_name}`"),
+            });
+        }
+    }
+    let operation = RetainedSurfaceOperation::from_tool_name(tool_name);
+    let user_memory = args.get("memory_scope").and_then(Value::as_str) == Some("user")
+        && matches!(
+            operation,
+            Some(
+                RetainedSurfaceOperation::FactStoreAdd
+                    | RetainedSurfaceOperation::FactStoreSearch
+                    | RetainedSurfaceOperation::FactStoreProbe
+                    | RetainedSurfaceOperation::FactStoreRelated
+                    | RetainedSurfaceOperation::FactStoreReason
+                    | RetainedSurfaceOperation::FactStoreContradict
+                    | RetainedSurfaceOperation::FactStoreGet
+                    | RetainedSurfaceOperation::FactStoreUpdate
+                    | RetainedSurfaceOperation::FactStoreRemove
+                    | RetainedSurfaceOperation::FactStoreSupersede
+                    | RetainedSurfaceOperation::FactStoreList
+                    | RetainedSurfaceOperation::FactFeedback
+                    | RetainedSurfaceOperation::MemoryStatus
+            )
+        );
+    // Both canonical selectors bind profile storage before project dispatch.
+    if user_memory || crate::mcp::tools::session_refresh_profile_scope_requested(tool_name, args) {
+        if args.get("storage_scope").is_some() {
+            return Err(TraceDecayError::Config {
+                message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
+            });
+        }
+        ensure_mcp_dispatch_available(tool_name)?;
+        return operation.map(Some).ok_or_else(|| {
+            if user_memory {
+                TraceDecayError::Config {
+                    message: format!("{tool_name} requires a supported retained action"),
+                }
+            } else {
+                unknown_tool_error(tool_name)
+            }
+        });
+    }
+    if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
+        if !tool_name.starts_with("tracedecay_lcm_") && tool_name != "tracedecay_message_search" {
+            return Err(TraceDecayError::Config {
+                message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
+            });
+        }
+        match storage_scope {
+            "user" => {
+                // User-scoped retained/LCM calls return before the root
+                // dispatch guard below. Keep the canonical availability
+                // decision ahead of every profile handler and store effect.
+                if RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+                    || tool_name == "tracedecay_message_search"
+                {
+                    ensure_mcp_dispatch_available(tool_name)?;
+                }
+                if let Some(operation) = RetainedSurfaceOperation::from_tool_name(tool_name) {
+                    return Ok(Some(operation));
+                }
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "storage_scope=user is unavailable for non-retained tool `{tool_name}`"
+                    ),
+                });
+            }
+            "project" => {
+                if let Some(object) = args.as_object_mut() {
+                    object.remove("storage_scope");
+                }
+            }
+            _ => {
+                return Err(TraceDecayError::Config {
+                    message: "storage_scope must be one of project, user".to_string(),
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn validate_tool_project_scope(
+    tool_name: &str,
+    args: &Value,
+    has_resolved_project_route: bool,
+) -> Result<()> {
+    if tool_accepts_registered_project_selector(tool_name) {
+        support::validate_registered_project_selector_aliases(
+            args,
+            crate::mcp::project_route::semantic_route_argument_fields(tool_name),
+        )?;
+    } else if rejected_tool_project_selector_present(tool_name, args) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{tool_name} is scoped to the active project and does not accept project selectors"
+            ),
+        });
+    }
+    if tool_dispatches_registered_project_reader(tool_name)
+        && crate::mcp::project_route::arguments_have_project_selector(tool_name, args)
+        && !has_resolved_project_route
+    {
+        return Err(TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            "registered project selection was not resolved before handler dispatch",
+        ));
+    }
+    Ok(())
+}
+
+/// These closed families own their canonical effect settlement and bypass
+/// compatibility catalog dispatch, while still requiring MCP availability.
+async fn dispatch_daemon_tool(
+    group: Option<McpToolDispatchGroup>,
+    cg: &TraceDecay,
+    tool_name: &str,
+    args: Value,
+    options: ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    match group {
+        Some(McpToolDispatchGroup::ApplicationSurface) => {
+            boxed_send(dispatch_application_surface_tools(
+                tool_name, cg, args, options,
+            ))
+            .await
+        }
+        Some(McpToolDispatchGroup::MultiRoot) => {
+            boxed_send(handle_multi_root(
+                tool_name,
+                args,
+                options.application_invocation_executor,
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
+            ))
+            .await
+        }
+        Some(McpToolDispatchGroup::Work) => {
+            boxed_send(handle_work(
+                tool_name,
+                args,
+                options.application_invocation_executor,
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
+            ))
+            .await
+        }
+        Some(McpToolDispatchGroup::Workflow) => {
+            boxed_send(handle_workflow(
+                tool_name,
+                args,
+                options.application_invocation_executor,
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
+            ))
+            .await
+        }
+        _ => Err(unknown_tool_error(tool_name)),
+    }
+}
+
+/// Admit catalog ownership, bound read execution, and preserve settled effects.
+async fn dispatch_catalog_tool(
+    dispatch_group: Option<McpToolDispatchGroup>,
+    cg: &TraceDecay,
+    tool_name: &str,
+    args: Value,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+    options: ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    // Catalog-declared compatibility operations must resolve the MCP binding
+    // before reaching their retained typed handler. Operations without an
+    // application-catalog contract remain under the explicit root MCP
+    // migration owner until their family receives one.
+    if let Err(error) = resolve_catalog_tool_binding(BindingSurface::Mcp, tool_name) {
+        return Err(TraceDecayError::Config {
+            message: error.to_string(),
+        });
+    }
+    let compatibility_owned = LegacyToolCompatibilityOwner::admits(tool_name).map_err(|error| {
+        TraceDecayError::project_route(
+            "mcp.catalog_discovery_unavailable",
+            false,
+            format!("MCP tool discovery is unavailable: {error}"),
+        )
+    })?;
+    if !compatibility_owned && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
+        return Err(unknown_tool_error(tool_name));
+    }
+    ensure_mcp_dispatch_available(tool_name)?;
+    // The universal ceiling. Every dispatch group below runs inside this one
+    // bound, so a group added later inherits it without opting in and no
+    // handler can be reached unbounded. Per-group wraps (git, memory) stay:
+    // they report a nicer domain-shaped result and a shorter bound, and this
+    // is only the backstop beneath them.
+    let dispatch_budget =
+        dispatch_groups::tool_dispatch_budget(tool_name, options.application_deadline.as_ref());
+    let Some(dispatch_budget) = dispatch_budget else {
+        // `deadline_remaining` yields `None` only for an already-elapsed
+        // carried deadline, which must be rejected rather than dispatched.
+        return Err(dispatch_groups::tool_dispatch_deadline_error(
+            tool_name,
+            std::time::Duration::ZERO,
+        ));
+    };
+    let served_stale_graph_generation = Arc::clone(&options.served_stale_graph_generation);
+    let dispatched = dispatch_catalog_group(
+        dispatch_group,
+        cg,
+        tool_name,
+        args,
+        server_stats,
+        scope_prefix,
+        options,
+    );
+    let result = if matches!(
+        dispatch_group,
+        Some(McpToolDispatchGroup::RetainedApplication)
+    ) || super::binding::tool_requires_canonical_effect_settlement(tool_name)
+    {
+        // Canonically settled effects complete their own deadline and
+        // cancellation protocol before this adapter receives a terminal.
+        // Dropping that terminal in the generic transport timeout would
+        // erase an admitted Effect or PartialEffect receipt.
+        dispatched.await
+    } else {
+        match tokio::time::timeout(dispatch_budget, dispatched).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(dispatch_groups::tool_dispatch_deadline_error(
+                tool_name,
+                dispatch_budget,
+            )),
+        }
+    };
+    let mut result = result?;
+    append_stale_graph_freshness(&mut result, &served_stale_graph_generation);
+    Ok(result)
+}
+
+async fn dispatch_catalog_group(
+    dispatch_group: Option<McpToolDispatchGroup>,
+    cg: &TraceDecay,
+    tool_name: &str,
+    args: Value,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+    options: ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    // Keep the registered lease alive while a moved handler borrows its store.
+    let project_session_db_lease = options.registered_project_session_db.clone();
+    let project_session_db = project_session_db_lease
+        .as_ref()
+        .or(options.session_authorities.project);
+    match dispatch_group {
+        Some(McpToolDispatchGroup::Graph) => {
+            boxed_send(dispatch_graph_tools(
+                tool_name,
+                cg,
+                args,
+                scope_prefix,
+                options,
+            ))
+            .await
+        }
+        Some(McpToolDispatchGroup::Info) => {
+            boxed_send(dispatch_info_tools(
+                tool_name,
+                cg,
+                args,
+                server_stats,
+                scope_prefix,
+                scope_prefix,
+                project_session_db,
+                options,
+            ))
+            .await
+        }
+        Some(McpToolDispatchGroup::Admin) => {
+            boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
+        }
+        Some(McpToolDispatchGroup::Analysis) => {
+            boxed_send(dispatch_analysis_tools(
+                tool_name,
+                cg,
+                args,
+                scope_prefix,
+                options,
+            ))
+            .await
+        }
+        Some(McpToolDispatchGroup::Git) => {
+            boxed_send(dispatch_git_tools(tool_name, cg, args, options)).await
+        }
+        Some(McpToolDispatchGroup::Edit) => {
+            boxed_send(dispatch_edit_tools(tool_name, cg, args, options)).await
+        }
+        Some(McpToolDispatchGroup::Health) => {
+            boxed_send(dispatch_health_tools(
+                tool_name,
+                cg,
+                args,
+                scope_prefix,
+                project_session_db,
+                options,
+            ))
+            .await
+        }
+        Some(McpToolDispatchGroup::RetainedApplication) => {
+            boxed_send(dispatch_retained_application_tools(
+                tool_name,
+                cg,
+                args,
+                scope_prefix,
+                project_session_db,
+                options,
+            ))
+            .await
+        }
+        Some(McpToolDispatchGroup::Memory) => {
+            boxed_send(dispatch_memory_tools(tool_name, cg, args, options)).await
+        }
+        Some(McpToolDispatchGroup::SessionWorkflow) => {
+            boxed_send(dispatch_session_workflow_tools(
+                tool_name, cg, args, options,
+            ))
+            .await
+        }
+        // Typed daemon surface tools already returned above; reaching here means
+        // the name resolves to no reachable dispatch entry.
+        Some(
+            McpToolDispatchGroup::ApplicationSurface
+            | McpToolDispatchGroup::MultiRoot
+            | McpToolDispatchGroup::Work
+            | McpToolDispatchGroup::Workflow,
+        )
+        | None => Err(unknown_tool_error(tool_name)),
+    }
+}
+
+/// Project the verified serving generation's freshness without changing its answer.
+fn append_stale_graph_freshness(
+    result: &mut ToolResult,
+    served_stale_graph_generation: &std::sync::OnceLock<ServedStaleCodeGraphReadV1>,
+) {
+    if let Some(served) = served_stale_graph_generation.get()
+        && let Some(content) = result
+            .value
+            .get_mut("content")
+            .and_then(|content| content.as_array_mut())
+    {
+        let generation = &served.generation;
+        let age = seated_generation_age_label(served.sealed_at);
+        let remedy = if served.rebuild_in_flight {
+            "while the code index rebuilds"
+        } else {
+            "with no rebuild pass in flight — the scheduler is not \
+         replacing this generation"
+        };
+        content.push(json!({"type": "text", "text": format!(
+            "\ncode_graph_freshness: stale — serving the last complete generation \
+             {generation} (sealed {age} ago) {remedy}; results may trail the \
+             live worktree"
+        )}));
+    }
 }
 
 /// Coarse human duration between a generation's seal time and now, for the
