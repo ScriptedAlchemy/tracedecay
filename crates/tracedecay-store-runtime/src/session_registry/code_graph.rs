@@ -2696,8 +2696,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub async fn release_one_sealed_generation_staging_rows(
         &self,
         project_id: ProjectId,
-        repository_id: &RepositoryId,
-        generations_root: std::path::PathBuf,
         project_database: &tracedecay_runtime_core::db::Database,
         cancellation: &tracedecay_session_memory::context::CancellationToken,
         after: Option<GraphProjectionIdentityV1>,
@@ -2720,33 +2718,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         if bound_shard != project_shard {
             self.ensure_code_graph_shard_attached(&bound_shard).await;
         }
-        // The release recovers the verified head when the installed generation
-        // is absent, and that recovery hydrates through the manifest provider.
-        // This lease-only path bound no replay route, so every such recovery
-        // answered "sealed code generation replay source is not mounted for
-        // this projection": the rows stayed retained and code-generation
-        // retention degraded on every tick for as long as no code-graph
-        // runtime happened to be seated (issue #1244). Bind the same route
-        // `retain_code_graph_runtime` binds, for
-        // the duration of this sweep; equal routes share one reference, so a
-        // concurrently seated runtime keeps its own.
-        let replay_root = project_database
-            .database_path()
-            .with_extension("graph-replay");
-        let _manifest_route = self
-            .graph_manifest_provider
-            .bind(
-                bound_shard.clone(),
-                project_id,
-                repository_id.clone(),
-                generations_root,
-                replay_root,
-            )
-            .map_err(|error| {
-                GraphDbError::unavailable(format!(
-                    "bind code graph replay route for the staging release sweep: {error}"
-                ))
-            })?;
         let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = authority;
         let mut storage = project_database
             .graph_publication_storage()

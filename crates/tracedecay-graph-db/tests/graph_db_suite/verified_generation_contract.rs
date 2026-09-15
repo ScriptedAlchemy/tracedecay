@@ -14,7 +14,7 @@ use tracedecay_graph_db::{
     GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphRelationRef,
     GraphReplayCollectionOutcome, GraphWatermark, SealedCodeGenerationReplay,
     SealedGraphStateDigest, SealedStagingRelease, SealedStagingRetentionReason, SourceGeneration,
-    take_graph_db_hydration_counters,
+    take_graph_db_hydration_counters, take_graph_db_verification_counters,
 };
 use tracedecay_store::{
     GraphPendingReplayDiscardOutcomeV1, GraphPendingReplayDiscardV1, GraphProjectionIdentityV1,

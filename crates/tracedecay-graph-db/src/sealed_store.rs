@@ -33,6 +33,7 @@
 //!   <physical-namespace-hex>/
 //!     generation.grafeo         <- compact single-generation store
 //!     sealed.json               <- receipt binding the recovered digest
+//!     sealed.checked            <- written only after post-reopen proof
 //! ```
 //!
 //! # Sealed-read-bundle integration point
@@ -174,6 +175,9 @@ const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
 const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
+/// Digest recorded only after a successful post-reopen proof. A `sealed.json`
+/// written before that proof is not release authority.
+const SEALED_STORE_CHECKED_FILE: &str = "sealed.checked";
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
 /// The one form a sealed store is built in. Every value TraceDecay persists
@@ -200,6 +204,30 @@ struct SealedStoreReceiptV1 {
     recovered_digest: String,
     entities: usize,
     relations: usize,
+}
+
+impl SealedStoreReceiptV1 {
+    fn binds(
+        &self,
+        locator: &GenerationLocator,
+        physical_namespace: &str,
+        expected_digest: &str,
+    ) -> bool {
+        self.version == SEALED_STORE_RECEIPT_VERSION
+            && self.recovered_digest == expected_digest
+            && self.physical_namespace == physical_namespace
+            && self.namespace == locator.projection.namespace.as_str()
+            && self.projection == locator.projection.projection.as_str()
+            && self.generation == locator.generation.as_str()
+    }
+}
+
+/// Digest and row counts that authorize a staging-row release without opening
+/// the sealed engine.
+pub(crate) struct SealedReleaseEvidence {
+    pub recovered_digest: String,
+    pub entities: usize,
+    pub relations: usize,
 }
 
 /// How [`GraphDb::ensure_sealed_generation_store`] satisfied a publication's
@@ -821,6 +849,48 @@ impl GraphDb {
         sealed.get(locator).cloned()
     }
 
+    /// Receipt evidence that `locator`'s on-disk sealed artifact matches
+    /// `expected` digest, without opening the sealed engine.
+    ///
+    /// Staging-row release is cleanup, not serving. The relational head plus
+    /// a post-reopen `sealed.checked` digest already name a proven artifact.
+    /// A `sealed.json` written before that proof is not enough: a crash after
+    /// the install rename and before proof would otherwise delete the only
+    /// reconstructable staging rows. Serving and activation still prove
+    /// before they read, and a successful proof persists the check.
+    pub(crate) fn matching_sealed_release_receipt(
+        &self,
+        locator: &GenerationLocator,
+        expected: &str,
+    ) -> Result<Option<SealedReleaseEvidence>, GraphDbError> {
+        if sealed_store_disabled() {
+            return Ok(None);
+        }
+        let Some(reopen) = self.inner.reopen.as_ref() else {
+            return Ok(None);
+        };
+        let Some(database_path) = reopen.config.path.clone() else {
+            return Ok(None);
+        };
+        let physical_namespace = locator.physical_namespace()?;
+        let directory =
+            sealed_generation_directory(&sealed_store_root(&database_path), &physical_namespace);
+        let Some(receipt) = load_sealed_store_receipt(&directory)? else {
+            return Ok(None);
+        };
+        if !receipt.binds(locator, physical_namespace.as_str(), expected) {
+            return Ok(None);
+        }
+        if !sealed_store_check_matches(&directory, expected)? {
+            return Ok(None);
+        }
+        Ok(Some(SealedReleaseEvidence {
+            recovered_digest: receipt.recovered_digest,
+            entities: receipt.entities,
+            relations: receipt.relations,
+        }))
+    }
+
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub fn discard_sealed_generation_reader(
         &self,
@@ -1033,30 +1103,6 @@ impl GraphDb {
                 Ok(())
             }
         }
-    }
-
-    pub(crate) fn open_installed_sealed_generation_store_if_present(
-        &self,
-        lease: &crate::lease::VerifiedGenerationLease,
-    ) -> Result<(), GraphDbError> {
-        if self.sealed_generation_reader(&lease.locator).is_some() {
-            return Ok(());
-        }
-        let Some(commit) = self.generation_commit(&lease.locator)? else {
-            return Ok(());
-        };
-        let identity = GraphGenerationManifestIdentity::new(
-            lease.locator.projection.clone(),
-            lease.locator.generation.clone(),
-            commit.source_generation,
-            commit.watermark,
-            lease.dependency_identities.clone(),
-        );
-        self.open_sealed_generation_store_if_present(
-            &identity,
-            &lease.head.recovered_digest,
-            &|| Ok(()),
-        )
     }
 
     fn install_sealed_generation_store(
@@ -1672,29 +1718,53 @@ fn open_sealed_store(
     open_sealed_store_checked(directory, identity, expected, &|| Ok(()))
 }
 
+fn load_sealed_store_receipt(
+    directory: &Path,
+) -> Result<Option<SealedStoreReceiptV1>, GraphDbError> {
+    let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
+    let receipt_bytes = match std::fs::read(&receipt_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
+    };
+    serde_json::from_slice(&receipt_bytes)
+        .map(Some)
+        .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))
+}
+
+fn sealed_store_check_matches(
+    directory: &Path,
+    expected_digest: &str,
+) -> Result<bool, GraphDbError> {
+    let path = directory.join(SEALED_STORE_CHECKED_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(digest) => Ok(digest == expected_digest),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(sealed_store_io_failure("sealed check read failed", error)),
+    }
+}
+
+fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result<(), GraphDbError> {
+    if sealed_store_check_matches(directory, expected_digest)? {
+        return Ok(());
+    }
+    std::fs::write(directory.join(SEALED_STORE_CHECKED_FILE), expected_digest)
+        .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
+}
+
 fn open_sealed_store_checked(
     directory: &Path,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Option<Arc<SealedGenerationStore>>, GraphDbError> {
-    let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
     let database_path = directory.join(SEALED_STORE_DATABASE_FILE);
-    let receipt_bytes = match std::fs::read(&receipt_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
+    let Some(receipt) = load_sealed_store_receipt(directory)? else {
+        return Ok(None);
     };
-    let receipt: SealedStoreReceiptV1 = serde_json::from_slice(&receipt_bytes)
-        .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))?;
+    let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
     let physical_namespace = identity.physical_namespace()?;
-    if receipt.version != SEALED_STORE_RECEIPT_VERSION
-        || receipt.recovered_digest != expected.as_str()
-        || receipt.physical_namespace != physical_namespace.as_str()
-        || receipt.namespace != identity.projection.namespace.as_str()
-        || receipt.projection != identity.projection.projection.as_str()
-        || receipt.generation != identity.generation.as_str()
-    {
+    if !receipt.binds(&locator, physical_namespace.as_str(), expected.as_str()) {
         return Err(GraphDbError::unavailable(
             "sealed generation store receipt does not bind this generation".to_owned(),
         ));
@@ -1743,6 +1813,10 @@ fn open_sealed_store_checked(
     ) {
         let _ = database.close();
         return Err(sealed_store_failure("post-proof hibernation failed", error));
+    }
+    if let Err(error) = persist_sealed_store_check(directory, expected.as_str()) {
+        let _ = database.close();
+        return Err(error);
     }
     Ok(Some(Arc::new(SealedGenerationStore {
         locator: GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
