@@ -30,8 +30,8 @@ stale states into empty success or silent fallback.
 Reuse the canonical authority. Delete duplicate paths and obsolete machinery
 before adding another abstraction.
 
-When replacing an internal API, read and apply
-`/home/zack/.cursor/plugins/cache/cursor-public/pstack/be432a96ed36e48d05f44bf375864355f62263f9/skills/principle-migrate-callers-then-delete-legacy-apis/SKILL.md`.
+When replacing an internal API, read and apply the
+`principle-migrate-callers-then-delete-legacy-apis` skill (pstack plugin).
 Inventory and migrate every internal caller, then delete the legacy API in the
 same wave. Use only time-boxed adapters. Do not add compatibility layers without
 proven external or persisted consumers.
@@ -56,9 +56,7 @@ from inferences. Cut process narration.
 Use owned tools when they answer the task, not as ceremony. Read and follow the
 matching guide instead of copying its rules here:
 
-- Read `/home/zack/.cursor/plugins/local/tracedecay/skills/discovering-tracedecay/SKILL.md`
-  for TraceDecay operations.
-- Read `/home/zack/.agents/skills/ripwire-router/SKILL.md` for Ripwire task
-  routing.
-- Read `/home/zack/.cursor/plugins/local/cargo-hauler/skills/cargo-hauler/SKILL.md`
-  for Cargo execution.
+- Read the `discovering-tracedecay` skill (tracedecay plugin) for TraceDecay
+  operations.
+- Read the `ripwire-router` skill (Ripwire agent skills) for Ripwire task routing.
+- Read the `cargo-hauler` skill (cargo-hauler plugin) for Cargo execution.
