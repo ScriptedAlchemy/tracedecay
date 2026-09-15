@@ -91,18 +91,28 @@ impl CodeLexicalCloneSuccessorV1 {
     pub fn next_cursor(
         &self,
     ) -> Result<Option<VerifiedSealedLexicalCursorV1>, CodeLexicalArtifactErrorV1> {
-        self.connection
+        let (next_page, bytes): (i64, Option<Vec<u8>>) = self
+            .connection
             .query_row(
-                "SELECT next_cursor FROM clone_successor_state WHERE singleton = 1",
+                "SELECT next_page_ordinal, next_cursor FROM clone_successor_state WHERE singleton = 1",
                 [],
-                |row| row.get::<_, Option<Vec<u8>>>(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .map_err(sqlite_error)?
+            .map_err(sqlite_error)?;
+        let cursor = bytes
             .map(|bytes| {
                 VerifiedSealedLexicalCursorV1::restore_persisted(&bytes)
                     .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
             })
-            .transpose()
+            .transpose()?;
+        if cursor.as_ref().map_or(next_page != 0, |cursor| {
+            u64::try_from(next_page).ok() != Some(cursor.next_page_ordinal())
+        }) {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone successor page ordinal disagrees with its source cursor".to_owned(),
+            ));
+        }
+        Ok(cursor)
     }
 
     pub fn append_page(
@@ -125,29 +135,11 @@ impl CodeLexicalCloneSuccessorV1 {
                 "clone successor page is not the next source page".to_owned(),
             ));
         }
-        let stored: Option<(String, String, Vec<u8>)> = transaction
-            .query_row(
-                "SELECT page_digest, cumulative_digest, next_cursor FROM source_pages WHERE page_ordinal = ?1",
-                [next_page],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(sqlite_error)?;
+        verify_copied_source_page(&transaction, page)?;
         let next_cursor = page
             .next_cursor()
             .persisted_bytes()
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        if stored
-            != Some((
-                page.page_digest().as_str().to_owned(),
-                page.cumulative_digest().as_str().to_owned(),
-                next_cursor.clone(),
-            ))
-        {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "clone successor page does not match the copied lexical source receipt".to_owned(),
-            ));
-        }
         append_clone_rows(&transaction, page, control)?;
         transaction
             .execute(
@@ -161,6 +153,16 @@ impl CodeLexicalCloneSuccessorV1 {
             .map_err(sqlite_error)?;
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)
+    }
+
+    pub fn verify_resumed_page(
+        &self,
+        page: &VerifiedSealedLexicalPageV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        checkpoint(control)?;
+        verify_copied_source_page(&self.connection, page)?;
+        verify_clone_page_rows(&self.connection, page, control)
     }
 
     pub fn finish(
@@ -418,6 +420,130 @@ fn append_clone_rows(
     Ok(())
 }
 
+fn verify_copied_source_page(
+    connection: &Connection,
+    page: &VerifiedSealedLexicalPageV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let stored: Option<(String, String, Vec<u8>)> = connection
+        .query_row(
+            "SELECT page_digest, cumulative_digest, next_cursor FROM source_pages WHERE page_ordinal = ?1",
+            [i64::try_from(page.page_ordinal())
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(sqlite_error)?;
+    let next_cursor = page
+        .next_cursor()
+        .persisted_bytes()
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    if stored
+        != Some((
+            page.page_digest().as_str().to_owned(),
+            page.cumulative_digest().as_str().to_owned(),
+            next_cursor,
+        ))
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "clone successor page does not match the copied lexical source receipt".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_clone_page_rows(
+    connection: &Connection,
+    page: &VerifiedSealedLexicalPageV1,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    for body in page.clone_bodies() {
+        checkpoint(control)?;
+        let expected_payload = serde_json::to_vec(&body.payload)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let stored_payload: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT payload FROM clone_body_payloads WHERE payload_digest = ?1",
+                [body.payload.payload_digest.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        if stored_payload.as_deref() != Some(expected_payload.as_slice()) {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "resumed clone payload differs from its sealed source page".to_owned(),
+            ));
+        }
+
+        let expected_occurrence = serde_json::to_vec(&body.occurrence)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let stored_occurrence: Option<(String, String, i64, i64, Vec<u8>)> = connection
+            .query_row(
+                "SELECT payload_digest, path, body_start, body_end, occurrence FROM clone_occurrences WHERE symbol_occurrence_id = ?1",
+                [body.occurrence.symbol_occurrence_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        let expected_span = (
+            i64::try_from(body.occurrence.body_span.start_byte)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+            i64::try_from(body.occurrence.body_span.end_byte)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+        );
+        if stored_occurrence.as_ref().map(|stored| {
+            (
+                stored.0.as_str(),
+                stored.1.as_str(),
+                stored.2,
+                stored.3,
+                stored.4.as_slice(),
+            )
+        }) != Some((
+            body.occurrence.payload_digest.as_str(),
+            body.occurrence.path.as_str(),
+            expected_span.0,
+            expected_span.1,
+            expected_occurrence.as_slice(),
+        )) {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "resumed clone occurrence differs from its sealed source page".to_owned(),
+            ));
+        }
+
+        let expected_postings = body
+            .payload
+            .exact_keys(body.occurrence.eligibility)
+            .into_iter()
+            .map(|key| {
+                (
+                    i64::from(key.class as u8),
+                    i64::from(key.normalization_revision),
+                    key.digest.as_str().to_owned(),
+                    body.occurrence.payload_digest.as_str().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut statement = connection
+            .prepare(
+                "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings WHERE symbol_occurrence_id = ?1 ORDER BY class, normalization_revision, digest",
+            )
+            .map_err(sqlite_error)?;
+        let stored_postings = statement
+            .query_map([body.occurrence.symbol_occurrence_id.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(sqlite_error)?
+            .collect::<Result<Vec<(i64, i64, String, String)>, _>>()
+            .map_err(sqlite_error)?;
+        if stored_postings != expected_postings {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "resumed clone postings differ from their sealed source page".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn verify_source_receipt(
     prior: &VerifiedCodeLexicalArtifactV1,
     source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -442,18 +568,21 @@ fn verify_clone_rows(
     connection: &Connection,
     source: &VerifiedSealedLexicalSourceReceiptV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let (occurrences, missing_payloads, dangling_postings): (i64, i64, i64) = connection
+    let (occurrences, missing_payloads, orphan_payloads, dangling_postings): (i64, i64, i64, i64) =
+        connection
         .query_row(
             "SELECT
              (SELECT COUNT(*) FROM clone_occurrences),
              (SELECT COUNT(*) FROM clone_occurrences AS occurrence LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = occurrence.payload_digest WHERE payload.payload_digest IS NULL),
+             (SELECT COUNT(*) FROM clone_body_payloads AS payload LEFT JOIN clone_occurrences AS occurrence ON occurrence.payload_digest = payload.payload_digest WHERE occurrence.symbol_occurrence_id IS NULL),
              (SELECT COUNT(*) FROM clone_exact_postings AS posting LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest WHERE occurrence.symbol_occurrence_id IS NULL OR payload.payload_digest IS NULL OR occurrence.payload_digest != posting.payload_digest)",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(sqlite_error)?;
     if u64::try_from(occurrences).ok() != Some(source.total_clone_bodies())
         || missing_payloads != 0
+        || orphan_payloads != 0
         || dangling_postings != 0
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(

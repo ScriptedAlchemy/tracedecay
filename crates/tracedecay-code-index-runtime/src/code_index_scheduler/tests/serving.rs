@@ -40,8 +40,8 @@ use tracedecay_query::retrieval::{
     },
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
-    sampled_process_resident_bytes_v1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryPressureV1, sampled_process_resident_bytes_v1,
 };
 
 use super::{
@@ -758,6 +758,85 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     registry.shutdown().await;
 }
 
+#[test]
+fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_owners() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish generation"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        while !latest.query_owners_are_ready() {
+            latest.advance_text_serving(1).expect("publish V14 head");
+        }
+    }
+
+    let limit = NonZeroU64::new(4 * 1024 * 1024 * 1024).expect("resident-memory limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let admission_headroom = limit.get().saturating_sub(pressure.high_watermark_bytes());
+    let held_bytes = limit
+        .get()
+        .saturating_sub(admission_headroom)
+        .saturating_sub(
+            u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1)
+                .expect("reader budget fits u64"),
+        )
+        .saturating_sub(64 * 1024 * 1024);
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let held = resident_memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test.clone-successor-transient")
+                .expect("test component"),
+            NonZeroU64::new(held_bytes).expect("temporary reservation"),
+        )
+        .expect("hold transient competing memory");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    scheduler.bind_resident_memory(Arc::clone(&resident_memory));
+    let latest = scheduler.latest_complete().expect("restored generation");
+    assert_eq!(
+        latest.advance_text_serving(1),
+        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+        "the competing reservation must deny the first successor admission"
+    );
+    latest
+        .production_query_owners()
+        .expect("V14 owners remain queryable after successor refusal");
+    assert!(
+        latest.text_projection_needs_work(),
+        "the refused successor must remain pending for a later scheduler wake"
+    );
+
+    drop(held);
+    while latest.text_projection_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("retry clone successor after transient memory clears");
+    }
+    latest
+        .production_query_owners()
+        .expect("successor retry leaves query owners ready");
+    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+        .expect("open successor artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read successor revision");
+    assert_eq!(revision, 15);
+}
+
 fn start_partial_clone_successor(
     fixture: &GitFixture,
     store: &TempDir,
@@ -814,7 +893,7 @@ fn start_partial_clone_successor(
 }
 
 #[test]
-fn clone_successor_restart_resumes_its_source_cursor_and_keeps_v14_readable() {
+fn clone_successor_restart_revalidates_its_source_cursor_and_keeps_v14_readable() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
@@ -835,25 +914,24 @@ fn clone_successor_restart_resumes_its_source_cursor_and_keeps_v14_readable() {
     latest
         .production_query_owners()
         .expect("V14 owners serve during resumed successor");
-    if next_page == source_pages {
-        assert!(
-            completed,
-            "a resumed terminal cursor must publish without replaying its accepted page"
-        );
-    } else {
-        let resumed_page: i64 = rusqlite::Connection::open(&staging_path)
-            .expect("open resumed clone successor")
-            .query_row(
-                "SELECT next_page_ordinal FROM clone_successor_state WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read resumed clone-successor cursor");
-        assert!(
-            u64::try_from(resumed_page).expect("nonnegative resumed cursor") > next_page,
-            "restart must advance from the durable cursor instead of replaying page zero"
-        );
-    }
+    assert!(
+        !completed,
+        "the first resumed slice must authenticate persisted rows before publishing"
+    );
+    let resumed_page: i64 = rusqlite::Connection::open(&staging_path)
+        .expect("open resumed clone successor")
+        .query_row(
+            "SELECT next_page_ordinal FROM clone_successor_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read resumed clone-successor cursor");
+    assert_eq!(
+        u64::try_from(resumed_page).expect("nonnegative resumed cursor"),
+        next_page,
+        "source replay must not append past the unauthenticated durable cursor"
+    );
+    assert!(next_page <= source_pages);
     while latest.text_projection_needs_work() {
         latest
             .advance_text_serving(16)
@@ -896,6 +974,107 @@ fn corrupt_clone_successor_staging_is_rebuilt_without_cooling_v14_owners() {
             .expect("finish rebuilt clone successor");
     }
     assert_ne!(active_text_artifact_path(store.path()), v14_path);
+}
+
+#[test]
+fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let (_, staging_path, _, _) = start_partial_clone_successor(&fixture, &store);
+    let connection =
+        rusqlite::Connection::open(&staging_path).expect("open clone-successor staging");
+    let (occurrence_id, original_occurrence): (String, Vec<u8>) = connection
+        .query_row(
+            "SELECT symbol_occurrence_id, occurrence FROM clone_occurrences ORDER BY symbol_occurrence_id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read staged clone occurrence");
+    let original_posting: (i64, i64, String, String, String) = connection
+        .query_row(
+            "SELECT class, normalization_revision, digest, symbol_occurrence_id, payload_digest FROM clone_exact_postings ORDER BY class, normalization_revision, digest, symbol_occurrence_id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .expect("read staged clone posting");
+    connection
+        .execute_batch(
+            "DROP TRIGGER immutable_clone_occurrences_update;
+             DROP TRIGGER immutable_clone_exact_postings_delete;
+             DROP TRIGGER builder_gate_clone_exact_postings_insert;",
+        )
+        .expect("remove staging mutation guards for tamper injection");
+    connection
+        .execute(
+            "UPDATE clone_occurrences SET occurrence = X'5B5D' WHERE symbol_occurrence_id = ?1",
+            [&occurrence_id],
+        )
+        .expect("alter one persisted occurrence");
+    connection
+        .execute(
+            "DELETE FROM clone_exact_postings WHERE class = ?1 AND normalization_revision = ?2 AND digest = ?3 AND symbol_occurrence_id = ?4",
+            rusqlite::params![
+                original_posting.0,
+                original_posting.1,
+                original_posting.2,
+                original_posting.3
+            ],
+        )
+        .expect("delete one persisted posting");
+    connection
+        .execute(
+            "INSERT INTO clone_exact_postings(class, normalization_revision, digest, symbol_occurrence_id, payload_digest) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                original_posting.0,
+                original_posting.1,
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                original_posting.3,
+                original_posting.4
+            ],
+        )
+        .expect("replace the posting while preserving counts and references");
+    drop(connection);
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    while latest.text_projection_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("revalidate or rebuild resumed clone rows");
+    }
+    let published =
+        rusqlite::Connection::open(active_text_artifact_path(store.path())).expect("open V15 head");
+    let occurrence: Vec<u8> = published
+        .query_row(
+            "SELECT occurrence FROM clone_occurrences WHERE symbol_occurrence_id = ?1",
+            [&occurrence_id],
+            |row| row.get(0),
+        )
+        .expect("read rebuilt clone occurrence");
+    assert_eq!(occurrence, original_occurrence);
+    assert_eq!(
+        published
+            .query_row(
+                "SELECT COUNT(*) FROM clone_exact_postings WHERE class = ?1 AND normalization_revision = ?2 AND digest = ?3 AND symbol_occurrence_id = ?4 AND payload_digest = ?5",
+                rusqlite::params![
+                    original_posting.0,
+                    original_posting.1,
+                    original_posting.2,
+                    original_posting.3,
+                    original_posting.4
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read rebuilt clone posting"),
+        1
+    );
 }
 
 #[test]
