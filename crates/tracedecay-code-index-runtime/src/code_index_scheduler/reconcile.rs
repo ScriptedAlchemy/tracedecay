@@ -50,9 +50,9 @@ use crate::code_index::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
         CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
-        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1,
-        CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
-        VerifiedSealedTextGenerationMetadataV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        DAEMON_CODE_INDEX_CHUNKER_REVISION, VerifiedSealedTextGenerationMetadataV1,
     },
 };
 
@@ -609,6 +609,7 @@ pub(super) enum FreshnessProbeVerdictV1 {
 pub(super) enum RetainedTextGenerationRestoreV1 {
     Servable(LatestCodeTextGenerationV1),
     Refused(VerifiedSealedTextGenerationMetadataV1),
+    Failed(CodeIndexPublicationStoreErrorV1),
 }
 
 pub struct CodeIndexWorktreeSchedulerV1 {
@@ -2171,7 +2172,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     None,
                 )
             } else {
-                let mut source = text_artifact_store
+                let source = text_artifact_store
                     .open_sealed_source_with_progress(
                         &sealed_identity,
                         &text_control,
@@ -2214,14 +2215,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                         },
                     )
                     .ok()?;
-                if let Ok(Some(published)) = self.publication.active_already_decoded()
-                    && published.manifest().generation_id == generation_id
-                {
-                    // Same-process successor: the builder still holds the decoded
-                    // files. Re-decoding the sealed files array is how a 455 MiB
-                    // cancel-batch successor spent the receipt wait in source_scan.
-                    let _ = source.attach_published_files(&published);
-                }
                 (
                     source.metadata().clone(),
                     source.format_revision(),
@@ -2257,6 +2250,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_control.retire();
             return None;
         }
+        if let Err(error) = self.publication.release_decoded_active_after_seal() {
+            text_control.retire();
+            return Some(RetainedTextGenerationRestoreV1::Failed(error));
+        }
         let metadata = Arc::new(metadata);
         Some(RetainedTextGenerationRestoreV1::Servable(
             LatestCodeTextGenerationV1 {
@@ -2286,10 +2283,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         ))
     }
 
-    pub fn servable_retained_text_generation(&mut self) -> Option<LatestCodeTextGenerationV1> {
-        match self.restore_retained_text_generation()? {
-            RetainedTextGenerationRestoreV1::Servable(generation) => Some(generation),
-            RetainedTextGenerationRestoreV1::Refused(_) => None,
+    pub fn servable_retained_text_generation(
+        &mut self,
+    ) -> Result<Option<LatestCodeTextGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        match self.restore_retained_text_generation() {
+            Some(RetainedTextGenerationRestoreV1::Servable(generation)) => Ok(Some(generation)),
+            Some(RetainedTextGenerationRestoreV1::Refused(_)) | None => Ok(None),
+            Some(RetainedTextGenerationRestoreV1::Failed(error)) => Err(error),
         }
     }
 
@@ -3222,6 +3222,11 @@ impl CodeIndexWorktreeSchedulerV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn sealed_decode_count(&self) -> u64 {
         self.publication.sealed_decode_count()
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn poison_decoded_publication_cache_for_test(&self) {
+        self.publication.poison_decoded_cache_for_test();
     }
 
     /// Occupy this worktree's active-generation decode barrier, reproducing the
