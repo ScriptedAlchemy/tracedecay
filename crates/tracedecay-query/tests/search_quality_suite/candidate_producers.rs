@@ -2860,7 +2860,7 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     )
     .expect("the current revision must open");
 
-    for revision in [9i64, 16] {
+    for revision in [9i64, 17] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -3251,7 +3251,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("read current format revision");
-    assert_eq!(format_revision, 15);
+    assert_eq!(format_revision, 16);
     let uncompressed_ngram_rows: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM ngram_postings WHERE substr(documents, 1, 4) = x'54444e31' OR length(documents) > cardinality + 4",
@@ -3326,7 +3326,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
     );
     let binary_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM rows WHERE substr(row, 1, 7) = x'54444c52313400'",
+            "SELECT COUNT(*) FROM rows WHERE substr(row, 1, 7) = x'54444c52313600'",
             [],
             |row| row.get(0),
         )
@@ -3336,7 +3336,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
         .expect("count rows");
     assert_eq!(
         binary_rows, total_rows,
-        "every revision-14 row carries the binary tag"
+        "every revision-16 row carries the binary tag"
     );
     let (interned_strings, staging_tables): (i64, i64) = connection
         .query_row(
