@@ -9,8 +9,9 @@ use tracedecay_application::ConfigurationSetRequestV1;
 use tracedecay_domain::configuration::{ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey};
 use tracedecay_domain::{ManifestDigest, VectorGenerationIdV1};
 use tracedecay_semantic_contracts::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticModelLifecycleStateV1,
-    SemanticProfileSelection, SemanticResourceCeilings,
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticFallbackReasonV1,
+    SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1, SemanticProfileSelection,
+    SemanticResourceCeilings,
 };
 use tracedecay_usecases::semantic_runtime::{ProjectSemanticActivationExt, SemanticRuntimeStateV1};
 use tracedecay_usecases::store::vector_generations::{
@@ -73,6 +74,42 @@ pub(super) fn seed_distribution_fixture(
     std::fs::write(reference, &model.source.revision).expect("write revision reference");
 }
 
+pub(super) async fn install_project_distribution_fixture(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    fixture_root: &Path,
+) -> Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1> {
+    let project_id = tracedecay_domain::ProjectId::new(
+        harness
+            .project_id(project)
+            .await
+            .expect("installed project identity"),
+    )
+    .expect("canonical project identity");
+    let lifecycle = harness
+        .resources
+        .as_ref()
+        .expect("live harness")
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("session registry")
+        .project_semantic_lifecycle(&project_id)
+        .await
+        .expect("installed project lifecycle");
+    let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(harness.profile_root())
+        .join("projects")
+        .join(project_id.as_str());
+    seed_distribution_fixture(&lifecycle_root, fixture_root, &lifecycle);
+    lifecycle
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
+        .expect("select production semantic model");
+    lifecycle
+        .acquire_blocking_for_tests()
+        .expect("install verified distribution fixture");
+    lifecycle
+}
+
 pub(super) fn installed_selection_material(
     owner: &tracedecay_semantic::SemanticModelLifecycleOwnerV1,
 ) -> (String, PathBuf) {
@@ -99,9 +136,11 @@ pub(super) async fn wait_for_semantic_generation(
     Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
     PublishedVectorGenerationV1,
 ) {
-    tokio::time::timeout(Duration::from_mins(3), async {
+    let mut last_observation = "not polled".to_owned();
+    let result = tokio::time::timeout(Duration::from_mins(3), async {
         loop {
             let resources = harness.resources.as_ref().expect("live harness");
+            last_observation = "serving code scope unavailable".to_owned();
             let Some(scope) = resources
                 .invocation
                 .code_index_schedulers
@@ -111,10 +150,16 @@ pub(super) async fn wait_for_semantic_generation(
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            last_observation = "serving code generation unavailable".to_owned();
             let Some(code) = scope.serving_generation else {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            last_observation = format!(
+                "serving generation {:?}; expected {:?}",
+                code.manifest().generation_id,
+                expected_source
+            );
             if code.manifest().generation_id != *expected_source {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
@@ -140,6 +185,10 @@ pub(super) async fn wait_for_semantic_generation(
                     .await
                     .expect("public code-index readiness status"),
             );
+            last_observation = format!(
+                "public code freshness: {}",
+                freshness["code_index_freshness"]
+            );
             if freshness["code_index_freshness"]["status"] != json!("current")
                 || freshness["code_index_freshness"]["worktree"]["latest_generation_id"]
                     != json!(expected_source)
@@ -162,30 +211,37 @@ pub(super) async fn wait_for_semantic_generation(
                     .await
                     .expect("public code-index query-authority readiness"),
             );
+            last_observation = format!(
+                "public query status={}, code_generation={}",
+                query_readiness["status"], query_readiness["code_generation"]
+            );
             if query_readiness["status"] == json!("unavailable")
                 || query_readiness["code_generation"] != json!(expected_source)
             {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             }
-            let vector_id =
-                match tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+            let runtime_state =
+                tracedecay_usecases::semantic_runtime::project_semantic_application_status(
                     project, None,
                 )
-                .map(|status| status.state)
-                {
-                    Some(SemanticRuntimeStateV1::Degraded {
-                        active_generation: Some(generation),
-                        ..
-                    }) => generation,
-                    Some(SemanticRuntimeStateV1::Current { receipt }) => {
-                        receipt.activated_generation
-                    }
-                    _ => {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                        continue;
-                    }
-                };
+                .map(|status| status.state);
+            last_observation = format!(
+                "semantic application state: {runtime_state:?}; lifecycle: {:?}",
+                tracedecay_usecases::semantic_runtime::project_lifecycle_status(project)
+            );
+            let vector_id = match runtime_state {
+                Some(SemanticRuntimeStateV1::Degraded {
+                    active_generation: Some(generation),
+                    ..
+                }) => generation,
+                Some(SemanticRuntimeStateV1::Current { receipt }) => receipt.activated_generation,
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+            };
+            last_observation = "vector graph provider unavailable".to_owned();
             let Some(provider) = resources
                 .invocation
                 .code_index_schedulers
@@ -195,16 +251,19 @@ pub(super) async fn wait_for_semantic_generation(
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            last_observation = "retained vector graph unavailable".to_owned();
             let Ok(retained) = provider.graph_for_generation(&code).await else {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            last_observation = "read-only vector generation store unavailable".to_owned();
             let Ok(Some(store)) =
                 GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_id)
             else {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            last_observation = "published vector generation unavailable".to_owned();
             let Ok(Some(vector)) = store
                 .generation(&vector_id, Arc::clone(retained.cancellation()))
                 .await
@@ -212,12 +271,16 @@ pub(super) async fn wait_for_semantic_generation(
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            last_observation = format!(
+                "vector source {:?}; expected {:?}",
+                vector.source_generation(),
+                expected_source
+            );
             if vector.source_generation() == expected_source {
                 let lifecycle =
-                    tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(
-                        project,
-                    )
-                    .expect("production lifecycle status");
+                    tracedecay_usecases::semantic_runtime::project_lifecycle_status(project)
+                        .expect("production lifecycle status");
+                last_observation = format!("model lifecycle state: {:?}", lifecycle.state);
                 if matches!(
                     lifecycle.state,
                     Some(SemanticModelLifecycleStateV1::Ready { .. })
@@ -228,8 +291,10 @@ pub(super) async fn wait_for_semantic_generation(
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("production semantic generation did not publish")
+    .await;
+    result.unwrap_or_else(|error| {
+        panic!("production semantic generation did not publish for {}: {error:?}; last observation: {last_observation}", project.display())
+    })
 }
 
 async fn wait_for_settled_semantic_generation(
@@ -384,8 +449,21 @@ pub(super) async fn evaluate_native_profile(
                 let measured = report
                     .semantic_activation_resource_pins(EVALUATED_PROFILE_ID)
                     .expect("PASS carries exact current/10x resource pins");
-                let lifecycle = tracedecay_semantic::default_shared_lifecycle_owner()
-                    .expect("production lifecycle");
+                let project_id = tracedecay_domain::ProjectId::new(
+                    harness
+                        .project_id(project)
+                        .await
+                        .expect("installed project identity"),
+                )
+                .expect("canonical project identity");
+                let lifecycle = resources
+                    .store_administration
+                    .session_runtime_registry()
+                    .await
+                    .expect("session registry")
+                    .project_semantic_lifecycle(&project_id)
+                    .await
+                    .expect("installed project lifecycle");
                 let model = lifecycle
                     .catalog()
                     .get(DEFAULT_FASTEMBED_MODEL_ID)
@@ -793,19 +871,6 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         return;
     };
     let _profile = crate::config::PinnedUserDataDir::new();
-    let lifecycle_root =
-        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
-    let lifecycle =
-        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
-    seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
-    lifecycle
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select production semantic model");
-    lifecycle
-        .acquire_blocking_for_tests()
-        .expect("install verified distribution fixture");
-    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
-
     let isolation = tempfile::TempDir::new().expect("journey isolation");
     let project = isolation.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source directory");
@@ -821,8 +886,61 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         .await
         .expect("production composition");
     let resources = harness.resources.as_ref().expect("live harness");
+    // Publication before genuine model acquisition must recover from its typed
+    // artifact refusal without a source edit or a test-triggered reschedule.
+    let initially_unavailable_code = tokio::time::timeout(Duration::from_mins(3), async {
+        loop {
+            let state = tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+                &project, None,
+            )
+            .map(|status| status.state);
+            if matches!(
+                state,
+                Some(SemanticRuntimeStateV1::Degraded {
+                    active_generation: None,
+                    reason: SemanticFallbackReasonV1::ArtifactUnavailable,
+                })
+            ) {
+                break resources
+                    .invocation
+                    .code_index_schedulers
+                    .latest_generation_id(&project)
+                    .await
+                    .expect("published code generation before model acquisition");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("initial generation must expose its missing semantic artifact");
+    let lifecycle = install_project_distribution_fixture(&harness, &project, &fixture_root).await;
+    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
     let (first_code_id, first_code, first_vector) =
         wait_for_settled_semantic_generation(&harness, &project, None).await;
+    assert_eq!(
+        first_code_id, initially_unavailable_code,
+        "verified model acquisition must recover the existing code generation"
+    );
+    let runtime = tool_payload(
+        &harness
+            .call_tool(&project, "tracedecay_runtime", json!({ "format": "json" }))
+            .await
+            .expect("public runtime model observation"),
+    );
+    let model: SemanticModelLifecycleStatusV1 =
+        serde_json::from_value(runtime["semantic_model"].clone())
+            .expect("public exact-project model lifecycle");
+    assert_eq!(
+        model.selected_model.as_deref(),
+        Some(DEFAULT_FASTEMBED_MODEL_ID)
+    );
+    assert!(matches!(model.state,
+        Some(SemanticModelLifecycleStateV1::Installed {
+            model_id, artifact_digest: observed_digest, ..
+        } | SemanticModelLifecycleStateV1::Ready {
+            model_id, artifact_digest: observed_digest, ..
+        }) if model_id == DEFAULT_FASTEMBED_MODEL_ID && observed_digest == artifact_digest
+    ));
     let graph = harness.server(&project).expect("project server").cg().await;
     assert!(
         graph

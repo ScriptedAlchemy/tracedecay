@@ -182,7 +182,7 @@ impl RetainedHookTasks {
 
 // One retained join state per existing task. Concurrent drains share its
 // terminal result; cancelling a waiter never moves out or detaches the handle.
-struct RetainedHookTaskJoin {
+pub(super) struct RetainedHookTaskJoin {
     state: tokio::sync::Mutex<RetainedHookTaskJoinState>,
     abort: tokio::task::AbortHandle,
 }
@@ -193,14 +193,14 @@ enum RetainedHookTaskJoinState {
 }
 
 impl RetainedHookTaskJoin {
-    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+    pub(super) fn new(handle: tokio::task::JoinHandle<()>) -> Self {
         Self {
             abort: handle.abort_handle(),
             state: tokio::sync::Mutex::new(RetainedHookTaskJoinState::Running(handle)),
         }
     }
 
-    async fn wait(&self) -> Result<(), String> {
+    pub(super) async fn wait(&self) -> Result<(), String> {
         let mut state = self.state.lock().await;
         match &mut *state {
             RetainedHookTaskJoinState::Finished(result) => result.clone(),
@@ -210,6 +210,10 @@ impl RetainedHookTaskJoin {
                 result
             }
         }
+    }
+
+    pub(super) fn abort(&self) {
+        self.abort.abort();
     }
 
     fn try_finished(&self) -> Option<Result<(), String>> {
@@ -289,7 +293,7 @@ impl Drop for RetainedHookTasks {
         tasks.extend(std::mem::take(&mut state.tasks).into_values());
         for task in tasks {
             task.cancellation.cancel();
-            task.join.abort.abort();
+            task.join.abort();
         }
     }
 }

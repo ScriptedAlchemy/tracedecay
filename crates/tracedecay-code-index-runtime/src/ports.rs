@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tokio::time::{Duration, timeout};
 use tracedecay_application::ResolvedScope;
@@ -87,7 +87,7 @@ impl Default for GitWatchMaintenanceWakeV1 {
 
 /// Catalog snapshot the git-transaction owner consults for capability manifests.
 pub type ApplicationCatalogSnapshotFn =
-    fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1>;
+    fn() -> Result<&'static CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationCatalogSnapshotErrorV1 {
@@ -100,23 +100,6 @@ impl ApplicationCatalogSnapshotErrorV1 {
             message: message.into(),
         }
     }
-}
-
-static APPLICATION_CATALOG_SNAPSHOT: OnceLock<ApplicationCatalogSnapshotFn> = OnceLock::new();
-
-/// Register the root catalog composer. Idempotent: the first install wins.
-pub fn install_application_catalog_snapshot(composer: ApplicationCatalogSnapshotFn) {
-    let _ = APPLICATION_CATALOG_SNAPSHOT.set(composer);
-}
-
-pub(crate) fn build_application_catalog_snapshot()
--> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> {
-    let Some(composer) = APPLICATION_CATALOG_SNAPSHOT.get().copied() else {
-        return Err(ApplicationCatalogSnapshotErrorV1::new(
-            "application catalog snapshot composer is not installed",
-        ));
-    };
-    composer()
 }
 
 /// Connection-admission lease the scheduler parks behind on blocking work.

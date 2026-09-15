@@ -1837,11 +1837,18 @@ impl ProductionSemanticRuntimeV1 {
                 );
                 projection
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    event = "semantic_projection_schedule",
+                    outcome = "artifact_unavailable",
+                    error = %error,
+                    lifecycle_state = ?self.lifecycle.status().state,
+                    "semantic projection cannot admit the selected model artifact"
+                );
                 return schedule_saved_code_generation(
                     &self.handle,
                     &generation,
-                    || Err(SemanticRuntimeScheduleFailureV1::Artifact),
+                    move || Err(error),
                     move || async move {
                         drop(fair_lease);
                         Err(SemanticRuntimeScheduleFailureV1::Publication)
@@ -4066,20 +4073,17 @@ pub fn resolve_project_semantic_runtime_status(
     let scheduler = project_path
         .and_then(|path| project_semantic_application_status(path, configuration.clone()));
     let lifecycle = match project_path {
-        Some(path) => project_or_shared_lifecycle_status(path),
-        None if configuration.is_none() => None,
-        None => tracedecay_semantic::default_shared_lifecycle_owner().map(|owner| owner.status()),
+        Some(path) => project_lifecycle_status(path),
+        None => None,
     };
     resolve_semantic_application_status(scheduler, lifecycle.as_ref(), configuration)
 }
 
-pub fn project_or_shared_lifecycle_status(
-    project_path: &Path,
-) -> Option<SemanticModelLifecycleStatusV1> {
+pub fn project_lifecycle_status(project_path: &Path) -> Option<SemanticModelLifecycleStatusV1> {
     if let Some(runtime) = project_semantic_production_runtime(project_path) {
         return Some(runtime.lifecycle_status());
     }
-    tracedecay_semantic::default_shared_lifecycle_owner().map(|owner| owner.status())
+    None
 }
 
 /// Hook invoked after a code generation publishes; must not block search.

@@ -228,10 +228,16 @@ async fn authentic_callback_to_all_delivery_surfaces() {
         .iter()
         .map(|binding| binding.surface())
         .collect::<BTreeSet<_>>();
-    assert!(surfaces.contains(&BindingSurface::Http));
-    assert!(surfaces.contains(&BindingSurface::Mcp));
-    assert!(surfaces.contains(&BindingSurface::Cli));
-    assert!(surfaces.contains(&BindingSurface::Lsp));
+    assert_eq!(
+        surfaces,
+        BTreeSet::from([
+            BindingSurface::Http,
+            BindingSurface::Mcp,
+            BindingSurface::Cli,
+            BindingSurface::Dashboard,
+        ]),
+        "LSP feedback is an internal delivery projection, not a callable catalog binding"
+    );
 
     let registrations = stock_host_registration_evidence(HostKindV1::ClaudeCode)
         .into_iter()
@@ -289,7 +295,7 @@ async fn exact_search_does_not_wait_for_semantic_projection() {
     );
     let _daemon = common::spawn_tracedecay_daemon(environment.home());
     let initialized = common::tracedecay_command_with_home(environment.home())
-        .args(["init", "--quiet"])
+        .arg("init")
         .current_dir(&project)
         .stdin(Stdio::null())
         .output()

@@ -1,6 +1,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::Instant;
+
+use crate::lock_admission::{LockAdmissionError, lock_until};
 
 use tracedecay_domain::UtcMicros;
 
@@ -66,6 +69,15 @@ pub(super) fn acquire_lease(
     lease_duration_micros: i64,
     now: UtcMicros,
 ) -> Result<(HookSpoolWriterLeaseV1, File), HookSpoolError> {
+    acquire_lease_with_deadline(root, lease_duration_micros, now, None)
+}
+
+pub(super) fn acquire_lease_with_deadline(
+    root: &Path,
+    lease_duration_micros: i64,
+    now: UtcMicros,
+    deadline: Option<Instant>,
+) -> Result<(HookSpoolWriterLeaseV1, File), HookSpoolError> {
     let expires_at = UtcMicros(
         now.0
             .checked_add(lease_duration_micros)
@@ -88,7 +100,13 @@ pub(super) fn acquire_lease(
     if !validate_regular_or_missing(&path)? {
         return Err(HookSpoolError::UnsafePath);
     }
-    file.try_lock().map_err(map_try_lock_error)?;
+    match deadline {
+        Some(deadline) => lock_until(&file, deadline).map_err(|error| match error {
+            LockAdmissionError::TimedOut => HookSpoolError::AdmissionTimedOut,
+            LockAdmissionError::Io => HookSpoolError::Io,
+        })?,
+        None => file.try_lock().map_err(map_try_lock_error)?,
+    }
     write_lease_file(&mut file, candidate)?;
     hotpath::measure_block!("hooks.spool.fsync.directory", {
         shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)

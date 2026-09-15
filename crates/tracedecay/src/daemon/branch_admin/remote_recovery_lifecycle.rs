@@ -14,6 +14,7 @@ use tracedecay_store_runtime::{
 use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
+use crate::daemon::maintenance::StoreTelemetrySamplingRegistry;
 use crate::daemon::store_writer_gate::WriterAdmissionGuard;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
@@ -37,6 +38,7 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     >,
     native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
+    store_telemetry_sampling: StoreTelemetrySamplingRegistry,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,
     #[cfg(unix)]
@@ -157,6 +159,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
             ),
             native_integration_services: Arc::clone(&administration.native_integration_services),
             session_sync_service: Arc::clone(&administration.session_sync_service),
+            store_telemetry_sampling: administration.store_telemetry_sampling(),
             project_server_retirements: Arc::clone(&administration.project_server_retirements),
             #[cfg(unix)]
             automation_schedulers: Arc::clone(&administration.automation_schedulers),
@@ -268,6 +271,10 @@ impl RemoteRecoveryProjectLifecycleV1 {
             .map_err(|error| TraceDecayError::Config {
                 message: format!("could not retire recovery project session sync: {error}"),
             })?;
+        // Sampling retains a counted database client independently of servers.
+        // Release only the session store being replaced after its producers stop.
+        self.store_telemetry_sampling
+            .release_retained_handle(database.db_path());
         Ok(fence)
     }
 

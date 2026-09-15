@@ -1,9 +1,9 @@
 //! I/O and validation primitives for the model artifact store.
 
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_semantic_contracts::ArtifactMemberRoleV1;
 use tracedecay_semantic_contracts::{
-    ArtifactMemberRoleV1, ArtifactPackageMemberV1, ResourceCeilingV1, RuntimeCompatibilityV1,
-    Sha256DigestHex,
+    ArtifactPackageMemberV1, ResourceCeilingV1, RuntimeCompatibilityV1, Sha256DigestHex,
 };
 
 use super::*;
@@ -370,8 +370,20 @@ pub(super) fn open_or_create_component_dir(
     }
 }
 
-pub(super) fn member_file_name(role: ArtifactMemberRoleV1) -> &'static str {
+/// Physical layout is role-owned, independent of portable source paths.
+/// Historical records without a manifest retain their established ONNX layout.
+pub(super) fn member_file_name(
+    role: ArtifactMemberRoleV1,
+    runtime: Option<&RuntimeCompatibilityV1>,
+) -> &'static str {
     match role {
+        ArtifactMemberRoleV1::Model
+            if runtime.is_some_and(|runtime| {
+                runtime.runtime == EmbeddingRuntimeFamilyV1::Model2VecStatic.runtime_family()
+            }) =>
+        {
+            "model.safetensors"
+        }
         ArtifactMemberRoleV1::Model => "model.onnx",
         ArtifactMemberRoleV1::Tokenizer => "tokenizer.json",
         ArtifactMemberRoleV1::Config => "config.json",

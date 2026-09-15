@@ -308,6 +308,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
             graph_runtime.code_graph_seat_port(),
             Arc::clone(&project_database),
             tracedecay_code_index_runtime::code_index_scheduler::CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount persistent graph-backed scheduler");

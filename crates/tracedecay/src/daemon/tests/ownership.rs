@@ -142,7 +142,8 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
     assert_eq!(
         feedback_cycle.is_some(),
         matches!(git_state, ProjectGitState::Committed),
-        "feedback cycle presence must follow exact committed Git identity"
+        "feedback cycle presence must follow exact committed Git identity for {}",
+        canonical_project.display(),
     );
     assert!(
         crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(&replay_root),

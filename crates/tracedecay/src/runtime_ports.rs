@@ -49,18 +49,6 @@ pub fn register_runtime_ports() -> Result<()> {
 pub fn register_runtime_ports_without_mcp_tool_catalog() {
     register_session_ports();
     register_agent_host_ports();
-    tracedecay_code_index_runtime::install_application_catalog_snapshot(
-        compose_application_catalog_snapshot,
-    );
-}
-
-fn compose_application_catalog_snapshot() -> std::result::Result<
-    tracedecay_tool_catalog::CatalogSnapshotV1,
-    tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
-> {
-    crate::catalog_composition::build_application_catalog_snapshot().map_err(|error| {
-        tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
-    })
 }
 
 // ---------------------------------------------------------------------------

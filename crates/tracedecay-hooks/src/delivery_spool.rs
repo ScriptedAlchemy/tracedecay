@@ -6,6 +6,9 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use crate::lock_admission::{LockAdmissionError, lock_until};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -100,6 +103,8 @@ pub enum HookDeliverySpoolError {
     Full,
     #[error("hook delivery receipt spool is busy")]
     Busy,
+    #[error("hook delivery writer admission deadline expired")]
+    AdmissionTimedOut,
     #[error("hook delivery receipt spool path is unsafe")]
     UnsafePath,
     #[error("hook delivery receipt spool is corrupt")]
@@ -118,7 +123,20 @@ pub struct HookDeliveryReceiptSpoolV1 {
 impl HookDeliveryReceiptSpoolV1 {
     #[hotpath::measure(label = "hooks.delivery.open")]
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, HookDeliverySpoolError> {
-        let root = root.into();
+        Self::open_with_deadline(root.into(), None)
+    }
+
+    pub fn open_until(
+        root: impl Into<PathBuf>,
+        deadline: Instant,
+    ) -> Result<Self, HookDeliverySpoolError> {
+        Self::open_with_deadline(root.into(), Some(deadline))
+    }
+
+    fn open_with_deadline(
+        root: PathBuf,
+        deadline: Option<Instant>,
+    ) -> Result<Self, HookDeliverySpoolError> {
         ensure_root(&root)?;
         let lock_path = root.join(LOCK_FILE);
         validate_regular_or_missing(&lock_path).map_err(|_| HookDeliverySpoolError::UnsafePath)?;
@@ -137,13 +155,23 @@ impl HookDeliveryReceiptSpoolV1 {
         {
             return Err(HookDeliverySpoolError::UnsafePath);
         }
-        lock.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => {
-                hotpath::gauge!("hooks.delivery.lock.contended").inc(1);
-                HookDeliverySpoolError::Busy
+        match deadline {
+            Some(deadline) => lock_until(&lock, deadline).map_err(|error| match error {
+                LockAdmissionError::TimedOut => HookDeliverySpoolError::AdmissionTimedOut,
+                LockAdmissionError::Io => HookDeliverySpoolError::Io,
+            })?,
+            None => {
+                hotpath::measure_block!("hooks.delivery.lock.try_lock", lock.try_lock()).map_err(
+                    |error| match error {
+                        std::fs::TryLockError::WouldBlock => {
+                            hotpath::gauge!("hooks.delivery.lock.contended").inc(1);
+                            HookDeliverySpoolError::Busy
+                        }
+                        std::fs::TryLockError::Error(_) => HookDeliverySpoolError::Io,
+                    },
+                )?;
             }
-            std::fs::TryLockError::Error(_) => HookDeliverySpoolError::Io,
-        })?;
+        }
         let spool = Self { root, _lock: lock };
         spool.receipt_paths()?;
         Ok(spool)
@@ -433,6 +461,41 @@ mod tests {
                 let _ = fs::remove_file(&self.0);
             }
         }
+    }
+
+    #[test]
+    fn bounded_delivery_admission_preserves_receipts_and_does_not_renew_deadlines() {
+        let root = TestDir::new();
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let original = receipt();
+        owner.append(&original).unwrap();
+        let paths = owner.receipt_paths().unwrap();
+        let before = fs::read(&paths[0]).unwrap();
+        assert_eq!(
+            HookDeliveryReceiptSpoolV1::open(&root.0).unwrap_err(),
+            HookDeliverySpoolError::Busy
+        );
+        let deadline = Instant::now() + std::time::Duration::from_millis(20);
+        assert_eq!(
+            HookDeliveryReceiptSpoolV1::open_until(&root.0, deadline).unwrap_err(),
+            HookDeliverySpoolError::AdmissionTimedOut
+        );
+        assert_eq!(fs::read(&paths[0]).unwrap(), before);
+        drop(owner);
+        assert_eq!(
+            HookDeliveryReceiptSpoolV1::open_until(&root.0, deadline).unwrap_err(),
+            HookDeliverySpoolError::AdmissionTimedOut
+        );
+        let admitted = HookDeliveryReceiptSpoolV1::open_until(
+            &root.0,
+            Instant::now()
+                + std::time::Duration::from_micros(
+                    crate::HookSynchronousDeadlineV1::start().remaining_micros(),
+                ),
+        )
+        .unwrap();
+        assert!(!admitted.append(&original).unwrap());
+        assert_eq!(fs::read(&paths[0]).unwrap(), before);
     }
 
     fn receipt() -> HookDeliverySourceReceiptV1 {

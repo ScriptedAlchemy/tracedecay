@@ -239,6 +239,223 @@ impl ObservationScopeV1 {
     }
 }
 
+/// Native Cline-family streams share a task while retaining independent order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClineTranscriptStream {
+    ApiHistory,
+    UiMessages,
+}
+
+impl ClineTranscriptStream {
+    pub fn source_identity(
+        self,
+        provider: ProviderId,
+        session_id: SessionId,
+    ) -> Result<ObservationSourceIdentityV1, ObservationContractError> {
+        if !matches!(provider.as_str(), "cline" | "roo-code" | "kilo") {
+            return Err(ObservationContractError::InvalidSourceIdentity);
+        }
+        let key = match self {
+            Self::ApiHistory => "api_history",
+            Self::UiMessages => "ui_messages",
+        };
+        ObservationSourceIdentityV1::for_provider_source(
+            provider,
+            session_id,
+            SessionId::new(key).map_err(|_| ObservationContractError::InvalidSourceIdentity)?,
+        )
+    }
+
+    pub fn from_source(source: &ObservationSourceIdentityV1) -> Option<Self> {
+        if !matches!(source.provider().as_str(), "cline" | "roo-code" | "kilo") {
+            return None;
+        }
+        match source.explicit_source_key()?.as_str() {
+            "api_history" => Some(Self::ApiHistory),
+            "ui_messages" => Some(Self::UiMessages),
+            _ => None,
+        }
+    }
+}
+
+/// Verified replacement of a historical combined Cline record by its native stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClineNativeSourceTransition {
+    predecessor_id: CanonicalObservationIdV1,
+    successor_id: CanonicalObservationIdV1,
+    predecessor_payload: PayloadReferenceV1,
+    successor_payload: PayloadReferenceV1,
+    stream: ClineTranscriptStream,
+}
+
+impl ClineNativeSourceTransition {
+    pub fn predecessor_id(&self) -> &CanonicalObservationIdV1 {
+        &self.predecessor_id
+    }
+    pub fn successor_id(&self) -> &CanonicalObservationIdV1 {
+        &self.successor_id
+    }
+    pub fn predecessor_payload(&self) -> &PayloadReferenceV1 {
+        &self.predecessor_payload
+    }
+    pub fn successor_payload(&self) -> &PayloadReferenceV1 {
+        &self.successor_payload
+    }
+    pub fn stream(&self) -> ClineTranscriptStream {
+        self.stream
+    }
+}
+
+/// Stable task/native-object identity used before native stream cursors split.
+/// This derives a lookup key; it neither fabricates nor persists an observation.
+pub fn cline_task_native_observation_id(
+    observation: &DurableObservationV1,
+) -> Result<Option<CanonicalObservationIdV1>, ObservationContractError> {
+    if ClineTranscriptStream::from_source(observation.source()).is_none() {
+        return Ok(None);
+    }
+    let identity = observation.identity();
+    let Some(native_record_id) = identity.native_record_id() else {
+        return Ok(None);
+    };
+    let task_source = ObservationSourceIdentityV1::for_provider(
+        observation.source().provider().clone(),
+        observation.source().session_id().clone(),
+    )?;
+    let material = ObservationIdentityMaterialV1::for_native_record(
+        task_source,
+        observation.scope().clone(),
+        identity.generation(),
+        identity.position(),
+        identity.ordering_domain(),
+        native_record_id.clone(),
+    )?;
+    CanonicalObservationIdV1::derive(&material).map(Some)
+}
+
+/// Locates the native-stream candidate for an immutable combined-source record.
+/// A matching key is not transition authority; callers must verify both records.
+pub fn cline_native_source_successor_id(
+    observation: &DurableObservationV1,
+) -> Result<Option<CanonicalObservationIdV1>, ObservationContractError> {
+    if observation.source().explicit_source_key().is_some()
+        || !matches!(
+            observation.source().provider().as_str(),
+            "cline" | "roo-code" | "kilo"
+        )
+    {
+        return Ok(None);
+    }
+    let Some(native_id) = observation.identity().native_record_id() else {
+        return Ok(None);
+    };
+    let Ok(envelope) = CanonicalObservationEnvelopeV1::deserialize(observation.payload()) else {
+        return Ok(None);
+    };
+    let stream = match envelope.native_record_kind() {
+        "message" => ClineTranscriptStream::ApiHistory,
+        "usage" => ClineTranscriptStream::UiMessages,
+        _ => return Ok(None),
+    };
+    let identity = observation.identity();
+    let material = ObservationIdentityMaterialV1::for_native_record(
+        stream.source_identity(
+            observation.source().provider().clone(),
+            observation.source().session_id().clone(),
+        )?,
+        observation.scope().clone(),
+        identity.generation(),
+        identity.position(),
+        identity.ordering_domain(),
+        native_id.clone(),
+    )?;
+    CanonicalObservationIdV1::derive(&material).map(Some)
+}
+
+/// Permits only the evidenced combined-file to native-file source transition.
+/// Authored facts, native identity, scope and sanitization remain exact; a UI
+/// record may lose only the API-array length formerly added to its position.
+pub fn prove_cline_native_source_transition(
+    predecessor: &DurableObservationV1,
+    successor: &DurableObservationV1,
+) -> Option<ClineNativeSourceTransition> {
+    let stream = ClineTranscriptStream::from_source(successor.source())?;
+    let prior = predecessor.identity();
+    let next = successor.identity();
+    let native_id = next.native_record_id()?;
+    if predecessor.source().explicit_source_key().is_some()
+        || predecessor.source().provider() != successor.source().provider()
+        || predecessor.source().session_id() != successor.source().session_id()
+        || predecessor.scope() != successor.scope()
+        || prior.native_record_id() != Some(native_id)
+        || prior.ordering_domain() != ObservationOrderingDomainV1::SnapshotOrder
+        || next.ordering_domain() != ObservationOrderingDomainV1::SnapshotOrder
+        || predecessor.retention_class() != successor.retention_class()
+        || predecessor.receipt().disposition() != successor.receipt().disposition()
+        || predecessor.receipt().sensitivity() != successor.receipt().sensitivity()
+        || predecessor.receipt().receipt().sanitizer_version()
+            != successor.receipt().receipt().sanitizer_version()
+        || cline_task_native_observation_id(successor)
+            .ok()
+            .flatten()
+            .as_ref()
+            != Some(predecessor.observation_id())
+    {
+        return None;
+    }
+    let mut old = CanonicalObservationEnvelopeV1::deserialize(predecessor.payload()).ok()?;
+    let new = CanonicalObservationEnvelopeV1::deserialize(successor.payload()).ok()?;
+    if serde_json::to_value(&old).ok().as_ref() != Some(predecessor.payload())
+        || serde_json::to_value(&new).ok().as_ref() != Some(successor.payload())
+        || old.provider() != predecessor.source().provider()
+        || new.provider() != successor.source().provider()
+        || old.stable_record_id() != native_id
+        || new.stable_record_id() != native_id
+        || old.relations().session_id() != predecessor.source().session_id()
+        || new.relations().session_id() != successor.source().session_id()
+        || old.evidence.ordering_domain != ObservationOrderingDomainV1::SnapshotOrder
+        || new.evidence.ordering_domain != ObservationOrderingDomainV1::SnapshotOrder
+        || old.evidence.range != prior.position()
+        || new.evidence.range != next.position()
+    {
+        return None;
+    }
+    match stream {
+        ClineTranscriptStream::ApiHistory => {
+            if old.native_record_kind() != "message" || new.native_record_kind() != "message" {
+                return None;
+            }
+        }
+        ClineTranscriptStream::UiMessages => {
+            if old.native_record_kind() != "usage"
+                || new.native_record_kind() != "usage"
+                || !old.facts().iter().all(|fact| {
+                    matches!(fact, CanonicalObservationFactV1::UncorrelatedUsage { .. })
+                })
+                || old.evidence.range.end() - old.evidence.range.start() != 1
+                || new.evidence.range.end() - new.evidence.range.start() != 1
+                || old.evidence.range.start() < new.evidence.range.start()
+                || old.evidence.native_sequence != Some(old.evidence.range.start())
+                || new.evidence.native_sequence != Some(new.evidence.range.start())
+            {
+                return None;
+            }
+            old.evidence.range = new.evidence.range;
+            old.evidence.native_sequence = new.evidence.native_sequence;
+        }
+    }
+    if old != new {
+        return None;
+    }
+    Some(ClineNativeSourceTransition {
+        predecessor_id: predecessor.observation_id().clone(),
+        successor_id: successor.observation_id().clone(),
+        predecessor_payload: predecessor.payload_reference().clone(),
+        successor_payload: successor.payload_reference().clone(),
+        stream,
+    })
+}
+
 /// Native ordering authority for one provider source.
 ///
 /// Numeric positions are comparable only within the same source, scope,

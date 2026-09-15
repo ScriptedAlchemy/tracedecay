@@ -19,6 +19,15 @@ fn operation_authority(
 }
 
 impl GraphVectorGenerationStoreV1 {
+    pub fn project_stage_census(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<tracedecay_store::SemanticVectorStageCensusPage, VectorGenerationStoreErrorV1> {
+        self.runtime
+            .project_stage_census(&operation_authority(cancellation))
+            .map_err(map_graph_error)
+    }
+
     #[hotpath::measure(label = "usecases.store.reserve_generation")]
     pub fn reserve_one_generation(
         &self,

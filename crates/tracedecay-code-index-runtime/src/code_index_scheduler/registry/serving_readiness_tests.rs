@@ -1,16 +1,17 @@
-//! Serving notifications follow actual installation, independently of sealing.
+//! Serving notifications cover installation and renewed source admission.
 
 use std::process::Command;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_domain::ProjectId;
 
 use super::super::graph_activation::install_injected_activation_gate;
-use super::CodeIndexSchedulerRegistryV1;
+use super::{CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn serving_waiter_wakes_after_sealed_generation_finishes_activation() {
+async fn serving_waiter_tracks_installation_freshness_and_retirement() {
     let fixture = TempDir::new().expect("fixture root");
     let project = fixture.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source directory");
@@ -108,6 +109,131 @@ async fn serving_waiter_wakes_after_sealed_generation_finishes_activation() {
             .iter()
             .any(|symbol| symbol.simple_name == "branch_probe")
     );
+    let canonical_project = project.canonicalize().expect("canonical project");
+    let freshness = {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&canonical_project)
+            .expect("mounted worktree")
+            .source_freshness
+            .clone()
+    };
+    {
+        let mut state = freshness.state.lock().expect("freshness state");
+        state.last_reconciled_at = std::time::Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the readiness proof");
+        state.busy_witness_memo = None;
+    }
+    let ready = registry
+        .latest_complete_ready(&project)
+        .await
+        .expect("an expired cheap proof must revalidate the unchanged source");
+    assert_eq!(
+        ready.generation().manifest().generation_id,
+        published.generation_id
+    );
+
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold unchanged-source revalidation");
+    changes.borrow_and_update();
+    let seat_epoch = {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&canonical_project)
+            .expect("mounted worktree")
+            .serving_generation_epoch
+            .clone()
+    };
+    let installed_epoch = seat_epoch.load(Ordering::Acquire);
+    let scheduler = registry
+        .scheduler_handle(&project)
+        .await
+        .expect("mounted scheduler");
+    {
+        let mut scheduler = scheduler.lock().expect("scheduler lock");
+        scheduler.notify_path(project.join("src/lib.rs"));
+        assert!(
+            scheduler.freshness_probe_requires_reconcile(),
+            "a true source hint invalidates admission even inside the fresh clock window"
+        );
+    }
+    assert!(
+        registry.latest_complete_ready(&project).await.is_none(),
+        "a seated generation must not inherit the invalidated source proof"
+    );
+    assert!(!changes.has_changed().expect("live serving subscription"));
+    drop(admission);
+    let revalidated = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            changes.changed().await.expect("source revalidation notification");
+            if let Some(ready) = registry.latest_complete_ready(&project).await {
+                break ready;
+            }
+        }
+    })
+    .await
+    .expect("unchanged-source reconciliation must wake the retained waiter");
+    assert_eq!(
+        revalidated.generation().manifest().generation_id,
+        published.generation_id,
+        "source revalidation must retain the exact unchanged generation"
+    );
+    assert_eq!(
+        seat_epoch.load(Ordering::Acquire),
+        installed_epoch,
+        "source revalidation must not replace the existing serving slot"
+    );
+    assert!(
+        registry.event_to_ready_receipts().last().is_some_and(|receipt| {
+            matches!(receipt.outcome, CodeIndexCadenceOutcomeV1::Noop { .. })
+        }),
+        "the wake must follow the real unchanged-source reconcile"
+    );
+    assert!(
+        matches!(
+            publications.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "the unchanged source must wake admission without another publication"
+    );
+
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold source rebuild while checking drift admission");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn changed_branch_probe() {}\n",
+    )
+    .expect("drift source after the retained generation");
+    {
+        let mut state = freshness.state.lock().expect("freshness state");
+        state.last_reconciled_at = std::time::Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the readiness proof");
+        state.busy_witness_memo = None;
+    }
+    assert!(
+        registry.latest_complete_ready(&project).await.is_none(),
+        "expired proof must not admit a source that changed"
+    );
+    assert_eq!(
+        registry
+            .scheduler_handle(&project)
+            .await
+            .expect("scheduler")
+            .lock()
+            .expect("scheduler lock")
+            .pending_hint_count(),
+        None,
+        "rejected source proof must request the canonical authoritative scan"
+    );
+    drop(admission);
     changes.borrow_and_update();
     registry.cancel();
     tokio::time::timeout(Duration::from_secs(5), changes.changed())

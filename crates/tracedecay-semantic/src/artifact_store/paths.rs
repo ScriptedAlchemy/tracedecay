@@ -83,7 +83,7 @@ impl ModelArtifactStore {
         digest: &Sha256DigestHex,
         role: ArtifactMemberRoleV1,
     ) -> PathBuf {
-        self.artifact_dir(digest).join(member_file_name(role))
+        self.artifact_dir(digest).join(member_file_name(role, None))
     }
 
     /// Exclusive store lock acquisition (in-process mutex + advisory file
@@ -111,6 +111,40 @@ impl ModelArtifactStore {
             _memory: memory,
             _file: file,
         })
+    }
+
+    /// Re-verify an installed inventory record without claiming runtime readiness.
+    /// Selection can reuse its bytes even before a runtime is mounted.
+    pub fn verified_installed_record(
+        &self,
+        digest: &Sha256DigestHex,
+    ) -> Result<ArtifactInventoryRecordV1, ArtifactImportErrorV1> {
+        let _lock = self.acquire_lock()?;
+        self.recover_locked()?;
+        let inventory = self.load_inventory_locked()?;
+        let record = inventory
+            .records
+            .get(digest.as_str())
+            .ok_or(ArtifactImportErrorV1::StagingUnavailable)?;
+        if !matches!(
+            record.state,
+            ArtifactInventoryStateV1::Installed | ArtifactInventoryStateV1::RetainedForRollback
+        ) {
+            return Err(ArtifactImportErrorV1::StagingUnavailable);
+        }
+        let manifest = record
+            .manifest
+            .as_ref()
+            .ok_or(ArtifactImportErrorV1::ManifestRejected)?;
+        self.verify_manifest(manifest)?;
+        if manifest.artifact_identity_digest() != *digest
+            || manifest.canonical_digest() != record.manifest_digest
+            || manifest.payload.members != record.members
+        {
+            return Err(ArtifactImportErrorV1::ManifestRejected);
+        }
+        self.verify_artifact_record(record)?;
+        Ok(record.clone())
     }
 
     /// Load the inventory (absent file = empty inventory).

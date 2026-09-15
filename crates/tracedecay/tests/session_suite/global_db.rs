@@ -4,6 +4,8 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_lcm::LcmStorageKind;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::codex::CodexSource;
+use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
@@ -1352,6 +1354,51 @@ async fn session_ingest_health_can_filter_by_provider() {
     assert_eq!(claude_health.tracked_transcripts, 1);
     assert_eq!(claude_health.pending_transcripts, 1);
     assert_eq!(claude_health.pending_bytes, 300);
+}
+
+#[tokio::test]
+async fn session_ingest_health_resolves_provider_checkpoints_and_missing_offsets() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let source = CodexSource::with_home(tmp.path());
+    let codex = tmp.path().join("codex.jsonl");
+    let cursor = tmp.path().join("cursor.jsonl");
+    let uncheckpointed = tmp.path().join("uncheckpointed.jsonl");
+    for (provider, session_id, path, size) in [
+        ("codex", "codex", &codex, 100),
+        ("cursor", "cursor", &cursor, 200),
+        ("codex", "uncheckpointed", &uncheckpointed, 50),
+    ] {
+        std::fs::write(path, vec![b'x'; size]).unwrap();
+        let mut session = sample_session(provider, session_id, "proj");
+        session.transcript_path = Some(path.to_str().unwrap().to_owned());
+        db.upsert_session(&session).await;
+    }
+    for (key, offset, mtime) in [
+        (source.cursor_key(&codex).durable_text(), 100, 1_000),
+        (cursor.to_str().unwrap().to_owned(), 150, 2_000),
+    ] {
+        db.set_parse_offset(
+            &key,
+            tracedecay_global_db::ParseOffset {
+                byte_offset: offset,
+                mtime,
+                file_id: 0,
+            },
+        )
+        .await;
+    }
+    let health = db.session_ingest_health().await;
+    assert_eq!(health.tracked_transcripts, 3);
+    assert_eq!(health.pending_transcripts, 2);
+    assert_eq!(health.pending_bytes, 100);
+    assert_eq!(health.max_transcript_pending_bytes, 50);
+    assert_eq!(health.last_ingest_unix, Some(2_000));
+    let health = db.session_ingest_health_for_provider(Some("codex")).await;
+    assert_eq!(health.tracked_transcripts, 2);
+    assert_eq!(health.pending_transcripts, 1);
+    assert_eq!(health.pending_bytes, 50);
+    assert_eq!(health.last_ingest_unix, Some(1_000));
 }
 
 #[tokio::test]

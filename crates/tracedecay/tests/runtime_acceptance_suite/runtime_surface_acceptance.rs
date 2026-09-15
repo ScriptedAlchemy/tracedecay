@@ -1,7 +1,8 @@
 use crate::common;
 
+use super::application_production_reachability::admitted_mcp_invocation;
+
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -84,17 +85,48 @@ impl RuntimeFixture {
     fn home(&self) -> &Path {
         self._environment.home()
     }
+
+    fn daemon_log_tail(&self) -> String {
+        std::fs::read_to_string(self._environment.scratch().join("runtime-daemon.log"))
+            .expect("read isolated runtime daemon log")
+            .lines()
+            .rev()
+            .take(160)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 async fn runtime_fixture() -> RuntimeFixture {
     let (environment, project) = common::IsolatedEnv::acquire().await;
-    let daemon = common::spawn_tracedecay_daemon(environment.home());
+    let daemon_log = std::fs::File::create(environment.scratch().join("runtime-daemon.log"))
+        .expect("create isolated runtime daemon log");
+    let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
+        command.env("RUST_LOG", "info").stderr(daemon_log);
+    });
     initialize_project(environment.home(), &project);
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("daemon handshake");
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
         .expect("daemon client");
+    let mounted = admitted_mcp_invocation(
+        &client,
+        ApplicationSurfaceOperation::ConfigurationObservedState,
+        "request.runtime-fixture.configuration-mounted",
+        || {
+            parse_application_surface_request(
+                ApplicationSurfaceOperation::ConfigurationObservedState,
+                serde_json::json!({}),
+            )
+            .expect("configuration readiness request")
+        },
+    )
+    .await;
+    successful_application(&mounted);
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -105,12 +137,6 @@ async fn runtime_fixture() -> RuntimeFixture {
 }
 
 async fn lsp_runtime_fixture() -> RuntimeFixture {
-    let host_rustup_home = std::env::var_os("RUSTUP_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))
-        .filter(|path| path.is_dir());
-    let host_rustup_toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
-        .or_else(|| option_env!("RUSTUP_TOOLCHAIN").map(OsString::from));
     let (environment, project) = common::IsolatedEnv::acquire().await;
     copy_dir(
         &common::repository_path("tests/fixtures/context_eval_project"),
@@ -128,16 +154,11 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     );
     git(&project, &["add", "."]);
     git(&project, &["commit", "--quiet", "-m", "base"]);
+    let daemon_log = std::fs::File::create(environment.scratch().join("runtime-daemon.log"))
+        .expect("create isolated LSP daemon log");
     let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
-        // Keep TraceDecay state under the isolated home while allowing a rustup
-        // proxy on PATH to resolve the host's already-installed analyzer.
-        command.stderr(Stdio::inherit());
-        if let Some(rustup_home) = host_rustup_home {
-            command.env("RUSTUP_HOME", rustup_home);
-            if let Some(rustup_toolchain) = host_rustup_toolchain {
-                command.env("RUSTUP_TOOLCHAIN", rustup_toolchain);
-            }
-        }
+        environment.apply_toolchain_env(command);
+        command.env("RUST_LOG", "info").stderr(daemon_log);
     });
     let output = common::tracedecay_command_with_home(environment.home())
         .arg("init")
@@ -611,7 +632,9 @@ async fn assert_application_transport_parity(
         };
         assert_eq!(
             evidence.execution.termination,
-            OperationTermination::Completed
+            OperationTermination::Completed,
+            "{case} ({operation:?}) did not complete: {envelope:?}\nIsolated daemon log:\n{}",
+            fixture.daemon_log_tail()
         );
         assert_eq!(evidence.coverage.returned, evidence.page.returned);
     }
@@ -1238,7 +1261,49 @@ async fn project_open_application_boundary() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
-    let fixture = runtime_fixture().await;
+    let fixture = lsp_runtime_fixture().await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let result = call_default_tool(
+                &fixture.handshake,
+                "tracedecay_status",
+                serde_json::json!({
+                    "format": "json", "include_branch_diagnostics": false,
+                    "include_storage_health": false, "include_session_ingest": false,
+                    "include_staleness": false,
+                }),
+            )
+            .await
+            .expect("read exact project graph readiness");
+            let status = tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
+                .expect("canonical project status");
+            let freshness = &status["code_index_freshness"];
+            let serving = &freshness["worktree"]["code_graph_serving"];
+            match (
+                freshness["status"].as_str(),
+                serving["state"].as_str(),
+                serving["reason"].as_str(),
+            ) {
+                (Some("current"), Some("ready"), _) => break,
+                (_, Some("refused"), _) | (_, _, Some("activation_disabled")) => {
+                    panic!("graph readiness refused: {status}")
+                }
+                (Some("warming"), _, _)
+                | (_, Some("pending"), _)
+                | (_, Some("unavailable"), Some("generation_unavailable")) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                actual => panic!("unexpected graph readiness {actual:?}: {status}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "graph did not become current within publication budget\n{}",
+            fixture.daemon_log_tail()
+        )
+    });
     let page = serde_json::json!({ "page_size": 10, "cursor": null });
     let authenticate = assert_application_transport_parity(
         &fixture,
@@ -1887,26 +1952,22 @@ async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn production_lsp_negotiates_and_projects_canonical_context() {
     let fixture = lsp_runtime_fixture().await;
-    let root_uri = url::Url::from_directory_path(&fixture.project)
+    #[cfg(unix)]
+    let client_root = {
+        let alias = fixture._environment.scratch().join("client-root-alias");
+        std::os::unix::fs::symlink(&fixture.project, &alias).expect("client workspace alias");
+        alias
+    };
+    #[cfg(not(unix))]
+    let client_root = fixture.project.clone();
+    let root_uri = url::Url::from_directory_path(&client_root)
         .expect("project root URI")
         .to_string();
-    let document_uri = url::Url::from_file_path(fixture.project.join("src/auth/login.rs"))
+    let document_uri = url::Url::from_file_path(client_root.join("src/auth/login.rs"))
         .expect("document URI")
         .to_string();
     let source = std::fs::read_to_string(fixture.project.join("src/auth/login.rs"))
         .expect("checked-in fixture source");
-    let (deadline, cancellation) = lsp_control();
-    let mut session = DaemonLspSessionClient::open(
-        fixture.client.clone(),
-        "3.17",
-        Some(root_uri.clone()),
-        Vec::new(),
-        deadline,
-        cancellation,
-    )
-    .await
-    .expect("open production daemon LSP session");
-
     let projections = [
         "diagnostics",
         "postEditImpact",
@@ -1921,44 +1982,90 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         })
     })
     .collect::<Vec<_>>();
-    send_lsp(
-        &mut session,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "rootUri": root_uri,
-                "capabilities": {
-                    "general": { "positionEncodings": ["utf-16"] },
-                    // Standard methods are negotiated through standard client
-                    // capabilities, independently of the TraceDecay extension
-                    // below. A client that never declares them is correctly
-                    // refused, so this test declares the two it drives later.
-                    "textDocument": {
-                        "documentSymbol": { "dynamicRegistration": false },
-                        "hover": { "dynamicRegistration": false },
-                    },
-                    "experimental": {
-                        "tracedecay": {
-                            "revision": TRACEDECAY_CONTEXT_REVISION,
-                            "opaqueExpansion": true,
-                            "projections": projections,
+    // Cold protocol admission deliberately precedes analyzer registration.
+    // Reopen the warming session within the existing response budget; a
+    // session negotiates its owner's capabilities only once at initialize.
+    let (mut session, initialized) =
+        tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            loop {
+                let (deadline, cancellation) = lsp_control();
+                let mut session = DaemonLspSessionClient::open(
+                    fixture.client.clone(),
+                    "3.17",
+                    Some(root_uri.clone()),
+                    Vec::new(),
+                    deadline,
+                    cancellation,
+                )
+                .await
+                .expect("open production daemon LSP session");
+
+                send_lsp(
+                    &mut session,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "rootUri": root_uri,
+                            "capabilities": {
+                                "general": { "positionEncodings": ["utf-16"] },
+                                // Standard methods are negotiated through standard client
+                                // capabilities, independently of the TraceDecay extension
+                                // below. A client that never declares them is correctly
+                                // refused, so this test declares the two it drives later.
+                                "textDocument": {
+                                    "documentSymbol": { "dynamicRegistration": false },
+                                    "hover": { "dynamicRegistration": false },
+                                },
+                                "experimental": {
+                                    "tracedecay": {
+                                        "revision": TRACEDECAY_CONTEXT_REVISION,
+                                        "opaqueExpansion": true,
+                                        "projections": projections,
+                                    }
+                                }
+                            }
                         }
-                    }
+                    }),
+                )
+                .await;
+                let initialized = poll_lsp_response(&mut session, 1).await;
+                assert!(
+                    initialized["result"].is_object(),
+                    "initialize must not hide a protocol/scope error: {initialized}"
+                );
+                let capabilities = &initialized["result"]["capabilities"];
+                if capabilities["documentSymbolProvider"] == true
+                    && capabilities["hoverProvider"] == true
+                {
+                    break (session, initialized);
                 }
+                assert!(
+                    capabilities["documentSymbolProvider"].is_null()
+                        && capabilities["hoverProvider"].is_null(),
+                    "only the cold owner may defer declared analyzer capabilities: {initialized}"
+                );
+                shutdown_lsp(&mut session, 2).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-        }),
-    )
-    .await;
-    let initialized = poll_lsp_response(&mut session, 1).await;
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "analyzer owner did not publish within the initialization budget\n{}",
+                fixture.daemon_log_tail()
+            )
+        });
     assert_eq!(
         initialized["result"]["capabilities"]["positionEncoding"], "utf-16",
         "unexpected initialize response: {initialized}"
     );
     assert_eq!(
-        initialized["result"]["capabilities"]["documentSymbolProvider"], true,
-        "a routed analyzer must negotiate the declared document-symbol capability: {initialized}"
+        initialized["result"]["capabilities"]["documentSymbolProvider"],
+        true,
+        "a routed analyzer must negotiate the declared document-symbol capability: {initialized}\nIsolated daemon log:\n{}",
+        fixture.daemon_log_tail()
     );
     assert_eq!(
         initialized["result"]["capabilities"]["hoverProvider"], true,
@@ -2796,6 +2903,14 @@ fn assert_exact_markdown_field(markdown: &str, label: &str, expected: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn primitive_config_markdown_json_parity() {
     let fixture = runtime_fixture().await;
+    let mounted = admitted_mcp_invocation(
+        &fixture.client,
+        ApplicationSurfaceOperation::StorageStatus,
+        "request.primitive-config-parity.storage-mounted",
+        storage_status_request,
+    )
+    .await;
+    successful_application(&mounted);
     let request_id = RequestId::new("request.primitive-config-parity").expect("shared request id");
 
     let markdown_result = resolve_mcp_application_surface(

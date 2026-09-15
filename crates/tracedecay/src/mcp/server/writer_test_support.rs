@@ -85,7 +85,10 @@ pub(super) fn registered_context(
 
 pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
     let pin = PinnedUserDataDir::new();
-    let dir = TempDir::new().expect("temp repo");
+    let temporary_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temporary root");
+    let dir = TempDir::new_in(temporary_root).expect("canonical temp repo");
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
     git(root, &["config", "user.email", "t@t.com"]);

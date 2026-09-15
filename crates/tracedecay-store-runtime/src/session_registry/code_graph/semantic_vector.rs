@@ -3,6 +3,34 @@ use tracedecay_graph_db::VerifiedGenerationBeginV1;
 use tracedecay_usecases::semantic_runtime::SemanticVectorRetentionAuthorizationV1;
 
 impl RetainedCodeGraphRuntimeV1 {
+    pub fn semantic_vector_project_stage_census(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+        deadline: Instant,
+    ) -> std::result::Result<tracedecay_store::SemanticVectorStageCensusPage, GraphDbError> {
+        let mut authority = self
+            .project_database
+            .semantic_vector_publication_authority()
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        let (_, binding) = self.semantic_vector_staging_binding();
+        let request = tracedecay_store::SemanticVectorStageCensusRequest::for_shard(
+            binding.shard_id.clone(),
+            None,
+            1,
+        )
+        .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        self.semantic_operation(
+            cancellation,
+            deadline,
+            "semantic-vector-empty-census",
+            |_, context| {
+                authority
+                    .stage_census(&request, context)
+                    .map_err(map_semantic_vector_staging_error)
+            },
+        )
+    }
+
     pub fn reserve_one_semantic_vector_generation(
         &self,
         after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,

@@ -185,6 +185,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
             graph_runtime.code_graph_seat_port(),
             read_only_project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount retained generation");
@@ -557,6 +558,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount persistent graph generation");

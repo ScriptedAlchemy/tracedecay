@@ -723,6 +723,7 @@ pub(super) async fn register_project_open_production_owners(
                 access.clone(),
                 session_db.clone(),
                 tokio::runtime::Handle::current(),
+                canonical_git_application_catalog,
             ),
             label = "daemon.project.open.owners.git_authority"
         )
@@ -2048,6 +2049,19 @@ impl tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeResolverV1
             .map_err(|_| tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1)
     }
 }
+
+fn canonical_git_application_catalog() -> std::result::Result<
+    &'static tracedecay_tool_catalog::CatalogSnapshotV1,
+    tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
+> {
+    crate::application_surface::application_surface_catalog_ref().map_err(|error| {
+        tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
+    })
+}
+
+#[cfg(test)]
+#[path = "project_open_owners/git_catalog_tests.rs"]
+mod git_catalog_tests;
 
 #[cfg(test)]
 mod tests {

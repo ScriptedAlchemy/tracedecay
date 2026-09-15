@@ -31,28 +31,36 @@ use crate::runtime::shared::{
     append_usage_metadata, content_storage_text_and_tools, title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotCaptureOutcome,
-    StableMessageIdDomains, bounded_snapshot_input_len, capture_snapshot_observations,
-    non_durable_snapshot_record, read_snapshot_text_bounded, snapshot_message_fields,
-    stable_snapshot_message_id,
+    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionBatch,
+    SnapshotCaptureOutcome, StableMessageIdDomains, bounded_snapshot_input_len,
+    capture_snapshot_observations, non_durable_snapshot_record, read_snapshot_text_bounded,
+    snapshot_message_fields, stable_snapshot_message_id,
 };
 #[cfg(test)]
 use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, read_changed_with_companion,
+    TranscriptIngestResult, TranscriptSource, content_hash64, read_changed_with_companion,
 };
 use serde_json::{Map, Value};
 #[cfg(test)]
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ObservationOrderingDomainV1, ObservationSourceRangeV1,
 };
-use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
+use tracedecay_domain::{
+    ClineTranscriptStream, ObservationScopeV1, ObservationSourceGenerationV1, ProviderId, SessionId,
+};
 #[cfg(test)]
 use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
 
 mod observation;
 pub use observation::ClineLikeSnapshotObservationRecord;
+
+struct ParsedClineSnapshot {
+    transcript: ParsedTranscript,
+    api_generation: ObservationSourceGenerationV1,
+    ui_generation: Option<ObservationSourceGenerationV1>,
+}
 
 /// Cap task-directory scans so a long VS Code globalStorage history cannot
 /// block dashboard startup.
@@ -273,6 +281,17 @@ impl ClineLikeSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        self.load_snapshot(path, prev, project_root, max_new_bytes)
+            .map(|loaded| loaded.map(|snapshot| snapshot.transcript))
+    }
+
+    fn load_snapshot(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedClineSnapshot>> {
         let Some(task_dir) = path.parent() else {
             return Ok(None);
         };
@@ -339,7 +358,6 @@ impl ClineLikeSource {
             task_id,
             &ui_path,
             changed.companion_contents.as_deref(),
-            entries.len(),
             &location_cwd,
         )?
         else {
@@ -368,10 +386,21 @@ impl ClineLikeSource {
             parent_tool_use_id: None,
         };
 
-        Ok(Some(ParsedTranscript {
-            draft,
-            messages,
-            new_cursor: changed.new_cursor,
+        let api_generation =
+            ObservationSourceGenerationV1::new(content_hash64(&changed.contents).max(1))?;
+        let ui_generation = changed
+            .companion_contents
+            .as_deref()
+            .map(|contents| ObservationSourceGenerationV1::new(content_hash64(contents).max(1)))
+            .transpose()?;
+        Ok(Some(ParsedClineSnapshot {
+            transcript: ParsedTranscript {
+                draft,
+                messages,
+                new_cursor: changed.new_cursor,
+            },
+            api_generation,
+            ui_generation,
         }))
     }
 }
@@ -405,14 +434,36 @@ pub async fn capture_cline_like_snapshot_observations(
         |path| snapshot_input_bytes(source.provider, path),
         |path| {
             let Some(parsed) =
-                source.parse_snapshot(path, StoredCursor::default(), project_root, None)?
+                source.load_snapshot(path, StoredCursor::default(), project_root, None)?
             else {
                 return Ok(None);
             };
-            let generation = ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
-            let records =
-                normalize_cline_like_snapshot_observations(source.provider, &parsed.messages)?;
-            Ok(Some((generation, records)))
+            let records = normalize_cline_like_snapshot_observations(
+                source.provider,
+                &parsed.transcript.messages,
+            )?;
+            let (api_records, ui_records): (Vec<_>, Vec<_>) = records
+                .into_iter()
+                .partition(|record| record.stream == ClineTranscriptStream::ApiHistory);
+            let identity = |stream: ClineTranscriptStream| -> TranscriptIngestResult<_> {
+                Ok(stream.source_identity(
+                    ProviderId::new(source.provider)?,
+                    SessionId::new(&parsed.transcript.draft.session_id)?,
+                )?)
+            };
+            let mut batches = vec![SnapshotAdmissionBatch::for_source(
+                identity(ClineTranscriptStream::ApiHistory)?,
+                parsed.api_generation,
+                api_records,
+            )];
+            if let Some(generation) = parsed.ui_generation {
+                batches.push(SnapshotAdmissionBatch::for_source(
+                    identity(ClineTranscriptStream::UiMessages)?,
+                    generation,
+                    ui_records,
+                ));
+            }
+            Ok(Some(batches))
         },
     )
     .await
@@ -554,7 +605,6 @@ fn usage_records(
     task_id: &str,
     ui_path: &Path,
     companion_contents: Option<&str>,
-    ordinal_base: usize,
     location_cwd: &Path,
 ) -> TranscriptIngestResult<Option<Vec<SessionMessageRecord>>> {
     if !ui_path.is_file() {
@@ -658,7 +708,7 @@ fn usage_records(
             session_id: task_id.to_string(),
             role: "assistant".to_string(),
             timestamp,
-            ordinal: (ordinal_base + index) as i64,
+            ordinal: index as i64,
             text: content,
             kind: Some("usage".to_string()),
             model: None,
@@ -822,6 +872,11 @@ pub fn normalize_cline_like_snapshot_observations(
                 .into_bytes();
             Ok(ClineLikeSnapshotObservationRecord {
                 provider,
+                stream: if message.kind.as_deref() == Some("usage") {
+                    ClineTranscriptStream::UiMessages
+                } else {
+                    ClineTranscriptStream::ApiHistory
+                },
                 session_id: message.session_id.clone(),
                 native_record_id: message.message_id.clone(),
                 order,

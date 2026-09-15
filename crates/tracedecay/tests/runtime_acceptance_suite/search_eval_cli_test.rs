@@ -55,7 +55,10 @@ fn compare_reports_unmeasured_semantic_and_rerank_stages_as_pending() {
     );
     let payload = stdout_json(&output);
     assert_eq!(payload["command"], "compare");
-    assert_eq!(payload["status"], "pending");
+    assert_eq!(
+        payload["status"], "pending",
+        "comparison did not preserve the measured baseline: {payload}"
+    );
     for profile in payload["profiles"].as_array().expect("profiles array") {
         assert_eq!(profile["status"], "pending");
         assert!(matches!(

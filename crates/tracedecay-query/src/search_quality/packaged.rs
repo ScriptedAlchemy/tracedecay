@@ -7,7 +7,7 @@ use super::evaluate::SearchEvalError;
 
 const WORKLOAD_PATH: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
-const WORKLOAD_SHA256: &str = "7ce90140511ab52ff00057a8c3c6c65f9db7a87fc713e13bc45a9a9a946b41cb";
+const WORKLOAD_SHA256: &str = "b9c17e29e298f3db8b1eec0b35d4dda942fa5edf4f7a95d19ef1805345f0d77f";
 
 const FILES: &[(&str, &[u8])] = &[
     (

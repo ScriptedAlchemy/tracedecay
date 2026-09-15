@@ -13,6 +13,7 @@ pub mod capture;
 pub mod config;
 pub mod core_events;
 pub mod delivery_spool;
+mod lock_admission;
 pub mod native;
 pub mod runtime;
 pub mod spool;

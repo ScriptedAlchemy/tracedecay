@@ -315,7 +315,7 @@ fn replay_identity(session_id: &str, domain: &[u8]) -> String {
     format!("sha256:{}", encode_lowercase_hex(&hasher.finalize()))
 }
 
-pub(crate) fn codex_observation_source_v2(
+pub fn codex_observation_source_v2(
     session_id: &str,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
     Ok(ObservationSourceIdentityV1::for_provider_source(

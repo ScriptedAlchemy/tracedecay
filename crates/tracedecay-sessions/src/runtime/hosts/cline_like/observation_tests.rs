@@ -35,6 +35,98 @@ fn write_checked_in_native_task(tasks: &Path, project: &Path, api_filename: &str
     api
 }
 
+#[test]
+fn api_append_preserves_unchanged_native_ui_observation() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let tasks = temp.path().join("tasks");
+    let api = write_checked_in_native_task(&tasks, &project, "api_conversation_history.json");
+    let source = ClineLikeSource {
+        provider: "cline",
+        storage_roots: vec![tasks],
+        user_registered_roots: None,
+        project_matchers: ProjectRootMatcherCache::default(),
+        task_metadata: TaskMetadataCache::default(),
+    };
+    let before = source
+        .load_snapshot(&api, StoredCursor::default(), &project, None)
+        .unwrap()
+        .unwrap();
+    let before_records =
+        normalize_cline_like_snapshot_observations("cline", &before.transcript.messages).unwrap();
+    let before_ui = before_records
+        .iter()
+        .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+        .collect::<Vec<_>>();
+    assert_eq!(before_ui.len(), 1);
+    let mut entries: Vec<Value> = serde_json::from_slice(&std::fs::read(&api).unwrap()).unwrap();
+    entries.push(serde_json::json!({
+        "role": "user",
+        "content": "Appended API turn",
+        "ts": 1_800_000_020_i64
+    }));
+    std::fs::write(&api, serde_json::to_vec(&entries).unwrap()).unwrap();
+    let after_api = source
+        .load_snapshot(&api, StoredCursor::default(), &project, None)
+        .unwrap()
+        .unwrap();
+    let after_api_records =
+        normalize_cline_like_snapshot_observations("cline", &after_api.transcript.messages)
+            .unwrap();
+    let after_api_ui = after_api_records
+        .iter()
+        .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+        .collect::<Vec<_>>();
+    assert_ne!(before.api_generation, after_api.api_generation);
+    assert_eq!(
+        before.ui_generation, after_api.ui_generation,
+        "API append preserves UI content generation"
+    );
+    assert_eq!(
+        before_ui, after_api_ui,
+        "API append preserves exact native UI payload, source, identity, and range"
+    );
+    let unchanged_api = after_api_records
+        .iter()
+        .filter(|record| record.stream == ClineTranscriptStream::ApiHistory)
+        .collect::<Vec<_>>();
+    assert_eq!(unchanged_api.len(), 3);
+
+    let ui = api.parent().unwrap().join("ui_messages.json");
+    let mut entries: Vec<Value> = serde_json::from_slice(&std::fs::read(&ui).unwrap()).unwrap();
+    let mut appended = entries[0].clone();
+    appended["ts"] = serde_json::json!(1_800_000_030_i64);
+    entries.push(appended);
+    std::fs::write(&ui, serde_json::to_vec(&entries).unwrap()).unwrap();
+    let after_ui = source
+        .load_snapshot(&api, StoredCursor::default(), &project, None)
+        .unwrap()
+        .unwrap();
+    let after_ui_records =
+        normalize_cline_like_snapshot_observations("cline", &after_ui.transcript.messages).unwrap();
+    let after_ui_api = after_ui_records
+        .iter()
+        .filter(|record| record.stream == ClineTranscriptStream::ApiHistory)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after_api.api_generation, after_ui.api_generation,
+        "UI append preserves API content generation"
+    );
+    assert_ne!(after_api.ui_generation, after_ui.ui_generation);
+    assert_eq!(
+        unchanged_api, after_ui_api,
+        "UI append preserves every API payload, source, identity, and range"
+    );
+    assert_eq!(
+        after_ui_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+            .count(),
+        2
+    );
+}
+
 #[tokio::test]
 async fn checked_in_cline_family_snapshots_preserve_receipts_through_failures_and_replay() {
     use crate::admission::test_support::MemoryHostAdmission;

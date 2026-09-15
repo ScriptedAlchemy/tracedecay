@@ -168,7 +168,9 @@ async fn run_foreground_loopback(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance(
+        store_administration.session_runtime_registry().await?,
+    );
 
     let lifecycle = DaemonLifecycle::default();
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
@@ -639,7 +641,12 @@ async fn run_foreground_unix(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance(
+        engine
+            .store_administration
+            .session_runtime_registry()
+            .await?,
+    );
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
     let profile_database = engine
         .store_administration

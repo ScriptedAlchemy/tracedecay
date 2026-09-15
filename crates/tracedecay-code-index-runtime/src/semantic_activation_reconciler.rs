@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -5,10 +6,15 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use tracedecay_semantic_contracts::SemanticLifecycleVerifiedReadyEventV1;
+use tracedecay_semantic_contracts::{
+    SemanticFallbackReasonV1, SemanticLifecycleVerifiedReadyEventV1, SemanticModelLifecycleStateV1,
+};
 use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticActivationCoordinationErrorV1,
+    SemanticRuntimeStateV1, project_lifecycle_status, project_semantic_application_status,
 };
+
+use crate::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 const REOBSERVATION_UNIT_DEADLINE: Duration = Duration::from_secs(15);
 const REOBSERVATION_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
@@ -66,6 +72,8 @@ impl DaemonSemanticActivationReconcilerV1 {
         coordinator: Arc<ProductionSemanticActivationCoordinatorV1>,
         mut lifecycle_events: tokio::sync::watch::Receiver<SemanticLifecycleVerifiedReadyEventV1>,
         committed_activation_wake: Arc<Notify>,
+        project_root: PathBuf,
+        schedulers: CodeIndexSchedulerRegistryV1,
     ) -> Self {
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
@@ -74,9 +82,11 @@ impl DaemonSemanticActivationReconcilerV1 {
             let mut handled_epoch = None;
             let mut committed_activation_changed = false;
             loop {
-                let event = lifecycle_events.borrow_and_update().clone();
+                let mut event = lifecycle_events.borrow_and_update().clone();
                 if should_reconcile(handled_epoch, &event, committed_activation_changed) {
-                    if should_reconcile_ready_event(handled_epoch, &event) {
+                    let mut projection_reoffered =
+                        !should_reconcile_ready_event(handled_epoch, &event);
+                    if !projection_reoffered {
                         handled_epoch = Some(event.epoch);
                     }
                     committed_activation_changed = false;
@@ -90,7 +100,50 @@ impl DaemonSemanticActivationReconcilerV1 {
                             observed = tokio::time::timeout(
                                 REOBSERVATION_UNIT_DEADLINE,
                                 hotpath::future!(
-                                    coordinator.reobserve_current_activation(),
+                                    async {
+                                        // A ready wake is only authority to retry this project's
+                                        // currently selected artifact. Selection can change before
+                                        // the watcher consumes a coalesced event.
+                                        let selected_material = project_lifecycle_status(&project_root)
+                                            .and_then(|status| status.state)
+                                            .is_some_and(|state| {
+                                                matches!(state,
+                                                    SemanticModelLifecycleStateV1::Installed { .. }
+                                                        | SemanticModelLifecycleStateV1::Loading { .. }
+                                                        | SemanticModelLifecycleStateV1::Indexing { .. }
+                                                        | SemanticModelLifecycleStateV1::Ready { .. }
+                                                ) && event.artifact_digest.as_deref()
+                                                    == Some(state.artifact_digest())
+                                            });
+                                        let state = project_semantic_application_status(&project_root, None)
+                                            .map(|status| status.state);
+                                        let mut projection_pending = !projection_reoffered
+                                            && selected_material
+                                            && matches!(&state, Some(SemanticRuntimeStateV1::Indexing { .. }));
+                                        if !projection_reoffered
+                                            && selected_material
+                                            && matches!(&state, Some(SemanticRuntimeStateV1::Degraded {
+                                                reason: SemanticFallbackReasonV1::ArtifactUnavailable,
+                                                ..
+                                            }))
+                                        {
+                                            // Re-offer once per verified epoch through the mounted
+                                            // scheduler. Current/Indexing are never reprojected, so
+                                            // mark_ready cannot start a projection feedback loop.
+                                            projection_reoffered = schedulers
+                                                .reschedule_semantic_generation(&project_root).await;
+                                            projection_pending = !projection_reoffered;
+                                        }
+                                        let observed = coordinator.reobserve_current_activation().await?;
+                                        if projection_pending {
+                                            // An attempt that saw missing material may still be
+                                            // completing asynchronously. Keep this wake pending
+                                            // with the existing bounded retry until it settles.
+                                            Err(SemanticActivationCoordinationErrorV1::Unavailable)
+                                        } else {
+                                            Ok(observed)
+                                        }
+                                    },
                                     label = "daemon.semantic.activation_reconciler.reobserve"
                                 ),
                             ) => observed,
@@ -152,6 +205,8 @@ impl DaemonSemanticActivationReconcilerV1 {
                         let latest = lifecycle_events.borrow_and_update().clone();
                         if latest.epoch > handled_epoch.unwrap_or_default() {
                             handled_epoch = Some(latest.epoch);
+                            event = latest;
+                            projection_reoffered = false;
                             backoff = REOBSERVATION_INITIAL_BACKOFF;
                         }
                     }

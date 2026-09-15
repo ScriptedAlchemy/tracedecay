@@ -430,6 +430,8 @@ impl CodeIndexSchedulerRegistryV1 {
             text_generation,
             published_generation_id,
             serving_generation_epoch,
+            serving_source_witness,
+            serving_generation_changed,
             graph_activation,
             publication_gate,
             build_publication_lock,
@@ -453,6 +455,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.published_generation_id),
                 Arc::clone(&worktree.serving_generation_epoch),
+                Arc::clone(&worktree.serving_source_witness),
+                worktree.serving_generation_changed.clone(),
                 worktree.graph_activation.clone(),
                 Arc::clone(&worktree.semantic_evaluation_publication_gate),
                 Arc::clone(&worktree.build_publication_lock),
@@ -584,8 +588,16 @@ impl CodeIndexSchedulerRegistryV1 {
             let mut serving = swap_serving_generation
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut witness = serving_source_witness.write().map_err(|_| {
+                CodeIndexSchedulerErrorV1::Identity(
+                    "ignored-dependency serving witness lock is poisoned".to_owned(),
+                )
+            })?;
             *serving = Some(candidate.clone());
             swap_serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+            *witness = scheduler
+                .source_currency_witness_for(&candidate.generation().manifest().generation_id);
+            drop(witness);
             drop(serving);
             let _ = scheduler.schedule_semantic_generation(candidate.generation_handle());
             Ok::<_, CodeIndexSchedulerErrorV1>(())
@@ -601,7 +613,9 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         };
         match swap {
-            Ok(()) => {}
+            Ok(()) => {
+                serving_generation_changed.send_replace(());
+            }
             Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
                 CodeIndexIgnoredDependencyRefusalV1::StaleGeneration,
             )) => {
