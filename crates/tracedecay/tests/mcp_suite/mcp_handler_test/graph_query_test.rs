@@ -1419,6 +1419,164 @@ async fn similar_serves_verified_exact_and_rename_normalized_families() {
 }
 
 #[tokio::test]
+async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages() {
+    let large_body = "
+        let one = parse(input);
+        let two = transform(one);
+        let three = validate(two);
+        let four = persist(three);
+        let five = audit(four);
+        let six = publish(five);
+        finish(six, input, one, two, three, four, five);
+    ";
+    let small_body = "
+        let one = parse(input);
+        let two = transform(one);
+        let three = validate(two);
+        let four = persist(three);
+        finish(four, input, one, two, three);
+    ";
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        for (path, name) in [
+            ("src/large_a.rs", "large_a"),
+            ("src/large_b.rs", "large_b"),
+            ("src/large_c.rs", "large_c"),
+        ] {
+            fs::write(
+                project.join(path),
+                format!("pub fn {name}(input: Input) {{ {large_body} }}\n"),
+            )
+            .unwrap();
+        }
+        for (path, name) in [("src/small_a.rs", "small_a"), ("src/small_b.rs", "small_b")] {
+            fs::write(
+                project.join(path),
+                format!("pub fn {name}(input: Input) {{ {small_body} }}\n"),
+            )
+            .unwrap();
+        }
+    })
+    .await;
+    let project_id = fixture
+        .production
+        .harness
+        .project_id(fixture.project_root())
+        .await
+        .expect("fixture project identity");
+    let repository_id =
+        tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+            fixture.project_root(),
+        )
+        .expect("fixture repository identity");
+
+    let first = call_production_tool(
+        &fixture,
+        "tracedecay_redundancy",
+        json!({
+            "project_id": project_id,
+            "repository_id": repository_id,
+            "match_classes": ["conservative_exact"],
+            "path": "src",
+            "include_generated_paths": false,
+            "family_limit": 1,
+            "member_limit": 2,
+            "work_limit": 20,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("production redundancy invocation");
+    let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
+    let first_family = &first["families"][0];
+    assert_eq!(
+        first_family["family"]["match_class"], "conservative_exact",
+        "{first}"
+    );
+    assert_eq!(
+        first_family["family"]["members"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(first_family["total_member_count"], 3, "{first}");
+    assert!(
+        first_family["reviewable_source_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "{first}"
+    );
+    assert_eq!(first["coverage"]["status"], "partial", "{first}");
+    assert_eq!(first["coverage"]["reason"], "family_limit", "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("another family must be resumable");
+
+    let second = call_production_tool(
+        &fixture,
+        "tracedecay_redundancy",
+        json!({
+            "project_id": project_id,
+            "repository_id": repository_id,
+            "match_classes": ["conservative_exact"],
+            "path": "src",
+            "include_generated_paths": false,
+            "family_limit": 1,
+            "member_limit": 2,
+            "work_limit": 20,
+            "cursor": cursor,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("redundancy continuation");
+    let second: Value = serde_json::from_str(extract_text(&second.value)).unwrap();
+    assert_eq!(second["families"][0]["total_member_count"], 2, "{second}");
+    assert_ne!(
+        first_family["family"]["family_digest"], second["families"][0]["family"]["family_digest"],
+        "{second}"
+    );
+    assert_eq!(second["coverage"]["status"], "complete", "{second}");
+    assert!(second["next_cursor"].is_null(), "{second}");
+
+    let forbidden = first.to_string();
+    for claim in [
+        "dead code",
+        "equivalent implementation",
+        "safe to merge",
+        "guaranteed removable lines",
+    ] {
+        assert!(!forbidden.contains(claim), "{claim}: {first}");
+    }
+
+    let unauthorized = call_production_tool(
+        &fixture,
+        "tracedecay_redundancy",
+        json!({
+            "project_id": project_id,
+            "repository_id": "repository.unauthorized",
+            "match_classes": ["conservative_exact"],
+            "path": null,
+            "include_generated_paths": false,
+            "family_limit": 10,
+            "member_limit": 10,
+            "work_limit": 20,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect_err("foreign repository scope must be denied");
+    assert!(
+        unauthorized
+            .to_string()
+            .contains("outside the authorized repository scope"),
+        "{unauthorized}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
+#[tokio::test]
 async fn analytics_tools_return_their_canonical_envelope_keys() {
     let (cg, _dir) = production_graph_query_fixture().await;
     let cases: &[(&str, Value, &[&str])] = &[

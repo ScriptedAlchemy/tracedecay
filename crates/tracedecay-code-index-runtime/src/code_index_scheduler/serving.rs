@@ -1,5 +1,7 @@
 //! Serving handles for the latest complete generation: query owners, the
 //! durable lexical text artifact, and graph activation state.
+mod family_report;
+
 use std::{
     collections::VecDeque,
     fs::File,
