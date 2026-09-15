@@ -1502,6 +1502,19 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact was staged without incremental field statistics".to_owned(),
             ));
         }
+        // Likewise, a revision-16 staging file still accepting pages must
+        // carry the fingerprint staging table; one written straight into the
+        // keyed tree (an older builder) is refused as incompatible so the
+        // scheduler discards and restages it instead of retrying an `Io`.
+        if layout.has_clone_fingerprints()
+            && receipt.is_none()
+            && finalization.is_none()
+            && !table_exists(&connection, "clone_fingerprint_postings_pages")?
+        {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "lexical artifact was staged without fingerprint posting pages".to_owned(),
+            ));
+        }
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
         crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
@@ -2022,18 +2035,23 @@ impl CodeLexicalArtifactBuilderV1 {
             let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
             verify_staged_source_chain(&transaction, source, control)?;
             if self.layout.has_clone_fingerprints() {
-                hotpath::measure_block!(
-                    "query.artifact.finalization.derive_clone_fingerprint_postings",
-                    with_cancellable_sqlite_statement(&transaction, control, || {
-                        derive_clone_fingerprint_postings(&transaction, &self.mutation_gate)
-                    })
-                )?;
-                hotpath::measure_block!(
-                    "query.artifact.finalization.derive_clone_fingerprint_counts",
-                    with_cancellable_sqlite_statement(&transaction, control, || {
-                        derive_clone_fingerprint_counts(&transaction)
-                    })
-                )?;
+                // The sorted pass and the count aggregation are the heaviest
+                // sorter statements in finalization; run them under the same
+                // sorter CPU admission as the pre-digest index wakes.
+                super::with_builder_sorter_cpu_admission(&transaction, || {
+                    hotpath::measure_block!(
+                        "query.artifact.finalization.derive_clone_fingerprint_postings",
+                        with_cancellable_sqlite_statement(&transaction, control, || {
+                            derive_clone_fingerprint_postings(&transaction, &self.mutation_gate)
+                        })
+                    )?;
+                    hotpath::measure_block!(
+                        "query.artifact.finalization.derive_clone_fingerprint_counts",
+                        with_cancellable_sqlite_statement(&transaction, control, || {
+                            derive_clone_fingerprint_counts(&transaction)
+                        })
+                    )
+                })??;
             }
             let content_epoch = authenticated_authority_epoch(&transaction, source)?;
             install_base_freeze(&transaction, self.layout)?;
@@ -6961,6 +6979,38 @@ mod tests {
                 &ActiveControl,
             ) {
                 Ok(_) => panic!("resume must not seal statistics without staged totals"),
+                Err(error) => error,
+            };
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
+    }
+
+    /// A revision-16 staging file written by the builder that inserted
+    /// fingerprint postings straight into the keyed tree has no staging table;
+    /// resuming it must be a typed incompatibility (discard and restage), not
+    /// a missing-table `Io` the scheduler would retry forever.
+    #[test]
+    fn resume_refuses_staging_without_fingerprint_posting_pages() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("no-fingerprint-staging.sqlite");
+        let metadata = test_metadata();
+        drop(
+            CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
+                .expect("create current staging artifact"),
+        );
+        let connection = Connection::open(&path).expect("open staging artifact for fixture setup");
+        connection
+            .execute_batch("DROP TABLE clone_fingerprint_postings_pages;")
+            .expect("install pre-staging fingerprint layout");
+        drop(connection);
+
+        let error =
+            match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &path,
+                metadata,
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &ActiveControl,
+            ) {
+                Ok(_) => panic!("resume must not accept a staging file without fingerprint pages"),
                 Err(error) => error,
             };
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
