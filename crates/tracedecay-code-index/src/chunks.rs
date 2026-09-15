@@ -1735,13 +1735,17 @@ impl DeterministicCodeChunker {
                     });
                 }
                 if let Some(signature) = emission.signature {
-                    pending.push(PendingChunk {
-                        grain: CodeSearchChunkGrainV1::SymbolSignature,
-                        symbol: Some(index),
-                        split_path: Vec::new(),
-                        span: signature,
-                        parent: Some((index, emission.pieces[0].0.clone())),
-                    });
+                    let body_is_the_signature =
+                        emission.pieces.len() == 1 && emission.pieces[0].1 == signature;
+                    if !body_is_the_signature {
+                        pending.push(PendingChunk {
+                            grain: CodeSearchChunkGrainV1::SymbolSignature,
+                            symbol: Some(index),
+                            split_path: Vec::new(),
+                            span: signature,
+                            parent: Some((index, emission.pieces[0].0.clone())),
+                        });
+                    }
                 }
             }
 
@@ -3177,6 +3181,66 @@ mod tests {
                 "exact occurrence must not land in a folded whitespace region"
             );
         }
+    }
+
+    #[test]
+    fn one_line_function_does_not_duplicate_its_body_as_a_signature_chunk() {
+        let source = "pub fn cancellation_probe_0000_000(input: u32) -> u32 { input + 0 }\n";
+        let result = chunk_source(source);
+        result.validate().expect("valid one-line function chunks");
+
+        let symbol_chunks: Vec<_> = result
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.anchor.symbol_occurrence_id.is_some())
+            .collect();
+        assert_eq!(
+            symbol_chunks.len(),
+            1,
+            "one-line functions must not mint a signature row that repeats the body: {symbol_chunks:?}"
+        );
+        assert_eq!(
+            symbol_chunks[0].anchor.grain,
+            CodeSearchChunkGrainV1::SymbolBody
+        );
+        assert_eq!(
+            symbol_chunks[0].sanitized_text.as_str(),
+            "pub fn cancellation_probe_0000_000(input: u32) -> u32 { input + 0 }\n"
+        );
+
+        let multiline = chunk_source("pub fn probe(input: u32) -> u32 {\n    input + 1\n}\n");
+        multiline
+            .validate()
+            .expect("valid multi-line function chunks");
+        let grains: BTreeSet<_> = multiline
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.anchor.symbol_occurrence_id.is_some())
+            .map(|chunk| chunk.anchor.grain)
+            .collect();
+        assert!(
+            grains.contains(&CodeSearchChunkGrainV1::SymbolSignature),
+            "a distinct first line must still emit a signature grain: {grains:?}"
+        );
+        assert!(
+            grains.contains(&CodeSearchChunkGrainV1::SymbolBody),
+            "a multi-line body must still emit a body grain: {grains:?}"
+        );
+        let signature = multiline
+            .chunks
+            .iter()
+            .find(|chunk| chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature)
+            .expect("signature chunk");
+        let body = multiline
+            .chunks
+            .iter()
+            .find(|chunk| chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody)
+            .expect("body chunk");
+        assert_ne!(
+            signature.sanitized_text.as_str(),
+            body.sanitized_text.as_str(),
+            "the kept signature must be a proper prefix, not a second copy of the body"
+        );
     }
 
     #[test]
