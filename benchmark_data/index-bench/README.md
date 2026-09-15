@@ -25,14 +25,16 @@ every instrumentation macro compiles to nothing.
 
 ## What it measures
 
-Four phases against the real production pipeline, no daemon involved:
+Six phases against the real production pipeline, no daemon involved:
 
 | phase | entrypoint | spans it covers |
 | --- | --- | --- |
 | clean generation | `CodeIndexProductionOwnerV1::build_and_publish` | `code_index.extract.parser_artifact`, `code_index.build.plan_full`, chunking |
 | incremental generation | the same, over an edited subset | `code_index.build.plan_increment`, retained-parse reuse |
+| one-body refresh | the same, after one generated Java body changes structurally | clone payload recomputation and reuse |
 | sealed page drain | `VerifiedSealedLexicalPageSourceV1::next_page_batch_if` | `code_index.lexical_source.batch_stage` |
 | artifact ingest | `CodeLexicalArtifactBuilderV1::append_pages` | `query.artifact.append_pages`, `query.artifact.batch.*`, `query.artifact.finalization.advance_wake` |
+| clone reads | `CodeLexicalArtifactReaderV1` | cold and warm exact lookup, fingerprint accounting, cancellation, and reopen |
 
 Read the report as service demand, not wall time: extraction runs on the
 rayon pool, so `code_index.extract.parser_artifact` totals CPU across
@@ -100,7 +102,38 @@ commit as incomparable.
 | --- | --- | --- |
 | `--corpus DIR` | `TRACEDECAY_INDEX_BENCH_CORPUS` | `benchmark_data/index-bench/corpus` |
 | `--replicas N` | `TRACEDECAY_INDEX_BENCH_REPLICAS` | `1` |
+| `--format-revision 14\|15\|16` | none | `16` |
 
 `--replicas` indexes the corpus N times under distinct logical-path prefixes.
 It is for local investigation of scaling behaviour; CI runs at 1, because the
 comparison wants a stable workload rather than a large one.
+
+`--format-revision` accepts 14, 15, or 16. Revision 14 is the control without
+clone tables. Revision 15 adds exact clone postings. Revision 16 adds
+fingerprint postings and counts.
+
+## Clone operating envelope
+
+Run the 5,200-file workload through Cargo Hauler:
+
+```text
+hauler exec -- cargo run --release -p tracedecay-query \
+  --features production --bin tracedecay-index-bench -- \
+  --replicas 20 --format-revision 16
+```
+
+The JSON result records source bytes, symbols, clone bodies, body tokens,
+language counts, artifact bytes, wall times, peak RSS, exact lookup samples,
+fingerprint accounting, cancellation, and restart. The one-body refresh is
+available for the committed generated corpus. A custom corpus without the
+generated Java body reports that measurement as unavailable.
+
+The Java subset has 20 normalized members per replica. Fifty replicas exercise
+one exact family with 1,000 members:
+
+```text
+hauler exec -- cargo run --release -p tracedecay-query \
+  --features production --bin tracedecay-index-bench -- \
+  --corpus benchmark_data/index-bench/corpus/java \
+  --replicas 50 --format-revision 16
+```

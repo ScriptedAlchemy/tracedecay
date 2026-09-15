@@ -1,0 +1,266 @@
+{
+  "schema": "tracedecay.clone-envelope.v1",
+  "campaign_tip": "ec35eb7f48808e51562ff76a0c0e6ce7f807f0f0",
+  "corpus": {
+    "revision": "index-bench-corpus.v1",
+    "content_digest": "sha256:e6d9f163e2971e2826045645f1cd71eb52b8919ea5156c169373aeeefa0ff4df"
+  },
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "cpu_model": "AMD EPYC 7742 64-Core Processor",
+    "logical_cpus": 96,
+    "memory_bytes": 138031566848
+  },
+  "runs": {
+    "file_5200_control_v14": {
+      "hauler_ticket": "cc-21818",
+      "replicas": 20,
+      "admitted_files": 5200,
+      "symbol_count": 87960,
+      "body_count": 56180,
+      "source_tokens": 2314305,
+      "artifact_bytes": 1187573760,
+      "artifact_ingest_ms": 75783,
+      "peak_rss_bytes": 18637742080,
+      "total_ms": 138607
+    },
+    "file_5200_clone_v16": {
+      "hauler_ticket": "cc-21819",
+      "replicas": 20,
+      "admitted_files": 5200,
+      "symbol_count": 87960,
+      "body_count": 56180,
+      "source_tokens": 2314305,
+      "artifact_bytes": 1552441344,
+      "artifact_ingest_ms": 130857,
+      "peak_rss_bytes": 18946297856,
+      "total_ms": 212917,
+      "body_refresh": {
+        "changed_files": 1,
+        "payloads_computed": 1,
+        "payloads_reused": 56179,
+        "wall_micros": 7769091
+      },
+      "unchanged_increment": {
+        "payloads_computed": 0,
+        "payloads_reused": 56180
+      },
+      "exact_lookup": {
+        "cold_micros": 659,
+        "warm_p95_micros": 382
+      }
+    },
+    "symbol_101154_control_v14": {
+      "hauler_ticket": "cc-21833",
+      "replicas": 23,
+      "admitted_files": 5980,
+      "eligible_bytes": 21365687,
+      "symbol_count": 101154,
+      "body_count": 64607,
+      "eligible_bodies": 51727,
+      "source_tokens": 2661450,
+      "artifact_bytes": 1366769664,
+      "artifact_ingest_ms": 73238,
+      "peak_rss_bytes": 21417521152,
+      "total_ms": 139735
+    },
+    "symbol_101154_clone_v16": {
+      "hauler_ticket": "cc-21834",
+      "replicas": 23,
+      "admitted_files": 5980,
+      "eligible_bytes": 21365687,
+      "symbol_count": 101154,
+      "body_count": 64607,
+      "eligible_bodies": 51727,
+      "source_tokens": 2661450,
+      "language_files": {
+        "go": 690,
+        "java": 460,
+        "python": 1150,
+        "rust": 2070,
+        "typescript": 1610
+      },
+      "artifact_bytes": 1786527744,
+      "artifact_ingest_ms": 142080,
+      "peak_rss_bytes": 21641617408,
+      "total_ms": 223658,
+      "body_refresh": {
+        "changed_files": 1,
+        "payloads_computed": 1,
+        "payloads_reused": 64606,
+        "wall_micros": 8614843
+      },
+      "unchanged_increment": {
+        "payloads_computed": 0,
+        "payloads_reused": 64607
+      },
+      "exact_lookup": {
+        "cold_micros": 749,
+        "warm_micros": [
+          456,
+          377,
+          374,
+          358,
+          367,
+          442,
+          423,
+          399,
+          364,
+          372,
+          390,
+          355,
+          470,
+          441,
+          377,
+          398,
+          363,
+          465,
+          379,
+          466,
+          458,
+          391,
+          391,
+          360,
+          409,
+          421,
+          442,
+          412,
+          357,
+          367,
+          381,
+          365,
+          379,
+          358,
+          375,
+          510,
+          531,
+          518,
+          393,
+          422,
+          361,
+          435,
+          366,
+          397,
+          391,
+          477,
+          569,
+          420,
+          431,
+          399,
+          449,
+          400,
+          397,
+          396,
+          391,
+          381,
+          445,
+          394,
+          395,
+          408,
+          398,
+          416,
+          463,
+          442,
+          367,
+          393,
+          361,
+          419,
+          430,
+          404,
+          419,
+          358,
+          360,
+          366,
+          359,
+          403,
+          420,
+          398,
+          394,
+          409,
+          399,
+          388,
+          395,
+          394,
+          361,
+          371,
+          367,
+          348,
+          359,
+          362,
+          342,
+          358,
+          376,
+          536,
+          540,
+          455,
+          395,
+          352,
+          375,
+          391
+        ],
+        "warm_p95_micros": 510
+      },
+      "fingerprint_lookup": {
+        "elapsed_micros": 49161,
+        "postings_read": 460,
+        "hot_posting_rows_skipped": 51610,
+        "candidates_admitted": 1,
+        "pairs_verified": 1,
+        "partial_reasons": [
+          "HotPostings"
+        ]
+      },
+      "cancellation": {
+        "coverage_unknown": 1,
+        "partial_reasons": [
+          "Cancelled"
+        ],
+        "point": "FingerprintCountRead"
+      },
+      "restart": {
+        "open_micros": 6156559,
+        "exact_members": 1
+      }
+    },
+    "exact_family_1000": {
+      "hauler_ticket": "cc-21824",
+      "admitted_files": 1000,
+      "family_members_excluding_source": 999,
+      "has_more": false,
+      "warm_p95_micros": 1267,
+      "total_ms": 28082,
+      "peak_rss_bytes": 2052956160
+    }
+  },
+  "deltas": {
+    "file_5200": {
+      "clone_peak_rss_added_bytes": 308555776,
+      "clone_artifact_ingest_added_ms": 55074
+    },
+    "symbol_101154": {
+      "clone_peak_rss_added_bytes": 224096256,
+      "clone_artifact_ingest_added_ms": 68842
+    }
+  },
+  "target_results": {
+    "clone_peak_rss_added_at_most_1_gib": true,
+    "clone_work_added_at_most_60_seconds_for_5200_files": true,
+    "clone_work_added_at_most_60_seconds_for_101154_symbols": false,
+    "warm_exact_lookup_p95_at_most_250_ms": true,
+    "one_body_refresh_at_most_1_second": false,
+    "unchanged_bodies_not_renormalized": true
+  },
+  "adversarial_tests": {
+    "candidate_and_posting_budgets": "cc-21820",
+    "work_budget_cursor_resume": "cc-21821",
+    "hot_only_fingerprints": "cc-21822",
+    "paging_and_cancellation": "cc-21823"
+  },
+  "hotpath": {
+    "baseline_ticket": "cc-21756",
+    "post_change_ticket": "cc-21825",
+    "top_clone_batch_total_seconds": 22.36,
+    "top_finalization_total_seconds": 36.73
+  }
+}
