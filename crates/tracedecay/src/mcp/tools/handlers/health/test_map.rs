@@ -57,30 +57,7 @@ pub(crate) async fn handle_test_map(
     _scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let (source_nodes, test_evidence) = hotpath::measure_block!("mcp.health.test_map.graph", {
-        let source_nodes = if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
-            let nodes = graph.symbols_in_logical_file(file, MAX_TEST_MAP_FILE_SYMBOLS + 1)?;
-            if nodes.len() > MAX_TEST_MAP_FILE_SYMBOLS {
-                return Err(test_map_unavailable(
-                    "verified test-map file census exceeded its symbol budget",
-                ));
-            }
-            nodes
-        } else if let Some(node_id) = args
-            .get("node_id")
-            .or(args.get("id"))
-            .and_then(|v| v.as_str())
-        {
-            let occurrence = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("invalid test-map symbol occurrence: {error}"),
-                }
-            })?;
-            graph.symbol_summary(&occurrence)?.into_iter().collect()
-        } else {
-            return Err(TraceDecayError::Config {
-                message: "missing required parameter: 'file' or 'node_id'".to_string(),
-            });
-        };
+        let source_nodes = test_map_source_nodes(graph, &args)?;
         let test_evidence = tracedecay_graph_query::test_risk::verified_test_evidence(graph)?;
         (source_nodes, test_evidence)
     });
@@ -181,4 +158,35 @@ pub(crate) async fn handle_test_map(
 
 fn test_map_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
+}
+
+fn test_map_source_nodes(
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    args: &Value,
+) -> Result<Vec<tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1>> {
+    let source_nodes = if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
+        let nodes = graph.symbols_in_logical_file(file, MAX_TEST_MAP_FILE_SYMBOLS + 1)?;
+        if nodes.len() > MAX_TEST_MAP_FILE_SYMBOLS {
+            return Err(test_map_unavailable(
+                "verified test-map file census exceeded its symbol budget",
+            ));
+        }
+        nodes
+    } else if let Some(node_id) = args
+        .get("node_id")
+        .or(args.get("id"))
+        .and_then(|v| v.as_str())
+    {
+        let occurrence = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("invalid test-map symbol occurrence: {error}"),
+            }
+        })?;
+        graph.symbol_summary(&occurrence)?.into_iter().collect()
+    } else {
+        return Err(TraceDecayError::Config {
+            message: "missing required parameter: 'file' or 'node_id'".to_string(),
+        });
+    };
+    Ok(source_nodes)
 }
