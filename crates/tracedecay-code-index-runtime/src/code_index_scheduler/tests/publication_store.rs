@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -27,7 +29,8 @@ use super::{
 use crate::{
     code_index::production::{
         CodeIndexAtomicPublicationPort, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
-        CodeIndexPublicationStoreErrorV1, UninterruptibleCodeIndexControlV1,
+        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+        SealedGenerationSegmentReadV1, UninterruptibleCodeIndexControlV1,
         VerifiedSealedLexicalPageReadV1,
     },
     code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1},
@@ -1634,6 +1637,191 @@ fn restart_rejects_corrupt_sealed_generation() {
     assert!(
         reopened.latest_complete_already_decoded().is_none(),
         "corrupt sealed state never becomes serving state"
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RestartDecodeStatusV1 {
+    Abstained { refused_revision: Option<u32> },
+    Decoded,
+    SourceCommitmentRefused,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RestartIdentityStatusV1 {
+    NotReached,
+    Matched,
+    Mismatched,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RestartDecodeCensusV1 {
+    monolithic: RestartDecodeStatusV1,
+    partitioned: RestartDecodeStatusV1,
+    sanitizer: RestartIdentityStatusV1,
+    pointer: RestartIdentityStatusV1,
+}
+
+fn restart_decode_census(
+    store: &Path,
+    pointer: &DurablePublicationPointerV1,
+) -> RestartDecodeCensusV1 {
+    let generation_path = store
+        .join("code-generations-v1")
+        .join(&pointer.generation_file);
+    let generation_bytes = std::fs::read(&generation_path).expect("read generation manifest");
+    let generation_size = u64::try_from(generation_bytes.len()).expect("generation byte size");
+    let expected_digest =
+        ManifestDigest::new(pointer.state_digest.clone()).expect("generation digest");
+    let monolithic = match CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
+        File::open(&generation_path).expect("open generation manifest"),
+        generation_size,
+        Some(&expected_digest),
+        &UninterruptibleCodeIndexControlV1,
+    ) {
+        Ok(None) => RestartDecodeStatusV1::Abstained {
+            refused_revision: None,
+        },
+        Ok(Some(_)) => RestartDecodeStatusV1::Decoded,
+        Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
+            RestartDecodeStatusV1::Abstained {
+                refused_revision: Some(revision),
+            }
+        }
+        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => {
+            RestartDecodeStatusV1::SourceCommitmentRefused
+        }
+        Err(error) => panic!("monolithic restart census failed: {error}"),
+    };
+    let segments = store.join("code-generation-segments-v1");
+    let partitioned = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &generation_bytes,
+        |request, buffer| {
+            let (digest, size, offset, length) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    (digest, size_bytes, 0, size_bytes)
+                }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    size_bytes,
+                    offset,
+                    length,
+                } => (digest, size_bytes, offset, length),
+            };
+            let digest = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "restart census segment digest is not canonical".to_owned(),
+                )
+            })?;
+            let path = segments.join(format!("segment-{digest}.json"));
+            let mut file = File::open(path).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "restart census segment open failed: {error}"
+                ))
+            })?;
+            if file
+                .metadata()
+                .map_err(|error| {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "restart census segment metadata failed: {error}"
+                    ))
+                })?
+                .len()
+                != size
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "restart census segment size does not match its manifest".to_owned(),
+                ));
+            }
+            let length = usize::try_from(length).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "restart census segment length is invalid: {error}"
+                ))
+            })?;
+            buffer.resize(length, 0);
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.read_exact(buffer))
+                .map_err(|error| {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "restart census segment read failed: {error}"
+                    ))
+                })
+        },
+    );
+    let generation = match partitioned {
+        Ok(Some(generation)) => generation,
+        Ok(None) => {
+            return RestartDecodeCensusV1 {
+                monolithic,
+                partitioned: RestartDecodeStatusV1::Abstained {
+                    refused_revision: None,
+                },
+                sanitizer: RestartIdentityStatusV1::NotReached,
+                pointer: RestartIdentityStatusV1::NotReached,
+            };
+        }
+        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => {
+            return RestartDecodeCensusV1 {
+                monolithic,
+                partitioned: RestartDecodeStatusV1::SourceCommitmentRefused,
+                sanitizer: RestartIdentityStatusV1::NotReached,
+                pointer: RestartIdentityStatusV1::NotReached,
+            };
+        }
+        Err(error) => panic!("partitioned restart census failed: {error}"),
+    };
+    let sanitizer = if generation.manifest().sanitizer_revision.as_str()
+        == tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1
+    {
+        RestartIdentityStatusV1::Matched
+    } else {
+        RestartIdentityStatusV1::Mismatched
+    };
+    let pointer_matches = generation.manifest().generation_id.as_str() == pointer.generation_id
+        && generation.snapshot().content_identity.as_str() == pointer.snapshot_content_identity
+        && generation.projection().publication_digest().as_str() == pointer.publication_digest
+        && generation.manifest().seal.sealed_at.0 == pointer.sealed_at_micros;
+    RestartDecodeCensusV1 {
+        monolithic,
+        partitioned: RestartDecodeStatusV1::Decoded,
+        sanitizer,
+        pointer: if pointer_matches {
+            RestartIdentityStatusV1::Matched
+        } else {
+            RestartIdentityStatusV1::Mismatched
+        },
+    }
+}
+
+#[test]
+fn restart_decode_census_reaches_partitioned_decode_and_matches_durable_identity() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("initial publish"));
+    }
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("read active pointer"),
+    )
+    .expect("decode active pointer");
+
+    assert_eq!(
+        restart_decode_census(store.path(), &pointer),
+        RestartDecodeCensusV1 {
+            monolithic: RestartDecodeStatusV1::Abstained {
+                refused_revision: None,
+            },
+            partitioned: RestartDecodeStatusV1::Decoded,
+            sanitizer: RestartIdentityStatusV1::Matched,
+            pointer: RestartIdentityStatusV1::Matched,
+        },
+        "shared premise: a current partitioned generation must survive the monolithic probe and reach exact sanitizer and pointer checks"
     );
 }
 

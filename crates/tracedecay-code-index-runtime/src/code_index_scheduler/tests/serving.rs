@@ -199,6 +199,23 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     let artifact_file = entry["text_artifact"]["artifact_file"]
         .as_str()
         .expect("attached text artifact descriptor");
+    let generation_file = pointer["generation_file"]
+        .as_str()
+        .expect("sealed generation file");
+    let generation_manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            store
+                .path()
+                .join("code-generations-v1")
+                .join(generation_file),
+        )
+        .expect("read sealed generation manifest"),
+    )
+    .expect("parse sealed generation manifest");
+    assert!(
+        generation_manifest["generation"]["manifest"]["source_commitments"].is_object(),
+        "sealed generation must retain source commitments: {generation_manifest}"
+    );
     assert!(
         artifact_file.starts_with("text-artifact-") && artifact_file.ends_with(".bin"),
         "the durable descriptor must use the content-addressed artifact naming rule"
@@ -222,6 +239,11 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    scheduler
+        .publication
+        .load_active_shared()
+        .expect("durable generation remains readable after clone CAS")
+        .expect("active generation remains published");
     let latest = scheduler.latest_complete().expect("restored generation");
     assert!(
         latest
@@ -623,6 +645,201 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
 
 #[cfg(unix)]
 #[test]
+fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+
+    while !latest.query_owners_are_warm() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    assert!(
+        latest.text_serving_needs_work(),
+        "clone successor must continue after lexical owners are seated"
+    );
+    latest
+        .production_query_owners()
+        .expect("lexical owners serve during clone successor");
+    let v14_path = active_text_artifact_path(store.path());
+    let v14_revision: i64 = rusqlite::Connection::open(&v14_path)
+        .expect("open V14 artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read V14 revision");
+    assert_eq!(v14_revision, 14);
+
+    while latest.text_serving_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("advance clone successor");
+    }
+    assert!(latest.query_owners_are_warm());
+    let v15_path = active_text_artifact_path(store.path());
+    assert_ne!(v15_path, v14_path);
+    let v15_revision: i64 = rusqlite::Connection::open(v15_path)
+        .expect("open V15 artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read V15 revision");
+    assert_eq!(v15_revision, 15);
+}
+
+fn start_partial_clone_successor(
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> (PathBuf, PathBuf, u64, u64) {
+    let mut scheduler = scheduler(
+        fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_warm() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    let v14_path = active_text_artifact_path(store.path());
+    assert!(latest.text_serving_needs_work());
+    assert!(
+        !latest
+            .advance_text_serving(1)
+            .expect("append one clone-successor page"),
+        "one page must leave a resumable clone successor"
+    );
+    latest
+        .production_query_owners()
+        .expect("V14 owners remain readable");
+    let staging_path = std::fs::read_dir(store.path().join("code-text-artifacts-v1"))
+        .expect("read text artifact root")
+        .map(|entry| entry.expect("read text artifact entry").path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".staging"))
+        })
+        .expect("partial clone-successor staging");
+    let connection =
+        rusqlite::Connection::open(&staging_path).expect("open clone-successor staging");
+    let next_page: i64 = connection
+        .query_row(
+            "SELECT next_page_ordinal FROM clone_successor_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read clone-successor cursor");
+    let source_pages: i64 = connection
+        .query_row("SELECT COUNT(*) FROM source_pages", [], |row| row.get(0))
+        .expect("count clone-successor source pages");
+    assert!(next_page > 0 && next_page <= source_pages);
+    (
+        v14_path,
+        staging_path,
+        u64::try_from(next_page).expect("nonnegative clone-successor cursor"),
+        u64::try_from(source_pages).expect("nonnegative source page count"),
+    )
+}
+
+#[test]
+fn clone_successor_restart_resumes_its_source_cursor_and_keeps_v14_readable() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let (v14_path, staging_path, next_page, source_pages) =
+        start_partial_clone_successor(&fixture, &store);
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    let completed = latest
+        .advance_text_serving(1)
+        .expect("resume clone successor after restart");
+    latest
+        .production_query_owners()
+        .expect("V14 owners serve during resumed successor");
+    if next_page == source_pages {
+        assert!(
+            completed,
+            "a resumed terminal cursor must publish without replaying its accepted page"
+        );
+    } else {
+        let resumed_page: i64 = rusqlite::Connection::open(&staging_path)
+            .expect("open resumed clone successor")
+            .query_row(
+                "SELECT next_page_ordinal FROM clone_successor_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read resumed clone-successor cursor");
+        assert!(
+            u64::try_from(resumed_page).expect("nonnegative resumed cursor") > next_page,
+            "restart must advance from the durable cursor instead of replaying page zero"
+        );
+    }
+    while latest.text_serving_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("finish resumed clone successor");
+    }
+    assert_ne!(active_text_artifact_path(store.path()), v14_path);
+}
+
+#[test]
+fn corrupt_clone_successor_staging_is_rebuilt_without_cooling_v14_owners() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let (v14_path, staging_path, _, _) = start_partial_clone_successor(&fixture, &store);
+    rusqlite::Connection::open(&staging_path)
+        .expect("open clone-successor staging")
+        .execute(
+            "UPDATE clone_successor_state SET next_cursor = ?1 WHERE singleton = 1",
+            [vec![0xff_u8]],
+        )
+        .expect("corrupt clone-successor cursor");
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    latest
+        .advance_text_serving(1)
+        .expect("discard corrupt clone successor and rebuild");
+    latest
+        .production_query_owners()
+        .expect("V14 owners serve while successor rebuilds");
+    while latest.text_serving_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("finish rebuilt clone successor");
+    }
+    assert_ne!(active_text_artifact_path(store.path()), v14_path);
+}
+
+#[test]
 fn text_artifact_builder_creates_an_owner_private_artifacts_root() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -830,9 +1047,14 @@ fn cold_activation_completes_text_serving_in_one_call() {
         "owner warmup must leave the text serving owners installed"
     );
     assert!(
-        !latest.text_serving_needs_work(),
-        "a completed warmup must leave no resumable build behind"
+        latest.text_serving_needs_work(),
+        "lexical warmup must leave clone backfill as background work"
     );
+    while latest.text_serving_needs_work() {
+        latest
+            .advance_text_serving(64)
+            .expect("finish clone successor");
+    }
 }
 
 #[test]

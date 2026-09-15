@@ -54,8 +54,8 @@ use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBatchLimitV1,
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactWriterRevisionV1, CodeLexicalProjectionAdapterV1,
-    CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
+    CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
+    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
     MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
@@ -1399,6 +1399,59 @@ fn v15_clone_payloads_are_content_addressed_and_exact_postings_page() {
         &verified.section_digests()[..legacy_verified.section_digests().len()],
         "V15 clone sections must not rewrite lexical section identities"
     );
+    let successor_path = directory
+        .path()
+        .join("lexical-artifact-successor-v15.sqlite");
+    let mut successor = CodeLexicalCloneSuccessorV1::open_or_create(
+        &legacy_path,
+        &successor_path,
+        legacy_verified.clone(),
+        fixture.metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    )
+    .expect("create clone-only successor");
+    successor
+        .append_page(&pages[0], &control)
+        .expect("append first clone page");
+    drop(successor);
+    let mut successor = CodeLexicalCloneSuccessorV1::open_or_create(
+        &legacy_path,
+        &successor_path,
+        legacy_verified,
+        fixture.metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    )
+    .expect("resume clone-only successor");
+    assert_eq!(
+        successor
+            .next_cursor()
+            .expect("successor cursor")
+            .expect("accepted page cursor"),
+        pages[0].next_cursor().clone()
+    );
+    for page in &pages[1..] {
+        successor
+            .append_page(page, &control)
+            .expect("append remaining clone page");
+    }
+    let successor_verified = successor
+        .finish(&receipt, &control)
+        .expect("finish clone-only successor");
+    assert_eq!(
+        successor_verified.section_digests(),
+        verified.section_digests()
+    );
+    assert_eq!(
+        successor_verified.artifact_digest(),
+        verified.artifact_digest()
+    );
+    CodeLexicalArtifactReaderV1::open_with_control(
+        &successor_path,
+        &successor_verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("open clone-only successor");
     let connection = rusqlite::Connection::open(&artifact_path).expect("inspect V15 artifact");
     assert_eq!(
         connection

@@ -531,12 +531,12 @@ const FIELD_STATS_STAGING_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] =
     ),
 ];
 
-struct BuilderMutationGuardV1 {
+pub(super) struct BuilderMutationGuardV1 {
     gate: Arc<AtomicU8>,
 }
 
 impl BuilderMutationGuardV1 {
-    fn enter(gate: &Arc<AtomicU8>) -> Result<Self, CodeLexicalArtifactErrorV1> {
+    pub(super) fn enter(gate: &Arc<AtomicU8>) -> Result<Self, CodeLexicalArtifactErrorV1> {
         gate.compare_exchange(
             BUILDER_MUTATION_IDLE,
             BUILDER_MUTATION_APPEND,
@@ -560,7 +560,7 @@ impl Drop for BuilderMutationGuardV1 {
     }
 }
 
-fn register_builder_mutation_gate(
+pub(super) fn register_builder_mutation_gate(
     connection: &Connection,
 ) -> Result<Arc<AtomicU8>, CodeLexicalArtifactErrorV1> {
     let gate = Arc::new(AtomicU8::new(BUILDER_MUTATION_IDLE));
@@ -3873,7 +3873,7 @@ fn insert_prepared_source_page(
     Ok(())
 }
 
-fn sqlite_file_size(connection: &Connection) -> Result<u64, CodeLexicalArtifactErrorV1> {
+pub(super) fn sqlite_file_size(connection: &Connection) -> Result<u64, CodeLexicalArtifactErrorV1> {
     let page_count: i64 = connection
         .pragma_query_value(None, "page_count", |row| row.get(0))
         .map_err(sqlite_error)?;
@@ -4325,7 +4325,7 @@ fn install_base_freeze(
     Ok(())
 }
 
-fn install_clone_freeze(
+pub(super) fn install_clone_freeze(
     transaction: &Transaction<'_>,
     layout: LexicalArtifactLayoutV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -5712,6 +5712,20 @@ pub(super) fn compute_section_digests(
         }
     }
     Ok(sections)
+}
+
+pub(super) fn compute_clone_section_digests(
+    connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<Vec<CodeLexicalArtifactSectionDigestV1>, CodeLexicalArtifactErrorV1> {
+    [
+        FinalizationSectionV1::CloneOccurrences,
+        FinalizationSectionV1::CloneExactPostings,
+        FinalizationSectionV1::CloneBodyPayloads,
+    ]
+    .into_iter()
+    .map(|section| digest_query(connection, section, control, LexicalArtifactLayoutV1::V15))
+    .collect()
 }
 
 fn digest_source_pages_and_base_receipts(

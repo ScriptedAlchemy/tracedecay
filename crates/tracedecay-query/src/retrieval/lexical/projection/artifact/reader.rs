@@ -157,6 +157,10 @@ impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
 }
 
 impl CodeLexicalArtifactReaderV1 {
+    pub fn has_clone_index(&self) -> bool {
+        self.layout.has_clone_index()
+    }
+
     /// Open a published artifact whose trust anchor is its content address:
     /// the durable head names the artifact file's size and SHA-256 digest,
     /// the embedded receipt is decoded only after the whole file matches

@@ -49,61 +49,140 @@ const TEXT_ARTIFACT_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     label: "text-artifact retention receipt",
 };
 
-/// Durably attach a verified text artifact to its sealed generation entry.
-///
-/// The lock is root-bound, so the caller can keep this exact guard while it
-/// advances the independent text head. Returning success proves the updated
-/// generation pointer and its parent directory were fsynced first.
-pub fn attach_verified_text_artifact_under_lock(
+enum VerifiedTextArtifactMutationV1<'a> {
+    Attach {
+        sealed_identity: &'a DurableSealedCodeGenerationIdentityV1,
+        descriptor: DurableCodeTextArtifactDescriptorV1,
+    },
+    Replace {
+        sealed_identity: &'a DurableSealedCodeGenerationIdentityV1,
+        expected: &'a DurableCodeTextArtifactDescriptorV1,
+        replacement: DurableCodeTextArtifactDescriptorV1,
+    },
+    Withdraw {
+        expected: &'a DurableCodeTextArtifactDescriptorV1,
+    },
+}
+
+fn mutate_verified_text_artifact_under_lock(
     lock: &CodeGenerationStoreLockV1,
     expected_pointer: &DurablePublicationPointerV1,
-    sealed_identity: &DurableSealedCodeGenerationIdentityV1,
-    descriptor: DurableCodeTextArtifactDescriptorV1,
+    mutation: VerifiedTextArtifactMutationV1<'_>,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let store_root = lock.generation_store_root()?;
-    validate_sealed_generation_identity(sealed_identity)?;
-    validate_text_artifact_descriptor(&descriptor)?;
+    let (generation_id, sealed_identity, retain_text_head) = match &mutation {
+        VerifiedTextArtifactMutationV1::Attach {
+            sealed_identity,
+            descriptor,
+        } => {
+            validate_sealed_generation_identity(sealed_identity)?;
+            validate_text_artifact_descriptor(descriptor)?;
+            (
+                descriptor.generation_id.clone(),
+                Some(*sealed_identity),
+                true,
+            )
+        }
+        VerifiedTextArtifactMutationV1::Replace {
+            sealed_identity,
+            expected,
+            replacement,
+        } => {
+            validate_sealed_generation_identity(sealed_identity)?;
+            validate_text_artifact_descriptor(expected)?;
+            validate_text_artifact_descriptor(replacement)?;
+            if expected.generation_id != replacement.generation_id {
+                return Err(CodeGenerationRetentionErrorV1::Conflict(
+                    "text-artifact replacement changed generation identity".to_owned(),
+                ));
+            }
+            (
+                replacement.generation_id.clone(),
+                Some(*sealed_identity),
+                false,
+            )
+        }
+        VerifiedTextArtifactMutationV1::Withdraw { expected } => {
+            validate_text_artifact_descriptor(expected)?;
+            (expected.generation_id.clone(), None, false)
+        }
+    };
     let mut pointer = read_active_pointer(store_root)?;
     if &pointer != expected_pointer {
         return Err(CodeGenerationRetentionErrorV1::Conflict(
-            "active generation pointer changed before text-artifact attachment".to_owned(),
+            "active generation pointer changed before text-artifact mutation".to_owned(),
         ));
     }
     validate_durable_generation_index(&pointer)?;
-    let attached_generation_id = descriptor.generation_id.clone();
     let entry = pointer
         .generation_index
         .iter_mut()
-        .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
+        .find(|entry| entry.generation_id == generation_id.as_str())
         .ok_or_else(|| {
             CodeGenerationRetentionErrorV1::Conflict(
                 "text-artifact generation is no longer retained by the durable index".to_owned(),
             )
         })?;
-    if entry.generation_file != sealed_identity.locator
-        || entry.state_digest != sealed_identity.digest.as_str()
-        || entry.size_bytes != sealed_identity.size_bytes
+    if let Some(sealed_identity) = sealed_identity
+        && (entry.generation_file != sealed_identity.locator
+            || entry.state_digest != sealed_identity.digest.as_str()
+            || entry.size_bytes != sealed_identity.size_bytes)
     {
         return Err(CodeGenerationRetentionErrorV1::Conflict(
             "text artifact does not match the retained sealed generation".to_owned(),
         ));
     }
-    match entry.text_artifact.as_ref() {
-        Some(existing) if existing == &descriptor => return Ok(pointer),
-        Some(_) => {
-            return Err(CodeGenerationRetentionErrorV1::Conflict(
-                "sealed generation already names a different text artifact".to_owned(),
-            ));
+    match mutation {
+        VerifiedTextArtifactMutationV1::Attach { descriptor, .. } => {
+            match entry.text_artifact.as_ref() {
+                Some(existing) if existing == &descriptor => return Ok(pointer),
+                Some(_) => {
+                    return Err(CodeGenerationRetentionErrorV1::Conflict(
+                        "sealed generation already names a different text artifact".to_owned(),
+                    ));
+                }
+                None => entry.text_artifact = Some(descriptor),
+            }
         }
-        None => entry.text_artifact = Some(descriptor),
+        VerifiedTextArtifactMutationV1::Replace {
+            expected,
+            replacement,
+            ..
+        } => match entry.text_artifact.as_ref() {
+            Some(existing) if existing == &replacement => return Ok(pointer),
+            Some(existing) if existing == expected => entry.text_artifact = Some(replacement),
+            Some(_) => {
+                return Err(CodeGenerationRetentionErrorV1::Conflict(
+                    "sealed generation names a newer text artifact".to_owned(),
+                ));
+            }
+            None => {
+                return Err(CodeGenerationRetentionErrorV1::Conflict(
+                    "sealed generation has no text artifact to replace".to_owned(),
+                ));
+            }
+        },
+        VerifiedTextArtifactMutationV1::Withdraw { expected } => {
+            match entry.text_artifact.as_ref() {
+                Some(existing) if existing == expected => entry.text_artifact = None,
+                Some(_) => {
+                    return Err(CodeGenerationRetentionErrorV1::Conflict(
+                        "sealed generation names a newer text artifact".to_owned(),
+                    ));
+                }
+                None => return Ok(pointer),
+            }
+        }
     }
-    let active_generation_id = pointer.generation_id.clone();
-    let removed = retain_bounded_generation_index_with_text_head(
-        &mut pointer.generation_index,
-        &active_generation_id,
-        Some(attached_generation_id.as_str()),
-    );
-    pointer.generation_index_truncated |= removed > 0;
+    if retain_text_head {
+        let active_generation_id = pointer.generation_id.clone();
+        let removed = retain_bounded_generation_index_with_text_head(
+            &mut pointer.generation_index,
+            &active_generation_id,
+            Some(generation_id.as_str()),
+        );
+        pointer.generation_index_truncated |= removed > 0;
+    }
     pointer.generation_index_digest = Some(durable_generation_index_digest(
         &pointer.generation_index,
         pointer.generation_index_truncated,
@@ -121,12 +200,53 @@ pub fn attach_verified_text_artifact_under_lock(
     }
     atomic_write(
         &store_root.join(ACTIVE_POINTER_FILE),
-        "code-generation-text-artifact-attachment",
+        "code-generation-text-artifact-mutation",
         &bytes,
         DirectorySyncPolicy::Strict,
     )
     .map_err(storage)?;
     Ok(pointer)
+}
+
+/// Durably attach a verified text artifact to its sealed generation entry.
+///
+/// The lock is root-bound, so the caller can keep this exact guard while it
+/// advances the independent text head. Returning success proves the updated
+/// generation pointer and its parent directory were fsynced first.
+pub fn attach_verified_text_artifact_under_lock(
+    lock: &CodeGenerationStoreLockV1,
+    expected_pointer: &DurablePublicationPointerV1,
+    sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+    descriptor: DurableCodeTextArtifactDescriptorV1,
+) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
+    mutate_verified_text_artifact_under_lock(
+        lock,
+        expected_pointer,
+        VerifiedTextArtifactMutationV1::Attach {
+            sealed_identity,
+            descriptor,
+        },
+    )
+}
+
+/// Atomically replace one exact text-artifact descriptor without clearing
+/// the generation's readable attachment between versions.
+pub fn replace_verified_text_artifact_under_lock(
+    lock: &CodeGenerationStoreLockV1,
+    expected_pointer: &DurablePublicationPointerV1,
+    sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+    expected_descriptor: &DurableCodeTextArtifactDescriptorV1,
+    replacement: DurableCodeTextArtifactDescriptorV1,
+) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
+    mutate_verified_text_artifact_under_lock(
+        lock,
+        expected_pointer,
+        VerifiedTextArtifactMutationV1::Replace {
+            sealed_identity,
+            expected: expected_descriptor,
+            replacement,
+        },
+    )
 }
 
 /// Withdraw one exact derived text-artifact attachment under the canonical
@@ -141,56 +261,13 @@ pub fn withdraw_verified_text_artifact_under_lock(
     expected_pointer: &DurablePublicationPointerV1,
     descriptor: &DurableCodeTextArtifactDescriptorV1,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
-    let store_root = lock.generation_store_root()?;
-    validate_text_artifact_descriptor(descriptor)?;
-    let mut pointer = read_active_pointer(store_root)?;
-    if &pointer != expected_pointer {
-        return Err(CodeGenerationRetentionErrorV1::Conflict(
-            "active generation pointer changed before text-artifact withdrawal".to_owned(),
-        ));
-    }
-    validate_durable_generation_index(&pointer)?;
-    let entry = pointer
-        .generation_index
-        .iter_mut()
-        .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
-        .ok_or_else(|| {
-            CodeGenerationRetentionErrorV1::Conflict(
-                "text-artifact generation is no longer retained by the durable index".to_owned(),
-            )
-        })?;
-    match entry.text_artifact.as_ref() {
-        Some(existing) if existing == descriptor => entry.text_artifact = None,
-        Some(_) => {
-            return Err(CodeGenerationRetentionErrorV1::Conflict(
-                "sealed generation names a newer text artifact".to_owned(),
-            ));
-        }
-        None => return Ok(pointer),
-    }
-    pointer.generation_index_digest = Some(durable_generation_index_digest(
-        &pointer.generation_index,
-        pointer.generation_index_truncated,
-    )?);
-    validate_durable_generation_index(&pointer)?;
-    let bytes = serde_json::to_vec(&pointer).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "publication pointer serialization failed: {error}"
-        ))
-    })?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1 {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "publication pointer exceeds its durable byte bound".to_owned(),
-        ));
-    }
-    atomic_write(
-        &store_root.join(ACTIVE_POINTER_FILE),
-        "code-generation-text-artifact-withdrawal",
-        &bytes,
-        DirectorySyncPolicy::Strict,
+    mutate_verified_text_artifact_under_lock(
+        lock,
+        expected_pointer,
+        VerifiedTextArtifactMutationV1::Withdraw {
+            expected: descriptor,
+        },
     )
-    .map_err(storage)?;
-    Ok(pointer)
 }
 
 /// Select one bounded page of derived text-artifact debris from the canonical

@@ -10,6 +10,7 @@ use thiserror::Error;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 
 mod builder;
+mod clone_successor;
 mod format;
 mod postings;
 mod prepared;
@@ -22,6 +23,7 @@ pub use builder::{
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     PreparedCodeLexicalArtifactBatchV1,
 };
+pub use clone_successor::CodeLexicalCloneSuccessorV1;
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
