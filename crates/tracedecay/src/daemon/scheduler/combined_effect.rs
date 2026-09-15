@@ -296,6 +296,137 @@ pub(super) async fn run_combined_scheduler_effect(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_skill_after_reflector_replay(
+    reflector: AutomationSettledTerminal,
+    skill_run_id: String,
+    skill_control: AutomationRunControl,
+    skill: AutomationEffectAuthority,
+    engine: &DaemonEngine,
+    automation_context: &AutomationProjectContext,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    configuration_revision_id: &tracedecay_domain::configuration::ConfigurationRevisionId,
+    backend: &dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
+    retrieval: &dyn tracedecay_automation_runtime::automation::runner::AutomationSessionRetrieval,
+    options: CombinedReviewAutomationOptions,
+    first_error: &mut Option<tracedecay_domain::errors::TraceDecayError>,
+) -> CombinedEffectOutcome {
+    super::log_scheduler_automation_replay(
+        automation_context.project_root(),
+        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
+        &reflector,
+    );
+    let mut skill_options = options.skill_writer;
+    skill_options.run_id = Some(skill_run_id);
+    skill_options.trigger = options.trigger;
+    let replay_completed = reflector.is_completed();
+    let retained = run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+        automation_context,
+        config,
+        configuration_revision_id,
+        backend,
+        retrieval,
+        skill_options,
+    )
+    .await;
+    settle_single_replay_leg(
+        engine,
+        automation_context.project_id(),
+        automation_context.project_root(),
+        first_error,
+        replay_completed,
+        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
+        &skill_control,
+        skill,
+        retained,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_reflector_after_skill_replay(
+    run_id: String,
+    reflector_control: AutomationRunControl,
+    reflector: AutomationEffectAuthority,
+    skill: AutomationSettledTerminal,
+    engine: &DaemonEngine,
+    automation_context: &AutomationProjectContext,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    configuration_revision_id: &tracedecay_domain::configuration::ConfigurationRevisionId,
+    backend: &dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
+    retrieval: &dyn tracedecay_automation_runtime::automation::runner::AutomationSessionRetrieval,
+    options: CombinedReviewAutomationOptions,
+    first_error: &mut Option<tracedecay_domain::errors::TraceDecayError>,
+) -> CombinedEffectOutcome {
+    super::log_scheduler_automation_replay(
+        automation_context.project_root(),
+        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
+        &skill,
+    );
+    let mut reflector_options = options.session_reflector;
+    reflector_options.run_id = Some(run_id);
+    reflector_options.trigger = options.trigger;
+    let replay_completed = skill.is_completed();
+    let retained = run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
+        automation_context,
+        config,
+        &reflector_control,
+        configuration_revision_id,
+        backend,
+        retrieval,
+        reflector_options,
+    )
+    .await;
+    settle_single_replay_leg(
+        engine,
+        automation_context.project_id(),
+        automation_context.project_root(),
+        first_error,
+        replay_completed,
+        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
+        &reflector_control,
+        reflector,
+        retained,
+    )
+    .await
+}
+
+fn replayed_pair_outcome(
+    project_path: &Path,
+    reflector: &AutomationSettledTerminal,
+    skill: &AutomationSettledTerminal,
+) -> CombinedEffectOutcome {
+    super::log_scheduler_automation_replay(
+        project_path,
+        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
+        reflector,
+    );
+    super::log_scheduler_automation_replay(
+        project_path,
+        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
+        skill,
+    );
+    if reflector.is_completed() && skill.is_completed() {
+        CombinedEffectOutcome::Completed
+    } else {
+        CombinedEffectOutcome::Handled
+    }
+}
+
+fn record_combined_effect_outcome(outcome: CombinedEffectOutcome) {
+    match outcome {
+        CombinedEffectOutcome::Completed => {
+            hotpath::gauge!("daemon.scheduler.combined_effect.completed_total").inc(1_u64);
+        }
+        CombinedEffectOutcome::Handled => {
+            hotpath::gauge!("daemon.scheduler.combined_effect.handled_total").inc(1_u64);
+        }
+        CombinedEffectOutcome::Deferred => {
+            hotpath::gauge!("daemon.scheduler.combined_effect.deferred_total").inc(1_u64);
+        }
+    }
+}
+
 /// Body of [`run_combined_scheduler_effect`], boxed at definition: the
 /// instrumented wrapper inlines whatever it wraps, and this state machine
 /// carries every replay leg of the combined review, so it must not sit in
@@ -332,21 +463,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 CombinedEffectOutcome::Handled
             }
             CombinedEffectAdmission::Replay { reflector, skill } => {
-                super::log_scheduler_automation_replay(
-                    automation_context.project_root(),
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
-                    &reflector,
-                );
-                super::log_scheduler_automation_replay(
-                    automation_context.project_root(),
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                    &skill,
-                );
-                if reflector.is_completed() && skill.is_completed() {
-                    CombinedEffectOutcome::Completed
-                } else {
-                    CombinedEffectOutcome::Handled
-                }
+                replayed_pair_outcome(automation_context.project_root(), &reflector, &skill)
             }
             CombinedEffectAdmission::ReflectorReplay {
                 reflector,
@@ -354,34 +471,19 @@ fn run_combined_scheduler_effect_inner<'a>(
                 skill_control,
                 skill,
             } => {
-                super::log_scheduler_automation_replay(
-                    automation_context.project_root(),
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
-                    &reflector,
-                );
-                let mut skill_options = options.skill_writer;
-                skill_options.run_id = Some(skill_run_id);
-                skill_options.trigger = options.trigger;
-                let replay_completed = reflector.is_completed();
-                let retained = run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+                run_skill_after_reflector_replay(
+                    *reflector,
+                    skill_run_id,
+                    skill_control,
+                    *skill,
+                    engine,
                     automation_context,
                     config,
                     configuration_revision_id,
                     backend,
                     retrieval,
-                    skill_options,
-                )
-                .await;
-                settle_single_replay_leg(
-                    engine,
-                    automation_context.project_id(),
-                    automation_context.project_root(),
+                    options,
                     first_error,
-                    replay_completed,
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                    &skill_control,
-                    *skill,
-                    retained,
                 )
                 .await
             }
@@ -391,36 +493,19 @@ fn run_combined_scheduler_effect_inner<'a>(
                 reflector,
                 skill,
             } => {
-                super::log_scheduler_automation_replay(
-                    automation_context.project_root(),
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
-                    &skill,
-                );
-                let mut reflector_options = options.session_reflector;
-                reflector_options.run_id = Some(run_id);
-                reflector_options.trigger = options.trigger;
-                let replay_completed = skill.is_completed();
-                let retained =
-                    run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                        automation_context,
-                        config,
-                        &reflector_control,
-                        configuration_revision_id,
-                        backend,
-                        retrieval,
-                        reflector_options,
-                    )
-                    .await;
-                settle_single_replay_leg(
-                    engine,
-                    automation_context.project_id(),
-                    automation_context.project_root(),
-                    first_error,
-                    replay_completed,
-                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
-                    &reflector_control,
+                run_reflector_after_skill_replay(
+                    run_id,
+                    reflector_control,
                     *reflector,
-                    retained,
+                    *skill,
+                    engine,
+                    automation_context,
+                    config,
+                    configuration_revision_id,
+                    backend,
+                    retrieval,
+                    options,
+                    first_error,
                 )
                 .await
             }
@@ -447,19 +532,35 @@ fn run_combined_scheduler_effect_inner<'a>(
                 .await
             }
         };
-        match outcome {
-            CombinedEffectOutcome::Completed => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.completed_total").inc(1_u64);
-            }
-            CombinedEffectOutcome::Handled => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.handled_total").inc(1_u64);
-            }
-            CombinedEffectOutcome::Deferred => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.deferred_total").inc(1_u64);
-            }
-        }
+        record_combined_effect_outcome(outcome);
         outcome
     })
+}
+
+fn combined_settlement_outcome(
+    result_mode: PairResultMode,
+    reflector: Option<&DeferredSettlementOutcome>,
+    skill: Option<&DeferredSettlementOutcome>,
+) -> CombinedEffectOutcome {
+    let both_completed = matches!(
+        reflector,
+        Some(DeferredSettlementOutcome::Settled(settled)) if settled.terminal.is_completed()
+    ) && matches!(
+        skill,
+        Some(DeferredSettlementOutcome::Settled(settled)) if settled.terminal.is_completed()
+    );
+    let both_abandoned = matches!(reflector, Some(DeferredSettlementOutcome::Abandoned))
+        && matches!(skill, Some(DeferredSettlementOutcome::Abandoned));
+
+    match result_mode {
+        PairResultMode::CompletedIfBoth if both_completed => CombinedEffectOutcome::Completed,
+        PairResultMode::DeferredIfBothAbandoned if both_abandoned => {
+            CombinedEffectOutcome::Deferred
+        }
+        PairResultMode::CompletedIfBoth
+        | PairResultMode::Handled
+        | PairResultMode::DeferredIfBothAbandoned => CombinedEffectOutcome::Handled,
+    }
 }
 
 /// Boxed at definition: this is the largest state machine on the scheduler
@@ -558,36 +659,93 @@ fn run_execute_pair<'a>(
             }
         };
 
-        match result_mode {
-            PairResultMode::CompletedIfBoth
-                if matches!(
-                    reflector_outcome.as_ref(),
-                    Some(DeferredSettlementOutcome::Settled(settled))
-                        if settled.terminal.is_completed()
-                ) && matches!(
-                    skill_outcome.as_ref(),
-                    Some(DeferredSettlementOutcome::Settled(settled))
-                        if settled.terminal.is_completed()
-                ) =>
-            {
-                CombinedEffectOutcome::Completed
-            }
-            PairResultMode::DeferredIfBothAbandoned
-                if matches!(
-                    reflector_outcome.as_ref(),
-                    Some(DeferredSettlementOutcome::Abandoned)
-                ) && matches!(
-                    skill_outcome.as_ref(),
-                    Some(DeferredSettlementOutcome::Abandoned)
-                ) =>
-            {
-                CombinedEffectOutcome::Deferred
-            }
-            PairResultMode::CompletedIfBoth
-            | PairResultMode::Handled
-            | PairResultMode::DeferredIfBothAbandoned => CombinedEffectOutcome::Handled,
-        }
+        combined_settlement_outcome(
+            result_mode,
+            reflector_outcome.as_ref(),
+            skill_outcome.as_ref(),
+        )
     })
+}
+
+async fn resolve_combined_effect_admission(
+    mode: PairMode,
+    reflector: AutomationEffectAdmission,
+    skill: AutomationEffectAdmission,
+    run_id: String,
+    skill_run_id: String,
+    reflector_control: AutomationRunControl,
+    skill_control: AutomationRunControl,
+) -> Result<CombinedEffectAdmission> {
+    use AutomationEffectAdmission::{Conflict, Execute, PreAdmissionProblem, Replay};
+
+    match (mode, reflector, skill) {
+        (PairMode::Combined, Execute(reflector), Execute(skill)) => {
+            let reflector_signal = reflector_control.read_control().clone();
+            let skill_signal = skill_control.read_control().clone();
+            let run_control =
+                AutomationRunControl::from_interrupted(std::sync::Arc::new(move || {
+                    reflector_signal.interrupted() | skill_signal.interrupted()
+                }));
+            Ok(CombinedEffectAdmission::Execute {
+                run_id,
+                run_control,
+                reflector,
+                skill,
+            })
+        }
+        (PairMode::SkillOnly, Replay(reflector), Execute(skill)) => {
+            Ok(CombinedEffectAdmission::ReflectorReplay {
+                reflector,
+                skill_run_id,
+                skill_control,
+                skill,
+            })
+        }
+        (PairMode::ReflectorOnly, Execute(reflector), Replay(skill)) => {
+            Ok(CombinedEffectAdmission::SkillReplay {
+                run_id,
+                reflector_control,
+                reflector,
+                skill,
+            })
+        }
+        (PairMode::Replayed, Replay(reflector), Replay(skill)) => {
+            Ok(CombinedEffectAdmission::Replay { reflector, skill })
+        }
+        (PairMode::ProblemAbandonSkill, PreAdmissionProblem(problem), Execute(skill)) => {
+            skill.abandon_uncommitted().await?;
+            Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![problem]))
+        }
+        (PairMode::ProblemAbandonReflector, Execute(reflector), PreAdmissionProblem(problem)) => {
+            reflector.abandon_uncommitted().await?;
+            Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![problem]))
+        }
+        (
+            PairMode::ProblemNoAbandon,
+            PreAdmissionProblem(reflector),
+            PreAdmissionProblem(skill),
+        ) => Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![
+            reflector, skill,
+        ])),
+        (PairMode::ProblemNoAbandon, PreAdmissionProblem(problem), Replay(_))
+        | (PairMode::ProblemNoAbandon, Replay(_), PreAdmissionProblem(problem)) => {
+            Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![problem]))
+        }
+        (PairMode::ConflictAbandonSkill, Conflict, Execute(skill)) => {
+            skill.abandon_uncommitted().await?;
+            Ok(CombinedEffectAdmission::Conflict)
+        }
+        (PairMode::ConflictAbandonReflector, Execute(reflector), Conflict) => {
+            reflector.abandon_uncommitted().await?;
+            Ok(CombinedEffectAdmission::Conflict)
+        }
+        (PairMode::ConflictNoAbandon, Conflict, _) | (PairMode::ConflictNoAbandon, _, Conflict) => {
+            Ok(CombinedEffectAdmission::Conflict)
+        }
+        _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "combined automation admission matrix was internally inconsistent".to_owned(),
+        }),
+    }
 }
 
 #[allow(
@@ -676,108 +834,16 @@ fn prepare_combined_effects_inner<'a>(
         };
 
         let mode = pair_mode(admission_state(&reflector), admission_state(&skill));
-        match (mode, reflector, skill) {
-            (
-                PairMode::Combined,
-                AutomationEffectAdmission::Execute(reflector),
-                AutomationEffectAdmission::Execute(skill),
-            ) => {
-                let reflector_signal = reflector_control.read_control().clone();
-                let skill_signal = skill_control.read_control().clone();
-                let run_control =
-                    AutomationRunControl::from_interrupted(std::sync::Arc::new(move || {
-                        reflector_signal.interrupted() | skill_signal.interrupted()
-                    }));
-                Ok(CombinedEffectAdmission::Execute {
-                    run_id,
-                    run_control,
-                    reflector,
-                    skill,
-                })
-            }
-            (
-                PairMode::SkillOnly,
-                AutomationEffectAdmission::Replay(reflector),
-                AutomationEffectAdmission::Execute(skill),
-            ) => Ok(CombinedEffectAdmission::ReflectorReplay {
-                reflector,
-                skill_run_id,
-                skill_control,
-                skill,
-            }),
-            (
-                PairMode::ReflectorOnly,
-                AutomationEffectAdmission::Execute(reflector),
-                AutomationEffectAdmission::Replay(skill),
-            ) => Ok(CombinedEffectAdmission::SkillReplay {
-                run_id,
-                reflector_control,
-                reflector,
-                skill,
-            }),
-            (
-                PairMode::Replayed,
-                AutomationEffectAdmission::Replay(reflector),
-                AutomationEffectAdmission::Replay(skill),
-            ) => Ok(CombinedEffectAdmission::Replay { reflector, skill }),
-            (
-                PairMode::ProblemAbandonSkill,
-                AutomationEffectAdmission::PreAdmissionProblem(problem),
-                AutomationEffectAdmission::Execute(skill),
-            ) => {
-                skill.abandon_uncommitted().await?;
-                Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![problem]))
-            }
-            (
-                PairMode::ProblemAbandonReflector,
-                AutomationEffectAdmission::Execute(reflector),
-                AutomationEffectAdmission::PreAdmissionProblem(problem),
-            ) => {
-                reflector.abandon_uncommitted().await?;
-                Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![problem]))
-            }
-            (
-                PairMode::ProblemNoAbandon,
-                AutomationEffectAdmission::PreAdmissionProblem(reflector),
-                AutomationEffectAdmission::PreAdmissionProblem(skill),
-            ) => Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![
-                reflector, skill,
-            ])),
-            (
-                PairMode::ProblemNoAbandon,
-                AutomationEffectAdmission::PreAdmissionProblem(problem),
-                AutomationEffectAdmission::Replay(_),
-            )
-            | (
-                PairMode::ProblemNoAbandon,
-                AutomationEffectAdmission::Replay(_),
-                AutomationEffectAdmission::PreAdmissionProblem(problem),
-            ) => Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![problem])),
-            (
-                PairMode::ConflictAbandonSkill,
-                AutomationEffectAdmission::Conflict,
-                AutomationEffectAdmission::Execute(skill),
-            ) => {
-                skill.abandon_uncommitted().await?;
-                Ok(CombinedEffectAdmission::Conflict)
-            }
-            (
-                PairMode::ConflictAbandonReflector,
-                AutomationEffectAdmission::Execute(reflector),
-                AutomationEffectAdmission::Conflict,
-            ) => {
-                reflector.abandon_uncommitted().await?;
-                Ok(CombinedEffectAdmission::Conflict)
-            }
-            (PairMode::ConflictNoAbandon, AutomationEffectAdmission::Conflict, _)
-            | (PairMode::ConflictNoAbandon, _, AutomationEffectAdmission::Conflict) => {
-                Ok(CombinedEffectAdmission::Conflict)
-            }
-            _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "combined automation admission matrix was internally inconsistent"
-                    .to_owned(),
-            }),
-        }
+        resolve_combined_effect_admission(
+            mode,
+            reflector,
+            skill,
+            run_id,
+            skill_run_id,
+            reflector_control,
+            skill_control,
+        )
+        .await
     })
 }
 
@@ -1084,6 +1150,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "ordered assertions cover one reservation's conflict, recovery, and cleanup lifecycle"
+    )]
     async fn assert_conflict_abandons_fresh_sibling(conflicting_leg: ConflictingLeg) {
         let fixture = CombinedAdmissionFixture::new().await;
         let run_id = match conflicting_leg {
@@ -1221,6 +1291,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "ordered assertions cover one partial replay through blocked and completed settlement"
+    )]
     async fn partial_replay_reuses_prior_scheduler_skip_without_current_publication() {
         let fixture = CombinedAdmissionFixture::new().await;
         let session_db = fixture.mount_observability().await;

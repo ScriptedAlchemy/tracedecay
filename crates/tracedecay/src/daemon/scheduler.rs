@@ -281,6 +281,12 @@ pub(super) struct AutomationSchedulerHandle {
     termination: Arc<MaintenanceTaskTermination>,
 }
 
+struct LiveAutomationScheduler {
+    owner: ProjectServerKey,
+    completion: Arc<()>,
+    lifecycle: AutomationSchedulerLifecycle,
+}
+
 impl AutomationSchedulerHandle {
     pub(super) fn request_stop(&self) {
         self.stop_requested.request();
@@ -409,6 +415,91 @@ mod automation_scheduler_exit_barrier_tests {
 }
 
 impl DaemonEngine {
+    async fn observe_automation_scheduler(
+        &self,
+        key: &ProjectServerKey,
+    ) -> std::result::Result<
+        Option<LiveAutomationScheduler>,
+        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome,
+    > {
+        use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+
+        let (finished, live) = {
+            let mut schedulers = self
+                .store_administration
+                .automation_schedulers()
+                .lock()
+                .await;
+            let Some(owner) = schedulers
+                .keys()
+                .find(|candidate| same_scheduler_owner(candidate, key))
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let Some(handle) = schedulers.get_mut(&owner) else {
+                return Err(AutomationSchedulerReconcileOutcome::OwnerUnavailable);
+            };
+            match observed_scheduler_lifecycle(handle) {
+                lifecycle @ (AutomationSchedulerLifecycle::Running
+                | AutomationSchedulerLifecycle::Exiting) => (
+                    None,
+                    Some(LiveAutomationScheduler {
+                        owner,
+                        completion: Arc::clone(&handle.completion),
+                        lifecycle,
+                    }),
+                ),
+                AutomationSchedulerLifecycle::Finished => (schedulers.remove(&owner), None),
+                AutomationSchedulerLifecycle::Retiring => {
+                    return Err(AutomationSchedulerReconcileOutcome::Retiring);
+                }
+            }
+        };
+        if let Some(mut handle) = finished
+            && let Some(task) = handle.task.take()
+        {
+            let _ = task.await;
+        }
+        Ok(live)
+    }
+
+    async fn reconcile_live_automation_scheduler(
+        &self,
+        live: LiveAutomationScheduler,
+    ) -> Option<tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome> {
+        use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+
+        let finished = {
+            let mut schedulers = self
+                .store_administration
+                .automation_schedulers()
+                .lock()
+                .await;
+            let Some(handle) = schedulers.get_mut(&live.owner) else {
+                return None;
+            };
+            if !Arc::ptr_eq(&handle.completion, &live.completion) {
+                return None;
+            }
+            let outcome = notify_automation_scheduler(handle);
+            if outcome != AutomationSchedulerReconcileOutcome::Finished {
+                return Some(outcome);
+            }
+            schedulers.remove(&live.owner)
+        };
+        if let Some(mut handle) = finished
+            && let Some(task) = handle.task.take()
+        {
+            let _ = task.await;
+        }
+        debug_assert!(matches!(
+            live.lifecycle,
+            AutomationSchedulerLifecycle::Running | AutomationSchedulerLifecycle::Exiting
+        ));
+        None
+    }
+
     #[hotpath::skip]
     pub(super) async fn activate_automation_scheduler_for_open_project(
         &self,
@@ -523,41 +614,10 @@ impl DaemonEngine {
         if !self.lifecycle.accepting() {
             return AutomationSchedulerReconcileOutcome::LifecycleInactive;
         }
-        let (finished, live) = {
-            let mut schedulers = self
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await;
-            let logical_owner = schedulers
-                .iter()
-                .find(|(candidate, _)| same_scheduler_owner(candidate, &key))
-                .map(|(candidate, _)| candidate.clone());
-            match logical_owner {
-                Some(owner) => {
-                    let Some(handle) = schedulers.get_mut(&owner) else {
-                        return AutomationSchedulerReconcileOutcome::OwnerUnavailable;
-                    };
-                    match observed_scheduler_lifecycle(handle) {
-                        lifecycle @ (AutomationSchedulerLifecycle::Running
-                        | AutomationSchedulerLifecycle::Exiting) => (
-                            None,
-                            Some((owner, Arc::clone(&handle.completion), lifecycle)),
-                        ),
-                        AutomationSchedulerLifecycle::Finished => (schedulers.remove(&owner), None),
-                        AutomationSchedulerLifecycle::Retiring => {
-                            return AutomationSchedulerReconcileOutcome::Retiring;
-                        }
-                    }
-                }
-                None => (None, None),
-            }
+        let live = match self.observe_automation_scheduler(&key).await {
+            Ok(live) => live,
+            Err(outcome) => return outcome,
         };
-        if let Some(mut handle) = finished
-            && let Some(task) = handle.task.take()
-        {
-            let _ = task.await;
-        }
 
         #[cfg(test)]
         self.automation_config_probe_attempts
@@ -590,14 +650,14 @@ impl DaemonEngine {
             }
         };
         if !configured {
-            if let Some((owner, completion, _)) = &live {
+            if let Some(live) = &live {
                 let schedulers = self
                     .store_administration
                     .automation_schedulers()
                     .lock()
                     .await;
-                if let Some(handle) = schedulers.get(owner)
-                    && Arc::ptr_eq(&handle.completion, completion)
+                if let Some(handle) = schedulers.get(&live.owner)
+                    && Arc::ptr_eq(&handle.completion, &live.completion)
                 {
                     handle.wake.notify_one();
                 }
@@ -613,49 +673,10 @@ impl DaemonEngine {
             return AutomationSchedulerReconcileOutcome::NotConfigured;
         }
 
-        if let Some((owner, completion, lifecycle)) = live {
-            let finished = {
-                let mut schedulers = self
-                    .store_administration
-                    .automation_schedulers()
-                    .lock()
-                    .await;
-                if let Some(handle) = schedulers.get_mut(&owner)
-                    && Arc::ptr_eq(&handle.completion, &completion)
-                {
-                    match observed_scheduler_lifecycle(handle) {
-                        AutomationSchedulerLifecycle::Running => {
-                            handle
-                                .generation
-                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                            handle.wake.notify_one();
-                            return AutomationSchedulerReconcileOutcome::RunningNotified;
-                        }
-                        AutomationSchedulerLifecycle::Exiting => {
-                            handle
-                                .generation
-                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                            handle.wake.notify_one();
-                            return AutomationSchedulerReconcileOutcome::Exiting;
-                        }
-                        AutomationSchedulerLifecycle::Finished => schedulers.remove(&owner),
-                        AutomationSchedulerLifecycle::Retiring => {
-                            return AutomationSchedulerReconcileOutcome::Retiring;
-                        }
-                    }
-                } else {
-                    None
-                }
-            };
-            if let Some(mut handle) = finished
-                && let Some(task) = handle.task.take()
-            {
-                let _ = task.await;
-            }
-            debug_assert!(matches!(
-                lifecycle,
-                AutomationSchedulerLifecycle::Running | AutomationSchedulerLifecycle::Exiting
-            ));
+        if let Some(live) = live
+            && let Some(outcome) = self.reconcile_live_automation_scheduler(live).await
+        {
+            return outcome;
         }
 
         let Some(cg) = retained_project_graph(self, &key).await else {
@@ -716,28 +737,7 @@ impl DaemonEngine {
             .as_ref()
             .and_then(|owner| schedulers.get_mut(owner))
         {
-            return match observed_scheduler_lifecycle(handle) {
-                AutomationSchedulerLifecycle::Running => {
-                    handle
-                        .generation
-                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    handle.wake.notify_one();
-                    AutomationSchedulerReconcileOutcome::RunningNotified
-                }
-                AutomationSchedulerLifecycle::Exiting => {
-                    handle
-                        .generation
-                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    handle.wake.notify_one();
-                    AutomationSchedulerReconcileOutcome::Exiting
-                }
-                AutomationSchedulerLifecycle::Finished => {
-                    AutomationSchedulerReconcileOutcome::Finished
-                }
-                AutomationSchedulerLifecycle::Retiring => {
-                    AutomationSchedulerReconcileOutcome::Retiring
-                }
-            };
+            return notify_automation_scheduler(handle);
         }
         let wake = Arc::new(tokio::sync::Notify::new());
         let loop_wake = Arc::clone(&wake);
@@ -1029,6 +1029,31 @@ fn observed_scheduler_lifecycle(
     }
 }
 
+fn notify_automation_scheduler(
+    handle: &mut AutomationSchedulerHandle,
+) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
+    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+
+    match observed_scheduler_lifecycle(handle) {
+        AutomationSchedulerLifecycle::Running => {
+            handle
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            handle.wake.notify_one();
+            AutomationSchedulerReconcileOutcome::RunningNotified
+        }
+        AutomationSchedulerLifecycle::Exiting => {
+            handle
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            handle.wake.notify_one();
+            AutomationSchedulerReconcileOutcome::Exiting
+        }
+        AutomationSchedulerLifecycle::Finished => AutomationSchedulerReconcileOutcome::Finished,
+        AutomationSchedulerLifecycle::Retiring => AutomationSchedulerReconcileOutcome::Retiring,
+    }
+}
+
 #[hotpath::measure(label = "daemon.scheduler.retained_project_graph", future = true)]
 async fn retained_project_graph(
     engine: &DaemonEngine,
@@ -1111,6 +1136,142 @@ fn boxed_host_receipt_review<'a>(
     ))
 }
 
+async fn review_scheduler_host_receipts(
+    project_path: &Path,
+    cg: &TraceDecay,
+    handshake: &DaemonHandshake,
+    engine: &DaemonEngine,
+    run_control: &AutomationRunControl,
+) {
+    if let Err(error) =
+        boxed_host_receipt_review(project_path, cg, handshake, engine, run_control).await
+    {
+        log_daemon_event(
+            "host_receipt_review",
+            &[
+                ("project", project_path.display().to_string()),
+                ("outcome", "error".to_string()),
+                ("error", error.to_string()),
+            ],
+        );
+    }
+}
+
+async fn run_automation_scheduler_tick_once(
+    project_path: &Path,
+    cg: &TraceDecay,
+    handshake: &DaemonHandshake,
+    engine: &DaemonEngine,
+    run_control: &AutomationRunControl,
+) {
+    log_daemon_event(
+        "scheduler_tick",
+        &[
+            ("project", project_path.display().to_string()),
+            ("outcome", "start".to_string()),
+        ],
+    );
+    let tick_result = {
+        let _background_job = BackgroundJobGaugeGuard::enter();
+        boxed_automation_scheduler_tick(project_path, cg, handshake, engine, run_control).await
+    };
+    if let Err(error) = tick_result {
+        log_daemon_event(
+            "scheduler_tick",
+            &[
+                ("project", project_path.display().to_string()),
+                ("outcome", "error".to_string()),
+                ("error", error.to_string()),
+            ],
+        );
+    }
+    review_scheduler_host_receipts(project_path, cg, handshake, engine, run_control).await;
+}
+
+async fn wait_for_next_automation_scheduler_tick(
+    project_path: &Path,
+    cg: &TraceDecay,
+    handshake: &DaemonHandshake,
+    engine: &DaemonEngine,
+    run_control: &AutomationRunControl,
+    wake: &tokio::sync::Notify,
+) {
+    let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(cg)).await;
+    log_daemon_event(
+        "scheduler_sleep",
+        &[
+            ("project", project_path.display().to_string()),
+            ("next_tick_secs", tick_secs.to_string()),
+        ],
+    );
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_secs(tick_secs)) => {}
+        () = wake.notified() => {
+            // Receipts arrive at tool cadence. Wait for a short quiet period
+            // and reset it for every later receipt, producing one review for
+            // the burst rather than one review per command.
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_secs(5)) => break,
+                    () = wake.notified() => {}
+                }
+            }
+            review_scheduler_host_receipts(project_path, cg, handshake, engine, run_control).await;
+        }
+    }
+}
+
+async fn handle_scheduler_project_open_error(
+    project_path: &Path,
+    wake: &tokio::sync::Notify,
+    consecutive_open_failures: &mut u32,
+    error: &TraceDecayError,
+) -> bool {
+    *consecutive_open_failures = consecutive_open_failures.saturating_add(1);
+    log_daemon_event(
+        "scheduler_project_open",
+        &[
+            ("project", project_path.display().to_string()),
+            ("outcome", "error".to_string()),
+            ("error", error.to_string()),
+            (
+                "consecutive_failures",
+                consecutive_open_failures.to_string(),
+            ),
+        ],
+    );
+    if *consecutive_open_failures
+        >= tracedecay_automation_runtime::automation::scheduler::PROJECT_OPEN_FAILURE_ESCALATION
+    {
+        tracing::warn!(
+            event = "scheduler_project_open",
+            outcome = "escalated",
+            project = %project_path.display(),
+            consecutive_failures = *consecutive_open_failures,
+            error = %error,
+            "automation scheduler could not open its project repeatedly; \
+             exiting this loop, the next reconcile respawns it"
+        );
+        log_daemon_event(
+            "scheduler_exit",
+            &[
+                ("project", project_path.display().to_string()),
+                ("reason", "project_open_failed".to_string()),
+            ],
+        );
+        return true;
+    }
+    let backoff =
+        tracedecay_automation_runtime::automation::scheduler::project_open_backoff(
+            *consecutive_open_failures,
+        );
+    tokio::select! {
+        () = tokio::time::sleep(backoff) => {}
+        () = wake.notified() => {}
+    }
+    false
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "The task owns its wake, generation and completion tokens until scheduler exit is committed."
@@ -1179,137 +1340,30 @@ async fn run_automation_scheduler_loop(
                 continue;
             }
             Err(e) => {
-                // A transient failure (e.g. a momentarily corrupt jobs file or
-                // a project that cannot be opened this instant) must not
-                // permanently kill the scheduler loop. Surface the cause and
-                // retry instead of exiting for good.
-                //
-                // But retrying at a fixed tick forever is its own defect: a
-                // project that can never be opened re-attempts every tick for
-                // the daemon's life and logs identically every time. Back the
-                // retries off, and escalate to a terminal exit once the failure
-                // is clearly not transient. A finished scheduler is dropped
-                // from the registry, so the next reconcile respawns this loop —
-                // the exit costs a retry, not the lane.
-                consecutive_open_failures = consecutive_open_failures.saturating_add(1);
-                log_daemon_event(
-                    "scheduler_project_open",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "error".to_string()),
-                        ("error", e.to_string()),
-                        (
-                            "consecutive_failures",
-                            consecutive_open_failures.to_string(),
-                        ),
-                    ],
-                );
-                if consecutive_open_failures
-                    >= tracedecay_automation_runtime::automation::scheduler::PROJECT_OPEN_FAILURE_ESCALATION
+                if handle_scheduler_project_open_error(
+                    &project_path,
+                    &wake,
+                    &mut consecutive_open_failures,
+                    &e,
+                )
+                .await
                 {
-                    tracing::warn!(
-                        event = "scheduler_project_open",
-                        outcome = "escalated",
-                        project = %project_path.display(),
-                        consecutive_failures = consecutive_open_failures,
-                        error = %e,
-                        "automation scheduler could not open its project repeatedly; \
-                         exiting this loop, the next reconcile respawns it"
-                    );
-                    log_daemon_event(
-                        "scheduler_exit",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("reason", "project_open_failed".to_string()),
-                        ],
-                    );
                     break;
-                }
-                let backoff =
-                    tracedecay_automation_runtime::automation::scheduler::project_open_backoff(
-                        consecutive_open_failures,
-                    );
-                tokio::select! {
-                    () = tokio::time::sleep(backoff) => {}
-                    () = wake.notified() => {}
                 }
                 continue;
             }
         }
-        log_daemon_event(
-            "scheduler_tick",
-            &[
-                ("project", project_path.display().to_string()),
-                ("outcome", "start".to_string()),
-            ],
-        );
-        let tick_result = {
-            let _background_job = BackgroundJobGaugeGuard::enter();
-            boxed_automation_scheduler_tick(&project_path, &cg, &handshake, &engine, &run_control)
-                .await
-        };
-        if let Err(e) = tick_result {
-            log_daemon_event(
-                "scheduler_tick",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
-                ],
-            );
-        }
-        if let Err(error) =
-            boxed_host_receipt_review(&project_path, &cg, &handshake, &engine, &run_control).await
-        {
-            log_daemon_event(
-                "host_receipt_review",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", error.to_string()),
-                ],
-            );
-        }
-        let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(&cg)).await;
-        log_daemon_event(
-            "scheduler_sleep",
-            &[
-                ("project", project_path.display().to_string()),
-                ("next_tick_secs", tick_secs.to_string()),
-            ],
-        );
-        tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(tick_secs)) => {}
-            () = wake.notified() => {
-                // Receipts arrive at tool cadence. Wait for a short quiet
-                // period and reset it for every later receipt, producing one
-                // review for the burst rather than one review per command.
-                loop {
-                    tokio::select! {
-                        () = tokio::time::sleep(Duration::from_secs(5)) => break,
-                        () = wake.notified() => {}
-                    }
-                }
-                if let Err(error) = boxed_host_receipt_review(
-                    &project_path,
-                    &cg,
-                    &handshake,
-                    &engine,
-                    &run_control,
-                )
-                .await
-                {
-                    log_daemon_event(
-                        "host_receipt_review",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("outcome", "error".to_string()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                }
-            }
-        }
+        run_automation_scheduler_tick_once(&project_path, &cg, &handshake, &engine, &run_control)
+            .await;
+        wait_for_next_automation_scheduler_tick(
+            &project_path,
+            &cg,
+            &handshake,
+            &engine,
+            &run_control,
+            &wake,
+        )
+        .await;
     }
 }
 
@@ -2003,6 +2057,176 @@ async fn automation_scheduler_has_work(
 
 /// Ticks every schedulable user-defined job with the same lock/cooldown
 /// discipline as the fixed tasks (enforced inside the job runner).
+struct UserJobsSchedulerPass<'a> {
+    engine: &'a DaemonEngine,
+    run_control: &'a AutomationRunControl,
+    project_id: &'a tracedecay_domain::ProjectId,
+    project_path: &'a Path,
+    profile_root: &'a Path,
+    cg: &'a crate::tracedecay::TraceDecay,
+    dashboard_root: &'a Path,
+    configuration_digest: &'a tracedecay_domain::ManifestDigest,
+    config: &'a tracedecay_automation_runtime::automation::config::AutomationConfig,
+    backend:
+        &'a tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,
+}
+
+impl UserJobsSchedulerPass<'_> {
+    async fn scheduled_occurrence(
+        &self,
+        job: &tracedecay_automation_runtime::automation::jobs::AutomationJob,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let (requested_run_id, occurrence_anchor_run_id) =
+            scheduled_user_job_run_id(self.dashboard_root, job, self.configuration_digest).await?;
+        match tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
+            self.dashboard_root,
+            self.config,
+            job,
+            &requested_run_id,
+            occurrence_anchor_run_id.as_deref(),
+        )
+        .await?
+        {
+            Some(run) => {
+                record_scheduler_run(
+                    self.engine,
+                    self.project_id,
+                    self.project_path,
+                    &run.ledger_record,
+                );
+                Ok(None)
+            }
+            None => Ok(Some((requested_run_id, occurrence_anchor_run_id))),
+        }
+    }
+
+    async fn settle_job(
+        &self,
+        job: &tracedecay_automation_runtime::automation::jobs::AutomationJob,
+        run_id: String,
+        occurrence_anchor_run_id: Option<String>,
+        effect: AutomationEffectAuthority,
+        effect_run_control: AutomationRunControl,
+    ) -> Option<TraceDecayError> {
+        let retained_run = tracedecay_automation_runtime::automation::jobs::run_user_job_with_backend_for_retained_settlement(
+            self.dashboard_root,
+            self.config,
+            self.backend,
+            job,
+            tracedecay_automation_runtime::automation::jobs::UserJobRunOptions {
+                trigger:
+                    tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Scheduler,
+                run_id: Some(run_id),
+                profile_root: Some(self.profile_root.to_path_buf()),
+                project_root: Some(self.project_path.to_path_buf()),
+                occurrence_anchor_run_id,
+            },
+        )
+        .await;
+        settle_scheduler_retained_automation(
+            self.engine,
+            self.project_id,
+            self.project_path,
+            AgentTaskKind::UserJob,
+            &effect_run_control,
+            effect,
+            retained_run,
+            |run| {
+                if run.ledger_record.status
+                    == tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Skipped
+                    && run.ledger_record.error.as_deref() == Some("scheduler_lock_active")
+                {
+                    RetainedAutomationSettlementProjection::AbandonObserved {
+                        record: run.ledger_record,
+                    }
+                } else {
+                    RetainedAutomationSettlementProjection::Run {
+                        record: run.ledger_record,
+                        committed: run.committed_receipt.map(Box::new),
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    async fn run_job(
+        &self,
+        job: &tracedecay_automation_runtime::automation::jobs::AutomationJob,
+    ) -> Option<TraceDecayError> {
+        log_scheduler_task_start(self.project_path, AgentTaskKind::UserJob);
+        // One ledger read mints the occurrence identity and its diagnostic
+        // anchor. Keeping them together prevents a concurrent terminal from
+        // narrowing the anti-duplicate window.
+        let (requested_run_id, occurrence_anchor_run_id) =
+            match self.scheduled_occurrence(job).await {
+                Ok(Some(occurrence)) => occurrence,
+                Ok(None) => return None,
+                Err(error) => {
+                    log_scheduler_task_error(
+                        self.project_path,
+                        AgentTaskKind::UserJob,
+                        &error,
+                    );
+                    return Some(error);
+                }
+            };
+        let (admission, run_id, effect_run_control) = match scheduler_automation_effect(
+            self.engine,
+            self.cg,
+            self.run_control,
+            self.project_path,
+            self.dashboard_root,
+            Some(&requested_run_id),
+            self.configuration_digest.clone(),
+            |run_id| {
+                tracedecay_automation_runtime::automation::effect_runtime::user_job_run_request(
+                    run_id, &job.id,
+                )
+            },
+        )
+        .await
+        {
+            Ok(effect) => effect,
+            Err(error) => {
+                log_scheduler_task_error(self.project_path, AgentTaskKind::UserJob, &error);
+                return Some(error);
+            }
+        };
+        let effect = match admission {
+            AutomationEffectAdmission::Execute(effect) => effect,
+            AutomationEffectAdmission::Conflict => {
+                log_scheduler_admission_conflict(self.project_path, AgentTaskKind::UserJob);
+                return None;
+            }
+            AutomationEffectAdmission::Replay(terminal) => {
+                log_scheduler_automation_replay(
+                    self.project_path,
+                    AgentTaskKind::UserJob,
+                    &terminal,
+                );
+                return None;
+            }
+            AutomationEffectAdmission::PreAdmissionProblem(problem) => {
+                log_scheduler_pre_admission_problem(
+                    self.project_path,
+                    AgentTaskKind::UserJob,
+                    &problem,
+                );
+                return None;
+            }
+        };
+        self.settle_job(
+            job,
+            run_id,
+            occurrence_anchor_run_id,
+            effect,
+            effect_run_control,
+        )
+        .await
+    }
+}
+
 #[hotpath::measure(label = "daemon.scheduler.user_jobs_pass", future = true)]
 #[allow(
     clippy::too_many_arguments,
@@ -2021,157 +2245,40 @@ async fn run_user_jobs_scheduler_pass(
     first_error: &mut Option<TraceDecayError>,
 ) {
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let jobs =
-        match tracedecay_automation_runtime::automation::jobs::load_jobs(&dashboard_root).await {
-            Ok(jobs) => jobs,
-            Err(e) => {
-                log_daemon_event(
-                    "scheduler_user_jobs",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "error".to_string()),
-                        ("error", e.to_string()),
-                    ],
-                );
-                first_error.get_or_insert(e);
-                return;
-            }
-        };
+    let jobs = match tracedecay_automation_runtime::automation::jobs::load_jobs(&dashboard_root).await
+    {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            log_daemon_event(
+                "scheduler_user_jobs",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "error".to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+            first_error.get_or_insert(error);
+            return;
+        }
+    };
+    let pass = UserJobsSchedulerPass {
+        engine,
+        run_control,
+        project_id,
+        project_path,
+        profile_root,
+        cg,
+        dashboard_root: &dashboard_root,
+        configuration_digest: &configuration_digest,
+        config,
+        backend,
+    };
     for job in jobs
         .iter()
         .filter(|job| tracedecay_automation_runtime::automation::jobs::job_is_schedulable(job))
     {
-        log_scheduler_task_start(project_path, AgentTaskKind::UserJob);
-        // One ledger read mints the occurrence identity AND yields the anchor
-        // every diagnostic appended for this occurrence must scan back to.
-        // Splitting those across two reads lets a terminal committed in
-        // between narrow the anti-duplicate window below a row that already
-        // carries this occurrence's derived diagnostic identity.
-        let (requested_run_id, occurrence_anchor_run_id) =
-            match scheduled_user_job_run_id(&dashboard_root, job, &configuration_digest).await {
-                Ok(occurrence) => occurrence,
-                Err(error) => {
-                    log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
-                    first_error.get_or_insert(error);
-                    continue;
-                }
-            };
-        match tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
-            &dashboard_root,
-            config,
-            job,
-            &requested_run_id,
-            occurrence_anchor_run_id.as_deref(),
-        )
-        .await
-        {
-            Ok(Some(run)) => {
-                record_scheduler_run(engine, project_id, project_path, &run.ledger_record);
-                continue;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
-                first_error.get_or_insert(error);
-                continue;
-            }
-        }
-        let effect = match scheduler_automation_effect(
-            engine,
-            cg,
-            run_control,
-            project_path,
-            &dashboard_root,
-            Some(&requested_run_id),
-            configuration_digest.clone(),
-            |run_id| {
-                tracedecay_automation_runtime::automation::effect_runtime::user_job_run_request(
-                    run_id, &job.id,
-                )
-            },
-        )
-        .await
-        {
-            Ok(effect) => effect,
-            Err(error) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
-                first_error.get_or_insert(error);
-                continue;
-            }
-        };
-        let (admission, run_id, effect_run_control) = effect;
-        let effect = match admission {
-            AutomationEffectAdmission::Execute(effect) => effect,
-            AutomationEffectAdmission::Conflict => {
-                log_scheduler_admission_conflict(project_path, AgentTaskKind::UserJob);
-                continue;
-            }
-            AutomationEffectAdmission::Replay(terminal) => {
-                log_scheduler_automation_replay(project_path, AgentTaskKind::UserJob, &terminal);
-                continue;
-            }
-            AutomationEffectAdmission::PreAdmissionProblem(problem) => {
-                log_scheduler_pre_admission_problem(project_path, AgentTaskKind::UserJob, &problem);
-                continue;
-            }
-        };
-        let retained_run = tracedecay_automation_runtime::automation::jobs::run_user_job_with_backend_for_retained_settlement(
-            &dashboard_root,
-            config,
-            backend,
-            job,
-            tracedecay_automation_runtime::automation::jobs::UserJobRunOptions {
-                trigger:
-                    tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Scheduler,
-                run_id: Some(run_id),
-                profile_root: Some(profile_root.to_path_buf()),
-                project_root: Some(project_path.to_path_buf()),
-                occurrence_anchor_run_id: occurrence_anchor_run_id.clone(),
-            },
-        )
-        .await;
-        synchronize_scheduler_effect_control(&effect_run_control);
-        let settlement = effect.start_retained_automation_settlement(
-            retained_run,
-            Some(scheduler_run_observer(engine, project_id, project_path)),
-            |run| {
-                if run.ledger_record.status
-                    == tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Skipped
-                    && run.ledger_record.error.as_deref() == Some("scheduler_lock_active")
-                {
-                    RetainedAutomationSettlementProjection::AbandonObserved {
-                        record: run.ledger_record,
-                    }
-                } else {
-                    RetainedAutomationSettlementProjection::Run {
-                        record: run.ledger_record,
-                        committed: run.committed_receipt.map(Box::new),
-                    }
-                }
-            },
-        );
-        match settlement.wait().await {
-            Ok(RetainedAutomationSettlementOutcome::Problem {
-                problem,
-                record: _record,
-            }) => {
-                log_daemon_event(
-                    "scheduler_task_application_problem",
-                    &scheduler_application_problem_log_fields(
-                        project_path,
-                        AgentTaskKind::UserJob,
-                        &problem,
-                    ),
-                );
-            }
-            Ok(
-                RetainedAutomationSettlementOutcome::Run { .. }
-                | RetainedAutomationSettlementOutcome::Reused { .. }
-                | RetainedAutomationSettlementOutcome::AbandonedObserved { .. },
-            ) => {}
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
+        if let Some(error) = pass.run_job(job).await {
+            first_error.get_or_insert(error);
         }
     }
 }

@@ -3,6 +3,12 @@ use std::path::Path;
 use std::pin::Pin;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+use tracedecay_automation_runtime::automation::runner::{
+    CombinedReviewAutomationOptions, SessionReflectorAutomationOptions,
+    SkillWriterAutomationOptions, registered_project_automation_retrieval,
+};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -92,13 +98,6 @@ async fn run_one_host_receipt_review(
     engine: &DaemonEngine,
     run_control: &AutomationRunControl,
 ) -> Result<HostReceiptReviewProgress> {
-    use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
-    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
-    use tracedecay_automation_runtime::automation::runner::{
-        CombinedReviewAutomationOptions, SessionReflectorAutomationOptions,
-        SkillWriterAutomationOptions, registered_project_automation_retrieval,
-    };
-
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let Some(ready) =
         tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root)
@@ -124,35 +123,11 @@ async fn run_one_host_receipt_review(
         .store_administration
         .registered_project_session_database(automation_context.project_root(), cg.store_layout())
         .await?;
-    let watermark_durable =
-        {
-            let snapshot = session_database.read_snapshot().await.map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("host receipt session snapshot unavailable: {error}"),
-                }
-            })?;
-            let mut rows = snapshot
-                .query(
-                    "SELECT 1
-                 FROM lcm_raw_messages
-                 WHERE provider = ?1 AND message_id = ?2
-                 LIMIT 1",
-                    tracedecay_runtime_core::db::engine::params![
-                        "hermes",
-                        ready.transcript_watermark.as_str()
-                    ],
-                )
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("host receipt transcript watermark query failed: {error}"),
-                })?;
-            rows.next()
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("host receipt transcript watermark read failed: {error}"),
-                })?
-                .is_some()
-        };
+    let watermark_durable = host_receipt_watermark_is_durable(
+        session_database.as_ref(),
+        ready.transcript_watermark.as_str(),
+    )
+    .await?;
     if !watermark_durable {
         // Never review a terminal receipt until the exact completed-turn
         // watermark is durable in LCM.
@@ -233,12 +208,50 @@ async fn run_one_host_receipt_review(
     }
 }
 
+async fn host_receipt_watermark_is_durable(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    watermark: &str,
+) -> Result<bool> {
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt session snapshot unavailable: {error}"),
+        })?;
+    let mut rows = snapshot
+        .query(
+            "SELECT 1
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND message_id = ?2
+         LIMIT 1",
+            tracedecay_runtime_core::db::engine::params!["hermes", watermark],
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt transcript watermark query failed: {error}"),
+        })?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt transcript watermark read failed: {error}"),
+        })?
+        .is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+    use tracedecay_automation_runtime::automation::runner::{
+        CombinedReviewAutomationOptions, SessionReflectorAutomationOptions,
+        SkillWriterAutomationOptions, registered_project_automation_retrieval,
+    };
+
     use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake, MovedStoreAdoption};
     use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
 
