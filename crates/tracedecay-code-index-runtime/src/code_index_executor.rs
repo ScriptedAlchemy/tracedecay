@@ -1447,7 +1447,9 @@ where
             })
             .await;
             match read {
-                Ok(Ok(Some(result))) => code_search::CodeIndexSimilarOutcomeV1::Complete(result),
+                Ok(Ok(Some(result))) => {
+                    code_search::CodeIndexSimilarOutcomeV1::Complete(Box::new(result))
+                }
                 Ok(Ok(None)) => code_search::CodeIndexSimilarOutcomeV1::NotFound,
                 Ok(Err(_)) | Err(_) => {
                     unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
