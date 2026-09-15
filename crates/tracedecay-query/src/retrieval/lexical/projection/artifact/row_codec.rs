@@ -300,14 +300,12 @@ pub(super) fn encode_artifact_row(
         LexicalArtifactLayoutV1::V11
         | LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13 => encode_compact_v11(row),
-        LexicalArtifactLayoutV1::V14 | LexicalArtifactLayoutV1::V15 => encode_binary(
-            row,
-            dictionary,
-            ROW_CODEC_V14_MAGIC,
-            &LEGACY_FIELD_LENGTH_ORDER,
-            false,
-        ),
-        LexicalArtifactLayoutV1::V16 => encode_binary(
+        // Admission bases (V14/V15) and the fingerprint-complete revision
+        // (V16) share the current compact row codec. Clone fingerprints stay
+        // deferred via `has_clone_fingerprints`, not via a weaker row encoding.
+        LexicalArtifactLayoutV1::V14
+        | LexicalArtifactLayoutV1::V15
+        | LexicalArtifactLayoutV1::V16 => encode_binary(
             row,
             dictionary,
             ROW_CODEC_V16_MAGIC,
@@ -356,24 +354,38 @@ pub(super) fn decode_artifact_row(
         LexicalArtifactLayoutV1::V11
         | LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13 => decode_compact_v11(generation, chunk_id, bytes),
-        LexicalArtifactLayoutV1::V14 | LexicalArtifactLayoutV1::V15 => decode_binary(
-            generation,
-            chunk_id,
-            bytes,
-            dictionary,
-            ROW_CODEC_V14_MAGIC,
-            &LEGACY_FIELD_LENGTH_ORDER,
-            false,
-        ),
-        LexicalArtifactLayoutV1::V16 => decode_binary(
-            generation,
-            chunk_id,
-            bytes,
-            dictionary,
-            ROW_CODEC_V16_MAGIC,
-            &FIELD_LENGTH_ORDER,
-            true,
-        ),
+        // Row bytes carry their codec tag. Clone-successor bumps may label an
+        // artifact V16 before rows are rewritten; dispatch on the tag so
+        // seated lexical owners stay readable either way.
+        LexicalArtifactLayoutV1::V14
+        | LexicalArtifactLayoutV1::V15
+        | LexicalArtifactLayoutV1::V16 => {
+            if bytes.starts_with(ROW_CODEC_V16_MAGIC) {
+                decode_binary(
+                    generation,
+                    chunk_id,
+                    bytes,
+                    dictionary,
+                    ROW_CODEC_V16_MAGIC,
+                    &FIELD_LENGTH_ORDER,
+                    true,
+                )
+            } else if bytes.starts_with(ROW_CODEC_V14_MAGIC) {
+                decode_binary(
+                    generation,
+                    chunk_id,
+                    bytes,
+                    dictionary,
+                    ROW_CODEC_V14_MAGIC,
+                    &LEGACY_FIELD_LENGTH_ORDER,
+                    false,
+                )
+            } else {
+                Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact row is missing its binary codec tag".to_owned(),
+                ))
+            }
+        }
     }
 }
 
@@ -433,10 +445,10 @@ fn decode_compact_v11(
 }
 
 // ---------------------------------------------------------------------------
-// Revision 14: binary row with a per-file / per-symbol dictionary
+// Binary row with a per-file / per-symbol dictionary
 // ---------------------------------------------------------------------------
 //
-// magic `TDLR14\0`, then in order:
+// Legacy magic `TDLR14\0` (still decoded), then in order:
 //   ref file entry · opt-ref symbol entry · parent (tag, digest | literal)
 //   varint span start/end · u8 grain · varint ordinal
 //   varint term count × (u8 kind, bytes, varint span start/end, symbol tag [ref])
@@ -446,8 +458,9 @@ fn decode_compact_v11(
 // presence byte followed by the ref when present. `bytes` is a varint length
 // followed by the bytes. Decoders consume the whole payload and fail closed
 // on any trailing byte.
-// Revision 16 uses `TDLR16\0`, appends signature and documentation to symbol
-// dictionary entries, and widens the field bitmap to `u16`.
+// Current codec uses `TDLR16\0`, appends signature and documentation to symbol
+// dictionary entries, and widens the field bitmap to `u16`. Admission bases
+// (V14/V15) emit this codec while clone fingerprints remain V16-only.
 
 fn encode_binary(
     row: &ArtifactRowV1,
@@ -1162,11 +1175,50 @@ mod tests {
     }
 
     #[test]
-    fn binary_v14_and_v15_restore_legacy_one_byte_bitmap_rows() {
+    fn binary_v14_and_v15_emit_current_row_codec() {
         for layout in [LexicalArtifactLayoutV1::V14, LexicalArtifactLayoutV1::V15] {
-            for row in [sample_row(), window_row(), legacy_symbol_row()] {
+            for row in [
+                sample_row(),
+                window_row(),
+                legacy_symbol_row(),
+                symbol_row(),
+            ] {
                 let (encoded, _, decoded) = round_trip(layout, &row);
+                assert!(
+                    encoded.starts_with(b"TDLR16\0"),
+                    "admission bases must emit the current row codec"
+                );
+                assert_eq!(decoded, row);
+            }
+        }
+    }
+
+    #[test]
+    fn binary_layouts_restore_legacy_one_byte_bitmap_rows() {
+        for layout in [
+            LexicalArtifactLayoutV1::V14,
+            LexicalArtifactLayoutV1::V15,
+            LexicalArtifactLayoutV1::V16,
+        ] {
+            for row in [sample_row(), window_row(), legacy_symbol_row()] {
+                let mut dictionary = RowDictionaryTableV1::new();
+                let encoded = super::encode_binary(
+                    &row,
+                    &mut dictionary,
+                    super::ROW_CODEC_V14_MAGIC,
+                    &super::LEGACY_FIELD_LENGTH_ORDER,
+                    false,
+                )
+                .expect("encode legacy");
                 assert!(encoded.starts_with(b"TDLR14\0"));
+                let decoded = decode_artifact_row(
+                    layout,
+                    &row.anchor.generation_id,
+                    row.id.as_str(),
+                    &encoded,
+                    &dictionary,
+                )
+                .expect("decode legacy under current layout");
                 assert_eq!(decoded, row);
             }
         }
@@ -1177,6 +1229,22 @@ mod tests {
         let row = symbol_row();
         let (encoded, _, decoded) = round_trip(LexicalArtifactLayoutV1::V16, &row);
         assert!(encoded.starts_with(b"TDLR16\0"));
+        assert_eq!(decoded, row);
+    }
+
+    #[test]
+    fn binary_v16_layout_reads_v14_admission_rows_after_successor_label() {
+        let row = symbol_row();
+        let (encoded, dictionary, _) = round_trip(LexicalArtifactLayoutV1::V14, &row);
+        assert!(encoded.starts_with(b"TDLR16\0"));
+        let decoded = decode_artifact_row(
+            LexicalArtifactLayoutV1::V16,
+            &row.anchor.generation_id,
+            row.id.as_str(),
+            &encoded,
+            &dictionary,
+        )
+        .expect("V16 layout must read current-codec admission rows");
         assert_eq!(decoded, row);
     }
 

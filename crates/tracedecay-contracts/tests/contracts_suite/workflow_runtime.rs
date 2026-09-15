@@ -294,8 +294,8 @@ fn durable_plan_releases_only_the_committed_parallel_frontier_after_rebuild() {
         )
         .and_then(|event| rebuilt.apply(&event))
         .unwrap();
-    let encoded =
-        serde_json::to_value(retry_rebound).expect("retry-rebound projection remains transportable");
+    let encoded = serde_json::to_value(retry_rebound)
+        .expect("retry-rebound projection remains transportable");
     let decoded: tracedecay_domain::WorkflowRunProjection =
         serde_json::from_value(encoded).expect("retry-rebound projection remains decodable");
     assert_eq!(
