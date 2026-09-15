@@ -44,18 +44,17 @@ fn missing_cli_binary_reports_fixture_error() {
 
     let scratch = tempfile::tempdir().expect("missing CLI test directory");
     let missing_binary = scratch.path().join("tracedecay");
-    let output = std::process::Command::new(
-        std::env::current_exe().expect("daemon suite executable path"),
-    )
-    .args([
-        "--exact",
-        "missing_cli_binary_reports_fixture_error",
-        "--nocapture",
-    ])
-    .env("TRACEDECAY_TEST_MISSING_CLI_CHILD", "1")
-    .env("TRACEDECAY_TEST_BIN", &missing_binary)
-    .output()
-    .expect("missing CLI child process");
+    let output =
+        std::process::Command::new(std::env::current_exe().expect("daemon suite executable path"))
+            .args([
+                "--exact",
+                "missing_cli_binary_reports_fixture_error",
+                "--nocapture",
+            ])
+            .env("TRACEDECAY_TEST_MISSING_CLI_CHILD", "1")
+            .env("TRACEDECAY_TEST_BIN", &missing_binary)
+            .output()
+            .expect("missing CLI child process");
 
     assert!(!output.status.success(), "missing CLI child succeeded");
     let stderr = String::from_utf8_lossy(&output.stderr);
