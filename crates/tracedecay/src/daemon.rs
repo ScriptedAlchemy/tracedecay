@@ -190,10 +190,12 @@ use bootstrap_route::{
 mod branch_add;
 mod branch_admin;
 use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
-use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
 #[cfg(test)]
 use tracedecay_code_index_runtime::code_index_executor::{
     code_index_search_display_binding, mcp_search_request_termination,
+};
+use tracedecay_code_index_runtime::code_index_executor::{
+    code_index_search_executor, code_index_similar_executor,
 };
 #[cfg(test)]
 use tracedecay_code_index_runtime::code_index_task_support::code_index_scope_unavailable;

@@ -528,8 +528,10 @@ impl ProductionCodeIndexQueryOwnersV1 {
         symbol_occurrence_id: &tracedecay_domain::SymbolOccurrenceId,
         limit: usize,
         control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<Option<tracedecay_query::code_search::CodeIndexSimilarCompletedV1>, RetrievalPortError>
-    {
+    ) -> Result<
+        Option<tracedecay_query::code_search::CodeIndexSimilarCompletedV1>,
+        RetrievalPortError,
+    > {
         let Some(source) = self
             .hydration
             .clone_body(symbol_occurrence_id)
@@ -1458,7 +1460,7 @@ impl LatestCodeTextGenerationV1 {
         self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
     }
 
-    pub(super) fn finish_query_owner_warmup_for_request(
+    pub(crate) fn finish_query_owner_warmup_for_request(
         &self,
         request_control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {

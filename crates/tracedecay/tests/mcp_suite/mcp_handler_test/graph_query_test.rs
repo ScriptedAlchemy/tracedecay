@@ -1276,6 +1276,50 @@ pub fn sum_positive(values: &[i32]) -> i32 {
 }
 
 #[tokio::test]
+async fn similar_returns_verified_near_clone_with_a_different_name() {
+    let shared = (0..24)
+        .map(|ordinal| format!("shared_step_{ordinal}();\n"))
+        .collect::<String>();
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/source.rs"),
+            format!("pub fn collect_payments() {{\n{shared}source_only();\n}}\n"),
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/candidate.rs"),
+            format!("pub fn archive_records() {{\n{shared}candidate_only();\n}}\n"),
+        )
+        .unwrap();
+    })
+    .await;
+
+    let result = call_production_tool(
+        &fixture,
+        "tracedecay_similar",
+        json!({"symbol": "collect_payments", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert!(
+        payload
+            .get("near_pairs")
+            .and_then(Value::as_array)
+            .is_some_and(|pairs| pairs.iter().any(|pair| {
+                pair["candidate"]["name"] == "archive_records"
+                    && pair["candidate"]["file"] == "src/candidate.rs"
+            })),
+        "tracedecay_similar must expose the verified body clone despite its unrelated name: {payload}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
+#[tokio::test]
 async fn analytics_tools_return_their_canonical_envelope_keys() {
     let (cg, _dir) = production_graph_query_fixture().await;
     let cases: &[(&str, Value, &[&str])] = &[
