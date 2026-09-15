@@ -1,5 +1,8 @@
 //! Project-open authority accessors installed on an MCP server.
 
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_query::code_search::{CodeIndexSearchAuthorityV1, CodeIndexSimilarExecutor};
+
 use super::{CodeGraphProjectionReadPort, CodeIndexIgnoredDependencyAdmissionPort, McpServer};
 
 impl McpServer {
@@ -11,6 +14,18 @@ impl McpServer {
 
     pub(crate) fn code_graph_projection_read_port(&self) -> Option<CodeGraphProjectionReadPort> {
         self.code_graph_projection_read_port.clone()
+    }
+
+    pub(crate) fn code_index_similar_executor(&self) -> Option<CodeIndexSimilarExecutor> {
+        self.code_index_similar_executor.clone()
+    }
+
+    pub(crate) fn code_index_search_authority(&self) -> Option<CodeIndexSearchAuthorityV1> {
+        self.code_index_search_authority.clone()
+    }
+
+    pub(crate) fn admitted_project_scope(&self) -> Option<ResolvedScope> {
+        self.admitted_project_scope.clone()
     }
 
     pub(crate) fn code_index_ignored_dependency_admission(

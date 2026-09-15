@@ -1,11 +1,12 @@
-//! Exact sealed-generation branch comparison for the daemon-owned MCP route.
+//! Exact sealed-generation inputs for branch diff and dashboard comparison reads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    FreshnessVectorDigest, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1,
-    TemporalModeV1, VectorWatermark, canonical_sha256,
+    ContentDigest, FileIdentityDigest, FileOccurrenceId, FreshnessVectorDigest, GitOidV1, RefId,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1,
+    SnapshotFileDispositionV1, TemporalModeV1, VectorWatermark, canonical_sha256,
 };
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
@@ -27,6 +28,41 @@ struct GenerationCountsV1 {
     files: usize,
     chunks: usize,
     symbols: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexRevisionFileV1 {
+    pub file_identity: FileIdentityDigest,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub path: String,
+    pub content_digest: ContentDigest,
+    pub disposition: SnapshotFileDispositionV1,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexRevisionSnapshotV1 {
+    pub generation: String,
+    pub files: Vec<CodeIndexRevisionFileV1>,
+    pub symbols: Vec<code_search::CodeIndexBranchSymbolV1>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexRevisionPairV1 {
+    pub base: CodeIndexRevisionSnapshotV1,
+    pub head: CodeIndexRevisionSnapshotV1,
+}
+
+#[derive(Clone)]
+pub struct CodeIndexRevisionPairRequestV1 {
+    pub base_reference: RefId,
+    pub base_revision: GitOidV1,
+    pub base_tree: GitOidV1,
+    pub head_reference: RefId,
+    pub head_revision: GitOidV1,
+    pub head_tree: GitOidV1,
+    pub file_filter: Option<String>,
+    pub kind_filter: Option<String>,
+    pub control: code_index_scheduler::branch_generations::BranchGenerationReadControlV1,
 }
 
 fn generation_counts(
@@ -179,6 +215,92 @@ pub fn generation_symbols(
     }
     symbols.sort_by_key(symbol_key);
     Ok(symbols)
+}
+
+fn generation_files(
+    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    file_filter: Option<&str>,
+) -> Result<Vec<CodeIndexRevisionFileV1>, code_search::CodeIndexSearchUnavailableReasonV1> {
+    let repository = generation.snapshot().repository.as_str();
+    let mut files = generation
+        .snapshot()
+        .files
+        .iter()
+        .filter(|file| {
+            file_filter.is_none_or(|filter| {
+                file.logical_path == filter || file.logical_path.starts_with(filter)
+            })
+        })
+        .map(|file| {
+            let file_identity =
+                tracedecay_code_index::chunks::code_file_identity(repository, &file.logical_path)
+                    .map_err(|_| code_search::CodeIndexSearchUnavailableReasonV1::Internal)?;
+            Ok(CodeIndexRevisionFileV1 {
+                file_identity,
+                file_occurrence_id: file.file_occurrence_id.clone(),
+                path: file.logical_path.clone(),
+                content_digest: file.content_digest.clone(),
+                disposition: file.disposition,
+            })
+        })
+        .collect::<Result<Vec<_>, code_search::CodeIndexSearchUnavailableReasonV1>>()?;
+    files.sort_by(|left, right| left.file_identity.cmp(&right.file_identity));
+    Ok(files)
+}
+
+pub async fn revision_pair_layout_inputs(
+    schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    scope: &tracedecay_contracts::ResolvedScope,
+    request: CodeIndexRevisionPairRequestV1,
+) -> Result<CodeIndexRevisionPairV1, code_search::CodeIndexSearchUnavailableReasonV1> {
+    request.control.termination().map_or(Ok(()), Err)?;
+    let generations = schedulers
+        .bounded_generations_for_revisions(
+            scope,
+            &request.base_reference,
+            &request.base_revision,
+            &request.base_tree,
+            &request.head_reference,
+            &request.head_revision,
+            &request.head_tree,
+            code_index_scheduler::branch_generations::BranchGenerationCardinalityBoundsV1 {
+                maximum_files: MAX_BRANCH_DIFF_FILES_PER_GENERATION,
+                maximum_chunks: MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION,
+                maximum_symbols: MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION,
+            },
+            request.control.clone(),
+        )
+        .await?;
+    if generation_exceeds_bound(generation_counts(generations.base.generation()))
+        || generation_exceeds_bound(generation_counts(generations.head.generation()))
+    {
+        return Err(code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+    }
+    let read = |generation: &crate::code_index::production::CodeIndexPublishedGenerationV1| {
+        let symbols = generation_symbols(
+            generation,
+            request.file_filter.as_deref(),
+            request.kind_filter.as_deref(),
+            &request.control,
+        )?;
+        let mut files = generation_files(generation, request.file_filter.as_deref())?;
+        if request.kind_filter.is_some() {
+            let included = symbols
+                .iter()
+                .map(|symbol| symbol.file_identity.clone())
+                .collect::<BTreeSet<_>>();
+            files.retain(|file| included.contains(&file.file_identity));
+        }
+        Ok(CodeIndexRevisionSnapshotV1 {
+            generation: generation.manifest().generation_id.as_str().to_owned(),
+            files,
+            symbols,
+        })
+    };
+    let base = read(generations.base.generation())?;
+    let head = read(generations.head.generation())?;
+    request.control.termination().map_or(Ok(()), Err)?;
+    Ok(CodeIndexRevisionPairV1 { base, head })
 }
 
 fn page_diff_changes(

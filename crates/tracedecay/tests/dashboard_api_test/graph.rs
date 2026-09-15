@@ -29,16 +29,26 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_contracts::retrieval::{
+    SimilarCoverageV1, SimilarFamilyV1, SimilarOccurrenceV1, SimilarResultV1,
+};
 use tracedecay_contracts::{
     CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
     ResolvedScope,
+};
+use tracedecay_dashboard_api::code_read_api::{
+    DashboardCodeReadErrorV1, DashboardCodeReadPortV1, DashboardRevisionPairReadFuture,
+    DashboardRevisionPairRequestV1, DashboardSharedFamilyReadFuture,
+    DashboardSharedFamilyRequestV1, RevisionPairChangeV1, RevisionPairFileDispositionV1,
+    RevisionPairFileRegionV1, RevisionPairFileV1, RevisionPairRevisionV1,
+    RevisionPairSymbolRegionV1, RevisionPairSymbolV1, RevisionPairUnionLayoutV1,
 };
 use tracedecay_domain::code_intelligence::{Edge, EdgeKind, Node, NodeKind, Visibility};
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
     ComplexityAnalysisV1, ContentDigest, EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId,
-    LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
+    GitOidV1, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
     RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
     SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest,
     SymbolOccurrenceId, canonical_sha256,
@@ -99,6 +109,65 @@ impl CodeGraphProjectionReadPort for FixtureGraphProjectionV1 {
 #[derive(Clone)]
 struct FixtureGraphAdmissionV1 {
     scope: ResolvedScope,
+}
+
+#[derive(Clone)]
+struct FixtureCodeReadPortV1;
+
+impl DashboardCodeReadPortV1 for FixtureCodeReadPortV1 {
+    fn shared_family<'a>(
+        &'a self,
+        request: DashboardSharedFamilyRequestV1,
+    ) -> DashboardSharedFamilyReadFuture<'a> {
+        Box::pin(async move {
+            if request.symbol_occurrence_id.as_str() == "symbol.shared.missing" {
+                return Err(DashboardCodeReadErrorV1::NotFound);
+            }
+            let source =
+                similar_occurrence(request.symbol_occurrence_id, "src/dashboard/mod.rs", 0);
+            let members = vec![
+                similar_occurrence(
+                    SymbolOccurrenceId::new("symbol.shared.first")
+                        .expect("first shared occurrence"),
+                    "src/dashboard/first.rs",
+                    10,
+                ),
+                similar_occurrence(
+                    SymbolOccurrenceId::new("symbol.shared.second")
+                        .expect("second shared occurrence"),
+                    "src/dashboard/second.rs",
+                    20,
+                ),
+            ];
+            Ok(SimilarResultV1 {
+                source_generation: source.source_generation.clone(),
+                source,
+                families: vec![SimilarFamilyV1 {
+                    match_class: request.match_class,
+                    normalization_revision: 1,
+                    family_digest: ManifestDigest::new(format!("sha256:{}", "4".repeat(64)))
+                        .expect("family digest"),
+                    representative_payload_digest: ManifestDigest::new(format!(
+                        "sha256:{}",
+                        "5".repeat(64)
+                    ))
+                    .expect("representative digest"),
+                    member_count: members.len(),
+                    members,
+                    complete: true,
+                    next_cursor: None,
+                }],
+                coverage: SimilarCoverageV1::Complete,
+            })
+        })
+    }
+
+    fn revision_pair<'a>(
+        &'a self,
+        request: DashboardRevisionPairRequestV1,
+    ) -> DashboardRevisionPairReadFuture<'a> {
+        Box::pin(async move { Ok(revision_pair_fixture(request)) })
+    }
 }
 
 impl CodeGraphReadAdmissionPort for FixtureGraphAdmissionV1 {
@@ -372,6 +441,136 @@ fn fixture_digest(domain: &str, value: &str) -> String {
         .to_owned()
 }
 
+fn similar_occurrence(
+    symbol_occurrence_id: SymbolOccurrenceId,
+    path: &str,
+    start_byte: u64,
+) -> SimilarOccurrenceV1 {
+    SimilarOccurrenceV1 {
+        project_id: ProjectId::new("project.dashboard-shared-code").expect("project"),
+        repository_id: tracedecay_domain::RepositoryId::new("repository.dashboard-shared-code")
+            .expect("repository"),
+        worktree_id: Some(
+            tracedecay_domain::WorktreeId::new("worktree.dashboard-shared-code").expect("worktree"),
+        ),
+        source_generation: CodeGenerationId::new("generation.dashboard-shared-code")
+            .expect("generation"),
+        snapshot_digest: ManifestDigest::new(format!("sha256:{}", "3".repeat(64)))
+            .expect("snapshot digest"),
+        symbol_occurrence_id,
+        path: path.to_owned(),
+        body_span: SourceSpan {
+            start_byte,
+            end_byte: start_byte + 10,
+        },
+    }
+}
+
+fn revision_pair_fixture(request: DashboardRevisionPairRequestV1) -> RevisionPairUnionLayoutV1 {
+    let base_file_identity =
+        FileIdentityDigest::new(format!("sha256:{}", "6".repeat(64))).expect("base file identity");
+    let added_file_identity =
+        FileIdentityDigest::new(format!("sha256:{}", "7".repeat(64))).expect("added file identity");
+    let stable_symbol_identity = SymbolIdentityDigest::new(format!("sha256:{}", "8".repeat(64)))
+        .expect("stable symbol identity");
+    let added_symbol_identity = SymbolIdentityDigest::new(format!("sha256:{}", "9".repeat(64)))
+        .expect("added symbol identity");
+    let base_file_occurrence =
+        FileOccurrenceId::new("file.compare.base").expect("base file occurrence");
+    let added_file_occurrence =
+        FileOccurrenceId::new("file.compare.added").expect("added file occurrence");
+    let base_symbol = RevisionPairSymbolV1 {
+        symbol_occurrence_id: SymbolOccurrenceId::new("symbol.compare.stable.base")
+            .expect("base symbol"),
+        file_identity: base_file_identity.as_str().to_owned(),
+        file_occurrence_id: base_file_occurrence.clone(),
+        qualified_name: "crate::stable".to_owned(),
+        name: "stable".to_owned(),
+        kind: "function".to_owned(),
+        file: "src/stable.rs".to_owned(),
+        content_digest: "sha256:stable".to_owned(),
+    };
+    let head_symbol = RevisionPairSymbolV1 {
+        symbol_occurrence_id: SymbolOccurrenceId::new("symbol.compare.stable.head")
+            .expect("head symbol"),
+        ..base_symbol.clone()
+    };
+    let added_symbol = RevisionPairSymbolV1 {
+        symbol_occurrence_id: SymbolOccurrenceId::new("symbol.compare.added")
+            .expect("added symbol"),
+        file_identity: added_file_identity.as_str().to_owned(),
+        file_occurrence_id: added_file_occurrence.clone(),
+        qualified_name: "crate::added".to_owned(),
+        name: "added".to_owned(),
+        kind: "function".to_owned(),
+        file: "src/added.rs".to_owned(),
+        content_digest: "sha256:added".to_owned(),
+    };
+    RevisionPairUnionLayoutV1 {
+        base: RevisionPairRevisionV1 {
+            reference: request.base.reference,
+            revision: request.base.revision,
+            tree: GitOidV1::new("a".repeat(40)).expect("base tree"),
+            generation: CodeGenerationId::new("generation.compare.base").expect("base generation"),
+        },
+        head: RevisionPairRevisionV1 {
+            reference: request.head.reference,
+            revision: request.head.revision,
+            tree: GitOidV1::new("b".repeat(40)).expect("head tree"),
+            generation: CodeGenerationId::new("generation.compare.head").expect("head generation"),
+        },
+        files: vec![
+            RevisionPairFileRegionV1 {
+                file_identity: base_file_identity.as_str().to_owned(),
+                change: RevisionPairChangeV1::Unchanged,
+                base: Some(RevisionPairFileV1 {
+                    file_occurrence_id: base_file_occurrence.clone(),
+                    path: "src/stable.rs".to_owned(),
+                    content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64)))
+                        .expect("stable digest"),
+                    disposition: RevisionPairFileDispositionV1::Present,
+                    symbol_identities: vec![stable_symbol_identity.as_str().to_owned()],
+                }),
+                head: Some(RevisionPairFileV1 {
+                    file_occurrence_id: base_file_occurrence,
+                    path: "src/stable.rs".to_owned(),
+                    content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64)))
+                        .expect("stable digest"),
+                    disposition: RevisionPairFileDispositionV1::Present,
+                    symbol_identities: vec![stable_symbol_identity.as_str().to_owned()],
+                }),
+            },
+            RevisionPairFileRegionV1 {
+                file_identity: added_file_identity.as_str().to_owned(),
+                change: RevisionPairChangeV1::Added,
+                base: None,
+                head: Some(RevisionPairFileV1 {
+                    file_occurrence_id: added_file_occurrence,
+                    path: "src/added.rs".to_owned(),
+                    content_digest: ContentDigest::new(format!("sha256:{}", "d".repeat(64)))
+                        .expect("added digest"),
+                    disposition: RevisionPairFileDispositionV1::Present,
+                    symbol_identities: vec![added_symbol_identity.as_str().to_owned()],
+                }),
+            },
+        ],
+        symbols: vec![
+            RevisionPairSymbolRegionV1 {
+                symbol_identity: stable_symbol_identity.as_str().to_owned(),
+                change: RevisionPairChangeV1::Unchanged,
+                base: Some(base_symbol),
+                head: Some(head_symbol),
+            },
+            RevisionPairSymbolRegionV1 {
+                symbol_identity: added_symbol_identity.as_str().to_owned(),
+                change: RevisionPairChangeV1::Added,
+                base: None,
+                head: Some(added_symbol),
+            },
+        ],
+    }
+}
+
 fn fixture_language(path: &str) -> LanguageId {
     let language = if path.ends_with(".tsx") {
         "typescript"
@@ -641,7 +840,8 @@ async fn start_dashboard_fixture_full(
         .dashboard_test_authority_with_session_reads(&server_graph)
         .await
         .unwrap_or_else(|error| panic!("compose dashboard graph authority: {error}"))
-        .with_code_graph_authority(code_graph_admission, code_graph_projection);
+        .with_code_graph_authority(code_graph_admission, code_graph_projection)
+        .with_code_read_authority(Arc::new(FixtureCodeReadPortV1));
     let server = tokio::spawn(async move {
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
@@ -819,6 +1019,123 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
                 .iter()
                 .any(|node| node["id"] == "n-route" && node["degree"] == 3),
             "subgraph nodes should carry total degree counts (n-route has 3 edges)"
+        );
+    });
+}
+
+#[test]
+fn code_read_api_returns_verified_families_and_one_revision_union_layout() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture().await;
+        let agent = http_agent();
+
+        for match_class in ["conservative_exact", "rename_normalized_exact"] {
+            let (status, family) = get_json(
+                &agent,
+                &format!(
+                    "{}/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.source&match_class={match_class}&limit=10",
+                    fixture.base_url
+                ),
+            );
+            assert_eq!(status, 200);
+            assert_eq!(family["domain_state"], "ready", "{family}");
+            assert_eq!(
+                family["version"]["graph_version"],
+                "generation.dashboard-shared-code"
+            );
+            assert_eq!(family["payload"]["coverage"]["status"], "complete");
+            assert_eq!(
+                family["payload"]["families"][0]["match_class"],
+                match_class
+            );
+            assert_eq!(family["payload"]["families"][0]["member_count"], 2);
+            assert_eq!(
+                family["payload"]["families"][0]["members"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(2)
+            );
+        }
+
+        let (status, missing) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.missing&match_class=conservative_exact&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(missing["domain_state"], "error", "{missing}");
+        assert_eq!(missing["payload"], Value::Null);
+        assert!(
+            missing["coverage"]["omission_reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons
+                    .iter()
+                    .any(|reason| reason == "selected_source_not_found"))
+        );
+
+        let (status, comparison) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/compare/union-layout?base=main&base_revision={}&head=feature&head_revision={}",
+                fixture.base_url,
+                "1".repeat(40),
+                "2".repeat(40),
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(comparison["domain_state"], "ready", "{comparison}");
+        assert!(comparison["version"]["graph_version"].is_null());
+        assert_eq!(
+            comparison["payload"]["base"]["generation"],
+            "generation.compare.base"
+        );
+        assert_eq!(
+            comparison["payload"]["head"]["generation"],
+            "generation.compare.head"
+        );
+        assert_eq!(
+            comparison["payload"]["base"]["reference"],
+            "refs/heads/main"
+        );
+        assert_eq!(
+            comparison["payload"]["head"]["reference"],
+            "refs/heads/feature"
+        );
+        assert_eq!(comparison["payload"]["files"][0]["change"], "unchanged");
+        assert_eq!(comparison["payload"]["files"][1]["change"], "added");
+        assert!(comparison["payload"]["files"][1]["base"].is_null());
+        assert_eq!(
+            comparison["payload"]["symbols"][0]["base"]["qualified_name"],
+            "crate::stable"
+        );
+        assert_eq!(
+            comparison["payload"]["symbols"][0]["head"]["qualified_name"],
+            "crate::stable"
+        );
+
+        let (status, invalid) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/compare/union-layout?base=main&base_revision=not-an-oid&head=feature&head_revision={}",
+                fixture.base_url,
+                "2".repeat(40),
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(invalid["domain_state"], "error");
+        assert_eq!(invalid["payload"], Value::Null);
+        assert!(
+            invalid["coverage"]["omission_reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons
+                    .iter()
+                    .any(|reason| reason == "invalid_request"))
         );
     });
 }

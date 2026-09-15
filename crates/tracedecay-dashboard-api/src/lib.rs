@@ -128,6 +128,7 @@ mod automation_skills_api;
 pub mod cloud;
 mod code_diagnostics_api;
 pub mod code_index_freshness_api;
+pub mod code_read_api;
 pub mod config;
 #[doc(hidden)]
 pub mod contract_schema;
@@ -315,6 +316,9 @@ pub struct DashboardStateCompositionV1 {
     /// this exact project. Standalone dashboards leave it absent and graph
     /// structure routes report typed unavailable.
     pub code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
+    /// Exact-project shared-family and revision-pair reads composed from the
+    /// daemon's verified code-index authorities.
+    pub code_read_authority: Option<code_read_api::DashboardCodeReadAuthorityV1>,
     pub registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Exact ProfileSessions read/mutation capability for the daemon-wide
     /// code-index worker preference. This never aliases the project settings
@@ -411,6 +415,8 @@ pub struct DashboardState {
     pub code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
     /// Canonical exact-project verified projection resolver.
     pub code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
+    /// Canonical verified shared-family and revision-pair read authority.
+    pub code_read_authority: Option<code_read_api::DashboardCodeReadAuthorityV1>,
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.
@@ -530,6 +536,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
     code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
+    code_read_authority: Option<code_read_api::DashboardCodeReadAuthorityV1>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
     profile_code_index_worker_settings:
@@ -557,6 +564,7 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             lcm_read_authority: None,
             code_graph_read_admission: None,
             code_graph_projection_read_port: None,
+            code_read_authority: None,
             git_correlation_read_authority: None,
             delivery_read_authority: None,
             profile_code_index_worker_settings: None,
@@ -615,6 +623,16 @@ impl DashboardHostAdmissionTestAuthorityV1 {
     ) -> Self {
         self.code_graph_read_admission = Some(admission);
         self.code_graph_projection_read_port = Some(projection);
+        self
+    }
+
+    /// Attaches the verified shared-family and revision-pair read authority.
+    #[must_use]
+    pub fn with_code_read_authority(
+        mut self,
+        authority: code_read_api::DashboardCodeReadAuthorityV1,
+    ) -> Self {
+        self.code_read_authority = Some(authority);
         self
     }
 
@@ -773,6 +791,7 @@ async fn build_state_inner(
         project_graph_resolver,
         code_graph_read_admission,
         code_graph_projection_read_port,
+        code_read_authority,
         registered_project_session_db,
         profile_code_index_worker_settings,
         lcm_read_authority,
@@ -836,6 +855,7 @@ async fn build_state_inner(
         ),
         code_graph_read_admission,
         code_graph_projection_read_port,
+        code_read_authority,
         project_graph,
         project_graph_resolver,
         memory_owner,
@@ -915,6 +935,7 @@ pub async fn build_selected_project_state(
             // selected project.
             code_graph_read_admission: None,
             code_graph_projection_read_port: None,
+            code_read_authority: None,
             registered_project_session_db: None,
             // This capability is profile-global and its route is deliberately
             // unscoped, so selected projects reuse the active dashboard's
@@ -1060,6 +1081,8 @@ where
                 .and_then(|authority| authority.code_graph_read_admission.clone()),
             code_graph_projection_read_port: test_authority
                 .and_then(|authority| authority.code_graph_projection_read_port.clone()),
+            code_read_authority: test_authority
+                .and_then(|authority| authority.code_read_authority.clone()),
             registered_project_session_db: test_authority
                 .map(|authority| authority.project_sessions.clone()),
             profile_code_index_worker_settings: test_authority
@@ -1608,6 +1631,14 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/plugins/graph/subgraph", get(graph_api::subgraph))
         .route("/api/plugins/graph/path", get(graph_api::path))
+        .route(
+            "/api/plugins/graph/shared-code/family",
+            get(code_read_api::shared_family),
+        )
+        .route(
+            "/api/plugins/graph/compare/union-layout",
+            get(code_read_api::revision_pair),
+        )
         .merge(graph_structure_api::contracted_routes())
         // Durable analytics API (hint lifecycle scaffolds + session usage rollups)
         .route(
@@ -2358,6 +2389,7 @@ mod authority_tests {
                 ),
                 code_graph_read_admission: None,
                 code_graph_projection_read_port: None,
+                code_read_authority: None,
                 project_graph: None,
                 project_graph_resolver: None,
                 memory_owner,
