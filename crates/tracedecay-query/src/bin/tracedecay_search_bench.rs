@@ -27,14 +27,16 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use rusqlite::Connection;
 
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
@@ -657,7 +659,16 @@ fn run(options: &Options) -> Result<String, String> {
     drop(exact_lane);
     drop(lexical_lane);
     drop(reader);
-    scratch.remove()?;
+    let artifact_inspect = inspect_artifact(&artifact_path);
+    if std::env::var_os("TRACEDECAY_SEARCH_BENCH_KEEP_SCRATCH").is_some() {
+        eprintln!(
+            "tracedecay-search-bench: keeping scratch {}",
+            scratch.path().display()
+        );
+        std::mem::forget(scratch);
+    } else {
+        scratch.remove()?;
+    }
 
     let total_wall = started.elapsed();
     let report = serde_json::json!({
@@ -684,6 +695,7 @@ fn run(options: &Options) -> Result<String, String> {
             "artifact_reopen_verified": millis(open_wall),
             "total": millis(total_wall),
         },
+        "artifact_inspect": artifact_inspect,
         "classes": class_reports,
     });
     serde_json::to_string_pretty(&report).map_err(|error| format!("serialize summary: {error}"))
@@ -1113,10 +1125,106 @@ impl Scratch {
 fn hash_file(path: &Path) -> Result<(ManifestDigest, u64), String> {
     use sha2::Digest as _;
 
-    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    let digest = ManifestDigest::from_sha256_bytes(&sha2::Sha256::digest(&bytes))
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size = size
+            .checked_add(read as u64)
+            .ok_or_else(|| format!("artifact {} overflowed u64", path.display()))?;
+    }
+    let digest = ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| format!("artifact digest: {error}"))?;
-    Ok((digest, bytes.len() as u64))
+    Ok((digest, size))
+}
+
+/// Harness-only inspection of the sealed artifact. Uses the same dbstat
+/// grouping as `sealed_v11_artifact_uses_interned_plans_and_reports_dbstat`.
+fn inspect_artifact(path: &Path) -> serde_json::Value {
+    let Ok(connection) = Connection::open(path) else {
+        return serde_json::json!({ "error": "open failed" });
+    };
+    let format_revision: Option<i64> = connection
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    let page_size: Option<i64> = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .ok();
+    let page_count: Option<i64> = connection
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .ok();
+    let freelist_count: Option<i64> = connection
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .ok();
+    let indexes: Vec<String> = connection
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' ORDER BY name")
+        .ok()
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get(0))
+                .ok()?
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        })
+        .unwrap_or_default();
+    let table_rows: BTreeMap<String, i64> = [
+        "rows",
+        "term_postings",
+        "exact_postings",
+        "ngram_postings",
+        "term_stats",
+        "field_stats",
+        "vocabulary",
+        "source_pages",
+    ]
+    .into_iter()
+    .filter_map(|table| {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .ok()
+            .map(|count| (table.to_owned(), count))
+    })
+    .collect();
+    let dbstat = match connection.prepare(
+        "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY SUM(pgsize) DESC",
+    ) {
+        Ok(mut statement) => match statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        {
+            Ok(sizes) => serde_json::json!({
+                "available": true,
+                "by_name": sizes
+                    .into_iter()
+                    .map(|(name, bytes)| serde_json::json!({"name": name, "bytes": bytes}))
+                    .collect::<Vec<_>>(),
+            }),
+            Err(error) => serde_json::json!({ "available": false, "error": error.to_string() }),
+        },
+        Err(error) => serde_json::json!({ "available": false, "error": error.to_string() }),
+    };
+    serde_json::json!({
+        "format_revision": format_revision,
+        "page_size": page_size,
+        "page_count": page_count,
+        "freelist_count": freelist_count,
+        "indexes": indexes,
+        "table_rows": table_rows,
+        "dbstat": dbstat,
+    })
 }
 
 fn peak_rss_bytes() -> Option<u64> {
