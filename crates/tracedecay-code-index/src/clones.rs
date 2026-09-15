@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -44,6 +45,17 @@ pub struct CloneFingerprintStreamV1<'a> {
     pub normalization_revision: u16,
     pub tokens: &'a [ConservativeCloneTokenV1],
     pub rename_tier_unavailable: Option<CloneBodyRenameStatusV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneSelectedBlockV1 {
+    source_payload_digest: ManifestDigest,
+    source_body_digest: ManifestDigest,
+    language: String,
+    class: CloneNormalizationClassV1,
+    normalization_revision: u16,
+    rename_tier_unavailable: Option<CloneBodyRenameStatusV1>,
+    tokens: Vec<ConservativeCloneTokenV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -413,9 +425,14 @@ impl CloneBodyPayloadV1 {
         &self,
         eligibility: CloneBodyEligibilityV1,
     ) -> Option<CloneFingerprintStreamV1<'_>> {
-        if eligibility != CloneBodyEligibilityV1::Eligible
-            || self.tokenization_status != CloneBodyTokenizationStatusV1::Complete
-        {
+        if eligibility != CloneBodyEligibilityV1::Eligible {
+            return None;
+        }
+        self.explicit_comparison_stream()
+    }
+
+    fn explicit_comparison_stream(&self) -> Option<CloneFingerprintStreamV1<'_>> {
+        if self.tokenization_status != CloneBodyTokenizationStatusV1::Complete {
             return None;
         }
         if self.rename_coverage == CloneBodyRenameStatusV1::Complete
@@ -471,6 +488,74 @@ impl CloneBodyPayloadV1 {
             return Err("clone payload digests do not match their canonical tokens".to_owned());
         }
         Ok(())
+    }
+}
+
+impl CloneSelectedBlockV1 {
+    pub fn from_payload(
+        source: &CloneBodyPayloadV1,
+        source_eligibility: CloneBodyEligibilityV1,
+        token_range: Range<usize>,
+    ) -> Result<Self, String> {
+        source.validate()?;
+        if source_eligibility == CloneBodyEligibilityV1::ExcludedIncompleteTokenization {
+            return Err("selected clone block source has incomplete tokenization".to_owned());
+        }
+        let stream = source
+            .explicit_comparison_stream()
+            .ok_or_else(|| "selected clone block source has no complete token stream".to_owned())?;
+        let tokens = stream
+            .tokens
+            .get(token_range)
+            .filter(|tokens| !tokens.is_empty())
+            .ok_or_else(|| {
+                "selected clone block token range is empty or outside its source".to_owned()
+            })?
+            .to_vec();
+        if winnow_clone_tokens(&tokens)?.is_empty() {
+            return Err("selected clone block is too small for fingerprint lookup".to_owned());
+        }
+        Ok(Self {
+            source_payload_digest: source.payload_digest.clone(),
+            source_body_digest: source.body_digest.clone(),
+            language: source.language.clone(),
+            class: stream.class,
+            normalization_revision: stream.normalization_revision,
+            rename_tier_unavailable: stream.rename_tier_unavailable,
+            tokens,
+        })
+    }
+
+    pub fn source_payload_digest(&self) -> &ManifestDigest {
+        &self.source_payload_digest
+    }
+
+    pub fn source_body_digest(&self) -> &ManifestDigest {
+        &self.source_body_digest
+    }
+
+    pub fn language(&self) -> &str {
+        &self.language
+    }
+
+    pub fn class(&self) -> CloneNormalizationClassV1 {
+        self.class
+    }
+
+    pub fn normalization_revision(&self) -> u16 {
+        self.normalization_revision
+    }
+
+    pub fn rename_tier_unavailable(&self) -> Option<CloneBodyRenameStatusV1> {
+        self.rename_tier_unavailable
+    }
+
+    pub fn tokens(&self) -> &[ConservativeCloneTokenV1] {
+        &self.tokens
+    }
+
+    pub fn fingerprint_positions(&self) -> Result<Vec<CloneFingerprintPositionV1>, String> {
+        winnow_clone_tokens(&self.tokens)
     }
 }
 

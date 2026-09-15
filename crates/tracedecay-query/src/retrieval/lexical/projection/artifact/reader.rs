@@ -14,7 +14,9 @@ use rusqlite::StatementStatus;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
-use tracedecay_code_index::clones::{CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1};
+use tracedecay_code_index::clones::{
+    CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
+};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
@@ -27,7 +29,9 @@ use tracedecay_private_fs::open_private_file;
 
 use super::builder::compute_section_digests;
 use super::fingerprints::{
-    CloneFingerprintArtifactReadV1, CloneFingerprintReadRequestV1, read_clone_fingerprint_page,
+    CloneFingerprintArtifactReadV1, CloneFingerprintReadRequestV1,
+    CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
+    read_clone_fingerprint_page,
 };
 use super::format::{
     ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, CodeLexicalImportMembershipWitnessV1,
@@ -704,11 +708,79 @@ impl CodeLexicalArtifactReaderV1 {
                 authority_digest: &authority_digest,
                 authority,
                 source,
+                selected_block: None,
                 cursor,
                 limit,
                 control,
             },
         )
+    }
+
+    pub fn clone_selected_block_page(
+        &self,
+        authority: &CloneBodyOccurrenceV1,
+        source: &CloneBodyPayloadV1,
+        selected_block: &CloneSelectedBlockV1,
+        cursor: Option<&CloneArtifactCursorV1>,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CloneSelectedBlockArtifactReadV1, CodeLexicalArtifactErrorV1> {
+        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
+            || self.metadata.generation != authority.source_generation
+        {
+            return Err(CodeLexicalArtifactErrorV1::Missing(
+                "clone lookup authority is unavailable".to_owned(),
+            ));
+        }
+        let authority_digest = clone_authority_digest(authority)?;
+        let connection = self.lock_connection()?;
+        let read = read_clone_fingerprint_page(
+            &connection,
+            CloneFingerprintReadRequestV1 {
+                layout: self.layout,
+                receipt: &self.receipt,
+                authority_digest: &authority_digest,
+                authority,
+                source,
+                selected_block: Some(selected_block),
+                cursor,
+                limit,
+                control,
+            },
+        )?;
+        let stream = read.stream.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "selected clone block has no fingerprint stream".to_owned(),
+            )
+        })?;
+        let members = read
+            .page
+            .members
+            .into_iter()
+            .map(|candidate| {
+                let containment = candidate.selected_block_containment.ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "selected clone block candidate has no containment class".to_owned(),
+                    )
+                })?;
+                Ok(CloneSelectedBlockArtifactCandidateV1 {
+                    payload: candidate.payload,
+                    occurrences: candidate.occurrences,
+                    anchors: candidate.anchors,
+                    containment,
+                })
+            })
+            .collect::<Result<Vec<_>, CodeLexicalArtifactErrorV1>>()?;
+        Ok(CloneSelectedBlockArtifactReadV1 {
+            page: CloneArtifactPageV1 {
+                members,
+                next_cursor: read.page.next_cursor,
+            },
+            stream,
+            coverage: read.coverage,
+            partial_reasons: read.partial_reasons,
+            accounting: read.accounting,
+        })
     }
 
     fn clone_exact_after<'a>(

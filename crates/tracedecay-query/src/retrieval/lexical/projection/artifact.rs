@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use thiserror::Error;
+pub use tracedecay_code_index::clones::CloneSelectedBlockV1;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 
 mod builder;
@@ -31,7 +32,8 @@ pub use fingerprints::{
     CloneFingerprintArtifactCandidateV1, CloneFingerprintArtifactReadV1,
     CloneFingerprintCancellationPointV1, CloneFingerprintPartialReasonV1,
     CloneFingerprintReadAccountingV1, CloneFingerprintStreamDescriptorV1,
-    MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
+    CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
+    CloneSelectedBlockContainmentClassV1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
 };
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,

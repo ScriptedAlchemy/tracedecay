@@ -53,8 +53,9 @@ use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneFingerprintCancellationPointV1,
-    CloneFingerprintPartialReasonV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
+    CloneFingerprintPartialReasonV1, CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1,
+    CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
@@ -1924,6 +1925,155 @@ fn fingerprint_candidates_reject_incompatible_bodies_and_page_byte_identically()
         Some(CloneFingerprintCancellationPointV1::PostingRead)
     );
     assert_eq!(cancelled.accounting.posting_rows_examined, 1);
+}
+
+#[test]
+fn selected_block_finds_both_containment_directions_without_indexing_subtrees() {
+    let inner = (0..14)
+        .map(|ordinal| format!("inner_{ordinal}(); "))
+        .collect::<String>();
+    let selected = format!("selected_before(); {{ {inner} }} selected_after();");
+    let containing_before = (0..80)
+        .map(|ordinal| format!("before_edge_{ordinal}(); "))
+        .collect::<String>();
+    let containing_after = (0..80)
+        .map(|ordinal| format!("after_edge_{ordinal}(); "))
+        .collect::<String>();
+    let fixture = real_lexical_source_fixture_from_sources(vec![
+        (
+            "file.clone.block.contained".to_owned(),
+            "src/contained.ts".to_owned(),
+            format!("export function contained() {{ {inner} }}").into_bytes(),
+        ),
+        (
+            "file.clone.block.containing".to_owned(),
+            "src/containing.ts".to_owned(),
+            format!(
+                "export function containing() {{ {containing_before} {{ {selected} }} {containing_after} }}"
+            )
+            .into_bytes(),
+        ),
+        (
+            "file.clone.block.equal".to_owned(),
+            "src/equal.ts".to_owned(),
+            format!("export function equal() {{ {selected} }}").into_bytes(),
+        ),
+        (
+            "file.clone.block.source".to_owned(),
+            "src/source.ts".to_owned(),
+            format!(
+                "export function source() {{ source_before(); {{ {selected} }} source_after(); }}"
+            )
+            .into_bytes(),
+        ),
+    ]);
+    let (directory, pages, reader) = build_clone_artifact(&fixture);
+    let bodies = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .collect::<Vec<_>>();
+    let source = bodies
+        .iter()
+        .find(|body| body.occurrence.path == "src/source.ts")
+        .expect("selected-block source");
+    let equal = bodies
+        .iter()
+        .find(|body| body.occurrence.path == "src/equal.ts")
+        .expect("equal selected block");
+    let source_tokens = source
+        .payload
+        .fingerprint_stream(source.occurrence.eligibility)
+        .expect("source fingerprint stream")
+        .tokens;
+    let equal_tokens = equal
+        .payload
+        .fingerprint_stream(equal.occurrence.eligibility)
+        .expect("equal fingerprint stream")
+        .tokens;
+    let start = source_tokens
+        .windows(equal_tokens.len())
+        .position(|window| window == equal_tokens)
+        .expect("selected statement block in source body");
+    let selection = CloneSelectedBlockV1::from_payload(
+        &source.payload,
+        source.occurrence.eligibility,
+        start..start + equal_tokens.len(),
+    )
+    .expect("selected block");
+    let result = reader
+        .clone_selected_block_page(
+            &source.occurrence,
+            &source.payload,
+            &selection,
+            None,
+            10,
+            &ArtifactControl { cancelled: false },
+        )
+        .expect("selected-block containment");
+    let classes = result
+        .page
+        .members
+        .iter()
+        .flat_map(|candidate| {
+            candidate
+                .occurrences
+                .iter()
+                .map(|occurrence| (occurrence.path.as_str(), candidate.containment))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        classes,
+        BTreeSet::from([
+            (
+                "src/contained.ts",
+                CloneSelectedBlockContainmentClassV1::SelectedBlockContainsCandidate,
+            ),
+            (
+                "src/containing.ts",
+                CloneSelectedBlockContainmentClassV1::CandidateContainsSelectedBlock,
+            ),
+            ("src/equal.ts", CloneSelectedBlockContainmentClassV1::Equal,),
+        ])
+    );
+    assert_eq!(
+        result.coverage,
+        RetrieverCoverage {
+            examined: 1,
+            eligible: 1,
+            ..RetrieverCoverage::default()
+        }
+    );
+    assert!(
+        u64::from(selection.tokens().len() as u32).saturating_mul(100)
+            < u64::from(
+                bodies
+                    .iter()
+                    .find(|body| body.occurrence.path == "src/containing.ts")
+                    .expect("containing body")
+                    .payload
+                    .token_count
+            )
+            .saturating_mul(70),
+        "containment must exercise the ratio that whole-body matching rejects"
+    );
+    let connection = rusqlite::Connection::open(directory.path().join("clone-artifact-v16.sqlite"))
+        .expect("inspect clone artifact");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM clone_occurrences", [], |row| row
+                .get::<_, i64>(0))
+            .expect("clone occurrence count"),
+        4,
+        "the selected block must not add a subtree occurrence"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM clone_body_payloads", [], |row| row
+                .get::<_, i64>(0))
+            .expect("clone payload count"),
+        4,
+        "the selected block must not add a subtree payload"
+    );
 }
 
 #[test]
