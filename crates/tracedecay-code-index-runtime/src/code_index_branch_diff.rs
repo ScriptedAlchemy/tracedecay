@@ -271,6 +271,11 @@ pub async fn revision_pair_layout_inputs(
             request.control.clone(),
         )
         .await?;
+    if generation_exceeds_bound(generation_counts(generations.base.generation()))
+        || generation_exceeds_bound(generation_counts(generations.head.generation()))
+    {
+        return Err(code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+    }
     let read = |generation: &crate::code_index::production::CodeIndexPublishedGenerationV1| {
         let symbols = generation_symbols(
             generation,

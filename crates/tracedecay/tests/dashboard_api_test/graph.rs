@@ -37,11 +37,11 @@ use tracedecay_contracts::{
     ResolvedScope,
 };
 use tracedecay_dashboard_api::code_read_api::{
-    DashboardCodeReadPortV1, DashboardRevisionPairReadFuture, DashboardRevisionPairRequestV1,
-    DashboardSharedFamilyReadFuture, DashboardSharedFamilyRequestV1, RevisionPairChangeV1,
-    RevisionPairFileDispositionV1, RevisionPairFileRegionV1, RevisionPairFileV1,
-    RevisionPairRevisionV1, RevisionPairSymbolRegionV1, RevisionPairSymbolV1,
-    RevisionPairUnionLayoutV1,
+    DashboardCodeReadErrorV1, DashboardCodeReadPortV1, DashboardRevisionPairReadFuture,
+    DashboardRevisionPairRequestV1, DashboardSharedFamilyReadFuture,
+    DashboardSharedFamilyRequestV1, RevisionPairChangeV1, RevisionPairFileDispositionV1,
+    RevisionPairFileRegionV1, RevisionPairFileV1, RevisionPairRevisionV1,
+    RevisionPairSymbolRegionV1, RevisionPairSymbolV1, RevisionPairUnionLayoutV1,
 };
 use tracedecay_domain::code_intelligence::{Edge, EdgeKind, Node, NodeKind, Visibility};
 use tracedecay_domain::{
@@ -120,6 +120,9 @@ impl DashboardCodeReadPortV1 for FixtureCodeReadPortV1 {
         request: DashboardSharedFamilyRequestV1,
     ) -> DashboardSharedFamilyReadFuture<'a> {
         Box::pin(async move {
+            if request.symbol_occurrence_id.as_str() == "symbol.shared.missing" {
+                return Err(DashboardCodeReadErrorV1::NotFound);
+            }
             let source =
                 similar_occurrence(request.symbol_occurrence_id, "src/dashboard/mod.rs", 0);
             let members = vec![
@@ -1057,6 +1060,24 @@ fn code_read_api_returns_verified_families_and_one_revision_union_layout() {
                 Some(2)
             );
         }
+
+        let (status, missing) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.missing&match_class=conservative_exact&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(missing["domain_state"], "error", "{missing}");
+        assert_eq!(missing["payload"], Value::Null);
+        assert!(
+            missing["coverage"]["omission_reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons
+                    .iter()
+                    .any(|reason| reason == "selected_source_not_found"))
+        );
 
         let (status, comparison) = get_json(
             &agent,

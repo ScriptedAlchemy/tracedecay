@@ -246,13 +246,6 @@ pub async fn shared_family(
         .await;
     match result {
         Ok(result) => family_response(&state, result),
-        Err(DashboardCodeReadErrorV1::NotFound) => {
-            Json(DashboardEnvelopeV1::complete_zero_findings(
-                scope_from_state(&state),
-                complete_family_coverage(false, false),
-                None,
-            ))
-        }
         Err(error) => code_read_failed(&state, error),
     }
 }
@@ -372,11 +365,9 @@ fn code_read_failed<T>(
 ) -> Json<DashboardEnvelopeV1<Option<T>>> {
     let scope = scope_from_state(state);
     let envelope = match error {
-        DashboardCodeReadErrorV1::NotFound => DashboardEnvelopeV1::complete_zero_findings(
-            scope,
-            complete_family_coverage(false, false),
-            None,
-        ),
+        DashboardCodeReadErrorV1::NotFound => {
+            DashboardEnvelopeV1::error(scope, None, error.reason())
+        }
         DashboardCodeReadErrorV1::RevisionChanged => {
             let mut coverage = DashboardCoverageV1::unknown();
             coverage.omission_reasons.push(error.reason().to_owned());
