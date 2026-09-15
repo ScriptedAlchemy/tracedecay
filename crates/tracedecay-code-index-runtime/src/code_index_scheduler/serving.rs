@@ -107,7 +107,6 @@ pub(super) fn text_artifact_source_batch_limits(
 /// as `Cancelled` even while the owning open is inside one long read or
 /// digest call that has not yet reached its own checkpoint.
 const TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1: Duration = Duration::from_millis(100);
-/// Bounds synchronous query-owner warmup if a source never reports progress.
 const TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1: usize = 10_000;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
@@ -392,9 +391,6 @@ pub struct LatestCodeTextGenerationV1 {
     /// graph-serving slot, so old Ready state cannot mask current Pending or
     /// terminal Unavailable state.
     pub(super) graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
-    /// Generation-owned singleflight state for the durable text projection.
-    /// The scheduler advances current owners. A selected historical query may
-    /// advance its own owner until exact and lexical reads become available.
     pub(super) text_projection_build: Arc<CodeTextProjectionStateV1>,
     pub(super) text_projection_failed: Arc<AtomicBool>,
     pub(super) text_control: GenerationTextControlV1,
