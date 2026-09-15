@@ -197,7 +197,7 @@ fn write_cancellation_batch(project: &Path, scratch: &Path) {
     fs::create_dir_all(&batch).expect("cancellation batch directory");
     for file_index in 0..CANCELLATION_BATCH_FILES {
         let mut source = String::new();
-        for symbol_index in 0..128 {
+        for symbol_index in 0..8 {
             writeln!(
                 source,
                 "pub fn cancellation_probe_{file_index:04}_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}"

@@ -562,6 +562,108 @@ struct StreamingSealedEnvelopeV1 {
     generation: StreamingPersistedPublishedGenerationV1,
 }
 
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct FileArtifactCheckpointPayloadRefV1<'a> {
+    reuse_key: &'a ManifestDigest,
+    file: PersistedFileGenerationArtifactsRefV2<'a>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileArtifactCheckpointPayloadV1 {
+    reuse_key: ManifestDigest,
+    file: PersistedFileGenerationArtifactsV2,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct FileArtifactCheckpointEnvelopeRefV1<'a> {
+    format_revision: u32,
+    state_digest: &'a ManifestDigest,
+    payload: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileArtifactCheckpointRawEnvelopeV1<'a> {
+    format_revision: u32,
+    state_digest: ManifestDigest,
+    #[serde(borrow)]
+    payload: &'a RawValue,
+}
+
+pub(super) fn encode_file_artifact_checkpoint(
+    reuse_key: &ManifestDigest,
+    file: &FileGenerationArtifactsV1,
+) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    let payload = serde_json::value::to_raw_value(&FileArtifactCheckpointPayloadRefV1 {
+        reuse_key,
+        file: PersistedFileGenerationArtifactsRefV2::new(
+            &file.authority,
+            &file.extraction,
+            &file.artifacts,
+        ),
+    })
+    .map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "file artifact checkpoint payload serialization failed: {error}"
+        ))
+    })?;
+    let state_digest = json_generation_digest(payload.get().as_bytes())?;
+    serde_json::to_vec(&FileArtifactCheckpointEnvelopeRefV1 {
+        format_revision: 1,
+        state_digest: &state_digest,
+        payload: &payload,
+    })
+    .map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "file artifact checkpoint envelope serialization failed: {error}"
+        ))
+    })
+}
+
+pub(super) fn decode_file_artifact_checkpoint(
+    expected_reuse_key: &ManifestDigest,
+    bytes: &[u8],
+) -> Result<Arc<FileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
+    let envelope: FileArtifactCheckpointRawEnvelopeV1 =
+        serde_json::from_slice(bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "file artifact checkpoint envelope decoding failed: {error}"
+            ))
+        })?;
+    if envelope.format_revision != 1 {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "file artifact checkpoint format revision is incompatible".to_owned(),
+        ));
+    }
+    let payload_digest = json_generation_digest(envelope.payload.get().as_bytes())?;
+    if payload_digest != envelope.state_digest {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "file artifact checkpoint state digest does not match its payload".to_owned(),
+        ));
+    }
+    let checkpoint: FileArtifactCheckpointPayloadV1 = serde_json::from_str(envelope.payload.get())
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "file artifact checkpoint payload decoding failed: {error}"
+            ))
+        })?;
+    if checkpoint.reuse_key != *expected_reuse_key {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "file artifact checkpoint reuse identity does not match its lookup".to_owned(),
+        ));
+    }
+    restore_file_pages(vec![checkpoint.file.expand()?])?
+        .pop()
+        .ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "file artifact checkpoint restored no artifact".to_owned(),
+            )
+        })
+}
+
 /// Rebuild every file's parser-backed exact authority on the indexing pool,
 /// then move each persist page into its published artifact.
 ///
@@ -699,6 +801,7 @@ pub(super) fn assemble_published_generation(
         attribution: OnceLock::new(),
         chunk_policy: OnceLock::new(),
         graph_manifest: OnceLock::new(),
+        process_reextracted_files: 0,
     };
     hotpath::measure_block!(
         "code_index.sealed_decode.corpus_validation",
@@ -1486,6 +1589,27 @@ mod tests {
             Err(CodeIndexProductionErrorV1::Contract(message))
                 if message.contains("admitted length")
         ));
+    }
+
+    #[test]
+    fn file_checkpoint_rejects_tampered_payload_before_materialization() {
+        let reuse_key =
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("fixture reuse key");
+        let payload = format!(
+            "{{\"reuse_key\":{},\"file\":{{}}}}",
+            serde_json::to_string(&reuse_key).expect("fixture reuse key serialization")
+        );
+        let state_digest = json_generation_digest(payload.as_bytes()).expect("fixture digest");
+        let tampered_payload = payload.replace("\"file\":{}", "\"file\":{\"tampered\":true}");
+        let envelope = format!(
+            "{{\"format_revision\":1,\"state_digest\":{},\"payload\":{tampered_payload}}}",
+            serde_json::to_string(&state_digest).expect("fixture digest serialization")
+        );
+
+        let error = decode_file_artifact_checkpoint(&reuse_key, envelope.as_bytes())
+            .expect_err("tampered checkpoint payload must be rejected");
+
+        assert!(error.to_string().contains("state digest"));
     }
 
     fn sealed_fixture(state_digest: &ManifestDigest, generation: &str) -> Vec<u8> {

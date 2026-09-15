@@ -1887,7 +1887,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ));
             }
             let snapshot_content_identity = captured.snapshot.content_identity.clone();
-            let reextracted_files = captured.changed_paths.len();
             let pending = self.publication.take_unpublished().filter(|pending| {
                 pending.snapshot().reference == captured.snapshot.reference
                     && pending.snapshot().source_revision == captured.snapshot.source_revision
@@ -1991,7 +1990,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .iter()
                     .map(|file| file.file_occurrence_id.clone())
                     .collect(),
-                reextracted_files,
+                reextracted_files: generation.process_reextracted_files(),
                 changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
                 reused_chunks: changes.reused.len(),
                 overflow_reconciled: drained_hints.overflow(),
@@ -2485,13 +2484,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }));
             }
 
-            // Only the content identity, the file manifest, and the
-            // changed-path count are needed after the build request takes
-            // ownership of the captured snapshot, so keep those instead of
-            // cloning every file record and changed path.
             let mut snapshot_content_identity = captured.snapshot.content_identity.clone();
             let mut source_manifest = SourceContentManifestV1::for_snapshot(&captured.snapshot);
-            let mut reextracted_files = captured.changed_paths.len();
             let mut generation = self.owner.build_and_publish(
                 CodeIndexBuildRequestV1 {
                     snapshot: captured.snapshot,
@@ -2518,7 +2512,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                     self.capture_authoritative_snapshot_without_active_generation_reuse(None)?;
                 snapshot_content_identity = captured.snapshot.content_identity.clone();
                 source_manifest = SourceContentManifestV1::for_snapshot(&captured.snapshot);
-                reextracted_files = captured.changed_paths.len();
                 generation = self.owner.build_and_publish(
                     CodeIndexBuildRequestV1 {
                         snapshot: captured.snapshot,
@@ -2596,7 +2589,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .iter()
                         .map(|file| file.file_occurrence_id.clone())
                         .collect(),
-                    reextracted_files,
+                    reextracted_files: generation.process_reextracted_files(),
                     changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
                     reused_chunks: changes.reused.len(),
                     overflow_reconciled,

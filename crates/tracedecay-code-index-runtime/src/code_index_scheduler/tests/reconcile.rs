@@ -1193,8 +1193,8 @@ fn provenance_only_reseal_recaptures_the_tree_delta_without_changing_chunks() {
         "committing indexed content must not change the content identity"
     );
     assert_eq!(
-        resealed.reextracted_files, 1,
-        "the moved HEAD tree must declare its one changed path for recapture"
+        resealed.reextracted_files, 0,
+        "a provenance-only reseal must report physical artifact reuse"
     );
     assert_eq!(
         resealed.changed_chunks, 0,

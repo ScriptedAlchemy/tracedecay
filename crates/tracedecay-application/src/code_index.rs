@@ -168,7 +168,7 @@ pub fn open_production_code_index_owner_v1<P, S>(
     projection: S,
 ) -> Result<ProductionCodeIndexOwnerV1<P, S>, CodeIndexProductionOpenErrorV1>
 where
-    P: CodeIndexAtomicPublicationPort,
+    P: CodeIndexAtomicPublicationPort + Sync,
     S: CodeChunkProjectionSink,
 {
     CodeIndexProductionOwnerV1::new(config, publication, projection)
