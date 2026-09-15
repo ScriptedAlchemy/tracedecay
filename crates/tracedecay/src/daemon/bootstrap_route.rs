@@ -48,6 +48,7 @@ fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
         })
 }
 
+#[hotpath::measure(label = "daemon.bootstrap.catalog_prewarm")]
 pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
     warming_bootstrap_tool_definitions().map(|_| ())
 }

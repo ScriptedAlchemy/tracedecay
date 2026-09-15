@@ -56,6 +56,7 @@ async fn run_foreground_loopback(
     _socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
+    let boot_started = Instant::now();
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
@@ -65,8 +66,10 @@ async fn run_foreground_loopback(
         &profile_root,
         "managed daemon database ownership",
     )?;
-    let mut authority =
-        authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version())?;
+    let mut authority = hotpath::measure_block!(
+        "daemon.bootstrap.authority_acquire",
+        authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version())
+    )?;
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         authority.record().epoch,
@@ -104,9 +107,22 @@ async fn run_foreground_loopback(
         return Ok(());
     }
     install_profile_worker_plan(&store_administration, &invocation).await?;
-    let (listener, endpoint) = BrokerListener::bind(authority.endpoint()).await?;
+    let (listener, endpoint) = hotpath::future!(
+        BrokerListener::bind(authority.endpoint()),
+        label = "daemon.bootstrap.listener_bind"
+    )
+    .await?;
     authority.publish_endpoint(&endpoint)?;
-    log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
+    log_daemon_event(
+        "daemon_listening",
+        &[
+            ("endpoint", endpoint.to_string()),
+            (
+                "boot_elapsed_ms",
+                boot_started.elapsed().as_millis().to_string(),
+            ),
+        ],
+    );
 
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     install_http_application_cold_resolver(
@@ -121,20 +137,28 @@ async fn run_foreground_loopback(
         &invocation,
     )
     .await?;
-    let http_application_service =
+    let http_application_service = hotpath::future!(
         http_application::DaemonHttpApplicationService::bind_with_remote_tls(
             http_application_registry.clone(),
             authority.auth_token(),
             remote_tls.as_ref(),
-        )
-        .await?;
+        ),
+        label = "daemon.bootstrap.http_bind"
+    )
+    .await?;
     authority.publish_http_application_endpoint(http_application_service.endpoint())?;
     if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
         authority.publish_remote_brain_tls_endpoint(endpoint)?;
     }
     log_daemon_event(
         "daemon_http_application_listening",
-        &[("endpoint", http_application_service.endpoint().to_string())],
+        &[
+            ("endpoint", http_application_service.endpoint().to_string()),
+            (
+                "boot_elapsed_ms",
+                boot_started.elapsed().as_millis().to_string(),
+            ),
+        ],
     );
     if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
         log_daemon_event(
@@ -162,6 +186,16 @@ async fn run_foreground_loopback(
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
+    // Terminal bootstrap milestone: every listener is published and the accept
+    // loop takes over. Queued connections that raced the bind are served from
+    // here on, so this elapsed value is the daemon's startup-to-ready cost.
+    log_daemon_event(
+        "daemon_ready",
+        &[(
+            "boot_elapsed_ms",
+            boot_started.elapsed().as_millis().to_string(),
+        )],
+    );
     loop {
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -461,6 +495,7 @@ async fn run_foreground_unix(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
+    let boot_started = Instant::now();
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
@@ -470,8 +505,10 @@ async fn run_foreground_unix(
         &profile_root,
         "managed daemon database ownership",
     )?;
-    let mut authority =
-        authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version())?;
+    let mut authority = hotpath::measure_block!(
+        "daemon.bootstrap.authority_acquire",
+        authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version())
+    )?;
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         authority.record().epoch,
@@ -547,12 +584,22 @@ async fn run_foreground_unix(
     }
     prepare_socket_path(&authority).await?;
 
-    let (listener, bound_endpoint) = BrokerListener::bind(authority.endpoint()).await?;
+    let (listener, bound_endpoint) = hotpath::future!(
+        BrokerListener::bind(authority.endpoint()),
+        label = "daemon.bootstrap.listener_bind"
+    )
+    .await?;
     authority.publish_endpoint(&bound_endpoint)?;
     set_owner_only_permissions(&socket_path, 0o600)?;
     log_daemon_event(
         "daemon_listening",
-        &[("endpoint", bound_endpoint.to_string())],
+        &[
+            ("endpoint", bound_endpoint.to_string()),
+            (
+                "boot_elapsed_ms",
+                boot_started.elapsed().as_millis().to_string(),
+            ),
+        ],
     );
     install_http_application_cold_resolver(
         &http_application_registry,
@@ -566,20 +613,28 @@ async fn run_foreground_unix(
         &engine.invocation,
     )
     .await?;
-    let http_application_service =
+    let http_application_service = hotpath::future!(
         http_application::DaemonHttpApplicationService::bind_with_remote_tls(
             http_application_registry.clone(),
             authority.auth_token(),
             remote_tls.as_ref(),
-        )
-        .await?;
+        ),
+        label = "daemon.bootstrap.http_bind"
+    )
+    .await?;
     authority.publish_http_application_endpoint(http_application_service.endpoint())?;
     if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
         authority.publish_remote_brain_tls_endpoint(endpoint)?;
     }
     log_daemon_event(
         "daemon_http_application_listening",
-        &[("endpoint", http_application_service.endpoint().to_string())],
+        &[
+            ("endpoint", http_application_service.endpoint().to_string()),
+            (
+                "boot_elapsed_ms",
+                boot_started.elapsed().as_millis().to_string(),
+            ),
+        ],
     );
     if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
         log_daemon_event(
@@ -639,6 +694,16 @@ async fn run_foreground_unix(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
+    // Terminal bootstrap milestone: every listener is published and the accept
+    // loop takes over. Queued connections that raced the bind are served from
+    // here on, so this elapsed value is the daemon's startup-to-ready cost.
+    log_daemon_event(
+        "daemon_ready",
+        &[(
+            "boot_elapsed_ms",
+            boot_started.elapsed().as_millis().to_string(),
+        )],
+    );
 
     loop {
         let stream = tokio::select! {
