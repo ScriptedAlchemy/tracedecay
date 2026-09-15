@@ -32,8 +32,9 @@ binary. The operator's daemon, profile, and stores are never touched.
     tool_calls           p50/p95/max of `tool` CLI round-trips: search, grep,
                          context, status, fact_store_search (memory recall);
                          N samples per tool after fixed warm-up
-    incremental_sync     one-file edit + commit, `tracedecay sync` -> the NEW
-                         generation is "current" (wall + seal->activation)
+    incremental_sync     three consecutive one-file edits + commits, each
+                         `tracedecay sync` -> its NEW generation is "current"
+                         (wall + seal->activation + physical store growth)
     daemon_restart       SIGTERM -> exit, respawn -> freshness "current"
                          again over the populated store (activation/replay
                          cost on startup)
@@ -99,11 +100,13 @@ DEFAULT_FIXTURE = REPO_ROOT / "benchmark_data" / "index-bench" / "corpus"
 
 # Pinned edit target for the incremental-sync phase (must exist in the fixture).
 TOUCH_FILE = Path("rust") / "watermark_010.rs"
-TOUCH_APPEND = (
-    "\n/// Scorecard incremental-sync probe appended by efficiency-scorecard.py.\n"
-    "pub fn scorecard_incremental_probe(seed: u64) -> u64 {\n"
-    "    seed.wrapping_mul(2654435761).wrapping_add(40503)\n"
+TOUCH_APPENDS = tuple(
+    "\n/// Scorecard incremental-sync probe "
+    f"{edit} appended by efficiency-scorecard.py.\n"
+    f"pub fn scorecard_incremental_probe_{edit}(seed: u64) -> u64 {{\n"
+    f"    seed.wrapping_mul(2654435761).wrapping_add({40502 + edit})\n"
     "}\n"
+    for edit in range(1, 4)
 )
 
 # Pinned tool-call battery. Sample i of a tool uses queries[i % len(queries)].
@@ -702,37 +705,50 @@ def run_scenario(
         touch_path = sandbox.project / TOUCH_FILE
         if not touch_path.is_file():
             raise PhaseFailure("incremental_sync", f"pinned touch file missing: {TOUCH_FILE}")
-        with touch_path.open("a", encoding="utf-8") as handle:
-            handle.write(TOUCH_APPEND)
-        sandbox.git("add", "-A")
-        sandbox.git("commit", "-q", "-m", "scorecard incremental probe")
-        probe_commit = sandbox.head_commit()
-        sync_started = time.monotonic()
-        sync = sandbox.run_cli("sync", timeout=SYNC_DEADLINE)
-        if sync.returncode != 0:
-            raise PhaseFailure("incremental_sync", f"sync failed: {sync.stderr.strip()[:400]}")
-        sync_returned = time.monotonic() - sync_started
+        incremental_edits: dict[str, dict] = {}
+        prior_generation = cold_generation
+        for edit, append in enumerate(TOUCH_APPENDS, start=1):
+            with touch_path.open("a", encoding="utf-8") as handle:
+                handle.write(append)
+            sandbox.git("add", "-A")
+            sandbox.git("commit", "-q", "-m", f"scorecard incremental probe {edit}")
+            probe_commit = sandbox.head_commit()
+            sync_started = time.monotonic()
+            sync = sandbox.run_cli("sync", timeout=SYNC_DEADLINE)
+            if sync.returncode != 0:
+                raise PhaseFailure(
+                    "incremental_sync",
+                    f"edit {edit} sync failed: {sync.stderr.strip()[:400]}",
+                )
+            sync_returned = time.monotonic() - sync_started
 
-        def new_generation_current(payload: dict) -> bool:
-            # The new generation must be serving AND belong to the probe
-            # commit, so a spurious same-content reconcile cannot satisfy the
-            # wait early.
-            return (
-                freshness_current(payload)
-                and latest_generation(payload) != cold_generation
-                and source_revision(payload) == probe_commit
+            def new_generation_current(payload: dict) -> bool:
+                # Every edit must advance the serving generation and bind the
+                # exact probe commit; a prior successful edit cannot satisfy
+                # a later wait.
+                return (
+                    freshness_current(payload)
+                    and latest_generation(payload) != prior_generation
+                    and source_revision(payload) == probe_commit
+                )
+
+            wall, payload, observed_at = wait_for(
+                sandbox,
+                "incremental_sync",
+                SYNC_DEADLINE - sync_returned,
+                new_generation_current,
             )
-
-        wall, payload, observed_at = wait_for(
-            sandbox, "incremental_sync", SYNC_DEADLINE - sync_returned, new_generation_current
-        )
-        run["incremental_sync"] = {
-            "wall_seconds": round(sync_returned + wall, 3),
-            "sync_returned_seconds": round(sync_returned, 3),
-            "seal_to_activation_seconds": seal_to_activation_seconds(payload, observed_at),
-            "generation_id": latest_generation(payload),
-            "store": store_measurements(sandbox),
-        }
+            prior_generation = latest_generation(payload)
+            incremental_edits[f"edit_{edit}"] = {
+                "wall_seconds": round(sync_returned + wall, 3),
+                "sync_returned_seconds": round(sync_returned, 3),
+                "seal_to_activation_seconds": seal_to_activation_seconds(payload, observed_at),
+                "generation_id": prior_generation,
+                "source_revision": probe_commit,
+                "store": store_measurements(sandbox),
+            }
+        run["incremental_sync"] = dict(incremental_edits["edit_1"])
+        run["incremental_sync"]["edits"] = incremental_edits
 
         # ── daemon_restart (populated store -> serving again) ────────────
         sampler.set_phase("daemon_restart")
@@ -834,8 +850,10 @@ def human_summary(scorecard: dict) -> str:
     row("cold index → freshness current", "cold_index.wall_seconds")
     row("cold index seal → activation", "cold_index.seal_to_activation_seconds")
     row("cold index daemon build elapsed", "cold_index.daemon_build_elapsed_seconds")
-    row("incremental sync (1-file) → new generation current", "incremental_sync.wall_seconds")
-    row("incremental sync seal → activation", "incremental_sync.seal_to_activation_seconds")
+    for edit in range(1, 4):
+        prefix = f"incremental_sync.edits.edit_{edit}"
+        row(f"incremental sync edit {edit} → new generation current", f"{prefix}.wall_seconds")
+        row(f"incremental sync edit {edit} seal → activation", f"{prefix}.seal_to_activation_seconds")
     row("daemon restart → serving (populated store)", "daemon_restart.spawn_to_current_seconds")
     lines.append("| | |")
     for tool in ("search", "grep", "context", "status", "memory_recall"):
@@ -861,11 +879,12 @@ def human_summary(scorecard: dict) -> str:
         "incremental_sync.store.generation_segment_bytes",
         "B",
     )
-    row(
-        "physical generation growth for 1-file edit",
-        "incremental_sync.store.generation_physical_growth_bytes",
-        "B",
-    )
+    for edit in range(1, 4):
+        row(
+            f"physical generation growth for 1-file edit {edit}",
+            f"incremental_sync.edits.edit_{edit}.store.generation_physical_growth_bytes",
+            "B",
+        )
     row(
         "text-artifact pool after sync",
         "incremental_sync.store.text_artifact_pool_bytes",
@@ -891,38 +910,36 @@ def flatten_store_bytes(run: dict) -> None:
     identity), so the medians use totals and the largest single generation
     rather than digest-keyed entries.
     """
-    for section in ("cold_index", "incremental_sync"):
-        stores = ((run.get(section) or {}).get("store") or {}).get("project_stores") or []
+    measured_sections = [run.get("cold_index") or {}]
+    incremental = run.get("incremental_sync") or {}
+    edits = incremental.get("edits") or {}
+    measured_sections.extend(edits.get(f"edit_{edit}") or {} for edit in range(1, 4))
+    prior_physical = None
+    for section in measured_sections:
+        stores = (section.get("store") or {}).get("project_stores") or []
         if stores:
             payloads = stores[0]["generation_payload_bytes"]
-            run[section]["store"]["project_stores_db_bytes"] = stores[0]["db_bytes"]
-            run[section]["store"]["project_stores_wal_bytes"] = stores[0]["wal_bytes"]
-            run[section]["store"]["project_stores_tree_bytes"] = stores[0]["store_tree_bytes"]
-            run[section]["store"]["generation_count"] = stores[0]["generation_count"]
-            run[section]["store"]["generation_payload_total_bytes"] = sum(payloads.values())
-            run[section]["store"]["generation_payload_max_bytes"] = (
+            store = section["store"]
+            store["project_stores_db_bytes"] = stores[0]["db_bytes"]
+            store["project_stores_wal_bytes"] = stores[0]["wal_bytes"]
+            store["project_stores_tree_bytes"] = stores[0]["store_tree_bytes"]
+            store["generation_count"] = stores[0]["generation_count"]
+            store["generation_payload_total_bytes"] = sum(payloads.values())
+            store["generation_payload_max_bytes"] = (
                 max(payloads.values()) if payloads else 0
             )
-            run[section]["store"]["generation_segment_bytes"] = stores[0][
-                "generation_segment_bytes"
-            ]
-            run[section]["store"]["generation_physical_bytes"] = (
-                run[section]["store"]["generation_payload_total_bytes"]
-                + run[section]["store"]["generation_segment_bytes"]
+            store["generation_segment_bytes"] = stores[0]["generation_segment_bytes"]
+            store["generation_physical_bytes"] = (
+                store["generation_payload_total_bytes"] + store["generation_segment_bytes"]
             )
-            run[section]["store"]["text_artifact_pool_bytes"] = stores[0][
-                "code_index_children_bytes"
-            ].get("code-text-artifacts-v1", 0)
-    cold = ((run.get("cold_index") or {}).get("store") or {}).get(
-        "generation_physical_bytes"
-    )
-    incremental = ((run.get("incremental_sync") or {}).get("store") or {}).get(
-        "generation_physical_bytes"
-    )
-    if isinstance(cold, int) and isinstance(incremental, int):
-        run["incremental_sync"]["store"]["generation_physical_growth_bytes"] = max(
-            0, incremental - cold
-        )
+            store["text_artifact_pool_bytes"] = stores[0]["code_index_children_bytes"].get(
+                "code-text-artifacts-v1", 0
+            )
+            if isinstance(prior_physical, int):
+                store["generation_physical_growth_bytes"] = max(
+                    0, store["generation_physical_bytes"] - prior_physical
+                )
+            prior_physical = store["generation_physical_bytes"]
 
 
 def build_binary() -> Path:
