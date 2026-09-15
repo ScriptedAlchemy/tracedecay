@@ -87,7 +87,10 @@ impl ProductionCodeIndexQueryOwnersV1 {
             );
             work_exhausted |= read.work_exhausted;
             report_continuation = Some(candidate.continuation);
-            let match_class = similar_match_class(candidate.key.class);
+            let match_class = match candidate.key.class {
+                CloneNormalizationClassV1::Conservative => SimilarMatchClassV1::ConservativeExact,
+                CloneNormalizationClassV1::Rename => SimilarMatchClassV1::RenameNormalizedExact,
+            };
             let next_cursor = read
                 .next_cursor
                 .as_ref()
@@ -114,35 +117,14 @@ impl ProductionCodeIndexQueryOwnersV1 {
             }
         }
         let source_generation = self.hydration.metadata().generation.clone();
-        let (coverage, next_cursor) = if work_exhausted
-            || (family_page_limit < request.family_limit && page_continuation.is_some())
-        {
-            (
-                RedundancyCoverageV1::Partial {
-                    reason: RedundancyPartialReasonV1::WorkLimit,
-                    examined_families,
-                    examined_members,
-                },
-                report_continuation,
-            )
-        } else if page_continuation.is_some() {
-            (
-                RedundancyCoverageV1::Partial {
-                    reason: RedundancyPartialReasonV1::FamilyLimit,
-                    examined_families,
-                    examined_members,
-                },
-                page_continuation,
-            )
-        } else {
-            (
-                RedundancyCoverageV1::Complete {
-                    examined_families,
-                    examined_members,
-                },
-                None,
-            )
-        };
+        let (coverage, next_cursor) = redundancy_coverage(
+            work_exhausted,
+            family_page_limit < request.family_limit,
+            page_continuation,
+            report_continuation,
+            examined_families,
+            examined_members,
+        );
         Ok(RedundancyResultV1 {
             source_generation,
             ranked_by: RedundancyRankingV1::ReviewableSourceBytes,
@@ -262,9 +244,39 @@ fn similar_occurrence(
     }
 }
 
-fn similar_match_class(class: CloneNormalizationClassV1) -> SimilarMatchClassV1 {
-    match class {
-        CloneNormalizationClassV1::Conservative => SimilarMatchClassV1::ConservativeExact,
-        CloneNormalizationClassV1::Rename => SimilarMatchClassV1::RenameNormalizedExact,
+fn redundancy_coverage(
+    work_exhausted: bool,
+    family_budget_limited: bool,
+    page_continuation: Option<String>,
+    report_continuation: Option<String>,
+    examined_families: usize,
+    examined_members: usize,
+) -> (RedundancyCoverageV1, Option<String>) {
+    if work_exhausted || (family_budget_limited && page_continuation.is_some()) {
+        (
+            RedundancyCoverageV1::Partial {
+                reason: RedundancyPartialReasonV1::WorkLimit,
+                examined_families,
+                examined_members,
+            },
+            report_continuation,
+        )
+    } else if page_continuation.is_some() {
+        (
+            RedundancyCoverageV1::Partial {
+                reason: RedundancyPartialReasonV1::FamilyLimit,
+                examined_families,
+                examined_members,
+            },
+            page_continuation,
+        )
+    } else {
+        (
+            RedundancyCoverageV1::Complete {
+                examined_families,
+                examined_members,
+            },
+            None,
+        )
     }
 }
