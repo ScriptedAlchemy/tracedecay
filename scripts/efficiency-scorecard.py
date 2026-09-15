@@ -32,8 +32,10 @@ binary. The operator's daemon, profile, and stores are never touched.
     tool_calls           p50/p95/max of `tool` CLI round-trips: search, grep,
                          context, status, fact_store_search (memory recall);
                          N samples per tool after fixed warm-up
-    incremental_sync     one-file edit + commit, `tracedecay sync` -> the NEW
-                         generation is "current" (wall + seal->activation)
+    incremental_sync     each consecutive one-file edit + commit followed by
+                         `tracedecay sync` -> the NEW generation is "current"
+                         (wall + seal->activation); `--incremental-edits`
+                         controls the sequence length
     daemon_restart       SIGTERM -> exit, respawn -> freshness "current"
                          again over the populated store (activation/replay
                          cost on startup)
@@ -645,7 +647,12 @@ def tool_battery(sandbox: Sandbox, samples: int) -> dict:
 
 
 def run_scenario(
-    binary: Path, fixture: Path, tool_samples: int, keep_sandbox: bool, sampler: RssSampler
+    binary: Path,
+    fixture: Path,
+    tool_samples: int,
+    incremental_edits: int,
+    keep_sandbox: bool,
+    sampler: RssSampler,
 ) -> dict:
     sandbox = Sandbox(binary=binary, fixture=fixture, keep=keep_sandbox)
     sandbox.on_spawn = sampler.set_pid
@@ -698,41 +705,52 @@ def run_scenario(
         run["tool_calls"] = tool_battery(sandbox, tool_samples)
 
         # ── incremental_sync ─────────────────────────────────────────────
-        sampler.set_phase("incremental_sync")
         touch_path = sandbox.project / TOUCH_FILE
         if not touch_path.is_file():
             raise PhaseFailure("incremental_sync", f"pinned touch file missing: {TOUCH_FILE}")
-        with touch_path.open("a", encoding="utf-8") as handle:
-            handle.write(TOUCH_APPEND)
-        sandbox.git("add", "-A")
-        sandbox.git("commit", "-q", "-m", "scorecard incremental probe")
-        probe_commit = sandbox.head_commit()
-        sync_started = time.monotonic()
-        sync = sandbox.run_cli("sync", timeout=SYNC_DEADLINE)
-        if sync.returncode != 0:
-            raise PhaseFailure("incremental_sync", f"sync failed: {sync.stderr.strip()[:400]}")
-        sync_returned = time.monotonic() - sync_started
-
-        def new_generation_current(payload: dict) -> bool:
-            # The new generation must be serving AND belong to the probe
-            # commit, so a spurious same-content reconcile cannot satisfy the
-            # wait early.
-            return (
-                freshness_current(payload)
-                and latest_generation(payload) != cold_generation
-                and source_revision(payload) == probe_commit
+        prior_generation = cold_generation
+        for edit_number in range(1, incremental_edits + 1):
+            phase = "incremental_sync" if edit_number == 1 else f"incremental_sync_{edit_number}"
+            sampler.set_phase(phase)
+            append = (
+                TOUCH_APPEND
+                if edit_number == 1
+                else TOUCH_APPEND.replace(
+                    "scorecard_incremental_probe",
+                    f"scorecard_incremental_probe_{edit_number}",
+                )
             )
+            with touch_path.open("a", encoding="utf-8") as handle:
+                handle.write(append)
+            sandbox.git("add", "-A")
+            sandbox.git("commit", "-q", "-m", f"scorecard incremental probe {edit_number}")
+            probe_commit = sandbox.head_commit()
+            sync_started = time.monotonic()
+            sync = sandbox.run_cli("sync", timeout=SYNC_DEADLINE)
+            if sync.returncode != 0:
+                raise PhaseFailure(phase, f"sync failed: {sync.stderr.strip()[:400]}")
+            sync_returned = time.monotonic() - sync_started
 
-        wall, payload, observed_at = wait_for(
-            sandbox, "incremental_sync", SYNC_DEADLINE - sync_returned, new_generation_current
-        )
-        run["incremental_sync"] = {
-            "wall_seconds": round(sync_returned + wall, 3),
-            "sync_returned_seconds": round(sync_returned, 3),
-            "seal_to_activation_seconds": seal_to_activation_seconds(payload, observed_at),
-            "generation_id": latest_generation(payload),
-            "store": store_measurements(sandbox),
-        }
+            def new_generation_current(payload: dict) -> bool:
+                # The new generation must be serving AND belong to this probe
+                # commit, so a stale prior edit cannot satisfy the wait early.
+                return (
+                    freshness_current(payload)
+                    and latest_generation(payload) != prior_generation
+                    and source_revision(payload) == probe_commit
+                )
+
+            wall, payload, observed_at = wait_for(
+                sandbox, phase, SYNC_DEADLINE - sync_returned, new_generation_current
+            )
+            prior_generation = latest_generation(payload)
+            run[phase] = {
+                "wall_seconds": round(sync_returned + wall, 3),
+                "sync_returned_seconds": round(sync_returned, 3),
+                "seal_to_activation_seconds": seal_to_activation_seconds(payload, observed_at),
+                "generation_id": prior_generation,
+                "store": store_measurements(sandbox),
+            }
 
         # ── daemon_restart (populated store -> serving again) ────────────
         sampler.set_phase("daemon_restart")
@@ -778,15 +796,8 @@ def collect_scalars(run: dict) -> dict[str, float]:
             for key, child in value.items():
                 visit(f"{prefix}.{key}" if prefix else key, child)
 
-    for section in (
-        "daemon_start_empty",
-        "cold_index",
-        "tool_calls",
-        "incremental_sync",
-        "daemon_restart",
-        "rss",
-    ):
-        visit(section, run.get(section))
+    for section, value in run.items():
+        visit(section, value)
     return scalars
 
 
@@ -834,8 +845,17 @@ def human_summary(scorecard: dict) -> str:
     row("cold index → freshness current", "cold_index.wall_seconds")
     row("cold index seal → activation", "cold_index.seal_to_activation_seconds")
     row("cold index daemon build elapsed", "cold_index.daemon_build_elapsed_seconds")
-    row("incremental sync (1-file) → new generation current", "incremental_sync.wall_seconds")
-    row("incremental sync seal → activation", "incremental_sync.seal_to_activation_seconds")
+    incremental_edits = scorecard["settings"]["incremental_edits"]
+    for edit_number in range(1, incremental_edits + 1):
+        section = "incremental_sync" if edit_number == 1 else f"incremental_sync_{edit_number}"
+        row(
+            f"incremental sync {edit_number} (1-file) → new generation current",
+            f"{section}.wall_seconds",
+        )
+        row(
+            f"incremental sync {edit_number} seal → activation",
+            f"{section}.seal_to_activation_seconds",
+        )
     row("daemon restart → serving (populated store)", "daemon_restart.spawn_to_current_seconds")
     lines.append("| | |")
     for tool in ("search", "grep", "context", "status", "memory_recall"):
@@ -845,40 +865,42 @@ def human_summary(scorecard: dict) -> str:
     row("graph symbols after cold index", "cold_index.graph_statistics.symbol_count", "")
     row("graph edges after cold index", "cold_index.graph_statistics.edge_count", "")
     row("store tree after cold index (1 gen)", "cold_index.store.project_stores_tree_bytes", "B")
-    row("store tree after sync (2 gens)", "incremental_sync.store.project_stores_tree_bytes", "B")
+    row("store tree after sync 1 (2 gens)", "incremental_sync.store.project_stores_tree_bytes", "B")
     row(
         "generation payload after cold index",
         "cold_index.store.generation_payload_total_bytes",
         "B",
     )
-    row(
-        "generation payload after sync",
-        "incremental_sync.store.generation_payload_total_bytes",
-        "B",
-    )
-    row(
-        "shared generation segments after sync",
-        "incremental_sync.store.generation_segment_bytes",
-        "B",
-    )
-    row(
-        "physical generation growth for 1-file edit",
-        "incremental_sync.store.generation_physical_growth_bytes",
-        "B",
-    )
+    for edit_number in range(1, incremental_edits + 1):
+        section = "incremental_sync" if edit_number == 1 else f"incremental_sync_{edit_number}"
+        row(
+            f"generation payload after sync {edit_number}",
+            f"{section}.store.generation_payload_total_bytes",
+            "B",
+        )
+        row(
+            f"shared generation segments after sync {edit_number}",
+            f"{section}.store.generation_segment_bytes",
+            "B",
+        )
+        row(
+            f"physical generation growth for 1-file edit {edit_number}",
+            f"{section}.store.generation_physical_growth_bytes",
+            "B",
+        )
     row(
         "text-artifact pool after sync",
         "incremental_sync.store.text_artifact_pool_bytes",
         "B",
     )
     row("store WAL after sync", "incremental_sync.store.project_stores_wal_bytes", "B")
-    for phase in (
-        "daemon_start_empty",
-        "cold_index",
-        "tool_calls",
-        "incremental_sync",
-        "daemon_restart",
-    ):
+    phases = ["daemon_start_empty", "cold_index", "tool_calls"]
+    phases.extend(
+        "incremental_sync" if edit_number == 1 else f"incremental_sync_{edit_number}"
+        for edit_number in range(1, incremental_edits + 1)
+    )
+    phases.append("daemon_restart")
+    for phase in phases:
         row(f"peak daemon RSS — {phase}", f"rss.peak_bytes.{phase}", "B")
     lines.append("")
     return "\n".join(lines)
@@ -891,7 +913,15 @@ def flatten_store_bytes(run: dict) -> None:
     identity), so the medians use totals and the largest single generation
     rather than digest-keyed entries.
     """
-    for section in ("cold_index", "incremental_sync"):
+    incremental_sections = sorted(
+        (
+            key
+            for key in run
+            if key == "incremental_sync" or re.fullmatch(r"incremental_sync_[2-9][0-9]*", key)
+        ),
+        key=lambda key: 1 if key == "incremental_sync" else int(key.rsplit("_", 1)[1]),
+    )
+    for section in ("cold_index", *incremental_sections):
         stores = ((run.get(section) or {}).get("store") or {}).get("project_stores") or []
         if stores:
             payloads = stores[0]["generation_payload_bytes"]
@@ -913,16 +943,16 @@ def flatten_store_bytes(run: dict) -> None:
             run[section]["store"]["text_artifact_pool_bytes"] = stores[0][
                 "code_index_children_bytes"
             ].get("code-text-artifacts-v1", 0)
-    cold = ((run.get("cold_index") or {}).get("store") or {}).get(
+    previous = ((run.get("cold_index") or {}).get("store") or {}).get(
         "generation_physical_bytes"
     )
-    incremental = ((run.get("incremental_sync") or {}).get("store") or {}).get(
-        "generation_physical_bytes"
-    )
-    if isinstance(cold, int) and isinstance(incremental, int):
-        run["incremental_sync"]["store"]["generation_physical_growth_bytes"] = max(
-            0, incremental - cold
+    for section in incremental_sections:
+        current = ((run.get(section) or {}).get("store") or {}).get(
+            "generation_physical_bytes"
         )
+        if isinstance(previous, int) and isinstance(current, int):
+            run[section]["store"]["generation_physical_growth_bytes"] = max(0, current - previous)
+        previous = current
 
 
 def build_binary() -> Path:
@@ -975,6 +1005,12 @@ def main() -> int:
         "--tool-samples", type=int, default=25, help="timed samples per tool per run (default 25)"
     )
     parser.add_argument(
+        "--incremental-edits",
+        type=int,
+        default=1,
+        help="consecutive one-file edit/sync phases per run (default 1)",
+    )
+    parser.add_argument(
         "--fixture", default=str(DEFAULT_FIXTURE), help="pinned fixture corpus directory"
     )
     parser.add_argument("--label", default="", help="free-form label recorded in the scorecard")
@@ -987,8 +1023,8 @@ def main() -> int:
     if args.quick:
         args.runs = 1
         args.tool_samples = 8
-    if args.runs < 1 or args.tool_samples < 1:
-        raise HarnessError("--runs and --tool-samples must be positive")
+    if args.runs < 1 or args.tool_samples < 1 or args.incremental_edits < 1:
+        raise HarnessError("--runs, --tool-samples, and --incremental-edits must be positive")
 
     fixture = Path(args.fixture).resolve()
     if not fixture.is_dir():
@@ -1027,6 +1063,7 @@ def main() -> int:
         "settings": {
             "runs": args.runs,
             "tool_samples_per_run": args.tool_samples,
+            "incremental_edits": args.incremental_edits,
             "warmup_calls_per_tool": 2,
             "poll_interval_seconds": POLL_INTERVAL_SECONDS,
             "search_queries": list(SEARCH_QUERIES),
@@ -1041,7 +1078,14 @@ def main() -> int:
     for index in range(args.runs):
         print(f"scorecard: run {index + 1}/{args.runs}", file=sys.stderr)
         sampler = RssSampler()
-        run = run_scenario(binary, fixture, args.tool_samples, args.keep_sandbox, sampler)
+        run = run_scenario(
+            binary,
+            fixture,
+            args.tool_samples,
+            args.incremental_edits,
+            args.keep_sandbox,
+            sampler,
+        )
         peaks, hwm = sampler.finish()
         run["rss"] = {"peak_bytes": peaks, "vmhwm_bytes_at_phase_end": hwm}
         flatten_store_bytes(run)
