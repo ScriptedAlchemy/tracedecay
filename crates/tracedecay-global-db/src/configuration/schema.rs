@@ -13,6 +13,10 @@ pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const CONFIGURATION_FORMAT_REVISION: i64 = 1;
 const FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
     "sha256:14cfab8b33e57816605c7275e7f3140d6755c933a84239b1608dbdf653b56a1b";
+/// Tip shape that already retired credential references but still carried the
+/// semantic-retrieval state tables. Converges by dropping those tables only.
+const PRIOR_FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
+    "sha256:c79fac916ce535c2b90bd46af0fec9dcd80bdb85ae7e226879dd6eb765e6ca63";
 /// The configuration shape every release from v0.1.0-beta.25 through
 /// v0.1.0-beta.37 published. It includes the inert credential-reference table
 /// and the retired semantic-retrieval state tables.
@@ -20,6 +24,11 @@ const RELEASED_CONFIGURATION_SCHEMA_DIGEST: &str =
     "sha256:99b8f5f5cebc584ab564181d8a67ee665031c20bbdf63b479c212d16a1c63746";
 const CONVERGE_RELEASED_CONFIGURATION_SQL: &str = "
 DROP TABLE configuration_credential_references;
+DROP TABLE configuration_semantic_retrieval_state_v1;
+DROP TABLE configuration_semantic_retrieval_pending_v1;
+DROP TABLE configuration_semantic_retrieval_inventory_v1;
+";
+const CONVERGE_PRIOR_FINAL_CONFIGURATION_SQL: &str = "
 DROP TABLE configuration_semantic_retrieval_state_v1;
 DROP TABLE configuration_semantic_retrieval_pending_v1;
 DROP TABLE configuration_semantic_retrieval_inventory_v1;
@@ -419,6 +428,8 @@ END;
 enum ConfigurationShape {
     Absent,
     Final,
+    /// Tip shape after credential retirement, before semantic-table retirement.
+    PriorFinal,
     /// The exact shape shipped by beta.25 through beta.37.
     Released,
 }
@@ -431,6 +442,8 @@ async fn validate_configuration_schema(
     };
     let shape = if definition_digest == FINAL_CONFIGURATION_SCHEMA_DIGEST {
         ConfigurationShape::Final
+    } else if definition_digest == PRIOR_FINAL_CONFIGURATION_SCHEMA_DIGEST {
+        ConfigurationShape::PriorFinal
     } else if definition_digest == RELEASED_CONFIGURATION_SCHEMA_DIGEST {
         ConfigurationShape::Released
     } else {
@@ -461,14 +474,16 @@ async fn validate_configuration_schema(
     Ok(shape)
 }
 
-/// Read-only admission: the final shape and the shipped shape are both
-/// admissible; the writer converges the shipped one on its next open.
+/// Read-only admission: the final shape and convergeable prior shapes are
+/// admissible; the writer converges prior shapes on its next open.
 pub async fn admit_configuration_schema(
     connection: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
 ) -> Result<(), ConfigurationSchemaError> {
     match validate_configuration_schema(connection).await? {
-        ConfigurationShape::Final | ConfigurationShape::Released => Ok(()),
+        ConfigurationShape::Final
+        | ConfigurationShape::PriorFinal
+        | ConfigurationShape::Released => Ok(()),
         ConfigurationShape::Absent if fresh_store.is_some() => Ok(()),
         ConfigurationShape::Absent => Err(ConfigurationSchemaError::ResetRequired {
             reason: "configuration schema is missing from a non-fresh registered store",
@@ -482,6 +497,9 @@ pub async fn ensure_configuration_schema(
 ) -> Result<(), ConfigurationSchemaError> {
     match validate_configuration_schema(connection).await? {
         ConfigurationShape::Final => return Ok(()),
+        ConfigurationShape::PriorFinal => {
+            return converge_prior_final_configuration(connection).await;
+        }
         ConfigurationShape::Released => {
             return converge_released_configuration(connection).await;
         }
@@ -532,6 +550,23 @@ async fn converge_released_configuration(
     } else {
         Err(ConfigurationSchemaError::ResetRequired {
             reason: "released configuration store did not converge to the final shape",
+        })
+    }
+}
+
+/// Converges a tip store that already dropped credential references but still
+/// carries retired semantic-retrieval tables.
+async fn converge_prior_final_configuration(
+    connection: &impl Executor,
+) -> Result<(), ConfigurationSchemaError> {
+    connection
+        .execute_batch(CONVERGE_PRIOR_FINAL_CONFIGURATION_SQL)
+        .await?;
+    if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
+        Ok(())
+    } else {
+        Err(ConfigurationSchemaError::ResetRequired {
+            reason: "prior-final configuration store did not converge to the final shape",
         })
     }
 }
