@@ -52,11 +52,10 @@ use tracedecay_query::retrieval::exact::{
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneArtifactCursorPositionV1,
-    CloneFingerprintCancellationPointV1, CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1,
-    CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1,
-    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
-    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneFingerprintCancellationPointV1,
+    CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
+    CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
@@ -2271,19 +2270,42 @@ fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
         .last()
         .expect("at least one completed candidate");
     let cursor = read.page.next_cursor.expect("partial read cursor");
-    let CloneArtifactCursorPositionV1::Fingerprint {
-        body_digest,
-        payload_digest,
-    } = cursor.after
-    else {
-        panic!("fingerprint read emitted an exact cursor");
-    };
-    assert_eq!(
-        (&body_digest, &payload_digest),
+    let mut ordered_candidates = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .filter(|body| {
+            body.occurrence.symbol_occurrence_id != source.occurrence.symbol_occurrence_id
+        })
+        .collect::<Vec<_>>();
+    ordered_candidates.sort_by_key(|body| {
         (
-            &last_completed.payload.body_digest,
-            &last_completed.payload.payload_digest,
-        ),
+            body.payload.body_digest.clone(),
+            body.payload.payload_digest.clone(),
+        )
+    });
+    let completed_index = ordered_candidates
+        .iter()
+        .position(|body| body.payload.payload_digest == last_completed.payload.payload_digest)
+        .expect("completed candidate is in the ordered fixture");
+    let expected_resumed = ordered_candidates
+        .get(completed_index + 1)
+        .expect("unfinished candidate remains after the completed candidate");
+    let resumed = reader
+        .clone_fingerprint_page(
+            &source.occurrence,
+            &source.payload,
+            Some(&cursor),
+            256,
+            &ArtifactControl { cancelled: false },
+        )
+        .expect("resume bounded fingerprint read");
+    let first_resumed = resumed
+        .page
+        .members
+        .first()
+        .expect("resume retries the unfinished candidate");
+    assert_eq!(
+        first_resumed.payload.payload_digest, expected_resumed.payload.payload_digest,
         "the unfinished candidate must remain behind the continuation cursor"
     );
 }
