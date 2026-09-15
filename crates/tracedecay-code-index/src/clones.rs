@@ -774,18 +774,38 @@ fn chain_clone_anchors<F: FnMut() -> bool>(
     anchors: &[CloneTokenAnchorV1],
     meter: &mut CloneAlignmentWorkMeterV1<F>,
 ) -> Result<Vec<CloneTokenAnchorV1>, CloneAlignmentStoppedV1> {
-    let mut anchors = anchors
-        .iter()
-        .copied()
-        .filter(|anchor| {
-            verify_clone_token_anchor(
-                left,
-                anchor.left_token_position,
-                right,
-                anchor.right_token_position,
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut verified_anchors = Vec::with_capacity(anchors.len());
+    for anchor in anchors {
+        meter.tick()?;
+        let Some(left) = usize::try_from(anchor.left_token_position)
+            .ok()
+            .and_then(|position| {
+                left.get(position..position.saturating_add(CLONE_FINGERPRINT_K_V1))
+            })
+        else {
+            continue;
+        };
+        let Some(right) = usize::try_from(anchor.right_token_position)
+            .ok()
+            .and_then(|position| {
+                right.get(position..position.saturating_add(CLONE_FINGERPRINT_K_V1))
+            })
+        else {
+            continue;
+        };
+        let mut matches = true;
+        for (left, right) in left.iter().zip(right) {
+            meter.tick()?;
+            if left != right {
+                matches = false;
+                break;
+            }
+        }
+        if matches {
+            verified_anchors.push(*anchor);
+        }
+    }
+    let mut anchors = verified_anchors;
     anchors.sort_unstable_by_key(|anchor| {
         (
             anchor.left_token_position,
@@ -1317,5 +1337,30 @@ mod fingerprint_tests {
             .expect_err("alignment observes caller cancellation");
         assert_eq!(interrupted.reason, CloneAlignmentStopReasonV1::Interrupted);
         assert_eq!(interrupted.work, 1);
+    }
+
+    #[test]
+    fn anchor_validation_consumes_alignment_work_budget() {
+        let body = tokens("shared", CLONE_FINGERPRINT_K_V1);
+        let anchors = [CloneTokenAnchorV1 {
+            fingerprint: 1,
+            left_token_position: 0,
+            right_token_position: 0,
+        }];
+
+        let stopped = align_clone_tokens(
+            &body,
+            &body,
+            &anchors,
+            (CLONE_FINGERPRINT_K_V1 - 1) as u64,
+            || false,
+        )
+        .expect_err("anchor token comparisons must consume the work budget");
+
+        assert_eq!(
+            stopped.reason,
+            CloneAlignmentStopReasonV1::WorkBudgetExhausted
+        );
+        assert_eq!(stopped.work, (CLONE_FINGERPRINT_K_V1 - 1) as u64);
     }
 }
