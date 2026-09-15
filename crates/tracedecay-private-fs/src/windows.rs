@@ -43,6 +43,8 @@ const SECURITY_ACCESS: u32 = READ_CONTROL | FILE_READ_ATTRIBUTES;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const SHARE_READ_WRITE_DELETE: u32 = SHARE_READ_WRITE | FILE_SHARE_DELETE;
 const SECURE_OPEN_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
+const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
+const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
 
 #[derive(Clone, Copy, Debug)]
 enum PathKind {
@@ -296,9 +298,6 @@ pub fn create_private_file_retained(
 /// Atomically replace one sibling file with another through exact file and
 /// parent-directory handles, returning the exact published file handle.
 pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<File> {
-    const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
-    const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
-
     let source = absolute_security_path(source)?;
     let destination = absolute_security_path(destination)?;
     if source == destination {
@@ -313,12 +312,12 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
             "Windows replacement source must have a basename",
         ));
     }
-    let destination_name = destination.file_name().ok_or_else(|| {
-        io::Error::new(
+    if destination.file_name().is_none() {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Windows replacement destination must have a basename",
-        )
-    })?;
+        ));
+    }
     let source_parent = source.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -357,51 +356,11 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
     validate_file_kind(&source_file, &source, PathKind::File)?;
     source_file.sync_all()?;
 
-    let destination_name = destination_name.encode_wide().collect::<Vec<_>>();
-    if destination_name.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Windows replacement destination basename contains a NUL",
-        ));
-    }
-    let filename_offset = offset_of!(FILE_RENAME_INFO, FileName);
-    let filename_bytes = destination_name
-        .len()
-        .checked_mul(size_of::<u16>())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
-    let payload_size = filename_offset
-        .checked_add(filename_bytes)
-        .and_then(|size| size.checked_add(size_of::<u16>()))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
-    let buffer_size: u32 = payload_size
-        .max(size_of::<FILE_RENAME_INFO>())
-        .try_into()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
-    let word_count = (buffer_size as usize).div_ceil(size_of::<usize>());
-    let mut storage = vec![0_usize; word_count];
-    let rename_info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    let mut header = FILE_RENAME_INFO::default();
-    header.Anonymous.Flags = FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS;
-    header.RootDirectory = parent.as_raw_handle();
-    header.FileNameLength = filename_bytes as u32;
-    // SAFETY: `storage` is pointer-aligned and sized for the fixed header plus
-    // every UTF-16 code unit plus the zero-initialized terminator required by
-    // FILE_RENAME_INFO::FileName. `FileNameLength` excludes that terminator.
-    unsafe {
-        rename_info.write(header);
-        copy_nonoverlapping(
-            destination_name.as_ptr(),
-            storage
-                .as_mut_ptr()
-                .cast::<u8>()
-                .add(filename_offset)
-                .cast::<u16>(),
-            destination_name.len(),
-        );
-    }
+    let (storage, buffer_size) = posix_rename_payload(&destination)?;
 
-    // SAFETY: both handles remain live, the source has DELETE access, and the
-    // aligned buffer contains a complete FILE_RENAME_INFO_EX payload.
+    // SAFETY: the source handle stays live with DELETE access, the parent and
+    // ancestor handles pin the destination directory, and `storage` is a
+    // complete FILE_RENAME_INFO_EX payload.
     if unsafe {
         SetFileInformationByHandle(
             source_file.as_raw_handle(),
@@ -413,8 +372,70 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
     {
         return Err(io::Error::last_os_error());
     }
+    drop(parent);
     drop(ancestor_handles);
     Ok(source_file)
+}
+
+/// `FileRenameInfoEx` payload for a same-volume POSIX replace.
+///
+/// `SetFileInformationByHandle` returns `ERROR_INVALID_PARAMETER` (87) when
+/// `RootDirectory` is a parent handle, even for a same-directory rename.
+/// The documented Win32 payload is a null root plus the absolute destination
+/// path, with `FileNameLength` excluding the terminating NUL.
+fn posix_rename_payload(destination: &Path) -> io::Result<(Vec<usize>, u32)> {
+    let destination_wide = encode_path(destination)?;
+    let filename_units = destination_wide.len().saturating_sub(1);
+    let filename_bytes = filename_units
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows destination path is too long",
+            )
+        })?;
+    let filename_offset = offset_of!(FILE_RENAME_INFO, FileName);
+    let payload_size = filename_offset
+        .checked_add(filename_bytes)
+        .and_then(|size| size.checked_add(size_of::<u16>()))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows destination path is too long",
+            )
+        })?;
+    let buffer_size: u32 = payload_size
+        .max(size_of::<FILE_RENAME_INFO>())
+        .try_into()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows destination path is too long",
+            )
+        })?;
+    let word_count = (buffer_size as usize).div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; word_count];
+    let rename_info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let mut header = FILE_RENAME_INFO::default();
+    header.Anonymous.Flags = FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS;
+    header.RootDirectory = null_mut();
+    header.FileNameLength = filename_bytes as u32;
+    // SAFETY: `storage` is pointer-aligned and sized for the fixed header plus
+    // every UTF-16 code unit including the terminator `encode_path` appends.
+    // `FileNameLength` excludes that terminator.
+    unsafe {
+        rename_info.write(header);
+        copy_nonoverlapping(
+            destination_wide.as_ptr(),
+            storage
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(filename_offset)
+                .cast::<u16>(),
+            destination_wide.len(),
+        );
+    }
+    Ok((storage, buffer_size))
 }
 
 /// Returns bytes available to the current user at `path` (quota-aware).
@@ -1016,6 +1037,40 @@ mod tests {
         );
         assert_eq!(size_of::<FILE_RENAME_INFO>(), expected_size);
         assert_eq!(FileRenameInfoEx, 22);
+    }
+
+    #[test]
+    fn posix_rename_payload_uses_a_null_root_and_the_absolute_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = absolute_security_path(&temp.path().join("record")).unwrap();
+        let (storage, buffer_size) = posix_rename_payload(&destination).unwrap();
+        assert!(buffer_size as usize >= size_of::<FILE_RENAME_INFO>());
+        let info = unsafe { &*storage.as_ptr().cast::<FILE_RENAME_INFO>() };
+        assert!(
+            info.RootDirectory.is_null(),
+            "FileRenameInfoEx rejects a parent RootDirectory with ERROR_INVALID_PARAMETER"
+        );
+        let flags = unsafe { info.Anonymous.Flags };
+        assert_eq!(
+            flags,
+            FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS
+        );
+        let expected = encode_path(&destination).unwrap();
+        assert_eq!(
+            info.FileNameLength as usize,
+            (expected.len() - 1) * size_of::<u16>()
+        );
+        let name = unsafe {
+            std::slice::from_raw_parts(
+                storage
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset_of!(FILE_RENAME_INFO, FileName))
+                    .cast::<u16>(),
+                expected.len(),
+            )
+        };
+        assert_eq!(name, expected.as_slice());
     }
 
     fn snapshot(path: &Path, kind: PathKind) -> SecuritySnapshot {
