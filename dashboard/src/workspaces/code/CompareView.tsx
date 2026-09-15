@@ -400,7 +400,7 @@ function FileRegionRow({ region }: { region: RevisionPairFileRegionV1 }) {
     >
       <span className="flex items-center gap-1.5">
         <ChangeMark change={region.change} />
-        <span className="td-legend w-16 shrink-0">{COMPARE_CHANGE_RULES[region.change].label}</span>
+        <span className="td-legend w-20 shrink-0">{COMPARE_CHANGE_RULES[region.change].label}</span>
       </span>
       <SideCell side="base" file={region.base} fallbackPath={path} />
       <SideCell side="head" file={region.head} fallbackPath={path} />
@@ -449,8 +449,8 @@ function SymbolRegionRow({ region }: { region: RevisionPairSymbolRegionV1 }) {
       data-region-change={region.change}
     >
       <ChangeMark change={region.change} />
-      <span className="td-legend w-16 shrink-0">{COMPARE_CHANGE_RULES[region.change].label}</span>
-      <span className="td-legend w-16 shrink-0 truncate max-md:hidden">{shown?.kind ?? '—'}</span>
+      <span className="td-legend w-20 shrink-0">{COMPARE_CHANGE_RULES[region.change].label}</span>
+      <span className="td-legend w-20 shrink-0 truncate max-md:hidden">{shown?.kind ?? '—'}</span>
       <span className="td-value min-w-0 flex-1 truncate text-text-primary" title={shown?.qualified_name}>
         {shown?.qualified_name ?? region.symbol_identity}
       </span>
