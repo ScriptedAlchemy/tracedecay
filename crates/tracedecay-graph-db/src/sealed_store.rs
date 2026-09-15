@@ -33,6 +33,7 @@
 //!   <physical-namespace-hex>/
 //!     generation.grafeo         <- compact single-generation store
 //!     sealed.json               <- receipt binding the recovered digest
+//!     sealed.checked            <- written only after post-reopen proof
 //! ```
 //!
 //! # Sealed-read-bundle integration point
@@ -174,6 +175,9 @@ const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
 const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
+/// Digest recorded only after a successful post-reopen proof. A `sealed.json`
+/// written before that proof is not release authority.
+const SEALED_STORE_CHECKED_FILE: &str = "sealed.checked";
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
 /// The one form a sealed store is built in. Every value TraceDecay persists
@@ -848,10 +852,12 @@ impl GraphDb {
     /// Receipt evidence that `locator`'s on-disk sealed artifact matches
     /// `expected` digest, without opening the sealed engine.
     ///
-    /// Staging-row release is cleanup, not serving: the relational head plus
-    /// this receipt already name the artifact. Opening the engine to prove
-    /// the rows again is the whole-generation recovery that overran one
-    /// maintenance tick. Serving and activation still prove before they read.
+    /// Staging-row release is cleanup, not serving. The relational head plus
+    /// a post-reopen `sealed.checked` digest already name a proven artifact.
+    /// A `sealed.json` written before that proof is not enough: a crash after
+    /// the install rename and before proof would otherwise delete the only
+    /// reconstructable staging rows. Serving and activation still prove
+    /// before they read, and a successful proof persists the check.
     pub(crate) fn matching_sealed_release_receipt(
         &self,
         locator: &GenerationLocator,
@@ -873,6 +879,9 @@ impl GraphDb {
             return Ok(None);
         };
         if !receipt.binds(locator, physical_namespace.as_str(), expected) {
+            return Ok(None);
+        }
+        if !sealed_store_check_matches(&directory, expected)? {
             return Ok(None);
         }
         Ok(Some(SealedReleaseEvidence {
@@ -1723,6 +1732,26 @@ fn load_sealed_store_receipt(
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))
 }
 
+fn sealed_store_check_matches(
+    directory: &Path,
+    expected_digest: &str,
+) -> Result<bool, GraphDbError> {
+    let path = directory.join(SEALED_STORE_CHECKED_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(digest) => Ok(digest == expected_digest),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(sealed_store_io_failure("sealed check read failed", error)),
+    }
+}
+
+fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result<(), GraphDbError> {
+    if sealed_store_check_matches(directory, expected_digest)? {
+        return Ok(());
+    }
+    std::fs::write(directory.join(SEALED_STORE_CHECKED_FILE), expected_digest)
+        .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
+}
+
 fn open_sealed_store_checked(
     directory: &Path,
     identity: &GraphGenerationManifestIdentity,
@@ -1784,6 +1813,10 @@ fn open_sealed_store_checked(
     ) {
         let _ = database.close();
         return Err(sealed_store_failure("post-proof hibernation failed", error));
+    }
+    if let Err(error) = persist_sealed_store_check(directory, expected.as_str()) {
+        let _ = database.close();
+        return Err(error);
     }
     Ok(Some(Arc::new(SealedGenerationStore {
         locator: GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),

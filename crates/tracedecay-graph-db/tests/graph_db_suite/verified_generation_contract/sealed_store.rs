@@ -15,6 +15,18 @@ fn sealed_store_root(root: &Path) -> PathBuf {
 }
 
 /// Every sealed receipt currently on disk, as raw JSON strings.
+fn remove_sealed_checks(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(sealed_store_root(root)) else {
+        return;
+    };
+    for entry in entries.map(Result::unwrap) {
+        let check = entry.path().join("sealed.checked");
+        if check.is_file() {
+            std::fs::remove_file(check).unwrap();
+        }
+    }
+}
+
 fn sealed_receipts(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(sealed_store_root(root)) else {
         return Vec::new();
@@ -456,6 +468,56 @@ fn remounted_release_does_not_reprove_or_rehydrate_the_sealed_generation() {
             .staging_generation_row_counts(&manifest.identity())
             .unwrap(),
         (0, 0)
+    );
+}
+
+/// A crash after `sealed.json` is renamed into place and before the
+/// post-reopen proof persists `sealed.checked`. That receipt must not
+/// authorize deleting the only reconstructable staging rows.
+#[test]
+fn pre_proof_sealed_receipt_does_not_authorize_staging_release() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:pre-proof-receipt", "code");
+    let manifest = rich_manifest(identity, "pre-proof-g1", "pre-proof");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:pre-proof-g1",
+        None,
+        '6',
+    );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
+    publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    remove_sealed_checks(temp.path());
+    assert!(registered.close().unwrap());
+    registered.mount().unwrap();
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::Retained(SealedStagingRetentionReason::NoSealedStore)
+    );
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (2, 1)
     );
 }
 
