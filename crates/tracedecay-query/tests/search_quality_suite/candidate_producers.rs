@@ -24,6 +24,7 @@ use tracedecay_code_index::production::{
     VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
     VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
     VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -57,9 +58,10 @@ use tracedecay_query::retrieval::lexical::{
     CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
-    MAX_LEXICAL_QUERY_TERM_BYTES_V1, VerifiedCodeLexicalArtifactV1,
+    LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1, LexicalSpellingVariantV1,
+    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_FUZZY_TERM_EXPANSIONS_V1,
+    MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
+    VerifiedCodeLexicalArtifactV1,
 };
 use tracedecay_query::retrieval::ports::{
     ExactTermPostingReadPort, LexicalPostingReadPort, RetrievalExecutionControl, RetrievalPortError,
@@ -436,13 +438,18 @@ fn generation_backed_projection(
         .iter()
         .cloned()
         .collect::<Vec<_>>();
-    let symbol_qualified_names = generation
+    let symbol_displays = generation
         .symbols()
         .symbols
         .iter()
-        .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+        .map(|symbol| {
+            (
+                symbol.occurrence.clone(),
+                VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref()),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    CodeLexicalProjectionAdapterV1::new_admitted(metadata, chunks, symbol_qualified_names)
+    CodeLexicalProjectionAdapterV1::new_admitted(metadata, chunks, symbol_displays)
         .expect("generation-backed lexical projection")
 }
 
@@ -617,21 +624,13 @@ fn real_verified_pages_with_maximum_page_chunks(
     (fixture, pages, receipt)
 }
 
-/// The parser-attested qualified name of every symbol the pages carry. The
-/// in-memory projection has no sealed page to read a symbol display from, so
-/// it takes the same authority as a map.
-fn page_symbol_qualified_names(
+fn page_symbol_displays(
     pages: &[VerifiedSealedLexicalPageV1],
-) -> BTreeMap<SymbolOccurrenceId, String> {
+) -> BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1> {
     pages
         .iter()
         .flat_map(|page| page.symbol_displays().iter().flatten())
-        .map(|display| {
-            (
-                display.occurrence().clone(),
-                display.qualified_name().to_owned(),
-            )
-        })
+        .map(|display| (display.occurrence().clone(), display.clone()))
         .collect()
 }
 
@@ -1207,7 +1206,7 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
     let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
         metadata.clone(),
         chunks.clone(),
-        page_symbol_qualified_names(&pages),
+        page_symbol_displays(&pages),
     )
     .expect("one-shot lexical projection");
     let import_evidence = pages
@@ -1642,7 +1641,7 @@ fn lexical_scan_cancellation_unwinds_artifact_and_in_memory_sources_before_compl
         CodeLexicalProjectionAdapterV1::new_admitted(
             metadata.clone(),
             chunks,
-            page_symbol_qualified_names(&pages),
+            page_symbol_displays(&pages),
         )
         .expect("in-memory lexical projection"),
     );
@@ -1814,6 +1813,144 @@ fn extracted_qualified_names_match_in_memory_and_reopened_artifacts() {
 }
 
 #[test]
+fn vocabulary_fields_phrase_and_proximity_match_in_memory_and_reopened_artifacts() {
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.vocabulary".to_owned(),
+        "src/http-cache/client-store.rs".to_owned(),
+        b"pub struct CachedResponse;\n\
+          /// Loads the durable cache entry for the request owner.\n\
+          pub fn loadCachedResponse(retry_budget: u32) -> CachedResponse {\n\
+              let _ = retry_budget;\n\
+              CachedResponse\n\
+          }\n"
+        .to_vec(),
+    )]);
+    let generation = CodeIndexPublishedGenerationV1::decode_sealed(&fixture.sealed)
+        .expect("restore canonical generation");
+    let memory = LexicalLane::new(generation_backed_projection(
+        fixture.metadata.clone(),
+        &generation,
+    ));
+    let directory = tempfile::tempdir().expect("artifact directory");
+    let path = directory.path().join("vocabulary.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, fixture.metadata.clone())
+        .expect("create artifact");
+    let verified = builder
+        .rebuild_and_finalize(&mut fixture.open_source(128), &control)
+        .expect("build from parser-attested pages");
+    drop(builder);
+    let artifact = LexicalLane::new(
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        )
+        .expect("reopen lexical fields"),
+    );
+
+    let run = |query: &str,
+               whole_terms: &[&str],
+               phrases: &[&str],
+               field: LexicalFieldV1,
+               proximities: Vec<LexicalProximityV1>| {
+        let mut request = lexical_request(query, whole_terms, &[], phrases, 0, 32);
+        request.generation = fixture.metadata.generation.clone();
+        request.field_filters = vec![LexicalFieldFilterV1 {
+            field,
+            include: true,
+        }];
+        request.proximities = proximities;
+        let disk = artifact
+            .retrieve_lexical(&request)
+            .expect("artifact lexical query");
+        let in_memory = memory
+            .retrieve_lexical(&request)
+            .expect("in-memory lexical query");
+        assert_eq!(disk, in_memory, "{query} must agree across readers");
+        complete(disk)
+    };
+
+    for (query, field) in [
+        ("cached", LexicalFieldV1::SymbolName),
+        ("client", LexicalFieldV1::Path),
+        ("budget", LexicalFieldV1::Signature),
+        ("response", LexicalFieldV1::QualifiedName),
+    ] {
+        assert!(
+            !run(query, &[query], &[], field, Vec::new())
+                .candidates
+                .is_empty(),
+            "{query} must recover from its field vocabulary"
+        );
+    }
+    let mut typo = lexical_request("budgt", &["budgt"], &[], &[], 1, 32);
+    typo.generation = fixture.metadata.generation.clone();
+    typo.field_filters = vec![LexicalFieldFilterV1 {
+        field: LexicalFieldV1::Signature,
+        include: true,
+    }];
+    let disk_typo = artifact
+        .retrieve_lexical(&typo)
+        .expect("artifact typo query");
+    let memory_typo = memory
+        .retrieve_lexical(&typo)
+        .expect("in-memory typo query");
+    assert_eq!(disk_typo, memory_typo);
+    let disk_typo = complete(disk_typo);
+    assert_eq!(
+        disk_typo.evidence_by_occurrence[&disk_typo.candidates[0].source_occurrence_id]
+            .spelling_variants,
+        [LexicalSpellingVariantV1 {
+            query: "budgt".to_owned(),
+            alternative: "budget".to_owned(),
+        }]
+    );
+    let phrase = run(
+        "durable cache",
+        &[],
+        &["durable cache"],
+        LexicalFieldV1::Documentation,
+        Vec::new(),
+    );
+    assert_eq!(phrase.candidates.len(), 1);
+
+    let proximity = LexicalProximityV1 {
+        terms: vec!["durable".to_owned(), "owner".to_owned()],
+        maximum_gap: 5,
+    };
+    assert_eq!(
+        run(
+            "durable owner",
+            &[],
+            &[],
+            LexicalFieldV1::Documentation,
+            vec![proximity],
+        )
+        .candidates
+        .len(),
+        1
+    );
+    let too_narrow = LexicalProximityV1 {
+        terms: vec!["durable".to_owned(), "owner".to_owned()],
+        maximum_gap: 4,
+    };
+    assert!(
+        run(
+            "durable owner",
+            &[],
+            &[],
+            LexicalFieldV1::Documentation,
+            vec![too_narrow],
+        )
+        .candidates
+        .is_empty(),
+        "the maximum gap is inclusive and cannot widen"
+    );
+}
+
+#[test]
 fn disk_artifact_batch_stores_one_ngram_bitmap_shard_per_distinct_key() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
@@ -1825,7 +1962,7 @@ fn disk_artifact_batch_stores_one_ngram_bitmap_shard_per_distinct_key() {
     let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
         metadata.clone(),
         chunks,
-        page_symbol_qualified_names(&pages),
+        page_symbol_displays(&pages),
     )
     .expect("one-shot lexical projection");
     let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -4989,7 +5126,7 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
     let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
         metadata.clone(),
         chunks,
-        page_symbol_qualified_names(&pages),
+        page_symbol_displays(&pages),
     )
     .expect("one-shot lexical projection");
     let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -5216,6 +5353,7 @@ pub(crate) fn lexical_request(
         whole_terms: whole_terms.iter().map(|term| (*term).to_owned()).collect(),
         subtokens: subtokens.iter().map(|term| (*term).to_owned()).collect(),
         phrases: phrases.iter().map(|term| (*term).to_owned()).collect(),
+        proximities: Vec::new(),
         field_filters: Vec::<LexicalFieldFilterV1>::new(),
         fuzzy_budget,
         lexical_profile_revision: id("lexical-profile.v1"),
@@ -5512,6 +5650,13 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     assert!(
         first.evidence_by_occurrence[&first.candidates[0].source_occurrence_id]
             .typo_recovery_applied
+    );
+    assert_eq!(
+        first.evidence_by_occurrence[&first.candidates[0].source_occurrence_id].spelling_variants,
+        [LexicalSpellingVariantV1 {
+            query: "resreve_stock".to_owned(),
+            alternative: "reserve_stock".to_owned(),
+        }]
     );
 
     let over_budget = lexical_request(

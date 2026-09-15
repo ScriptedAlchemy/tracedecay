@@ -310,6 +310,7 @@ fn completed_sparse_search_with_anchor_route(
                 route,
                 score_micros: 900_000,
                 matched_terms: vec![anchor.to_owned()],
+                spelling_variants: Vec::new(),
             }],
         )]),
     };

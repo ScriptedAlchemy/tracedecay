@@ -9,7 +9,7 @@
     "exact_eligible_chunks_10x": 19930,
     "exact_eligible_chunks_current": 1993,
     "exact_file_count": 15,
-    "exact_query_count": 65,
+    "exact_query_count": 67,
     "fusion_revision": "CompositionKernel::compose"
   },
   "corpus": [
@@ -140,8 +140,8 @@
     "required_offline": "no_network_and_query_fallback_available"
   },
   "expected_query_fallback_digests": {
-    "train": "sha256:01852b887b544c6eb64b30aa66c50b814c6c3d852b8f0516fec94340255267f0",
-    "validation": "sha256:3fb1d629afc375a3984b1e69d84cb608632c4013362d64875c9cd76feb8cd1c4"
+    "train": "sha256:afa693698d371e76f4b6bb127886e6636e5294399ff5e95a5a29e9ea1ef77b36",
+    "validation": "sha256:0d797947f45d597927c6cbdd4e4d9598ff2fe46c78acfd121164d5584a0a2fc5"
   },
   "profile_matrix": [
     {
@@ -872,6 +872,24 @@
       }
     },
     {
+      "query_id": "train-034",
+      "partition": "train",
+      "strata": [
+        "identifier_split"
+      ],
+      "query": "cacheGrantSnapshot",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::cache_grant_snapshot"
+        ],
+        "document_id": "coverage",
+        "literal": "pub cache_grant_snapshot: Option<VerifiedCacheGrantSnapshotV1>"
+      }
+    },
+    {
       "allowed_scopes": [
         "research"
       ],
@@ -1572,6 +1590,30 @@
         "source_document_id": "config_store",
         "source_quote": "Reads the full config file contents from disk.",
         "judgment_rationale": "read_config is the whole-file read; the single-key accessor does not touch disk."
+      }
+    },
+    {
+      "query_id": "validation-033",
+      "partition": "validation",
+      "strata": [
+        "alias_recovery"
+      ],
+      "query": "memoization",
+      "lexical_aliases": [
+        {
+          "strict_query": "memoization",
+          "alternative": "cache grant"
+        }
+      ],
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::VerifiedCacheGrantSnapshotV1"
+        ],
+        "document_id": "coverage",
+        "literal": "pub struct VerifiedCacheGrantSnapshotV1"
       }
     }
   ],

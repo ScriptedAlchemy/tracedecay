@@ -9,24 +9,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
+use tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
-    ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
-    ExtractionAdmittedChunkV1, FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId,
-    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId,
-    SourceOccurrenceId, SymbolOccurrenceId,
+    CodeGenerationId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
+    ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1,
+    FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
+    SymbolOccurrenceId,
 };
 
 use super::super::{
-    LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
-    admit_candidate_sources, candidate_admission_outcome, lexical_checkpoint,
+    LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, LexicalSpellingVariantV1,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, admit_candidate_sources, candidate_admission_outcome,
+    lexical_checkpoint,
 };
 use super::{
     CodeLexicalProjectionMetadataV1, ECHO_SCORE_MILLIS, ExactMatchRowViewV1, FUZZY_SCORE_MILLIS,
     FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalRowScoreV1, LiteralProofCacheV1,
     PHRASE_SCORE_MILLIS, PreparedLexicalQueryV1, ProjectedChunkV1, add_score, bm25_score_micros,
     canonical_projected_exact_term, collect_term_kinds, exact_field_for_kind, exact_matches,
-    field_weight_millis, fuzzy_distance_bound, normalize_lexical, retrieval_anchor,
+    field_weight_millis, fuzzy_distance_bound, matches_phrase, normalize_lexical,
+    normalized_field_text, normalized_search_text, proximity_count, retrieval_anchor,
     substring_count,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
@@ -187,12 +190,9 @@ impl LexicalGenerationPostingsBuildV1 {
                 .or_default()
                 .insert(document);
         }
+        let search_text = normalized_search_text(row);
         self.normalized_text
-            .insert_document(
-                document,
-                row.normalized_text.as_bytes(),
-                &mut self.ngram_budget,
-            )
+            .insert_document(document, search_text.as_bytes(), &mut self.ngram_budget)
             .map_err(map_postings_build_error)
     }
 
@@ -263,11 +263,7 @@ enum CodeLexicalProjectionBuildPhaseV1 {
 #[derive(Debug)]
 pub struct CodeLexicalProjectionBuildV1 {
     metadata: Arc<CodeLexicalProjectionMetadataV1>,
-    /// Parser-attested extracted qualified name per symbol occurrence. The
-    /// sealed-page artifact path carries the same authority per chunk on its
-    /// symbol display; this is how the in-memory build receives it. Shared so
-    /// scoped builds over one generation read one corpus-wide map.
-    symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
+    symbol_displays: Arc<BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>>,
     chunks: Vec<Option<CodeSearchChunkV1>>,
     rows: Vec<ProjectedChunkV1>,
     postings: Option<LexicalGenerationPostingsBuildV1>,
@@ -281,7 +277,9 @@ impl CodeLexicalProjectionBuildV1 {
     pub fn new_admitted<C>(
         metadata: impl Into<Arc<CodeLexicalProjectionMetadataV1>>,
         chunks: Vec<C>,
-        symbol_qualified_names: impl Into<Arc<BTreeMap<SymbolOccurrenceId, String>>>,
+        symbol_displays: impl Into<
+            Arc<BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>>,
+        >,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
@@ -292,7 +290,7 @@ impl CodeLexicalProjectionBuildV1 {
                 .into_iter()
                 .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
-            symbol_qualified_names.into(),
+            symbol_displays.into(),
             true,
         )
     }
@@ -300,7 +298,7 @@ impl CodeLexicalProjectionBuildV1 {
     fn new_inner(
         metadata: Arc<CodeLexicalProjectionMetadataV1>,
         mut chunks: Vec<CodeSearchChunkV1>,
-        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
+        symbol_displays: Arc<BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>>,
         extraction_admitted: bool,
     ) -> Result<Self, RetrievalPortError> {
         metadata.validate()?;
@@ -318,7 +316,7 @@ impl CodeLexicalProjectionBuildV1 {
         let row_capacity = chunks.len();
         Ok(Self {
             metadata,
-            symbol_qualified_names,
+            symbol_displays,
             chunks: chunks.into_iter().map(Some).collect(),
             rows: Vec::with_capacity(row_capacity),
             postings: Some(LexicalGenerationPostingsBuildV1::default()),
@@ -398,13 +396,13 @@ impl CodeLexicalProjectionBuildV1 {
                                 chunk.anchor.file_occurrence_id
                             ))
                         })?;
-                    let qualified_name = chunk
+                    let symbol_display = chunk
                         .anchor
                         .symbol_occurrence_id
                         .as_ref()
-                        .and_then(|symbol| self.symbol_qualified_names.get(symbol))
-                        .map(String::as_str);
-                    let (row, fields) = ProjectedChunkV1::new(chunk, logical_path, qualified_name);
+                        .and_then(|symbol| self.symbol_displays.get(symbol));
+                    let (row, fields) =
+                        ProjectedChunkV1::from_ref(&chunk, logical_path, symbol_display);
                     self.raw_matches_normalized &=
                         row.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes();
                     self.postings
@@ -571,6 +569,17 @@ impl LexicalGenerationPostingsV1 {
                 }
             }
         }
+        sources.extend(
+            request
+                .proximities
+                .iter()
+                .flat_map(|proximity| &proximity.terms)
+                .map(|term| {
+                    let (frequency, documents) =
+                        self.whole_term_documents(&normalize_lexical(term));
+                    (frequency, (term.clone(), documents))
+                }),
+        );
         if let Some(postings) = self.term_documents.get(&LexicalFieldV1::Subtoken) {
             for subtoken in &request.subtokens {
                 if let Some(posting) = postings.get(&normalize_lexical(subtoken)) {
@@ -635,9 +644,7 @@ impl LexicalGenerationPostingsV1 {
     ) -> usize {
         candidates
             .iter()
-            .filter(|document| {
-                substring_count(&rows[*document as usize].normalized_text, phrase) > 0
-            })
+            .filter(|document| matches_phrase(&rows[*document as usize], phrase))
             .count()
     }
 
@@ -686,6 +693,12 @@ impl CodeLexicalProjectionAdapterV1 {
                 )
                 .saturating_add(row.logical_path.capacity())
                 .saturating_add(row.normalized_text.capacity())
+                .saturating_add(row.symbol_signature.as_ref().map_or(0, String::capacity))
+                .saturating_add(
+                    row.symbol_documentation
+                        .as_ref()
+                        .map_or(0, String::capacity),
+                )
                 .saturating_add(exact_term_bytes)
                 .saturating_add(
                     row.field_lengths
@@ -720,40 +733,23 @@ impl CodeLexicalProjectionAdapterV1 {
         )
     }
 
-    /// The single shared-source constructor: `chunks` carry parser-backed
-    /// extraction admission and `symbol_qualified_names` the extractor's
-    /// qualified name for every symbol occurrence among them; the sealed-page
-    /// artifact path carries the same authority on its per-chunk symbol
-    /// display. Passing an empty map projects no qualified-name postings, so
-    /// qualified-symbol queries lose their exact recall.
-    ///
-    /// Both shared inputs are accepted as anything convertible to an `Arc`, so
-    /// a caller building one projection per scope over the same generation
-    /// hands every scope the same immutable metadata and name map instead of
-    /// cloning them per scope.
-    ///
-    /// Hard-wires `deadline_micros = None` (crate 30s fallback); the daemon
-    /// mount passes its own deadline to [`Self::new_admitted_with_deadline`].
     pub fn new_admitted<C>(
         metadata: impl Into<Arc<CodeLexicalProjectionMetadataV1>>,
         chunks: Vec<C>,
-        symbol_qualified_names: impl Into<Arc<BTreeMap<SymbolOccurrenceId, String>>>,
+        symbol_displays: impl Into<
+            Arc<BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>>,
+        >,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
     {
-        Self::new_admitted_with_deadline(
-            metadata.into(),
-            chunks,
-            symbol_qualified_names.into(),
-            None,
-        )
+        Self::new_admitted_with_deadline(metadata.into(), chunks, symbol_displays.into(), None)
     }
 
     fn new_admitted_with_deadline<C>(
         metadata: Arc<CodeLexicalProjectionMetadataV1>,
         chunks: Vec<C>,
-        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
+        symbol_displays: Arc<BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>>,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError>
     where
@@ -765,7 +761,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 .into_iter()
                 .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
-            symbol_qualified_names,
+            symbol_displays,
             true,
             deadline_micros,
         )
@@ -774,7 +770,7 @@ impl CodeLexicalProjectionAdapterV1 {
     fn new_inner(
         metadata: Arc<CodeLexicalProjectionMetadataV1>,
         chunks: Vec<CodeSearchChunkV1>,
-        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
+        symbol_displays: Arc<BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>>,
         extraction_admitted: bool,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError> {
@@ -784,7 +780,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut build = CodeLexicalProjectionBuildV1::new_inner(
             metadata,
             chunks,
-            symbol_qualified_names,
+            symbol_displays,
             extraction_admitted,
         )?;
         match build.advance_inner(usize::MAX, Some(deadline))? {
@@ -880,6 +876,8 @@ impl CodeLexicalProjectionAdapterV1 {
                 matched_whole_terms: score.matched_whole_terms,
                 matched_subtokens: score.matched_subtokens,
                 matched_phrases: score.matched_phrases,
+                matched_proximities: score.matched_proximities,
+                spelling_variants: score.spelling_variants,
                 typo_recovery_applied: score.typo_recovery_applied,
                 echo_penalty_applied: score.echo_penalty_applied,
             };
@@ -1011,6 +1009,8 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut matched_whole_terms = BTreeSet::new();
         let mut matched_subtokens = BTreeSet::new();
         let mut matched_phrases = BTreeSet::new();
+        let mut matched_proximities = BTreeSet::new();
+        let mut spelling_variants = BTreeSet::new();
         let mut matched_kinds = BTreeSet::new();
         let mut typo_recovery_applied = false;
         for field in row.field_lengths.keys() {
@@ -1041,6 +1041,10 @@ impl CodeLexicalProjectionAdapterV1 {
                                 / 1_000;
                             add_score(&mut field_scores, *field, score);
                             matched_whole_terms.insert((*query_term).to_owned());
+                            spelling_variants.insert(LexicalSpellingVariantV1 {
+                                query: (*query_term).to_owned(),
+                                alternative: expansion.clone(),
+                            });
                             typo_recovery_applied = true;
                             collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
                         }
@@ -1062,29 +1066,46 @@ impl CodeLexicalProjectionAdapterV1 {
             }
         }
         for (phrase, normalized) in &prepared.phrases {
-            let tf = substring_count(&row.normalized_text, normalized);
-            if tf == 0 {
-                continue;
+            for field in row.field_lengths.keys() {
+                let Some(text) = normalized_field_text(row, *field) else {
+                    continue;
+                };
+                let tf = substring_count(&text, normalized);
+                if tf == 0 {
+                    continue;
+                }
+                let score = self
+                    .phrase_score(
+                        *field,
+                        tf,
+                        row,
+                        phrase_document_frequencies
+                            .get(normalized)
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+                    .saturating_mul(PHRASE_SCORE_MILLIS)
+                    / 1_000;
+                add_score(&mut field_scores, *field, score);
+                matched_phrases.insert((*phrase).to_owned());
             }
-            let field = if row.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
-                LexicalFieldV1::PreambleText
-            } else {
-                LexicalFieldV1::BodyText
-            };
-            let score = self
-                .phrase_score(
-                    field,
-                    tf,
-                    row,
-                    phrase_document_frequencies
-                        .get(normalized)
-                        .copied()
-                        .unwrap_or_default(),
-                )
-                .saturating_mul(PHRASE_SCORE_MILLIS)
-                / 1_000;
-            add_score(&mut field_scores, field, score);
-            matched_phrases.insert((*phrase).to_owned());
+        }
+        for proximity in &prepared.proximities {
+            for field in row.field_lengths.keys() {
+                let Some(text) = normalized_field_text(row, *field) else {
+                    continue;
+                };
+                let tf = proximity_count(&text, &proximity.terms, proximity.original.maximum_gap);
+                if tf == 0 {
+                    continue;
+                }
+                let score = self
+                    .phrase_score(*field, tf, row, 1)
+                    .saturating_mul(PHRASE_SCORE_MILLIS)
+                    / 1_000;
+                add_score(&mut field_scores, *field, score);
+                matched_proximities.insert(proximity.original.clone());
+            }
         }
         let echo_penalty_applied =
             !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
@@ -1098,6 +1119,8 @@ impl CodeLexicalProjectionAdapterV1 {
             matched_whole_terms: matched_whole_terms.into_iter().collect(),
             matched_subtokens: matched_subtokens.into_iter().collect(),
             matched_phrases: matched_phrases.into_iter().collect(),
+            matched_proximities: matched_proximities.into_iter().collect(),
+            spelling_variants: spelling_variants.into_iter().collect(),
             matched_kinds: matched_kinds.into_iter().collect(),
             typo_recovery_applied,
             echo_penalty_applied,
@@ -1302,28 +1325,6 @@ where
 }
 
 impl ProjectedChunkV1 {
-    fn new(
-        chunk: CodeSearchChunkV1,
-        logical_path: String,
-        qualified_name: Option<&str>,
-    ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
-        let fields = Self::projected_fields(&chunk, &logical_path, qualified_name);
-        let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
-        Self::from_parts(
-            chunk.id,
-            chunk.anchor,
-            chunk.language_descriptor_revision,
-            chunk.exact_terms,
-            chunk.sanitized_text,
-            logical_path,
-            None,
-            qualified_name.map(str::to_owned),
-            None,
-            normalized_text,
-            fields,
-        )
-    }
-
     fn exact_match_view(&self) -> ExactMatchRowViewV1<'_> {
         ExactMatchRowViewV1 {
             sanitized_text: self.sanitized_text.as_str(),

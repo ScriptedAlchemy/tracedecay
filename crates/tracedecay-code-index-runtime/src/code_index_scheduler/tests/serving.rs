@@ -380,6 +380,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
             whole_terms: vec!["callee".to_owned()],
             subtokens: vec!["callee".to_owned()],
             phrases: Vec::new(),
+            proximities: Vec::new(),
             field_filters: Vec::new(),
             fuzzy_budget: 0,
             lexical_profile_revision: ComponentRevision::new(
@@ -1492,11 +1493,7 @@ fn page_aligned_final_source_page_converges_the_text_projection() {
     let source = (0..super::super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 * 2).fold(
         String::new(),
         |mut source, index| {
-            writeln!(
-                &mut source,
-                "pub fn aligned_{index}() -> usize {{ {index} }}"
-            )
-            .expect("write page-aligned source fixture");
+            writeln!(&mut source, "fn a{index}() {{}}").expect("write page-aligned source fixture");
             source
         },
     );
@@ -1669,7 +1666,7 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
             "first page must advance within the file's chunks"
         );
         cursor[3] = serde_json::Value::from(0_u64);
-        cursor[7] = serde_json::Value::from(1_u64);
+        cursor[6] = serde_json::Value::from(1_u64);
 
         let text = |index: usize| {
             cursor[index]
@@ -1686,10 +1683,10 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
                 .to_le_bytes(),
         );
         hasher.update(text(0));
-        for index in [1, 2, 3, 7, 4, 5, 6, 8, 9] {
+        for index in [1, 2, 3, 8, 4, 5, 6, 7, 9, 10, 11, 12] {
             hasher.update(number(index).to_le_bytes());
         }
-        for index in [10, 11] {
+        for index in [13, 14] {
             hasher.update(
                 u64::try_from(text(index).len())
                     .expect("digest length")
@@ -1697,7 +1694,7 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
             );
             hasher.update(text(index));
         }
-        cursor[12] = serde_json::Value::from(format!(
+        cursor[15] = serde_json::Value::from(format!(
             "sha256:{}",
             encode_lowercase_hex(&hasher.finalize())
         ));
@@ -2945,7 +2942,7 @@ async fn core_query_profile_composes_live_code_index_lanes() {
             graph_max_depth: 1,
             page_size: 10,
             cursor: None,
-            lexical_routing: LexicalRoutingV1::query_only(),
+            lexical_routing: LexicalRoutingV1::default(),
         },
     );
     let executed = registry

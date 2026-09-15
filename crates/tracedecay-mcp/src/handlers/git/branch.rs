@@ -378,7 +378,7 @@ pub async fn handle_branch_search(ctx: &McpToolContext<'_>, args: Value) -> Resu
             source_reference: Some(source_reference),
             limit,
             cursor,
-            lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::query_only(),
+            lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::default(),
             authority: authority.cloned(),
             deadline,
             cancellation,

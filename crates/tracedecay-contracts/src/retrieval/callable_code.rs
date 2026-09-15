@@ -245,6 +245,8 @@ pub enum CodeLexicalField {
     SymbolName,
     QualifiedName,
     Path,
+    Signature,
+    Documentation,
     BodyText,
     PreambleText,
     ExactTerm,

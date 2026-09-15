@@ -1442,7 +1442,7 @@ mod tests {
             source_reference: None,
             limit: 10,
             cursor: None,
-            lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::query_only(),
+            lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::default(),
             authority: None,
             deadline: None,
             cancellation: None,

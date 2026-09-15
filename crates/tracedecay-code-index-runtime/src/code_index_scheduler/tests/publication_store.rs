@@ -30,8 +30,8 @@ use crate::{
     code_index::production::{
         CodeIndexAtomicPublicationPort, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        SealedGenerationSegmentReadV1, UninterruptibleCodeIndexControlV1,
-        VerifiedSealedLexicalPageReadV1,
+        SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentReadV1,
+        UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
     },
     code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1},
 };
@@ -80,7 +80,10 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     let first_manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&first_manifest_path).expect("read first manifest"))
             .expect("decode first manifest");
-    assert_eq!(first_manifest["generation"]["format_revision"], 8);
+    assert_eq!(
+        first_manifest["generation"]["format_revision"],
+        SEALED_GENERATION_FORMAT_REVISION_V1
+    );
     let first_segments = first_manifest["generation"]["file_segments"]
         .as_array()
         .expect("first generation file segments");
@@ -1908,7 +1911,7 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
     let manifest: serde_json::Value =
         serde_json::from_slice(&canonical).expect("decode generation manifest");
     assert_eq!(
-        manifest["generation"]["format_revision"], 8,
+        manifest["generation"]["format_revision"], SEALED_GENERATION_FORMAT_REVISION_V1,
         "durable publication must emit the partitioned format"
     );
     assert_eq!(

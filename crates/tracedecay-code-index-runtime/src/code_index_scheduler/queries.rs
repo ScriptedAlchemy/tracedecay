@@ -55,7 +55,7 @@ use tracedecay_query::retrieval::graph::{
     GraphLaneRequest, GraphLaneRetriever, graph_read_cancellation,
 };
 use tracedecay_query::retrieval::lexical::{
-    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest,
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl,
@@ -2685,22 +2685,20 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let served_generation = latest.metadata().manifest().generation_id.clone();
             let finished_at = query_finished_at();
             let base = prepared.query.request();
-            let whole_terms = request
-                .query
-                .as_str()
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
+            let Ok(mut parts) = lexical_query_parts(request.query.as_str()) else {
+                return unavailable(finished_at);
+            };
+            parts.phrases.extend(request.phrases.iter().cloned());
+            parts.phrases.sort();
+            parts.phrases.dedup();
             let lexical_control = CallableRetrievalExecutionControl::for_request(context.request);
             let lane_request = LexicalLaneRequest {
                 query_view: &request.query,
                 generation: served_generation.clone(),
-                whole_terms: whole_terms.clone(),
-                subtokens: whole_terms
-                    .iter()
-                    .map(|term| term.to_ascii_lowercase())
-                    .collect(),
-                phrases: request.phrases.clone(),
+                whole_terms: parts.whole_terms,
+                subtokens: parts.subtokens,
+                phrases: parts.phrases,
+                proximities: Vec::new(),
                 field_filters: request
                     .field_filters
                     .iter()
@@ -2709,6 +2707,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                             CodeLexicalField::SymbolName => LexicalFieldV1::SymbolName,
                             CodeLexicalField::QualifiedName => LexicalFieldV1::QualifiedName,
                             CodeLexicalField::Path => LexicalFieldV1::Path,
+                            CodeLexicalField::Signature => LexicalFieldV1::Signature,
+                            CodeLexicalField::Documentation => LexicalFieldV1::Documentation,
                             CodeLexicalField::BodyText => LexicalFieldV1::BodyText,
                             CodeLexicalField::PreambleText => LexicalFieldV1::PreambleText,
                             CodeLexicalField::ExactTerm => LexicalFieldV1::ExactTerm,

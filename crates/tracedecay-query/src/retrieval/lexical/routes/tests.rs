@@ -13,11 +13,14 @@ use tracedecay_domain::{
 };
 
 use super::{
-    LexicalAnchorV1, LexicalRouteErrorV1, LexicalRouteKindV1, LexicalRouteOutcomeV1,
-    LexicalRoutePlanV1, LexicalRoutingV1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,
-    MAX_PREFERRED_SYMBOL_TOKENS_V1, merge_lexical_routes, preferred_symbol_tokens,
+    LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorV1, LexicalRouteErrorV1,
+    LexicalRouteKindV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
+    MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1, MAX_PREFERRED_SYMBOL_TOKENS_V1,
+    merge_lexical_routes, preferred_symbol_tokens,
 };
-use crate::retrieval::lexical::{LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence};
+use crate::retrieval::lexical::{
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalProximityV1,
+};
 use crate::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError};
 
 fn id<T>(value: &str) -> T
@@ -93,9 +96,11 @@ fn routing_rejects_empty_multi_term_control_and_duplicate_anchors() {
         .expect("qualified names, paths, and codes are one technical term each");
     assert_eq!(accepted.anchors.len(), 3);
     assert!(accepted.prefer_symbol);
-    assert!(!accepted.is_query_only());
-    assert!(LexicalRoutingV1::query_only().is_query_only());
-    assert!(!LexicalRoutingV1::prefer_symbol().is_query_only());
+    assert_ne!(accepted, LexicalRoutingV1::default());
+    assert_ne!(
+        LexicalRoutingV1::prefer_symbol(),
+        LexicalRoutingV1::default()
+    );
     assert!(LexicalRoutingV1::prefer_symbol().prefer_symbol);
 }
 
@@ -203,6 +208,102 @@ fn route_plan_adds_one_route_per_anchor_and_a_symbol_route_only_with_tokens() {
     );
 }
 
+#[test]
+fn route_plan_exposes_identifier_and_path_splits_as_alternatives() {
+    for (query, expected) in [
+        ("VectorWatermark", vec!["vector", "watermark"]),
+        ("vector_watermark", vec!["vector", "watermark"]),
+        ("vector-watermark", vec!["vector", "watermark"]),
+        (
+            "src/vector/watermark.rs",
+            vec!["src", "vector", "watermark", "rs"],
+        ),
+        (
+            "VectorWatermark::merge_max",
+            vec!["vector", "watermark", "merge", "max"],
+        ),
+    ] {
+        let plan =
+            LexicalRoutePlanV1::plan(query, &LexicalRoutingV1::default()).expect("route plan");
+        assert_eq!(plan.routes()[0].kind, LexicalRouteKindV1::Query);
+        assert_eq!(
+            plan.routes()[1].kind,
+            LexicalRouteKindV1::IdentifierSplit {
+                strict_query: query.to_owned(),
+                terms: expected.iter().map(|term| (*term).to_owned()).collect(),
+            },
+            "{query}"
+        );
+        assert!(plan.routes()[1].parts.whole_terms.is_empty(), "{query}");
+        assert_eq!(
+            plan.routes()[1].proximities,
+            [LexicalProximityV1 {
+                terms: expected.iter().map(|term| (*term).to_owned()).collect(),
+                maximum_gap: 0,
+            }],
+            "{query}"
+        );
+    }
+
+    let bounded = LexicalRoutePlanV1::plan("a/b/c/d/e/f/g/h/i/j.rs", &LexicalRoutingV1::default())
+        .expect("bounded split route");
+    let LexicalRouteKindV1::IdentifierSplit { terms, .. } = &bounded.routes()[1].kind else {
+        panic!("single path adds an identifier-split route");
+    };
+    assert_eq!(terms.len(), MAX_PREFERRED_SYMBOL_TOKENS_V1);
+}
+
+#[test]
+fn route_plan_runs_matching_aliases_after_the_strict_query_in_byte_order() {
+    let routing = LexicalRoutingV1::default()
+        .with_aliases(vec![
+            LexicalAliasV1 {
+                strict_query: "memoization".to_owned(),
+                alternative: "stored value".to_owned(),
+            },
+            LexicalAliasV1 {
+                strict_query: "memoization".to_owned(),
+                alternative: "cache".to_owned(),
+            },
+            LexicalAliasV1 {
+                strict_query: "unrelated".to_owned(),
+                alternative: "ignored".to_owned(),
+            },
+        ])
+        .expect("bounded aliases");
+    let plan = LexicalRoutePlanV1::plan("MEMOIZATION", &routing).expect("plan");
+
+    assert_eq!(
+        plan.descriptors(),
+        [
+            LexicalRouteKindV1::Query,
+            LexicalRouteKindV1::Alias {
+                strict_query: "MEMOIZATION".to_owned(),
+                alternative: "cache".to_owned(),
+                reason: LexicalAlternativeReasonV1::ConfiguredVocabularyAlias,
+            },
+            LexicalRouteKindV1::Alias {
+                strict_query: "MEMOIZATION".to_owned(),
+                alternative: "stored value".to_owned(),
+                reason: LexicalAlternativeReasonV1::ConfiguredVocabularyAlias,
+            },
+        ]
+    );
+    assert_eq!(plan.routes()[1].parts.whole_terms, ["cache"]);
+    assert_eq!(
+        plan.routes()[2].parts.phrases,
+        ["stored value"],
+        "multi-term alternatives retain phrase search"
+    );
+    assert_eq!(
+        LexicalRoutingV1::default().with_aliases(vec![LexicalAliasV1 {
+            strict_query: "Memoization".to_owned(),
+            alternative: "memoization".to_owned(),
+        }]),
+        Err(LexicalRouteErrorV1::IdentityAlias { index: 0 })
+    );
+}
+
 fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
     RetrievalBudget {
         max_candidates_per_lane,
@@ -277,6 +378,8 @@ fn pair(
             .collect(),
         matched_subtokens: Vec::new(),
         matched_phrases: Vec::new(),
+        matched_proximities: Vec::new(),
+        spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
     };
@@ -363,7 +466,7 @@ fn query_only_routing_passes_the_lane_batch_through_untouched() {
     assert_eq!(outcome, RetrieverOutcome::Complete(batch));
     assert_eq!(receipt.routes, vec![LexicalRouteKindV1::Query]);
     assert!(receipt.matches_by_anchor.is_empty());
-    assert!(!receipt.has_additional_routes());
+    assert!(!receipt.has_disclosure());
 }
 
 #[test]
@@ -431,7 +534,7 @@ fn anchor_route_reranks_and_names_itself_in_the_evidence() {
         allocate_evidence.matched_whole_terms,
         ["inventory", "reserve_stock"]
     );
-    assert!(receipt.has_additional_routes());
+    assert!(receipt.has_disclosure());
     let reserve_matches = &receipt.matches_by_anchor
         [&id::<tracedecay_domain::RetrievalAnchorId>("anchor.occ.reserve")];
     assert_eq!(reserve_matches.len(), 1);
@@ -454,6 +557,65 @@ fn anchor_route_reranks_and_names_itself_in_the_evidence() {
     assert!(continuation.exhausted);
     assert_eq!(batch.coverage.eligible, 3);
     assert_eq!(batch.coverage.examined, 4);
+}
+
+#[test]
+fn alias_routes_append_after_the_byte_stable_strict_prefix() {
+    let query_batch = lane_batch(vec![
+        pair(
+            "occ.strict-a",
+            &[(LexicalFieldV1::BodyText, 300_000)],
+            &["memoization"],
+        ),
+        pair(
+            "occ.strict-b",
+            &[(LexicalFieldV1::BodyText, 200_000)],
+            &["memoization"],
+        ),
+    ]);
+    let alias_kind = LexicalRouteKindV1::Alias {
+        strict_query: "memoization".to_owned(),
+        alternative: "cache".to_owned(),
+        reason: LexicalAlternativeReasonV1::ConfiguredVocabularyAlias,
+    };
+    let alias_batch = lane_batch(vec![
+        pair(
+            "occ.alias",
+            &[(LexicalFieldV1::SymbolName, 900_000)],
+            &["cache"],
+        ),
+        pair(
+            "occ.strict-b",
+            &[(LexicalFieldV1::BodyText, 900_000)],
+            &["cache"],
+        ),
+    ]);
+
+    let (outcome, receipt) = merge_lexical_routes(
+        &generation(),
+        &budget(8),
+        &budget(8),
+        vec![
+            route(LexicalRouteKindV1::Query, query_batch.clone()),
+            route(alias_kind.clone(), alias_batch),
+        ],
+    )
+    .expect("alias merge");
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("both routes completed");
+    };
+
+    assert_eq!(
+        order(&batch),
+        ["occ.strict-a", "occ.strict-b", "occ.alias"],
+        "an alternative cannot reorder or replace a strict hit"
+    );
+    assert_eq!(
+        batch.candidates[..2],
+        query_batch.candidates,
+        "the strict prefix bytes remain unchanged"
+    );
+    assert_eq!(receipt.routes, [LexicalRouteKindV1::Query, alias_kind]);
 }
 
 #[test]

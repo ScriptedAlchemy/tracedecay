@@ -976,6 +976,7 @@ where
                 whole_terms: parts.whole_terms,
                 subtokens: parts.subtokens,
                 phrases: parts.phrases,
+                proximities: Vec::new(),
                 field_filters: Vec::new(),
                 fuzzy_budget: options.fuzzy_budget,
                 lexical_profile_revision: prototype.lexical_profile_revision.clone(),

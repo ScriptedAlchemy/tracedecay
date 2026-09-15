@@ -685,14 +685,6 @@ where
             budget: request.budget,
         })
     })?;
-    // Every lexical route (the query plus each caller anchor and the optional
-    // preferred-symbol route) runs through the same lane against the same
-    // pinned generation; the merge below is what composition admits as the
-    // single lexical lane input. The routes share the request's live
-    // execution control with the graph lane: a cancelled or expired request
-    // unwinds here with `RetrievalPortError::Cancelled` instead of hydrating
-    // every remaining candidate row while the caller's execution permit and
-    // the already-settled caller wait on it.
     let route_plan = LexicalRoutePlanV1::plan(query_view.as_str(), &input.lexical_routing)?;
     let (lexical, lexical_routes) =
         hotpath::measure_block!("daemon.code_index.query.lane.lexical", {
@@ -705,6 +697,7 @@ where
                     whole_terms: route.parts.whole_terms.clone(),
                     subtokens: route.parts.subtokens.clone(),
                     phrases: route.parts.phrases.clone(),
+                    proximities: route.proximities.clone(),
                     field_filters: route.field_filters.clone(),
                     fuzzy_budget: input.fuzzy_budget,
                     lexical_profile_revision: input.lexical_profile_revision.clone(),

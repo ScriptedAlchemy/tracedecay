@@ -48,9 +48,10 @@ pub use self::projection::{
     lexical_projection_build_deadline_micros,
 };
 pub use self::routes::{
-    LexicalAnchorV1, LexicalRouteErrorV1, LexicalRouteKindV1, LexicalRouteMatchV1,
-    LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRouteReceiptV1, LexicalRouteV1,
-    LexicalRoutingV1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,
+    LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorV1, LexicalRouteErrorV1,
+    LexicalRouteKindV1, LexicalRouteMatchV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
+    LexicalRouteReceiptV1, LexicalRouteV1, LexicalRoutingV1, MAX_LEXICAL_ALIAS_BYTES_V1,
+    MAX_LEXICAL_ALIASES_V1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,
     MAX_PREFERRED_SYMBOL_TOKENS_V1, merge_lexical_routes, preferred_symbol_tokens,
 };
 
@@ -66,8 +67,14 @@ const LEXICAL_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
 /// The projection sorts all eligible expansions before taking this prefix, so
 /// producer order and scheduler timing cannot affect the selected terms.
 pub const MAX_FUZZY_TERM_EXPANSIONS_V1: u32 = 64;
+pub const MAX_LEXICAL_PROXIMITIES_V1: usize = 4;
+pub const MAX_LEXICAL_PROXIMITY_TERMS_V1: usize = 8;
+pub const MAX_LEXICAL_PROXIMITY_GAP_V1: u32 = 8;
+pub const MAX_LEXICAL_PHRASES_V1: usize = 4;
+pub const MAX_LEXICAL_FIELD_FILTERS_V1: usize = 9;
 
-/// Maximum UTF-8 bytes in one lexical whole term, subtoken, or phrase.
+/// Maximum UTF-8 bytes in one lexical whole term, subtoken, phrase, or
+/// proximity term.
 pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
 /// Summed document-frequency budget for lexical term-source admission. Every
@@ -139,11 +146,15 @@ fn candidate_admission_outcome<E>(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LexicalQueryPartsV1 {
     pub whole_terms: Vec<String>,
     pub subtokens: Vec<String>,
     pub phrases: Vec<String>,
+}
+
+pub(super) fn normalize_lexical(value: &str) -> String {
+    value.to_ascii_lowercase()
 }
 
 /// Shared tokenizer for production retrieval and its direct evaluator.
@@ -209,15 +220,27 @@ pub fn lexical_query_parts(query: &str) -> Result<LexicalQueryPartsV1, Retrieval
     })
 }
 
-/// Whole exact terms and language-profiled subtokens are distinct fields.
+/// Posting field selected by lexical filters and emitted in per-field score
+/// evidence.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LexicalFieldV1 {
+    #[serde(alias = "symbol_name")]
     SymbolName,
+    #[serde(alias = "qualified_name")]
     QualifiedName,
+    #[serde(alias = "path")]
     Path,
+    #[serde(alias = "signature")]
+    Signature,
+    #[serde(alias = "documentation")]
+    Documentation,
+    #[serde(alias = "body_text")]
     BodyText,
+    #[serde(alias = "preamble_text")]
     PreambleText,
+    #[serde(alias = "exact_term")]
     ExactTerm,
+    #[serde(alias = "subtoken")]
     Subtoken,
 }
 
@@ -229,8 +252,51 @@ pub struct LexicalFieldFilterV1 {
     pub include: bool,
 }
 
-/// Typed lexical-lane request for identifier, phrase, token, field, and
-/// bounded fuzzy retrieval.
+/// Ordered terms that must occur in one field. `maximum_gap` counts the
+/// intervening tokens between each adjacent pair.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalProximityV1 {
+    pub terms: Vec<String>,
+    pub maximum_gap: u32,
+}
+
+impl LexicalProximityV1 {
+    fn validate(&self) -> Result<(), RetrievalPortError> {
+        if !(2..=MAX_LEXICAL_PROXIMITY_TERMS_V1).contains(&self.terms.len())
+            || self.maximum_gap > MAX_LEXICAL_PROXIMITY_GAP_V1
+        {
+            return Err(RetrievalPortError::Contract(
+                "lexical proximity requires two to eight terms and a maximum gap no larger than eight"
+                    .to_owned(),
+            ));
+        }
+        for term in &self.terms {
+            if term.is_empty()
+                || term.trim() != term
+                || term.len() > MAX_LEXICAL_QUERY_TERM_BYTES_V1
+                || term.chars().any(char::is_control)
+                || technical_tokens(term).count() != 1
+            {
+                return Err(RetrievalPortError::Contract(
+                    "lexical proximity terms must be single trimmed control-free terms within the v1 byte bound"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalSpellingVariantV1 {
+    pub query: String,
+    pub alternative: String,
+}
+
+/// Typed lexical-lane request for identifier, phrase, proximity, token, field,
+/// and bounded fuzzy retrieval.
 pub struct LexicalLaneRequest<'a> {
     pub base: RetrievalRequest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
@@ -238,6 +304,7 @@ pub struct LexicalLaneRequest<'a> {
     pub whole_terms: Vec<String>,
     pub subtokens: Vec<String>,
     pub phrases: Vec<String>,
+    pub proximities: Vec<LexicalProximityV1>,
     pub field_filters: Vec<LexicalFieldFilterV1>,
     /// Bounded fuzzy-term budget; the profile revision pins tokenizer and
     /// normalization versions.
@@ -283,6 +350,8 @@ pub struct LexicalLaneEvidence {
     pub matched_whole_terms: Vec<String>,
     pub matched_subtokens: Vec<String>,
     pub matched_phrases: Vec<String>,
+    pub matched_proximities: Vec<LexicalProximityV1>,
+    pub spelling_variants: Vec<LexicalSpellingVariantV1>,
     pub typo_recovery_applied: bool,
     pub echo_penalty_applied: bool,
 }
@@ -318,9 +387,29 @@ impl LexicalLaneRequest<'_> {
                 "lexical fuzzy budget exceeds the v1 bound of {MAX_FUZZY_TERM_EXPANSIONS_V1}"
             )));
         }
-        if self.whole_terms.is_empty() && self.subtokens.is_empty() && self.phrases.is_empty() {
+        if self.whole_terms.is_empty()
+            && self.subtokens.is_empty()
+            && self.phrases.is_empty()
+            && self.proximities.is_empty()
+        {
             return Err(RetrievalPortError::Contract(
-                "lexical requests require at least one whole term, subtoken, or phrase".to_owned(),
+                "lexical requests require at least one whole term, subtoken, phrase, or proximity"
+                    .to_owned(),
+            ));
+        }
+        if self.proximities.len() > MAX_LEXICAL_PROXIMITIES_V1 {
+            return Err(RetrievalPortError::Contract(format!(
+                "lexical proximity count exceeds the v1 bound of {MAX_LEXICAL_PROXIMITIES_V1}"
+            )));
+        }
+        for proximity in &self.proximities {
+            proximity.validate()?;
+        }
+        if self.phrases.len() > MAX_LEXICAL_PHRASES_V1
+            || self.field_filters.len() > MAX_LEXICAL_FIELD_FILTERS_V1
+        {
+            return Err(RetrievalPortError::Contract(
+                "lexical phrases or field filters exceed their v1 request bounds".to_owned(),
             ));
         }
         for term in self
@@ -383,26 +472,38 @@ impl LexicalLaneEvidence {
                 ));
             }
         }
-        for term in &self.matched_whole_terms {
-            if !request.whole_terms.contains(term) {
-                return Err(RetrievalPortError::Contract(
-                    "lexical lane evidence matches a whole term outside the request".to_owned(),
-                ));
+        for (matched, requested, channel) in [
+            (
+                &self.matched_whole_terms,
+                &request.whole_terms,
+                "whole term",
+            ),
+            (&self.matched_subtokens, &request.subtokens, "subtoken"),
+            (&self.matched_phrases, &request.phrases, "phrase"),
+        ] {
+            if matched.iter().any(|term| !requested.contains(term)) {
+                return Err(RetrievalPortError::Contract(format!(
+                    "lexical lane evidence matches a {channel} outside the request"
+                )));
             }
         }
-        for subtoken in &self.matched_subtokens {
-            if !request.subtokens.contains(subtoken) {
-                return Err(RetrievalPortError::Contract(
-                    "lexical lane evidence matches a subtoken outside the request".to_owned(),
-                ));
-            }
+        if self
+            .matched_proximities
+            .iter()
+            .any(|proximity| !request.proximities.contains(proximity))
+        {
+            return Err(RetrievalPortError::Contract(
+                "lexical lane evidence matches a proximity outside the request".to_owned(),
+            ));
         }
-        for phrase in &self.matched_phrases {
-            if !request.phrases.contains(phrase) {
-                return Err(RetrievalPortError::Contract(
-                    "lexical lane evidence matches a phrase outside the request".to_owned(),
-                ));
-            }
+        if self.spelling_variants.iter().any(|variant| {
+            !request.whole_terms.contains(&variant.query)
+                || variant.alternative == variant.query
+                || variant.alternative.is_empty()
+        }) {
+            return Err(RetrievalPortError::Contract(
+                "lexical spelling evidence is not bound to the request".to_owned(),
+            ));
         }
         Ok(())
     }
