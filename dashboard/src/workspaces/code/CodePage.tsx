@@ -187,7 +187,11 @@ export function CodePage() {
         title="Code"
         note="indexed symbols and relations under one sealed graph generation"
       />
-      <CodeViewSwitcher active={location.view} onSelect={navigateView} />
+      <CodeViewSwitcher
+        active={location.view}
+        traceAvailable={focusState === 'available'}
+        onSelect={navigateView}
+      />
       <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs text-text-muted">
         {codeViewNote(location.view)}
       </p>

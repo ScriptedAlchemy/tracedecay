@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router';
@@ -193,9 +193,12 @@ describe('the URL-stable Code view shell', () => {
         .getByRole('region', { name: 'Topology' })
         .getAttribute('aria-labelledby'),
     ).toBe('code-view-topology');
+    for (const name of ['Atlas', 'Trace', 'Shared Code', 'Compare']) {
+      expect(screen.getByRole<HTMLButtonElement>('button', { name }).disabled).toBe(true);
+    }
   });
 
-  it('opens Atlas as a truthful unavailable view instead of relabeling Topology', async () => {
+  it('restores Atlas as a disabled, truthful unavailable view', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -203,13 +206,13 @@ describe('the URL-stable Code view shell', () => {
         return jsonOk(resolveFixture(pathname, search));
       }),
     );
-    const user = userEvent.setup();
-    renderCode();
-
-    await user.click(screen.getByRole('button', { name: 'Atlas' }));
+    renderCode('/code?view=atlas');
 
     expect(await screen.findByText('Atlas is unavailable')).toBeTruthy();
     expect(screen.getByText(/fixed structural treemap projection/i)).toBeTruthy();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Atlas' }).disabled).toBe(
+      true,
+    );
     expect(screen.queryByRole('heading', { name: 'Topology' })).toBeNull();
   });
 
@@ -222,16 +225,35 @@ describe('the URL-stable Code view shell', () => {
       }),
     );
     const user = userEvent.setup();
-    renderCode();
+    renderCode('/code?symbol=sym-0');
     const topology = screen.getByRole('button', { name: 'Topology' });
+    const trace = screen.getByRole<HTMLButtonElement>('button', { name: 'Trace' });
+    await waitFor(() => {
+      expect(trace.disabled).toBe(false);
+    });
 
     topology.focus();
     await user.keyboard('{Tab}{Enter}');
 
-    const trace = screen.getByRole('button', { name: 'Trace' });
     expect(document.activeElement).toBe(trace);
     expect(trace.getAttribute('aria-current')).toBe('page');
-    expect(await screen.findByText('Trace needs a selected symbol')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: /trace ·/i })).toBeTruthy();
+  });
+
+  it('maps a published Core URL into Trace without losing its symbol', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const { pathname, search } = new URL(String(input), 'http://localhost');
+        return jsonOk(resolveFixture(pathname, search));
+      }),
+    );
+    renderCode('/code?structureLens=core&structureFocus=sym-0');
+
+    expect(await screen.findByRole('heading', { name: /trace ·/i })).toBeTruthy();
+    expect(
+      screen.getByRole('button', { name: 'Trace' }).getAttribute('aria-current'),
+    ).toBe('page');
   });
 
   it.each([
@@ -251,8 +273,15 @@ describe('the URL-stable Code view shell', () => {
     expect(screen.getByText(detail)).toBeTruthy();
     expect(
       screen
-        .getByRole('button', { name: title.replace(' is unavailable', '') })
+        .getByRole<HTMLButtonElement>('button', {
+          name: title.replace(' is unavailable', ''),
+        })
         .getAttribute('aria-current'),
     ).toBe('page');
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', {
+        name: title.replace(' is unavailable', ''),
+      }).disabled,
+    ).toBe(true);
   });
 });

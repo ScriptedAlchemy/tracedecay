@@ -30,12 +30,29 @@ describe('Code view locations', () => {
     });
   });
 
-  it('writes the default view without a redundant query parameter', () => {
+  it('maps published Trace and Core links into Trace with the same symbol', () => {
+    for (const legacyView of ['trace', 'core'] as const) {
+      expect(
+        readCodeLocation(
+          new URLSearchParams(
+            `structureLens=${legacyView}&structureFocus=symbol-42`,
+          ),
+        ),
+      ).toEqual({ view: 'trace', focusId: 'symbol-42' });
+    }
+  });
+
+  it('writes the default view without old or redundant query parameters', () => {
     expect(
-      writeCodeLocation(new URLSearchParams('view=trace&symbol=symbol-42'), {
-        view: 'topology',
-        focusId: null,
-      }).toString(),
+      writeCodeLocation(
+        new URLSearchParams(
+          'view=trace&symbol=symbol-42&structureLens=core&structureFocus=old',
+        ),
+        {
+          view: 'topology',
+          focusId: null,
+        },
+      ).toString(),
     ).toBe('');
   });
 });

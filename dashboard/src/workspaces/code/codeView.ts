@@ -13,24 +13,32 @@ export const CODE_VIEW_DEFINITIONS = {
   atlas: {
     label: 'Atlas',
     note: 'fixed repository geometry across structural lenses',
+    status: 'pending',
   },
   topology: {
     label: 'Topology',
     note: 'modules and symbols across exact and inferred relations',
+    status: 'mounted',
   },
   trace: {
     label: 'Trace',
     note: 'callers and inputs through the selected symbol to callees and effects',
+    status: 'mounted',
   },
   'shared-code': {
     label: 'Shared Code',
     note: 'exact and verified near-clone families',
+    status: 'pending',
   },
   compare: {
     label: 'Compare',
     note: 'two revisions in one stable union layout',
+    status: 'pending',
   },
-} as const satisfies Record<CodeView, { label: string; note: string }>;
+} as const satisfies Record<
+  CodeView,
+  { label: string; note: string; status: 'mounted' | 'pending' }
+>;
 
 export interface CodeLocation {
   readonly view: CodeView;
@@ -45,9 +53,11 @@ export interface CodeViewBlocker {
 
 const VIEW_PARAM = 'view';
 const FOCUS_PARAM = 'symbol';
+const LEGACY_VIEW_PARAM = 'structureLens';
+const LEGACY_FOCUS_PARAM = 'structureFocus';
 
 export function readCodeLocation(params: URLSearchParams): CodeLocation {
-  const focusId = params.get(FOCUS_PARAM);
+  const focusId = params.get(FOCUS_PARAM) ?? params.get(LEGACY_FOCUS_PARAM);
   const requested = params.get(VIEW_PARAM);
   switch (requested) {
     case 'atlas':
@@ -55,6 +65,15 @@ export function readCodeLocation(params: URLSearchParams): CodeLocation {
     case 'shared-code':
     case 'compare':
       return { view: requested, focusId };
+    default:
+      if (requested !== null) return { view: 'topology', focusId };
+  }
+  switch (params.get(LEGACY_VIEW_PARAM)) {
+    case 'trace':
+    case 'core':
+      return focusId === null
+        ? { view: 'topology', focusId }
+        : { view: 'trace', focusId };
     default:
       return { view: 'topology', focusId };
   }
@@ -65,6 +84,8 @@ export function writeCodeLocation(
   location: CodeLocation,
 ): URLSearchParams {
   const next = new URLSearchParams(current);
+  next.delete(LEGACY_VIEW_PARAM);
+  next.delete(LEGACY_FOCUS_PARAM);
   if (location.view === 'topology') next.delete(VIEW_PARAM);
   else next.set(VIEW_PARAM, location.view);
   if (location.focusId === null) next.delete(FOCUS_PARAM);

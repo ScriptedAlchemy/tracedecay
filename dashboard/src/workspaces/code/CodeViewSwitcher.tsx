@@ -17,9 +17,11 @@ export function codeViewNote(view: CodeView): string {
 
 export function CodeViewSwitcher({
   active,
+  traceAvailable,
   onSelect,
 }: {
   active: CodeView;
+  traceAvailable: boolean;
   onSelect: (view: CodeView) => void;
 }) {
   return (
@@ -32,6 +34,8 @@ export function CodeViewSwitcher({
         {CODE_VIEWS.map((view) => {
           const definition = CODE_VIEW_DEFINITIONS[view];
           const selected = view === active;
+          const disabled =
+            definition.status === 'pending' || (view === 'trace' && !traceAvailable);
           return (
             <li key={view}>
               <button
@@ -39,10 +43,11 @@ export function CodeViewSwitcher({
                 type="button"
                 aria-current={selected ? 'page' : undefined}
                 aria-controls={CODE_VIEW_PANEL_ID}
+                disabled={disabled}
                 onClick={() => onSelect(view)}
                 className={cn(
                   'flex min-h-[44px] items-center gap-2 border px-3 text-2xs',
-                  'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+                  'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40',
                   selected
                     ? 'border-edge-strong bg-surface-3 text-text-primary'
                     : 'border-transparent text-text-secondary hover:bg-surface-2',
