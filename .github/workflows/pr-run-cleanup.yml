@@ -1,0 +1,119 @@
+# Keeps a pull request's runner queue and Actions cache footprint bounded.
+#
+# On every push, drops the cache entries the push supersedes. Cache entries
+# are restorable only from the ref that saved them or from the default
+# branch, and the Rust lanes restore by key prefix: rust-cache picks the
+# newest `v0-rust-<lane>-<env>-` entry. Everything older on
+# `refs/pull/N/merge` is unreachable, yet it counts against the repository's
+# 10 GB cache budget until GitHub's least-recently-used eviction removes it —
+# and LRU does not know which entries are dead. Measured 2026-09-08 (PR 707,
+# run 34231734416, 2.5 hours after the previous push's run): CI alone saved
+# 9.6 GB per push, so the `ci-dev`, `ci-clippy-full`, `hawk` and Windows
+# rust-cache lanes (`No cache found`) all rebuilt cold. Deleting the
+# superseded generations here leaves LRU nothing to choose.
+#
+# On close or merge, cancels every workflow run still queued or in progress
+# for the pull request. GitHub does not do this itself: a merged PR's queued
+# CI, profiling and validation runs keep their place in the account's FIFO
+# runner queue and their concurrency-group slots, so an afternoon of merges
+# leaves dozens of runs that can never be acted on ahead of the integration
+# branch's own run. The same event drops all of the pull request's Actions
+# caches, which nothing can restore any more — measured 2026-09-07: 4.6 GB of
+# the budget held entries from seven merged child PRs while the Linux test
+# lane's cache had been evicted, so every one of its runs was a cold build.
+name: Pull request run hygiene
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+permissions:
+  actions: write
+
+jobs:
+  # The selection is `scripts/prune-superseded-actions-caches.py`, tested
+  # here before it runs. Only this repository's own pull requests: a fork's
+  # token cannot delete caches, and the guarded jobs that save them do not
+  # run for forks outside the integration branches anyway.
+  prune:
+    name: Prune superseded caches
+    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            .github/workflows
+
+      - name: Test the superseded-entry selection
+        run: |
+          python3 scripts/test-prune-superseded-actions-caches.py
+          python3 scripts/test-rust-cache-lineage.py
+          python3 scripts/check-rust-cache-lineage.py
+
+      - name: Delete the pull request's superseded cache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MERGE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+          superseded="$(gh api --paginate "repos/$REPO/actions/caches?ref=$MERGE_REF&per_page=100" \
+                          | python3 scripts/prune-superseded-actions-caches.py)"
+          deleted=0
+          for cache in $superseded; do
+            gh api -X DELETE "repos/$REPO/actions/caches/$cache" >/dev/null
+            deleted=$((deleted + 1))
+          done
+          echo "deleted $deleted superseded cache entry(ies) for $MERGE_REF"
+
+  cancel:
+    name: Cancel superseded runs
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel queued and in-progress runs for the closed head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          OWN_RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cancelled=0
+          for status in queued in_progress waiting pending; do
+            # Every workflow that ran for this head, not only CI: profiling,
+            # plugin validation and SDK conformance queue per push too.
+            for run in $(gh api "repos/$REPO/actions/runs?branch=$HEAD_REF&status=$status&per_page=100" \
+                           --jq '.workflow_runs[].id'); do
+              if [ "$run" = "$OWN_RUN" ]; then
+                continue
+              fi
+              if gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null 2>&1; then
+                echo "cancelled run $run ($status) for $HEAD_REF@${HEAD_SHA:0:9}"
+                cancelled=$((cancelled + 1))
+              fi
+            done
+          done
+          echo "cancelled $cancelled run(s) for closed head $HEAD_REF"
+
+      - name: Delete the closed pull request's Actions caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MERGE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+          deleted=0
+          for cache in $(gh api "repos/$REPO/actions/caches?ref=$MERGE_REF&per_page=100" \
+                           --jq '.actions_caches[].id'); do
+            if gh api -X DELETE "repos/$REPO/actions/caches/$cache" >/dev/null 2>&1; then
+              deleted=$((deleted + 1))
+            fi
+          done
+          echo "deleted $deleted cache entry(ies) for $MERGE_REF"

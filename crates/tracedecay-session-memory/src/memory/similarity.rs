@@ -1,0 +1,114 @@
+//! Write-time near-duplicate and dashboard similarity primitives.
+//!
+//! Tokenization here is English-prose oriented: a token may continue with
+//! hyphen or apostrophe, trailing `_`/`'`/`-` is trimmed, and a stopword
+//! list is dropped so overlap scores measure content words. Dashboard
+//! curation analytics and write-time near-duplicate checks share this
+//! classifier so those two surfaces cannot drift.
+//!
+//! This is **not** the project-memory fact-search tokenizer
+//! (`tracedecay_session_memory::fact_store::scoring::project_memory_tokens`). Search keeps path-like
+//! punctuation (`/`, `:`, `.`) as token characters and does not strip
+//! stopwords, so FTS queries and Jaccard scoring can match identifiers
+//! such as `crate::foo` and `src/lib.rs`. Unifying the two would change
+//! either search hits or similarity classification.
+
+use std::collections::BTreeSet;
+
+const TOKEN_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "in", "is",
+    "it", "of", "on", "or", "that", "the", "this", "to", "was", "were", "with",
+];
+
+pub(crate) fn content_tokens(content: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    for ch in content.chars() {
+        let lower = ch.to_ascii_lowercase();
+        let is_token_char = if current.is_empty() {
+            lower.is_ascii_alphanumeric()
+        } else {
+            lower.is_ascii_alphanumeric() || lower == '_' || lower == '\'' || lower == '-'
+        };
+        if is_token_char {
+            current.push(lower);
+        } else if !current.is_empty() {
+            tokens.insert(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.insert(current);
+    }
+    tokens
+        .into_iter()
+        .map(|t| {
+            t.trim_matches(|c| c == '_' || c == '\'' || c == '-')
+                .to_string()
+        })
+        .filter(|t| t.len() > 1 && !TOKEN_STOPWORDS.contains(&t.as_str()))
+        .collect()
+}
+
+pub fn lexical_overlap(a: &str, b: &str) -> (serde_json::Value, f64, f64) {
+    lexical_overlap_tokens(&content_tokens(a), &content_tokens(b))
+}
+
+/// Pre-tokenized variant of [`lexical_overlap`].
+pub(crate) fn lexical_overlap_tokens(
+    a_tokens: &BTreeSet<String>,
+    b_tokens: &BTreeSet<String>,
+) -> (serde_json::Value, f64, f64) {
+    let shared: Vec<&String> = a_tokens.intersection(b_tokens).collect();
+    let union = a_tokens.union(b_tokens).count();
+    let min_size = a_tokens.len().min(b_tokens.len());
+    let token_overlap = if union > 0 {
+        (shared.len() as f64 / union as f64 * 10_000.0).round() / 10_000.0
+    } else {
+        0.0
+    };
+    let overlap_coefficient = if min_size > 0 {
+        (shared.len() as f64 / min_size as f64 * 10_000.0).round() / 10_000.0
+    } else {
+        0.0
+    };
+    let payload = serde_json::json!({
+        "token_overlap": token_overlap,
+        "overlap_coefficient": overlap_coefficient,
+        "shared_token_count": shared.len(),
+        "a_token_count": a_tokens.len(),
+        "b_token_count": b_tokens.len(),
+        "shared_tokens": shared.iter().take(10).collect::<Vec<_>>(),
+    });
+    (payload, token_overlap, overlap_coefficient)
+}
+
+pub fn similarity_classification(
+    similarity: f64,
+    token_overlap: f64,
+    overlap_coefficient: f64,
+) -> &'static str {
+    if similarity >= 0.95 && (overlap_coefficient >= 0.65 || token_overlap >= 0.45) {
+        return "likely_duplicate";
+    }
+    if similarity >= 0.90 && (overlap_coefficient >= 0.35 || token_overlap >= 0.20) {
+        return "high_similarity";
+    }
+    if similarity >= 0.97 && overlap_coefficient >= 0.25 {
+        return "high_similarity";
+    }
+    "related"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_tokens_strips_stopwords() {
+        let tokens = content_tokens("The quick brown fox and the lazy dog");
+        assert!(tokens.contains("quick"));
+        assert!(tokens.contains("brown"));
+        assert!(!tokens.contains("the"));
+        assert!(!tokens.contains("and"));
+    }
+}

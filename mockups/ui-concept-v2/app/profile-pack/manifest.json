@@ -1,0 +1,573 @@
+{
+  "kind": "CONCEPT / PROFILE SNAPSHOT",
+  "purpose": "throwaway HUD read-only pack; not production evidence",
+  "source_profile": "/Users/zackjackson/.tracedecay",
+  "captured_at_pt": "2026-08-30T01:08:00-07:00",
+  "notes": [
+    "session_threads is empty in the live DBs",
+    "code index NOT sealed: tracedecay.db has graph_verified_heads_v1 counts, retrieval_anchors=0, no facts table",
+    "message text bodies, FTS, and full observation_json payloads were NOT copied",
+    "full sessions.db, user-sessions.db, and *.grafeo were NOT copied",
+    "do not treat counts as production evidence"
+  ],
+  "copy_status": {
+    "global.db": "ok",
+    "hook_analytics.jsonl": "ok",
+    "note": "CopyToBox refused /tmp and ~/.tracedecay; staged via /Users/zackjackson/agent-tools/td-slim-extract then copied"
+  },
+  "totals": {
+    "bytes": 17652153,
+    "files": 46
+  },
+  "projects": [
+    {
+      "id": "proj_ae394425f7837d4f",
+      "label_from_store_manifest_root": "tracedecay",
+      "project_root": "/Volumes/bigssd/projects/tracedecay",
+      "role": "PRIMARY",
+      "session_threads": 0,
+      "tracedecay_db": {
+        "graph_verified_heads_v1": 1,
+        "retrieval_anchors": 0,
+        "facts_table": "absent"
+      },
+      "row_counts": {
+        "sessions": 4,
+        "messages_spine": 229,
+        "observations_slim": 658,
+        "agents": 0,
+        "session_threads": 0
+      },
+      "files": [
+        {
+          "path": "proj_ae394425f7837d4f/sessions.json",
+          "bytes": 1122,
+          "rows": 4
+        },
+        {
+          "path": "proj_ae394425f7837d4f/messages-spine.json",
+          "bytes": 55136,
+          "rows": 229
+        },
+        {
+          "path": "proj_ae394425f7837d4f/observations-slim.json",
+          "bytes": 152293,
+          "rows": 658
+        },
+        {
+          "path": "proj_ae394425f7837d4f/agents.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_ae394425f7837d4f/hook_analytics.jsonl",
+          "bytes": 778551,
+          "lines": 2300
+        },
+        {
+          "path": "proj_ae394425f7837d4f/store_manifest.json",
+          "bytes": 396
+        },
+        {
+          "path": "proj_ae394425f7837d4f/branch-meta.json",
+          "bytes": 209
+        }
+      ],
+      "bytes": 987710
+    },
+    {
+      "id": "proj_e19f6f383c982ea8",
+      "label_from_store_manifest_root": "ZeroFS",
+      "project_root": "/Volumes/bigssd/projects/ZeroFS",
+      "role": null,
+      "session_threads": 0,
+      "tracedecay_db": {
+        "graph_verified_heads_v1": 2,
+        "retrieval_anchors": 0,
+        "facts_table": "absent"
+      },
+      "row_counts": {
+        "sessions": 26,
+        "messages_spine": 1662,
+        "observations_slim": 2712,
+        "agents": 30,
+        "session_threads": 0
+      },
+      "files": [
+        {
+          "path": "proj_e19f6f383c982ea8/sessions.json",
+          "bytes": 7557,
+          "rows": 26
+        },
+        {
+          "path": "proj_e19f6f383c982ea8/messages-spine.json",
+          "bytes": 388752,
+          "rows": 1662
+        },
+        {
+          "path": "proj_e19f6f383c982ea8/observations-slim.json",
+          "bytes": 607683,
+          "rows": 2712
+        },
+        {
+          "path": "proj_e19f6f383c982ea8/agents.json",
+          "bytes": 5815,
+          "rows": 30
+        },
+        {
+          "path": "proj_e19f6f383c982ea8/hook_analytics.jsonl",
+          "bytes": 951456,
+          "lines": 2796
+        },
+        {
+          "path": "proj_e19f6f383c982ea8/store_manifest.json",
+          "bytes": 392
+        },
+        {
+          "path": "proj_e19f6f383c982ea8/branch-meta.json",
+          "bytes": 241
+        }
+      ],
+      "bytes": 1961896
+    },
+    {
+      "id": "proj_8007f36f3654e9be",
+      "label_from_store_manifest_root": "zerofs-ios-companion",
+      "project_root": "/Volumes/bigssd/projects/zerofs-ios-companion",
+      "role": "densest agent tree",
+      "session_threads": 0,
+      "tracedecay_db": {
+        "graph_verified_heads_v1": 2,
+        "retrieval_anchors": 0,
+        "facts_table": "absent"
+      },
+      "row_counts": {
+        "sessions": 40,
+        "messages_spine": 5966,
+        "observations_slim": 6980,
+        "agents": 49,
+        "session_threads": 0
+      },
+      "files": [
+        {
+          "path": "proj_8007f36f3654e9be/sessions.json",
+          "bytes": 12011,
+          "rows": 40
+        },
+        {
+          "path": "proj_8007f36f3654e9be/messages-spine.json",
+          "bytes": 1366161,
+          "rows": 5966
+        },
+        {
+          "path": "proj_8007f36f3654e9be/observations-slim.json",
+          "bytes": 1522710,
+          "rows": 6980
+        },
+        {
+          "path": "proj_8007f36f3654e9be/agents.json",
+          "bytes": 9657,
+          "rows": 49
+        },
+        {
+          "path": "proj_8007f36f3654e9be/hook_analytics.jsonl",
+          "bytes": 184632,
+          "lines": 540
+        },
+        {
+          "path": "proj_8007f36f3654e9be/store_manifest.json",
+          "bytes": 406
+        },
+        {
+          "path": "proj_8007f36f3654e9be/branch-meta.json",
+          "bytes": 205
+        }
+      ],
+      "bytes": 3095782
+    },
+    {
+      "id": "proj_a812b7edf6fab331",
+      "label_from_store_manifest_root": "movie-library",
+      "project_root": "/Users/zackjackson/plugins/movie-library",
+      "role": "empty sessions",
+      "session_threads": 0,
+      "tracedecay_db": {
+        "graph_verified_heads_v1": 2,
+        "retrieval_anchors": 0,
+        "facts_table": "absent"
+      },
+      "row_counts": {
+        "sessions": 0,
+        "messages_spine": 0,
+        "observations_slim": 0,
+        "agents": 0,
+        "session_threads": 0
+      },
+      "files": [
+        {
+          "path": "proj_a812b7edf6fab331/sessions.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_a812b7edf6fab331/messages-spine.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_a812b7edf6fab331/observations-slim.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_a812b7edf6fab331/agents.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_a812b7edf6fab331/store_manifest.json",
+          "bytes": 401
+        },
+        {
+          "path": "proj_a812b7edf6fab331/branch-meta.json",
+          "bytes": 209
+        }
+      ],
+      "bytes": 622
+    },
+    {
+      "id": "proj_2f28a204e57c569f",
+      "label_from_store_manifest_root": "mqvpn",
+      "project_root": "/Volumes/bigssd/projects/mqvpn",
+      "role": null,
+      "session_threads": 0,
+      "tracedecay_db": {
+        "graph_verified_heads_v1": 13,
+        "retrieval_anchors": 0,
+        "facts_table": "absent"
+      },
+      "row_counts": {
+        "sessions": 1,
+        "messages_spine": 14,
+        "observations_slim": 16,
+        "agents": 0,
+        "session_threads": 0
+      },
+      "files": [
+        {
+          "path": "proj_2f28a204e57c569f/sessions.json",
+          "bytes": 278,
+          "rows": 1
+        },
+        {
+          "path": "proj_2f28a204e57c569f/messages-spine.json",
+          "bytes": 3408,
+          "rows": 14
+        },
+        {
+          "path": "proj_2f28a204e57c569f/observations-slim.json",
+          "bytes": 3785,
+          "rows": 16
+        },
+        {
+          "path": "proj_2f28a204e57c569f/agents.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_2f28a204e57c569f/hook_analytics.jsonl",
+          "bytes": 28125,
+          "lines": 82
+        },
+        {
+          "path": "proj_2f28a204e57c569f/store_manifest.json",
+          "bytes": 391
+        },
+        {
+          "path": "proj_2f28a204e57c569f/branch-meta.json",
+          "bytes": 205
+        }
+      ],
+      "bytes": 36195
+    },
+    {
+      "id": "proj_2c558f8ce42d5cdf",
+      "label_from_store_manifest_root": "core",
+      "project_root": "/Volumes/bigssd/projects/core",
+      "role": "newly enrolled; sessions empty",
+      "session_threads": 0,
+      "tracedecay_db": {
+        "note": "fresh store; sessions empty at capture; code index unsealed"
+      },
+      "row_counts": {
+        "sessions": 0,
+        "messages_spine": 0,
+        "observations_slim": 0,
+        "agents": 0,
+        "session_threads": 0
+      },
+      "files": [
+        {
+          "path": "proj_2c558f8ce42d5cdf/sessions.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/messages-spine.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/observations-slim.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/agents.json",
+          "bytes": 3,
+          "rows": 0
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/store_manifest.json",
+          "bytes": 390
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/branch-meta.json",
+          "bytes": 205
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/branches-local.txt",
+          "bytes": 23757
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/branches-remote.txt",
+          "bytes": 10688
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/branches-local.json",
+          "bytes": 27277
+        },
+        {
+          "path": "proj_2c558f8ce42d5cdf/README.md",
+          "bytes": 584
+        }
+      ],
+      "bytes": 62913
+    }
+  ],
+  "files": [
+    {
+      "path": "global.db",
+      "bytes": 4071424
+    },
+    {
+      "path": "hook_analytics.jsonl",
+      "bytes": 7435611,
+      "lines": 21992
+    },
+    {
+      "path": "proj_ae394425f7837d4f/sessions.json",
+      "bytes": 1122,
+      "rows": 4
+    },
+    {
+      "path": "proj_ae394425f7837d4f/messages-spine.json",
+      "bytes": 55136,
+      "rows": 229
+    },
+    {
+      "path": "proj_ae394425f7837d4f/observations-slim.json",
+      "bytes": 152293,
+      "rows": 658
+    },
+    {
+      "path": "proj_ae394425f7837d4f/agents.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_ae394425f7837d4f/hook_analytics.jsonl",
+      "bytes": 778551,
+      "lines": 2300
+    },
+    {
+      "path": "proj_ae394425f7837d4f/store_manifest.json",
+      "bytes": 396
+    },
+    {
+      "path": "proj_ae394425f7837d4f/branch-meta.json",
+      "bytes": 209
+    },
+    {
+      "path": "proj_e19f6f383c982ea8/sessions.json",
+      "bytes": 7557,
+      "rows": 26
+    },
+    {
+      "path": "proj_e19f6f383c982ea8/messages-spine.json",
+      "bytes": 388752,
+      "rows": 1662
+    },
+    {
+      "path": "proj_e19f6f383c982ea8/observations-slim.json",
+      "bytes": 607683,
+      "rows": 2712
+    },
+    {
+      "path": "proj_e19f6f383c982ea8/agents.json",
+      "bytes": 5815,
+      "rows": 30
+    },
+    {
+      "path": "proj_e19f6f383c982ea8/hook_analytics.jsonl",
+      "bytes": 951456,
+      "lines": 2796
+    },
+    {
+      "path": "proj_e19f6f383c982ea8/store_manifest.json",
+      "bytes": 392
+    },
+    {
+      "path": "proj_e19f6f383c982ea8/branch-meta.json",
+      "bytes": 241
+    },
+    {
+      "path": "proj_8007f36f3654e9be/sessions.json",
+      "bytes": 12011,
+      "rows": 40
+    },
+    {
+      "path": "proj_8007f36f3654e9be/messages-spine.json",
+      "bytes": 1366161,
+      "rows": 5966
+    },
+    {
+      "path": "proj_8007f36f3654e9be/observations-slim.json",
+      "bytes": 1522710,
+      "rows": 6980
+    },
+    {
+      "path": "proj_8007f36f3654e9be/agents.json",
+      "bytes": 9657,
+      "rows": 49
+    },
+    {
+      "path": "proj_8007f36f3654e9be/hook_analytics.jsonl",
+      "bytes": 184632,
+      "lines": 540
+    },
+    {
+      "path": "proj_8007f36f3654e9be/store_manifest.json",
+      "bytes": 406
+    },
+    {
+      "path": "proj_8007f36f3654e9be/branch-meta.json",
+      "bytes": 205
+    },
+    {
+      "path": "proj_a812b7edf6fab331/sessions.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_a812b7edf6fab331/messages-spine.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_a812b7edf6fab331/observations-slim.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_a812b7edf6fab331/agents.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_a812b7edf6fab331/store_manifest.json",
+      "bytes": 401
+    },
+    {
+      "path": "proj_a812b7edf6fab331/branch-meta.json",
+      "bytes": 209
+    },
+    {
+      "path": "proj_2f28a204e57c569f/sessions.json",
+      "bytes": 278,
+      "rows": 1
+    },
+    {
+      "path": "proj_2f28a204e57c569f/messages-spine.json",
+      "bytes": 3408,
+      "rows": 14
+    },
+    {
+      "path": "proj_2f28a204e57c569f/observations-slim.json",
+      "bytes": 3785,
+      "rows": 16
+    },
+    {
+      "path": "proj_2f28a204e57c569f/agents.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_2f28a204e57c569f/hook_analytics.jsonl",
+      "bytes": 28125,
+      "lines": 82
+    },
+    {
+      "path": "proj_2f28a204e57c569f/store_manifest.json",
+      "bytes": 391
+    },
+    {
+      "path": "proj_2f28a204e57c569f/branch-meta.json",
+      "bytes": 205
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/sessions.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/messages-spine.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/observations-slim.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/agents.json",
+      "bytes": 3,
+      "rows": 0
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/store_manifest.json",
+      "bytes": 390
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/branch-meta.json",
+      "bytes": 205
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/branches-local.txt",
+      "bytes": 23757
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/branches-remote.txt",
+      "bytes": 10688
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/branches-local.json",
+      "bytes": 27277
+    },
+    {
+      "path": "proj_2c558f8ce42d5cdf/README.md",
+      "bytes": 584
+    }
+  ]
+}

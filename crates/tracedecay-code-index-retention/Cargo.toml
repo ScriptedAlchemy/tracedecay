@@ -1,0 +1,30 @@
+[package]
+name = "tracedecay-code-index-retention"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Liveness-based retention for immutable code-index generations"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[dependencies]
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
+fs2 = "0.4"
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "parallel", "sha1", "sha256", "status"] }
+hotpath.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }

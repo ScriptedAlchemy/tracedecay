@@ -5,11 +5,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/check-release-drift.sh [--repo PATH] [--release-version VERSION]
 
-Fails when Cargo.toml differs from the latest non-prerelease GitHub release
-tag. That state means a release automation version bump reached master without the
-GitHub tag/release completing.
-
---registry-version remains an alias for --release-version.
+Fails when Cargo.toml differs from its published GitHub release. Stable
+versions are compared with the latest non-prerelease release; prerelease
+versions require their exact published prerelease tag.
 EOF
 }
 
@@ -22,7 +20,7 @@ while [[ $# -gt 0 ]]; do
       repo="${2:?missing value for --repo}"
       shift 2
       ;;
-    --release-version|--registry-version)
+    --release-version)
       release_version="${2:?missing value for $1}"
       shift 2
       ;;
@@ -45,7 +43,10 @@ import tomllib
 
 with open(sys.argv[1], "rb") as handle:
     manifest = tomllib.load(handle)
-print(manifest["package"]["version"])
+# The repository root is a virtual workspace manifest with no `[package]`.
+# Every member inherits `version.workspace = true`, so the released version is
+# the workspace one.
+print(manifest["workspace"]["package"]["version"])
 PY
 )"
 
@@ -54,17 +55,32 @@ if [[ -z "$release_version" ]]; then
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     curl_args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
   fi
-  release_version="$(curl "${curl_args[@]}" \
-    https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/latest \
-    | python3 -c '
+  release_endpoint="https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/latest"
+  expected_prerelease=false
+  if [[ "$local_version" == *-* ]]; then
+    release_endpoint="https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/tags/v${local_version}"
+    expected_prerelease=true
+  fi
+  if ! release_response="$(curl "${curl_args[@]}" "$release_endpoint")"; then
+    echo "release drift detected: no published GitHub release v$local_version" >&2
+    exit 1
+  fi
+  release_version="$(python3 -c '
 import json
 import sys
 
-tag = json.load(sys.stdin).get("tag_name")
+local_version, expected_prerelease = sys.argv[1:]
+release = json.load(sys.stdin)
+tag = release.get("tag_name")
 if not isinstance(tag, str) or not tag:
-    raise SystemExit("latest GitHub release response has no tag_name")
+    raise SystemExit("GitHub release response has no tag_name")
+if expected_prerelease == "true":
+    if tag != f"v{local_version}":
+        raise SystemExit(f"GitHub prerelease tag mismatch: expected v{local_version}, got {tag}")
+    if release.get("draft") is not False or release.get("prerelease") is not True:
+        raise SystemExit(f"GitHub prerelease v{local_version} is not published")
 print(tag)
-')"
+' "$local_version" "$expected_prerelease" <<<"$release_response")"
 fi
 
 release_version="${release_version#v}"

@@ -7,7 +7,7 @@ description: Map repo or directory architecture, including layered modules, depe
 
 Use `tracedecay:code-health`.
 
-- **Scope:** the whole repo, or the directory named in `$ARGUMENTS` if one was given.
-- Read-only.
-
-Output: a layered module map, dependency hotspots/violations, and a prioritized risk list.
+Map the whole repository, or `$ARGUMENTS` when it names a directory. This is
+read-only. Focus on module distribution, public surfaces, dependency structure,
+cycles, coupling, and depth as needed for a useful map, and support reported
+hotspots or boundary violations with evidence.

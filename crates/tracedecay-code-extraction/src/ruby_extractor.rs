@@ -1,22 +1,23 @@
 /// Tree-sitter based Ruby source code extractor.
 ///
 /// Parses Ruby source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::docstring_from_hash_comments;
+use crate::common::{docstring_from_hash_comments, local_node_id};
 use crate::complexity::{RUBY_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Ruby source files using tree-sitter.
 pub struct RubyExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -24,18 +25,15 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Depth of class/module nesting. > 0 means we are inside a class or module.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -43,19 +41,24 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -64,31 +67,21 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl RubyExtractor {
-    /// Extract code graph nodes and edges from a Ruby source file.
-    ///
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Ruby source code to parse.
-    pub fn extract_ruby(file_path: &str, source: &str) -> ExtractionResult {
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -97,7 +90,7 @@ impl RubyExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -111,6 +104,7 @@ impl RubyExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -118,28 +112,19 @@ impl RubyExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("ruby")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Ruby grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
-    }
-
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -153,7 +138,6 @@ impl RubyExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "method" => Self::visit_method(state, node, false),
@@ -172,8 +156,10 @@ impl RubyExtractor {
     /// `is_singleton` controls whether this becomes a Method regardless of class depth
     /// (singleton methods are always `NodeKind::Method`).
     fn visit_method(state: &mut ExtractionState, node: TsNode<'_>, is_singleton: bool) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let in_class = state.class_depth > 0 || is_singleton;
         let kind = if in_class {
@@ -189,8 +175,8 @@ impl RubyExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &RUBY_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let metrics = count_complexity(node, &RUBY_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -214,12 +200,12 @@ impl RubyExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -229,7 +215,6 @@ impl RubyExtractor {
             });
         }
 
-        // Extract call sites from the method body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -249,8 +234,8 @@ impl RubyExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &RUBY_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let metrics = count_complexity(node, &RUBY_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -274,12 +259,12 @@ impl RubyExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -289,15 +274,16 @@ impl RubyExtractor {
             });
         }
 
-        // Extract call sites from the method body.
         Self::extract_call_sites(state, node, &id);
     }
 
     /// Extract a class definition.
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
         // In tree-sitter-ruby, class node children include: "class", constant (name), superclass?, body
-        let name = find_direct_child_by_kind(node, "constant")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "constant").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let docstring = Self::extract_docstring(state, node);
@@ -307,7 +293,13 @@ impl RubyExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -331,12 +323,12 @@ impl RubyExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -346,10 +338,8 @@ impl RubyExtractor {
             });
         }
 
-        // Extract superclass (inheritance): `class Foo < Bar`
         Self::extract_superclass(state, node, &id);
 
-        // Visit class body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "body_statement") {
@@ -361,8 +351,10 @@ impl RubyExtractor {
 
     /// Extract a module definition.
     fn visit_module(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "constant")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "constant").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let docstring = Self::extract_docstring(state, node);
@@ -371,9 +363,14 @@ impl RubyExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
-        // Build "module ModuleName" signature
         let text = state.node_text(node);
         let signature = text
             .lines()
@@ -403,12 +400,12 @@ impl RubyExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -418,7 +415,6 @@ impl RubyExtractor {
             });
         }
 
-        // Visit module body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "body_statement") {
@@ -435,60 +431,56 @@ impl RubyExtractor {
         // In tree-sitter-ruby, assignment has left and right children.
         // Constants are represented as "constant" kind nodes on the left side.
         let left = node.child_by_field_name("left");
-        if let Some(left_node) = left {
-            if left_node.kind() == "constant" {
-                let name = state.node_text(left_node);
-                let start_line = node.start_position().row as u32;
-                let end_line = node.end_position().row as u32;
-                let start_column = node.start_position().column as u32;
-                let end_column = node.end_position().column as u32;
-                let text = state.node_text(node);
-                let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        if let Some(left_node) = left
+            && left_node.kind() == "constant"
+        {
+            let name = state.node_text(left_node);
+            let start_line = node.start_position().row as u32;
+            let end_line = node.end_position().row as u32;
+            let start_column = node.start_position().column as u32;
+            let end_column = node.end_position().column as u32;
+            let text = state.node_text(node);
+            let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+            let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
-                let graph_node = Node {
-                    id: id.clone(),
-                    kind: NodeKind::Const,
-                    name,
-                    qualified_name,
-                    file_path: state.file_path.clone(),
-                    start_line,
-                    attrs_start_line: start_line,
-                    end_line,
-                    start_column,
-                    end_column,
-                    signature: Some(text.trim().to_string()),
-                    docstring: None,
-                    visibility: Visibility::Pub,
-                    is_async: false,
-                    branches: 0,
-                    loops: 0,
-                    returns: 0,
-                    max_nesting: 0,
-                    unsafe_blocks: 0,
-                    unchecked_calls: 0,
-                    assertions: 0,
-                    updated_at: state.timestamp,
-                    parent_id: None,
-                };
-                state.nodes.push(graph_node);
+            let graph_node = Node {
+                id: id.clone(),
+                kind: NodeKind::Const,
+                name: name.to_string(),
+                qualified_name,
+                file_path: state.file_path.clone(),
+                start_line,
+                attrs_start_line: start_line,
+                end_line,
+                start_column,
+                end_column,
+                signature: Some(text.trim().to_string()),
+                docstring: None,
+                visibility: Visibility::Pub,
+                is_async: false,
+                branches: 0,
+                loops: 0,
+                returns: 0,
+                max_nesting: 0,
+                unsafe_blocks: 0,
+                unchecked_calls: 0,
+                assertions: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
+                updated_at: state.timestamp,
+                parent_id: None,
+            };
+            state.nodes.push(graph_node);
 
-                // Contains edge from parent.
-                if let Some(parent_id) = state.parent_node_id() {
-                    state.edges.push(Edge {
-                        source: parent_id.to_string(),
-                        target: id,
-                        kind: EdgeKind::Contains,
-                        line: Some(start_line),
-                    });
-                }
+            if let Some(parent_id) = state.parent_node_id() {
+                state.edges.push(Edge {
+                    source: parent_id.to_string(),
+                    target: id,
+                    kind: EdgeKind::Contains,
+                    line: Some(start_line),
+                });
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the superclass from a class definition (`class Foo < Bar`).
     ///
@@ -529,7 +521,7 @@ impl RubyExtractor {
                             let column = const_node.start_position().column as u32;
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: class_id.to_string(),
-                                reference_name: base_name,
+                                reference_name: base_name.to_string(),
                                 reference_kind: EdgeKind::Extends,
                                 line,
                                 column,
@@ -589,7 +581,7 @@ impl RubyExtractor {
     /// Ruby uses comment lines (# ...) as documentation. We look for `comment`
     /// sibling nodes that immediately precede the given definition node.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_hash_comments(&state.source, node)
+        docstring_from_hash_comments(state.source, node)
     }
 
     /// Find the method name identifier in a singleton method.
@@ -608,7 +600,7 @@ impl RubyExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "identifier" => {
-                        last_ident = Some(state.node_text(child));
+                        last_ident = Some(state.node_text(child).to_string());
                     }
                     "method_parameters" | "body_statement" => {
                         break;
@@ -644,14 +636,13 @@ impl RubyExtractor {
                         if let Some(name) = callee_name {
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: name,
+                                reference_name: name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into the call for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested method/singleton_method/class/module definitions to avoid
@@ -689,7 +680,16 @@ impl crate::LanguageExtractor for RubyExtractor {
         "Ruby"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_ruby(file_path, source)
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

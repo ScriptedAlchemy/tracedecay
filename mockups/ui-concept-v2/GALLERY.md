@@ -34,6 +34,8 @@ This gallery renders every authoritative final plate. Open the same-stem brief b
 
 ![Evidence gaps](03-loom/final/07-evidence-gaps.png)
 
+![Work proximity](03-loom/final/08-work-proximity.png)
+
 ## 04 Sessions
 
 ![Session provenance inspector](04-sessions/final/01-session-provenance-inspector.png)
@@ -45,6 +47,8 @@ This gallery renders every authoritative final plate. Open the same-stem brief b
 ## 06 Code
 
 ![Semantic cortex](06-code/final/01-semantic-cortex.png)
+
+![Structural comparison](06-code/final/02-structural-comparison.png)
 
 ## 07 Knowledge
 

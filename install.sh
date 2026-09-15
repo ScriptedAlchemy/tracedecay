@@ -47,11 +47,26 @@ trap 'rm -rf "$tmp_dir"' EXIT
 curl -fsSL "${asset_root}/${asset}" -o "${tmp_dir}/${asset}"
 curl -fsSL "${asset_root}/SHA256SUMS" -o "${tmp_dir}/SHA256SUMS"
 
-expected=$(
-  awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' \
-    "${tmp_dir}/SHA256SUMS"
-)
-[[ -n $expected ]] || fail "SHA256SUMS has no entry for ${asset}"
+if ! expected=$(
+  awk -v asset="$asset" '
+    $2 == asset || $2 == "*" asset {
+      matches += 1
+      digest = $1
+      fields = NF
+    }
+    END {
+      if (matches != 1 || fields != 2) {
+        exit 1
+      }
+      print digest
+    }
+  ' "${tmp_dir}/SHA256SUMS"
+); then
+  fail "SHA256SUMS must contain exactly one entry for ${asset}"
+fi
+[[ $expected =~ ^[[:xdigit:]]{64}$ ]] ||
+  fail "SHA256SUMS has an invalid digest for ${asset}"
+expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
 
 if command -v sha256sum >/dev/null 2>&1; then
   actual=$(sha256sum "${tmp_dir}/${asset}" | awk '{print $1}')

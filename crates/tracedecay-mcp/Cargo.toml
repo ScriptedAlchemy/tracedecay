@@ -1,0 +1,106 @@
+[package]
+name = "tracedecay-mcp"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Portable MCP catalog, rendering, and JSON-RPC transport for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+# Type-coupled: `transport::ProfiledStdin`/`ProfiledStdout` name the on-mode
+# `hotpath::io::InstrumentedIo` (hotpath 0.24 has no mode-agnostic `wrap`
+# alias for I/O), so any build that selects the backend with this crate in
+# its graph must select this feature too.
+hotpath = ["hotpath/hotpath"]
+# Gates in-memory ChannelTransport. ReplayTransport stays on the default
+# graph because production initialize-root replay uses it.
+test-transport = []
+# Cross-crate fixture surface: the session-authority composition over the
+# registered host-admission test runtime. Production code is never gated by it.
+test-helpers = ["tracedecay-project/test-helpers"]
+# Source-parsing analysis (field receiver typing, the unmounted-files
+# handler) needs the canonical Rust and TypeScript grammar tier. The
+# composition root mounts this production feature where that tier is already
+# part of the shipped code-index closure.
+source-analysis = ["tracedecay-code-extraction/lite"]
+
+[dependencies]
+futures-util = "0.3.33"
+gix.workspace = true
+glob = "0.3"
+hex = "0.4"
+hotpath.workspace = true
+libc = "0.2"
+rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
+# The multi-root execute tool derives its input schema from the contracts DTO.
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.19", default-features = false }
+toml = "1"
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0" }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
+tracedecay-mcp-catalog = { path = "../tracedecay-mcp-catalog", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
+tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracing = "0.1"
+tree-sitter = "0.26"
+url = "2"
+
+[dev-dependencies]
+rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0", features = ["test-helpers"] }
+# The dashboard LCM adapter's unit tests build request controls through the
+# dashboard-api test-transport constructor.
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0", features = ["test-transport"] }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+# The moved handler tests open projects through the registered test runtime
+# and the explicit `TraceDecay::*_for_test` constructors.
+tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }

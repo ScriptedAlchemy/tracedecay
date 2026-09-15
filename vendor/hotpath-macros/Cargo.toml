@@ -1,0 +1,50 @@
+[package]
+edition = "2021"
+name = "hotpath-macros"
+version = "0.24.0"
+publish = false
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "One profiler for CPU, time, memory, SQL, and async code - quickly find and debug performance bottlenecks. Proc macros crate."
+readme = "README.md"
+categories = ["development-tools"]
+license = "MIT"
+repository = "https://github.com/pawurb/hotpath-rs"
+
+[package.metadata.docs.rs]
+features = [
+    "hotpath",
+    "hotpath-alloc",
+]
+
+[features]
+default = []
+hotpath = [
+    "dep:proc-macro2",
+    "dep:quote",
+    "dep:syn",
+]
+hotpath-alloc = []
+hotpath-cpu = []
+
+[lib]
+name = "hotpath_macros"
+path = "src/lib.rs"
+proc-macro = true
+
+[dependencies.proc-macro2]
+version = "1.0.75"
+optional = true
+
+[dependencies.quote]
+version = "1.0.35"
+optional = true
+
+[dependencies.syn]
+version = "2.0.52"
+features = ["full"]
+optional = true

@@ -1,17 +1,24 @@
 ---
-description: Curate, update, delete, or inspect TraceDecay memory facts and dashboard curation from an explicit slash workflow.
+description: Run or inspect agent-managed memory curation and its terminal run record.
 argument-hint: "[subject]"
 ---
 
 # Curate memory
 
-Interpret `$ARGUMENTS` as the fact, entity, query, or curation action to review. If absent, ask what memory scope to curate before mutating anything.
+Interpret `$ARGUMENTS` as a fact, entity, query, curation scope, or existing
+run. Follow the bundled `project-memory` skill and load its curation reference
+only for a broad curation request or run inspection. Resolve the registered
+project before mutation. A read-only inspection must not launch another run,
+and the dashboard opens only when the user asks for visual curation.
 
-1. Resolve scope: confirm the active project root/store with `tracedecay_active_project` before touching memory.
-2. Start read-only with `tracedecay_fact_store` (`action`: `search` / `list` / `get` / `probe` / `related` / `reason` / `contradict`) or `tracedecay_memory_status` (only when the user asks for counts/health, since it may repair vectors/banks). Open `tracedecay_dashboard` (`action: "start"`) only when the user wants visual curation.
-3. Inventory candidates into add, update, merge/dedupe, stale, contradiction, secret-like, and possible-delete buckets, keeping fact ids, source, trust, tags, and evidence with each.
-4. Apply narrowly with `tracedecay_fact_store` `action: "add"` / `"update"`. Prefer update/merge over removal when useful provenance should survive.
-5. Hard-delete guardrail: require explicit approval immediately before every `action: "remove"` or dashboard hard delete, showing fact id, content/source summary, reason, and a permanent-delete warning — unless the user already gave an exact deletion instruction. Deletion is permanent; there is no undo. Never store secrets, credentials, or PII.
-6. Verify read-only: re-run search/list/probe/get and report final facts changed, skipped, or still needing judgment.
+Broad curation uses `tracedecay_fact_store_curate`; the daemon owns its task,
+validation, and supported effects. Preserve the returned run id and inspect
+terminal state and only advertised artifacts through the automation run views.
+If a failed run records applied operations, report them and the required
+reconciliation before considering a retry.
 
-Output: memory facts inspected or changed, confirmations requested, and the final verification search/list result. If any result includes a `tracedecay_metrics:` line, report the savings.
+Direct fact operations are for exact administration requests and are independent
+of curator runs. Prefer supersession when a newer fact corrects an older one.
+Removal is permanent; an exact deletion instruction is sufficient, while an
+ambiguous target must be resolved before removal. Verify the final state through
+canonical fact reads and report the run or fact identities that establish it.

@@ -1,5 +1,21 @@
 # TraceDecay UI concept V2
 
+## Run the existing concept app
+
+The full former `td-brain-demo` application now lives in [app/](app/README.md),
+including all fourteen workspaces, existing interactions and recorded exports.
+Continue development there using these reconciled briefs. This directory is the
+single maintained home for the concept application and its design authority.
+
+```sh
+cd mockups/ui-concept-v2/app
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5195/`. [Current application screenshots](screenshots/README.md)
+are rendered UI; [the gallery](GALLERY.md) contains design references.
+
 Jayse Hansen / Cantina Avengers FUI grammar applied to TraceDecay's fourteen
 dashboard workspaces. Borrow the grammar—night glass, hairline frames, amber
 attention, cyan signal, and measured fields—without copying Marvel marks.
@@ -24,6 +40,8 @@ Do not use these images as `dashboard/audit-baselines/`.
   superseded/rejected concept-only assets.
 - [GALLERY.md](GALLERY.md) renders every authoritative final plate in one
   reviewable sequence.
+- [GAPS.md](GAPS.md) separates accepted concepts from concept-app demonstration
+  coverage and production evidence gaps.
 - Each `<NN>-<workspace>/final/README.md` is that workspace's authoritative
   final state manifest and shared product/interaction contract.
 - Each final PNG's exact same-stem Markdown file owns that state's user job,
@@ -35,6 +53,11 @@ The more specific authority may add workspace detail but may not contradict a
 shared authority. When a proposed plate exposes behavior the shipping product
 does not, label that path unavailable or omit the control; a concept image
 cannot supply the missing integration.
+
+The [imported interaction application](app/README.md) exercises the concepts over
+checked-in snapshots and labeled fixtures. Its source is maintained here; the
+original external repository remains historical provenance. Demonstration data
+is not production availability.
 
 ## Layout and lifecycle
 
@@ -86,3 +109,26 @@ represents a distinct semantic or interaction state.
    health, controls, or success that no named production authority supplies.
 6. Every final state includes keyboard, reduced-motion, 200%-zoom/reflow,
    dense-real-data, and exact text/table/transcript fallback gates.
+
+## Validate a handoff
+
+Run the documentation-only check from the repository root:
+
+```sh
+python3 scripts/check-concept-pack.py
+python3 scripts/test-check-concept-pack.py
+# Also validate a split export and confirm the accepted PNGs are identical:
+python3 scripts/check-concept-pack.py --mirror /path/to/td-brain-demo/lookbook
+```
+
+The check enumerates missing/orphaned briefs, duplicate manifest mappings,
+broken local Markdown links, and rail names/order from `NAVIGATION.md`. It
+prints each pack's checkout commit and each PNG's Git blob identity; retain
+that output with the export review to distinguish mirrored assets from later
+revisions. The reported commit identifies the checkout; working-tree PNG blobs
+are printed independently so uncommitted image changes cannot impersonate it.
+No image-processing dependency or Rust build hook is involved.
+
+A split export may rewrite relative links for `pngs/` and `briefs/`, and link
+to its separately labelled application screenshots. PNG bytes must match;
+brief semantics and shared authorities still require review after path changes.

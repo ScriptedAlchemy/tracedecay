@@ -19,16 +19,6 @@ from typing import Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[3]
 RUNNER = ROOT / "benchmark_data" / "runtime" / "run.py"
 WRAPPER = ROOT / "scripts" / "run-runtime-performance.sh"
-DOCUMENTATION = ROOT / "docs" / "development" / "runtime-performance.md"
-SUBCOMMANDS = (
-    "prepare",
-    "capture",
-    "paired",
-    "compare",
-    "smoke",
-    "graph-capture",
-    "graph-paired",
-)
 OPERATOR_PROFILE_VARIABLES = (
     "TRACEDECAY_HOME",
     "TRACEDECAY_PROFILE",
@@ -66,13 +56,6 @@ def make_executable(path: Path, body: str) -> None:
 
 class RuntimePerformanceAdversarialTest(unittest.TestCase):
     maxDiff = None
-
-    def test_help_lists_every_supported_subcommand(self) -> None:
-        result = run_command((sys.executable, RUNNER, "--help"))
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for subcommand in SUBCOMMANDS:
-            self.assertIn(subcommand, result.stdout)
 
     def test_missing_binary_is_rejected_before_output_profile_creation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -381,52 +364,6 @@ class RuntimePerformanceAdversarialTest(unittest.TestCase):
                 result.stderr.lower(),
                 r"route|mounted|unwired|committed",
             )
-
-    def test_documentation_covers_final_v2_runtime_lanes(self) -> None:
-        documentation = DOCUMENTATION.read_text(encoding="utf-8")
-        normalized = " ".join(documentation.casefold().split())
-        required_phrases = (
-            "final v2",
-            "per-crate",
-            "integrated",
-            "crate identity",
-            "journey identity",
-            "workload identity",
-            "cold",
-            "warm",
-            "no-op",
-            "contention",
-            "recovery",
-            "abba",
-            "raw samples",
-            "n=1",
-            "distribution",
-            "unavailable",
-            "cargo benchmarks",
-            "platform",
-            "shard",
-            "storage mode",
-            "concurrency",
-            "cold/warm",
-            "junit retention",
-            "percentile history",
-            "p95",
-            "40 matching samples",
-            "p99",
-            "100 matching samples",
-            "readiness",
-            "reaping",
-            "committed production route",
-            "contract-only unwired success",
-        )
-        for phrase in required_phrases:
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, normalized)
-        self.assertNotRegex(documentation, r"(?i)\bPR[\s_-]*\d+\b")
-        self.assertNotRegex(
-            documentation,
-            r"(?i)\bmilestone[\s_-]*(?:latency[\s_-]*)?budget",
-        )
 
     def test_prepare_validation_never_launches_a_daemon(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

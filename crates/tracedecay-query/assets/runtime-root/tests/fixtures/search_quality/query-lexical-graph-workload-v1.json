@@ -1,0 +1,1624 @@
+{
+  "execution_contract": {
+    "cache_state": "cold_empty_in_memory_publication",
+    "concurrency": {
+      "query_execution": "serial_exact_workload_order",
+      "query_workers": 1
+    },
+    "exact_corpus_bytes": 149745,
+    "exact_eligible_chunks_10x": 19930,
+    "exact_eligible_chunks_current": 1993,
+    "exact_file_count": 15,
+    "exact_query_count": 67,
+    "fusion_revision": "CompositionKernel::compose"
+  },
+  "corpus": [
+    {
+      "document_id": "time",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs",
+      "source_path": "crates/tracedecay-domain/src/research/time.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "watermark",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
+      "source_path": "crates/tracedecay-domain/src/research/watermark.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "canonical",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/canonical.rs",
+      "source_path": "crates/tracedecay-domain/src/research/canonical.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "error",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/error.rs",
+      "source_path": "crates/tracedecay-domain/src/research/error.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "coverage",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/coverage.rs",
+      "source_path": "crates/tracedecay-domain/src/research/coverage.rs",
+      "scope": "research"
+    },
+    {
+      "document_id": "repository",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/repository.rs",
+      "source_path": "crates/tracedecay-domain/src/repository.rs",
+      "scope": "project"
+    },
+    {
+      "document_id": "integration",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/integration.rs",
+      "source_path": "crates/tracedecay-domain/src/integration.rs",
+      "scope": "project"
+    },
+    {
+      "document_id": "session",
+      "eligibility": "scope_guarded",
+      "language": "rust",
+      "path": "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs",
+      "source_path": "crates/tracedecay-domain/src/session.rs",
+      "scope": "session_private"
+    },
+    {
+      "document_id": "auth_login",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/context_eval_project/src/auth/login.rs",
+      "source_path": "tests/fixtures/context_eval_project/src/auth/login.rs",
+      "scope": "context_eval"
+    },
+    {
+      "document_id": "auth_session",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/context_eval_project/src/auth/session.rs",
+      "source_path": "tests/fixtures/context_eval_project/src/auth/session.rs",
+      "scope": "context_eval"
+    },
+    {
+      "document_id": "config_store",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/context_eval_project/src/storage/config_store.rs",
+      "source_path": "tests/fixtures/context_eval_project/src/storage/config_store.rs",
+      "scope": "context_eval"
+    },
+    {
+      "document_id": "net_retry",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/context_eval_project/src/net/retry.rs",
+      "source_path": "tests/fixtures/context_eval_project/src/net/retry.rs",
+      "scope": "context_eval"
+    },
+    {
+      "document_id": "dockerfile",
+      "eligibility": "searchable",
+      "language": "dockerfile",
+      "path": "tests/fixtures/sample.dockerfile",
+      "source_path": "tests/fixtures/sample.dockerfile",
+      "scope": "container_fixture"
+    },
+    {
+      "document_id": "generated_lock",
+      "eligibility": "excluded_generated_vendor_noise",
+      "language": "generated_metadata",
+      "path": "evals/agent_adoption/fixture/Cargo.lock",
+      "source_path": "evals/agent_adoption/fixture/Cargo.lock",
+      "scope": "project"
+    },
+    {
+      "document_id": "unsupported_cargo_slot",
+      "eligibility": "unsupported",
+      "language": "unsupported_fixture_extension",
+      "path": "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture",
+      "source_path": "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture",
+      "scope": "cargo_slot"
+    }
+  ],
+  "decision_policy": {
+    "required_cancellation": "bounded_typed_cancelled",
+    "required_fallback_byte_stability": true,
+    "required_offline": "no_network_and_query_fallback_available"
+  },
+  "expected_query_fallback_digests": {
+    "train": "sha256:afa693698d371e76f4b6bb127886e6636e5294399ff5e95a5a29e9ea1ef77b36",
+    "validation": "sha256:0d797947f45d597927c6cbdd4e4d9598ff2fe46c78acfd121164d5584a0a2fc5"
+  },
+  "profile_matrix": [
+    {
+      "graph_weight_ppm": 250000,
+      "lexical_weight_ppm": 1000000,
+      "profile_id": "query-fallback"
+    }
+  ],
+  "queries": [
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::UtcMicros"
+        ],
+        "document_id": "time",
+        "literal": "pub struct UtcMicros"
+      },
+      "partition": "train",
+      "query": "UtcMicros",
+      "query_id": "train-001",
+      "strata": [
+        "exact_symbol"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "watermark::VectorWatermark::merge_max"
+        ],
+        "document_id": "watermark",
+        "literal": "pub fn merge_max"
+      },
+      "partition": "train",
+      "query": "VectorWatermark::merge_max",
+      "query_id": "train-002",
+      "strata": [
+        "qualified_name",
+        "exact_symbol"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time"
+        ],
+        "document_id": "time",
+        "literal": "pub struct TimeInterval"
+      },
+      "partition": "train",
+      "query": "crates/tracedecay-domain/src/research/time.rs",
+      "query_id": "train-003",
+      "strata": [
+        "exact_path"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::InvalidTimeInterval"
+        ],
+        "document_id": "error",
+        "literal": "time interval start must not be after its end"
+      },
+      "partition": "train",
+      "query": "time interval start must not be after its end",
+      "query_id": "train-004",
+      "strata": [
+        "exact_error"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::APP_PORT"
+        ],
+        "document_id": "dockerfile",
+        "literal": "ENV APP_PORT=8080"
+      },
+      "partition": "train",
+      "query": "APP_PORT",
+      "query_id": "train-005",
+      "strata": [
+        "config_key"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::--port"
+        ],
+        "document_id": "dockerfile",
+        "literal": "CMD [\"--port\", \"8080\"]"
+      },
+      "partition": "train",
+      "query": "--port",
+      "query_id": "train-006",
+      "strata": [
+        "exact_flag"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "canonical::canonical_sha256"
+        ],
+        "document_id": "canonical",
+        "literal": "pub fn canonical_sha256"
+      },
+      "partition": "train",
+      "query": "how are canonical digests computed for manifests",
+      "query_id": "train-007",
+      "strata": [
+        "natural_language"
+      ],
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "canonical",
+        "source_quote": "Compute the canonical SHA-256 digest encoding used by domain manifests.",
+        "judgment_rationale": "canonical_sha256 is the only function that produces the manifest digest encoding the need asks about."
+      }
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::TimeInterval::validate"
+        ],
+        "document_id": "time",
+        "literal": "pub fn validate"
+      },
+      "partition": "train",
+      "query": "validate",
+      "query_id": "train-008",
+      "strata": [
+        "same_name_cross_scope"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "absence_literal": "zzqxv_owner_train_absent_9347",
+        "anchors": []
+      },
+      "partition": "train",
+      "query": "zzqxv_owner_train_absent_9347",
+      "query_id": "train-009",
+      "strata": [
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [],
+        "forbidden_documents": [
+          "generated_lock"
+        ]
+      },
+      "partition": "train",
+      "query": "checksum package registry metadata",
+      "query_id": "train-010",
+      "strata": [
+        "generated_vendor_noise",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "cargo_slot"
+      ],
+      "label": {
+        "anchors": [],
+        "forbidden_documents": [
+          "unsupported_cargo_slot"
+        ]
+      },
+      "partition": "train",
+      "query": "tmpfs_scratch_path",
+      "query_id": "train-011",
+      "strata": [
+        "unsupported_language",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "session_private"
+      ],
+      "label": {
+        "anchors": [
+          "git:01b0a0afe34c3342d6b5b076383f86ed8a8d0c66:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
+        ],
+        "git_path": "crates/tracedecay-domain/src/session.rs",
+        "literal": "pub struct ClosedUtcIntervalV1"
+      },
+      "historical_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
+      "partition": "train",
+      "query": "ClosedUtcIntervalV1",
+      "query_id": "train-012",
+      "strata": [
+        "incremental_edit"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::InvalidTimeInterval"
+        ],
+        "document_id": "error",
+        "literal": "time interval start must not be after its end"
+      },
+      "partition": "train",
+      "query": "\"time interval start must not be after its end\"",
+      "query_id": "train-013",
+      "strata": [
+        "quoted_phrase"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::cargo"
+        ],
+        "document_id": "dockerfile",
+        "literal": "cargo"
+      },
+      "partition": "train",
+      "query": "cargo",
+      "query_id": "train-014",
+      "strata": [
+        "tool_name"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "canonical::write_canonical",
+          "canonical::canonical_json_value"
+        ],
+        "document_id": "canonical",
+        "literal": "fn write_canonical"
+      },
+      "partition": "train",
+      "query": "where is structured data made byte-stable before it is fingerprinted",
+      "query_id": "train-015",
+      "strata": [
+        "natural_language"
+      ],
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "canonical",
+        "source_quote": "Serialize a JSON value with recursively lexicographic object keys and no insignificant whitespace.",
+        "judgment_rationale": "write_canonical performs the key ordering and whitespace removal the doc comment describes; canonical_json_value is its documented entry point."
+      }
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::VerifiedCacheGrantSnapshotV1::proves_current_access",
+          "coverage::RemoteCoverageV1::is_complete_for_requested_consistency"
+        ],
+        "document_id": "coverage",
+        "literal": "fn proves_current_access"
+      },
+      "partition": "train",
+      "query": "what proves an offline replica is still permitted to answer",
+      "query_id": "train-016",
+      "strata": [
+        "natural_language"
+      ],
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "coverage",
+        "source_quote": "freshness cannot be inferred from an unbound cache timestamp",
+        "judgment_rationale": "proves_current_access is the predicate that decides whether a cached grant still authorizes a read; the consistency check is the caller that consumes it."
+      }
+    },
+    {
+      "query_id": "train-017",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "which value type records an instant as microseconds since the epoch",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::UtcMicros"
+        ],
+        "document_id": "time",
+        "literal": "pub struct UtcMicros"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "time",
+        "source_quote": "UTC timestamp represented as microseconds from the Unix epoch.",
+        "judgment_rationale": "UtcMicros is the declared microsecond timestamp type; nothing else in the corpus carries that representation."
+      }
+    },
+    {
+      "query_id": "train-018",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how is per-shard progress tracked without one global sequence number",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "watermark::VectorWatermark",
+          "watermark::VectorWatermark::components"
+        ],
+        "document_id": "watermark",
+        "literal": "pub struct VectorWatermark"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "watermark",
+        "source_quote": "Per-shard progress without a fabricated global sequence.",
+        "judgment_rationale": "VectorWatermark and its per-shard component map are exactly the structure the doc comment describes."
+      }
+    },
+    {
+      "query_id": "train-019",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "which failure rejects a probability outside the unit range",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::InvalidConfidence"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"confidence must be finite and within [0.0, 1.0]\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "confidence must be finite and within [0.0, 1.0]",
+        "judgment_rationale": "InvalidConfidence is the single variant whose contract text states the unit-range rule."
+      }
+    },
+    {
+      "query_id": "train-020",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "what is reported when a fingerprint disagrees with the payload it covers",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::DigestMismatch"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"manifest digest does not match its canonical domain-separated payload\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "manifest digest does not match its canonical domain-separated payload",
+        "judgment_rationale": "DigestMismatch is the declared outcome for a digest that disagrees with its payload."
+      }
+    },
+    {
+      "query_id": "train-021",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "which error refuses a record that replaces itself",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::SelfSupersession"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"a manifest cannot supersede itself\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "a manifest cannot supersede itself",
+        "judgment_rationale": "SelfSupersession is the only variant covering a self-referential supersession edge."
+      }
+    },
+    {
+      "query_id": "train-022",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "why is a claim of who wrote something rejected without provider evidence",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::AuthorshipWithoutProviderLinkage"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"direct authorship requires provider-linked activity evidence\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "direct authorship requires provider-linked activity evidence",
+        "judgment_rationale": "The variant text states the provider-linkage requirement the need asks about."
+      }
+    },
+    {
+      "query_id": "train-023",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "what refuses redaction tallies larger than what was examined",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::InvalidRedactionCounts"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"redacted and rejected counts cannot exceed scanned count\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "redacted and rejected counts cannot exceed scanned count",
+        "judgment_rationale": "InvalidRedactionCounts is the declared refusal for inconsistent redaction tallies."
+      }
+    },
+    {
+      "query_id": "train-024",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how is a retention class recorded without implementing retention itself",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::RetentionClass",
+          "coverage::RetentionClass::new"
+        ],
+        "document_id": "coverage",
+        "literal": "pub struct RetentionClass(String)"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "coverage",
+        "source_quote": "The domain records the code without implementing retention policy or storage behavior.",
+        "judgment_rationale": "RetentionClass and its validating constructor are the whole of the recording surface the doc comment claims."
+      }
+    },
+    {
+      "query_id": "train-025",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how is a decoded list kept from consuming unbounded memory",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::BoundedVec"
+        ],
+        "document_id": "coverage",
+        "literal": "pub struct BoundedVec<T, const MAX: usize>"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "coverage",
+        "source_quote": "Deserialization consumes at most `MAX` values into memory.",
+        "judgment_rationale": "BoundedVec is the type whose documented deserialization bound answers the need."
+      }
+    },
+    {
+      "query_id": "train-026",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "where is each shard's search outcome recorded with a result",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::CoverageReportV1",
+          "coverage::CoverageReportV1::validate"
+        ],
+        "document_id": "coverage",
+        "literal": "pub struct CoverageReportV1"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "coverage",
+        "source_quote": "Exact per-shard disposition captured with a retrieval result.",
+        "judgment_rationale": "CoverageReportV1 holds the disposition map; its validator enforces the one-group-per-shard invariant the doc comment states."
+      }
+    },
+    {
+      "query_id": "train-027",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "what holds one immutable snapshot of repository identity and state",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "repository::RepositoryProvenanceV1"
+        ],
+        "document_id": "repository",
+        "literal": "pub struct RepositoryProvenanceV1"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "repository",
+        "source_quote": "One immutable, path-safe capture of repository identity and state.",
+        "judgment_rationale": "RepositoryProvenanceV1 is that capture; the generation-bound wrapper is a different need."
+      }
+    },
+    {
+      "query_id": "train-028",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "why does this module never guess facts the capture boundary could not see",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "repository",
+          "repository::EvidenceAvailabilityV1"
+        ],
+        "document_id": "repository",
+        "literal": "//! Pure repository-provenance contracts."
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "repository",
+        "source_quote": "These values preserve only canonical, path-safe evidence and never infer facts that the capture boundary could not establish.",
+        "judgment_rationale": "The module doc states the rule and EvidenceAvailabilityV1 is the type that encodes unobservable evidence as an explicit state."
+      }
+    },
+    {
+      "query_id": "train-029",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "which agent surfaces does the catalog share across packaging and delivery",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "integration::HostKindV1"
+        ],
+        "document_id": "integration",
+        "literal": "pub enum HostKindV1"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "integration",
+        "source_quote": "Canonical stock host surfaces shared by catalog, packaging, delivery, and conformance consumers.",
+        "judgment_rationale": "HostKindV1 enumerates exactly the shared surfaces the doc comment names."
+      }
+    },
+    {
+      "query_id": "train-030",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "what keeps repeated project syncs for one host from piling up",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "integration::HostIntegrationIdV1::sync_marker_file"
+        ],
+        "document_id": "integration",
+        "literal": "pub const fn sync_marker_file"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "integration",
+        "source_quote": "Marker used to debounce this host's incremental project syncs.",
+        "judgment_rationale": "sync_marker_file names the debounce marker; nothing else in the corpus provides one."
+      }
+    },
+    {
+      "query_id": "train-031",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how is the whole capability catalog turned into bytes that can be signed",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "integration::HostIntegrationCatalogV1::canonical_authority_bytes",
+          "integration::HostIntegrationCatalogV1::canonical_authority_digest"
+        ],
+        "document_id": "integration",
+        "literal": "pub fn canonical_authority_bytes"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "integration",
+        "source_quote": "Canonical bytes for the complete catalog authority",
+        "judgment_rationale": "The bytes function produces the canonical form and the digest function is its only consumer, so both answer the need."
+      }
+    },
+    {
+      "query_id": "train-032",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "where does a username and password become a signed-in user",
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "auth_login::authenticate"
+        ],
+        "document_id": "auth_login",
+        "literal": "pub fn authenticate"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "auth_login",
+        "source_quote": "Checks a username/password pair and, on success, creates a new authenticated session.",
+        "judgment_rationale": "authenticate is the documented entry point; the private predicate it calls is a separate need."
+      }
+    },
+    {
+      "query_id": "train-033",
+      "partition": "train",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "what keeps trying a flaky call and gives up after enough attempts",
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "net_retry::retry_with_backoff"
+        ],
+        "document_id": "net_retry",
+        "literal": "pub fn retry_with_backoff"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "net_retry",
+        "source_quote": "Retries `operation` up to `policy.max_attempts` times, doubling the delay between attempts, until it succeeds or attempts are exhausted.",
+        "judgment_rationale": "retry_with_backoff owns the attempt loop and the exhaustion decision."
+      }
+    },
+    {
+      "query_id": "train-034",
+      "partition": "train",
+      "strata": [
+        "identifier_split"
+      ],
+      "query": "cacheGrantSnapshot",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::cache_grant_snapshot"
+        ],
+        "document_id": "coverage",
+        "literal": "pub cache_grant_snapshot: Option<VerifiedCacheGrantSnapshotV1>"
+      }
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "watermark::VectorWatermark"
+        ],
+        "document_id": "watermark",
+        "literal": "pub struct VectorWatermark"
+      },
+      "partition": "validation",
+      "query": "VectorWatermark",
+      "query_id": "validation-001",
+      "strata": [
+        "exact_symbol"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::TimeInterval::validate"
+        ],
+        "document_id": "time",
+        "literal": "pub fn validate"
+      },
+      "partition": "validation",
+      "query": "TimeInterval::validate",
+      "query_id": "validation-002",
+      "strata": [
+        "qualified_name"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "watermark"
+        ],
+        "document_id": "watermark",
+        "literal": "pub struct ShardWatermark"
+      },
+      "partition": "validation",
+      "query": "crates/tracedecay-domain/src/research/watermark.rs",
+      "query_id": "validation-003",
+      "strata": [
+        "exact_path"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::LOG_LEVEL"
+        ],
+        "document_id": "dockerfile",
+        "literal": "ENV LOG_LEVEL=info"
+      },
+      "partition": "validation",
+      "query": "LOG_LEVEL",
+      "query_id": "validation-004",
+      "strata": [
+        "config_key"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::--interval"
+        ],
+        "document_id": "dockerfile",
+        "literal": "HEALTHCHECK --interval=30s"
+      },
+      "partition": "validation",
+      "query": "--interval",
+      "query_id": "validation-005",
+      "strata": [
+        "exact_flag"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "repository::RepositoryDirtyStateV1",
+          "repository::RepositoryRemoteIdentityV1",
+          "repository::evidence"
+        ],
+        "document_id": "repository",
+        "literal": "pub enum RepositoryDirtyStateV1"
+      },
+      "partition": "validation",
+      "query": "repository dirty state and remote identity evidence",
+      "query_id": "validation-006",
+      "strata": [
+        "natural_language"
+      ],
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "repository",
+        "source_quote": "stay distinct so callers do not infer that a remote was available when the bounded probe could not retain one",
+        "judgment_rationale": "Both enums and the evidence accessor are the declared carriers of the two evidence kinds named in the need."
+      }
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::RetentionClass::new"
+        ],
+        "document_id": "coverage",
+        "literal": "pub fn new"
+      },
+      "partition": "validation",
+      "query": "new",
+      "query_id": "validation-007",
+      "strata": [
+        "same_name_cross_scope"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "absence_literal": "qzxw_owner_validation_absent_551",
+        "anchors": []
+      },
+      "partition": "validation",
+      "query": "qzxw_owner_validation_absent_551",
+      "query_id": "validation-008",
+      "strata": [
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [],
+        "forbidden_documents": [
+          "session"
+        ]
+      },
+      "partition": "validation",
+      "query": "SessionEvidenceMetadataV1",
+      "query_id": "validation-009",
+      "strata": [
+        "wrong_scope",
+        "privacy_canary",
+        "no_answer"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "cargo_slot"
+      ],
+      "label": {
+        "anchors": [
+          "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture::tmpfs_scratch_path"
+        ],
+        "document_id": "unsupported_cargo_slot",
+        "forbidden_anchors": [
+          "tests/fixtures/search_quality/corpus/cargo-slot/src/main.rs::tmpfs_scratch_path"
+        ],
+        "literal": "tmpfs_scratch_path"
+      },
+      "partition": "validation",
+      "query": "tmpfs_scratch_path file history",
+      "query_id": "validation-010",
+      "strata": [
+        "renamed_moved_symbol",
+        "incremental_delete",
+        "incremental_rename"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [],
+        "forbidden_documents": [
+          "generated_lock"
+        ]
+      },
+      "partition": "validation",
+      "query": "Cargo.lock",
+      "query_id": "validation-011",
+      "strata": [
+        "generated_vendor_noise"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "config_store::ConfigStore::write_config"
+        ],
+        "document_id": "config_store",
+        "literal": "pub fn write_config"
+      },
+      "partition": "validation",
+      "query": "who writes to the config file",
+      "query_id": "validation-012",
+      "strata": [
+        "natural_language"
+      ],
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "config_store",
+        "source_quote": "Writes a single key/value pair to the config file on disk.",
+        "judgment_rationale": "write_config is the only path that touches the file for writes; read_config is deliberately excluded."
+      }
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "repository::COMMIT"
+        ],
+        "document_id": "repository",
+        "literal": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "partition": "validation",
+      "query": "COMMIT",
+      "query_id": "validation-013",
+      "strata": [
+        "commit_identifier"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::InvalidTimeInterval"
+        ],
+        "document_id": "error",
+        "literal": "time interval start must not be after its end"
+      },
+      "partition": "validation",
+      "query": "time interval start must not be after its end",
+      "query_id": "validation-014",
+      "strata": [
+        "exact_error"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "auth_session::validate_session"
+        ],
+        "document_id": "auth_session",
+        "literal": "pub fn validate_session"
+      },
+      "partition": "validation",
+      "query": "what stops an old login token from authorizing another request",
+      "query_id": "validation-015",
+      "strata": [
+        "natural_language"
+      ],
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "auth_session",
+        "source_quote": "Checks whether `session` is still within its validity window. Used on every authenticated request to reject expired tokens.",
+        "judgment_rationale": "validate_session is the documented rejection point for expired tokens."
+      }
+    },
+    {
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "net_retry::RetryPolicy::delay_for_attempt"
+        ],
+        "document_id": "net_retry",
+        "literal": "pub fn delay_for_attempt"
+      },
+      "partition": "validation",
+      "query": "what computes the pause before another failed web call",
+      "query_id": "validation-016",
+      "strata": [
+        "natural_language"
+      ],
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "net_retry",
+        "source_quote": "Exponential backoff delay before attempt number `attempt` (0-based).",
+        "judgment_rationale": "delay_for_attempt computes the delay itself; the retry loop that consumes it is a separate need."
+      }
+    },
+    {
+      "query_id": "validation-017",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "which type describes a span that includes its start but not its end",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "time::TimeInterval",
+          "time::TimeInterval::validate"
+        ],
+        "document_id": "time",
+        "literal": "pub struct TimeInterval"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "time",
+        "source_quote": "Closed half-open occurrence interval.",
+        "judgment_rationale": "TimeInterval is the interval type and its validator enforces the ordering that makes the span well formed."
+      }
+    },
+    {
+      "query_id": "validation-018",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how do i turn a domain value into its stable byte form",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "canonical::canonical_json_bytes"
+        ],
+        "document_id": "canonical",
+        "literal": "pub fn canonical_json_bytes"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "canonical",
+        "source_quote": "Serialize any domain value to the crate's canonical JSON byte form.",
+        "judgment_rationale": "canonical_json_bytes returns the bytes; the digest helper and the string form are different needs."
+      }
+    },
+    {
+      "query_id": "validation-019",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "when must an observation be recorded as fully certain",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::NonCertainDeclaration"
+        ],
+        "document_id": "error",
+        "literal": "requires confidence 1.0"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "evidence declared by a user or provider, or directly observed, requires confidence 1.0",
+        "judgment_rationale": "NonCertainDeclaration states the exact circumstances that force full certainty."
+      }
+    },
+    {
+      "query_id": "validation-020",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "why can a primary subject not also carry a related activity facet",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::ActivityFacetOnActivitySubject"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"an Activity primary subject cannot also have related_activity\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "an Activity primary subject cannot also have related_activity",
+        "judgment_rationale": "This variant is the sole declared refusal of that combination."
+      }
+    },
+    {
+      "query_id": "validation-021",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "what rejects free text that breaks the sanitized shape rules",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::UnsafeText"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"{field} violates the structural bounds for sanitized text\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "violates the structural bounds for sanitized text",
+        "judgment_rationale": "UnsafeText is the declared outcome for text outside the sanitized bounds."
+      }
+    },
+    {
+      "query_id": "validation-022",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "which failure means a value was not pinned to the snapshot it had to match",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::SnapshotMismatch"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"{field} is not pinned to the required snapshot\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "is not pinned to the required snapshot",
+        "judgment_rationale": "SnapshotMismatch is the declared refusal for an unpinned value."
+      }
+    },
+    {
+      "query_id": "validation-023",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how is a failure to write the stable form reported to callers",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::CanonicalSerialization"
+        ],
+        "document_id": "error",
+        "literal": "#[error(\"canonical serialization failed: {0}\")]"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_error_contract",
+        "source_document_id": "error",
+        "source_quote": "canonical serialization failed",
+        "judgment_rationale": "CanonicalSerialization is the variant that carries a serialization failure outward."
+      }
+    },
+    {
+      "query_id": "validation-024",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how do we know whether every shard was even known about",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::CoverageUniverseKnowledgeV1"
+        ],
+        "document_id": "coverage",
+        "literal": "pub enum CoverageUniverseKnowledgeV1"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "coverage",
+        "source_quote": "Whether the complete shard universe was known when coverage was captured.",
+        "judgment_rationale": "CoverageUniverseKnowledgeV1 is the explicit known/unknown state the need asks for."
+      }
+    },
+    {
+      "query_id": "validation-025",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "which field pins the moment a coverage decision was made",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::EvidenceRetentionWatermark::evaluated_at"
+        ],
+        "document_id": "coverage",
+        "literal": "pub evaluated_at: UtcMicros"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "coverage",
+        "source_quote": "Immutable instant at which this coverage decision was evaluated.",
+        "judgment_rationale": "evaluated_at is documented as that instant."
+      }
+    },
+    {
+      "query_id": "validation-026",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "what identifies the signed snapshot a cache grant came from",
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::VerifiedCacheGrantSnapshotV1",
+          "coverage::VerifiedCacheGrantSnapshotV1::grant_digest"
+        ],
+        "document_id": "coverage",
+        "literal": "pub grant_digest: ManifestDigest"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "coverage",
+        "source_quote": "The grant digest identifies the immutable signed snapshot.",
+        "judgment_rationale": "The snapshot type and its digest field are the identity the doc comment describes; the access predicate is train-016's need."
+      }
+    },
+    {
+      "query_id": "validation-027",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how is a repository fact that could not be observed represented",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "repository::EvidenceAvailabilityV1",
+          "repository::EvidenceAvailabilityV1::value"
+        ],
+        "document_id": "repository",
+        "literal": "pub enum EvidenceAvailabilityV1"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "repository",
+        "source_quote": "Explicit availability of one repository evidence value.",
+        "judgment_rationale": "EvidenceAvailabilityV1 encodes each unobservable case as its own state, and value() is how callers read it without inferring one."
+      }
+    },
+    {
+      "query_id": "validation-028",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "which storage profile does an agent integration get to choose",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "integration::TraceDecayProfileBindingV1"
+        ],
+        "document_id": "integration",
+        "literal": "pub enum TraceDecayProfileBindingV1"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "integration",
+        "source_quote": "Hosts never select storage or memory scope.",
+        "judgment_rationale": "TraceDecayProfileBindingV1 is the single binding, and its doc comment is the answer that hosts choose nothing."
+      }
+    },
+    {
+      "query_id": "validation-029",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "when may a host surface enter the observation catalog",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "integration::HostKindV1::fixture_backed_observation_integration_id"
+        ],
+        "document_id": "integration",
+        "literal": "pub const fn fixture_backed_observation_integration_id"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "integration",
+        "source_quote": "only when a checked-in native event fixture proves that integration",
+        "judgment_rationale": "This projection is the gate that admits a surface into the catalog."
+      }
+    },
+    {
+      "query_id": "validation-030",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "what per-host value is pinned into a shipped bundle manifest",
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "integration::HostIntegrationCatalogV1::host_capability_digest"
+        ],
+        "document_id": "integration",
+        "literal": "pub fn host_capability_digest"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "integration",
+        "source_quote": "Canonical per-host projection pinned into embedded bundle manifests.",
+        "judgment_rationale": "host_capability_digest produces exactly the pinned per-host value."
+      }
+    },
+    {
+      "query_id": "validation-031",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "where does a bearer token get minted after credentials pass",
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "auth_session::create_session"
+        ],
+        "document_id": "auth_session",
+        "literal": "pub fn create_session"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "auth_session",
+        "source_quote": "Creates a new session for `username` with a freshly generated token.",
+        "judgment_rationale": "create_session mints the session and token; validation of an existing one is validation-015's need."
+      }
+    },
+    {
+      "query_id": "validation-032",
+      "partition": "validation",
+      "strata": [
+        "natural_language"
+      ],
+      "query": "how is the saved settings file loaded back in full",
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "config_store::ConfigStore::read_config"
+        ],
+        "document_id": "config_store",
+        "literal": "pub fn read_config"
+      },
+      "need_provenance": {
+        "source_kind": "corpus_documentation",
+        "source_document_id": "config_store",
+        "source_quote": "Reads the full config file contents from disk.",
+        "judgment_rationale": "read_config is the whole-file read; the single-key accessor does not touch disk."
+      }
+    },
+    {
+      "query_id": "validation-033",
+      "partition": "validation",
+      "strata": [
+        "alias_recovery"
+      ],
+      "query": "memoization",
+      "lexical_aliases": [
+        {
+          "strict_query": "memoization",
+          "alternative": "cache grant"
+        }
+      ],
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::VerifiedCacheGrantSnapshotV1"
+        ],
+        "document_id": "coverage",
+        "literal": "pub struct VerifiedCacheGrantSnapshotV1"
+      }
+    }
+  ],
+  "schema_version": 1,
+  "source_repository_commit": "8312618fee8109b16be09e65f45118b4e550fa14",
+  "source_repository_tree": "587aed48f162f74765da3a35fc41850523ea377d",
+  "workload_id": "query-lexical-graph-workload-v1"
+}

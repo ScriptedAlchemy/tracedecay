@@ -4,6 +4,11 @@ This folder is the authoritative implementation reference for the approved provi
 
 The images are interaction references, not runtime receipts. Unless a brief says otherwise, sample identities and values are synthetic. Exact diffs, transcripts, checks, review threads, and provider state remain the evidence authority.
 
+Delivery admits only projects registered with TraceDecay and pull requests whose
+repository and tracked head are joined to indexed evidence. Provider metadata or
+a broad GitHub audit may enrich an admitted item; neither can admit an arbitrary
+repository or pull request by itself.
+
 An inbox must render unauthorized, `not_published`, rate-limited, denied, stale, unavailable, and served-empty responses honestly. Review attention is always bound to named sources such as `test_risk`, `unsafe_patterns`, weak evidence, contradictions, and unresolved or unreviewed counts; generic numeric PR risk scores are not product authority.
 
 ## State manifest

@@ -1,0 +1,87 @@
+{
+  "scan_roots": [
+    "src",
+    "crates/tracedecay-rusqlite-runtime/src"
+  ],
+  "direct_open_suffixes": [
+    "Builder::new_local",
+    "Database::initialize",
+    "Database::open",
+    "Database::open_read_only",
+    "Connection::open",
+    "Connection::open_in_memory",
+    "Connection::open_with_flags"
+  ],
+  "allowed": [
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
+      "callee": "Connection::open",
+      "disposition": "private restore staging destination"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/connection/mod.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "permanent daemon-owned shard opener"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/effects/sqlite.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "bounded read-only effect receipt probe over the writer-owned shard"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/evidence.rs",
+      "callee": "Connection::open",
+      "disposition": "standalone S11 evidence over private fixture copies; never live authority"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/evidence.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "read-only logical evidence over private fixture copies"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/graph/fixtures.rs",
+      "callee": "Connection::open",
+      "disposition": "test-only graph parity fixture"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/writer/backup.rs",
+      "scope": "StagedBackupDestination::create_new_private_destination",
+      "callee": "Connection::open_with_flags",
+      "disposition": "writer-owned private backup staging destination pinned until atomic publication or cleanup"
+    },
+    {
+      "path": "crates/tracedecay-rusqlite-runtime/src/writer/backup.rs",
+      "scope": "verify_sqlite",
+      "callee": "Connection::open_with_flags",
+      "disposition": "bounded read-only quick-check over the pinned private backup staging destination before publication"
+    },
+    {
+      "path": "src/sqlite_read_snapshot.rs",
+      "scope": "SnapshotConnection::open",
+      "callee": "Connection::open_with_flags",
+      "disposition": "immutable or private-copy snapshot source opened read-only outside the live store authority"
+    },
+    {
+      "path": "src/sqlite_read_snapshot.rs",
+      "scope": "SnapshotDatabase::backup_to",
+      "callee": "Connection::open_with_flags",
+      "disposition": "new private standalone backup destination populated from an already-frozen snapshot"
+    },
+    {
+      "path": "src/sqlite_read_snapshot.rs",
+      "scope": "materialize_standalone_snapshot",
+      "callee": "Connection::open_with_flags",
+      "disposition": "bounded source and private destination opens used only to collapse a frozen copied WAL family into a standalone snapshot"
+    },
+    {
+      "path": "src/retention/branch_compaction.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "bounded daemon maintenance for an unmounted non-active branch database; busy files are skipped rather than competing with a writer"
+    },
+    {
+      "path": "src/retention/storage_report.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "short read-only free-page sample that degrades on busy or unavailable WAL state and never obtains writer authority"
+    }
+  ]
+}

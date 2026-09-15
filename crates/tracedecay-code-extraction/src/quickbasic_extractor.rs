@@ -6,7 +6,7 @@
 /// so this extractor delegates to `QBasicExtractor` for all extraction
 /// and registers the QuickBasic-specific file extensions (`.bi`, `.bm`).
 use crate::qbasic_extractor::QBasicExtractor;
-use tracedecay_domain::code_intelligence::ExtractionResult;
+use tree_sitter::Tree;
 
 /// Extracts code graph nodes and edges from `QuickBasic` 4.5 source files.
 ///
@@ -23,7 +23,20 @@ impl crate::LanguageExtractor for QuickBasicExtractor {
         "QuickBASIC"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        QBasicExtractor::extract_qbasic(file_path, source)
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        QBasicExtractor.extract_parsed_artifact_prepared(
+            file_path,
+            source,
+            parsed_source,
+            tree,
+            scope,
+        )
     }
 }

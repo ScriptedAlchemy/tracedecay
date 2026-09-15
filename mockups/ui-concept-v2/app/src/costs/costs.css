@@ -1,0 +1,814 @@
+/* Costs interior — night-glass CONCEPT spend attribution. HUD owns rail/register/status/stamp. */
+
+.cs-root {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 228px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 42% 14%, #0c1626 0%, #060910 55%, #04060c 100%);
+}
+
+.cs-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  overflow: auto;
+}
+
+.cs-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 216px;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  flex: 0 0 224px;
+}
+
+/* ---------- evidence flow ---------- */
+
+.cs-flow {
+  flex: 0 0 232px;
+  overflow-x: auto;
+  isolation: isolate;
+}
+.cs-well.cs-flow { overflow-x: auto; overflow-y: hidden; }
+.cs-flow header { align-items: flex-start; }
+.cs-flow-key {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  color: #8b99a8;
+  font: 8px var(--font-mono);
+  white-space: nowrap;
+}
+.cs-flow-key span { display: flex; align-items: center; gap: 4px; }
+.cs-flow-key i { width: 20px; height: 5px; border: 1px solid rgba(120, 150, 175, .45); }
+.cs-flow-key i.priced { background: linear-gradient(#17374b, #17374b), linear-gradient(#f0b429, #f0b429); background-size: 100% 100%, 68% 2px; background-position: center, center; background-repeat: no-repeat; }
+.cs-flow-key i.unpriced { background: repeating-linear-gradient(135deg, rgba(94,231,255,.4) 0 2px, transparent 2px 5px); }
+.cs-flow-key i.gap { border-style: dashed; border-color: var(--activity-amber); }
+.cs-flow-stage,
+.cs-flow-row {
+  display: grid;
+  grid-template-columns: minmax(155px,1.15fr) 32px minmax(125px,1fr) 32px minmax(145px,1.05fr) 32px minmax(145px,1.15fr);
+  min-width: 900px;
+  gap: 0;
+  align-items: center;
+}
+.cs-flow-stage {
+  color: #657686;
+  font: 8px var(--font-display);
+  letter-spacing: .11em;
+  padding: 2px 6px 7px;
+}
+.cs-flow-stage i { height: 1px; background: rgba(94,231,255,.15); }
+.cs-flow-list { position: relative; z-index: 2; min-width: 900px; }
+.cs-flow-row {
+  width: 100%;
+  border: 0;
+  padding: 2px 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.cs-flow-row:hover .cs-flow-node,
+.cs-flow-row.is-selected .cs-flow-node { border-color: color-mix(in oklab, var(--signal-cyan) 65%, transparent); background: rgba(24,67,91,.3); }
+.cs-flow-row.is-dim { opacity: .32; }
+.cs-flow-row.is-selected { opacity: 1; }
+.cs-flow-row:focus-visible { outline: 1px solid var(--signal-cyan-hot); outline-offset: -1px; }
+.cs-flow-node {
+  min-width: 0;
+  min-height: 34px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 4px 8px;
+  border: 1px solid rgba(110,140,165,.25);
+  background: rgba(6,12,20,.86);
+  border-radius: 3px;
+}
+.cs-flow-node b { overflow: hidden; text-overflow: ellipsis; color: #d7eaf4; font: 10px var(--font-mono); white-space: nowrap; }
+.cs-flow-node small { overflow: hidden; text-overflow: ellipsis; color: #728394; font: 8.5px var(--font-mono); white-space: nowrap; margin-top: 3px; }
+.cs-flow-link {
+  position: relative;
+  display: block;
+  height: var(--flow-width);
+  min-height: 3px;
+  background: rgba(94,231,255,.16);
+  border-top: 1px solid rgba(94,231,255,.38);
+  border-bottom: 1px solid rgba(94,231,255,.38);
+}
+.cs-flow-row.is-priced .cs-flow-link::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 20%;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+  background: var(--activity-amber);
+  box-shadow: 0 0 5px rgba(240,180,41,.45);
+}
+.cs-flow-row.is-unpriced .cs-flow-link { background: repeating-linear-gradient(135deg, rgba(94,231,255,.32) 0 2px, transparent 2px 6px); }
+.cs-flow-row.is-gap .cs-flow-link { border: 1px dashed var(--activity-amber); background: rgba(240,180,41,.04); }
+.cs-flow-row.is-gap .cs-flow-node:nth-last-child(-n+3) { border-style: dashed; border-color: rgba(240,180,41,.55); }
+.cs-flow-row.is-unavailable .cs-flow-link { border-style: dashed; background: transparent; opacity: .55; }
+.cs-budget-boundary {
+  width: 420px;
+  min-width: 420px;
+  margin: 1px 6px 2px calc(53% + 4px);
+  padding: 4px 8px;
+  border: 1px dashed rgba(240,180,41,.55);
+  background: rgba(240,180,41,.035);
+  color: var(--activity-amber);
+  font: 8.5px var(--font-mono);
+  letter-spacing: .05em;
+}
+.cs-budget-boundary span { margin-left: 12px; color: #9aa8b6; letter-spacing: 0; }
+.cs-budget-boundary.is-unserved { border-color: rgba(120,150,175,.35); color: #7d8b98; }
+.cs-flow footer { flex: 0 0 auto; }
+
+/* ---------- wells ---------- */
+
+.cs-well {
+  position: relative;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 20%, var(--edge-subtle));
+  background: color-mix(in oklab, var(--night-substrate) 78%, #04070d);
+  box-shadow: inset 0 1px 0 rgba(180, 230, 255, 0.045);
+  border-radius: var(--radius-panel);
+  padding: 7px 10px 7px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.cs-well header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.cs-well header b,
+.cs-kpi .k,
+.cs-inspect .k {
+  display: block;
+  font-family: var(--font-display);
+  font-stretch: 112%;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--signal-cyan);
+  white-space: nowrap;
+}
+.cs-well header b { color: #b7c4d0; }
+.cs-well header span {
+  display: block;
+  color: #6d7d8d;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.abs { color: var(--activity-amber); font-style: italic; font-weight: 400; }
+
+/* ---------- chart ---------- */
+
+.cs-chart-total {
+  text-align: right;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.cs-chart-total b {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+.cs-chart-total span {
+  display: block;
+  color: #6d7d8d;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.cs-range-control {
+  margin: 2px 0 0 auto;
+  padding: 2px 5px;
+  border: 1px solid rgba(94,231,255,.28);
+  border-radius: 2px;
+  background: rgba(8,24,34,.65);
+  color: #8fbdcb;
+  font: 7.5px var(--font-mono);
+  letter-spacing: .05em;
+  cursor: pointer;
+}
+.cs-range-control:hover,
+.cs-range-control[aria-expanded="true"] { border-color: var(--signal-cyan); color: var(--signal-cyan-hot); }
+.cs-range-control:focus-visible { outline: 1px solid var(--signal-cyan-hot); outline-offset: 1px; }
+.cs-range-status {
+  position: absolute;
+  z-index: 4;
+  top: 47px;
+  right: 9px;
+  width: min(280px, calc(100% - 18px));
+  padding: 7px 9px;
+  border: 1px solid rgba(94,231,255,.48);
+  background: rgba(5,12,20,.97);
+  box-shadow: 0 6px 20px rgba(0,0,0,.45);
+  color: #93a8b8;
+  font: 8.5px/1.4 var(--font-mono);
+}
+.cs-range-status b { display: block; margin-bottom: 3px; color: var(--signal-cyan-hot); font-size: 8px; letter-spacing: .1em; }
+.cs-range-status span { display: block; }
+
+.cs-chart-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 128px;
+  gap: 0 8px;
+}
+
+.cs-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding-bottom: 14px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: #4f5d6a;
+  pointer-events: none;
+}
+
+.cs-plot {
+  position: relative;
+  min-width: 0;
+  border-left: 1px solid color-mix(in oklab, var(--signal-cyan) 14%, transparent);
+}
+
+.cs-grid {
+  position: absolute;
+  inset: 0 0 14px 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  pointer-events: none;
+}
+.cs-grid i {
+  display: block;
+  height: 1px;
+  background: rgba(94, 231, 255, 0.07);
+}
+.cs-grid i:last-child { background: rgba(94, 231, 255, 0.18); }
+
+.cs-fixture-series {
+  position: absolute;
+  inset: 30px 5px 14px;
+  width: calc(100% - 10px);
+  height: calc(100% - 44px);
+  overflow: visible;
+  transition: opacity 120ms ease;
+}
+.cs-fixture-series path {
+  fill: none;
+  stroke: #5ee7ff;
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px rgba(94,231,255,.5));
+}
+.cs-fixture-series circle { fill: #5ee7ff; stroke: #d7f7ff; stroke-width: 1px; }
+.cs-fixture-series.is-dim,
+.cs-unpriced-marker.is-dim { opacity: .18; }
+.cs-unpriced-marker {
+  position: absolute;
+  top: 30px;
+  bottom: 14px;
+  left: 53%;
+  width: 7px;
+  border-left: 1px dashed var(--activity-amber);
+  background: repeating-linear-gradient(135deg, rgba(240,180,41,.18) 0 2px, transparent 2px 5px);
+  transition: opacity 120ms ease;
+}
+.cs-unpriced-marker span {
+  position: absolute;
+  bottom: 3px;
+  left: 7px;
+  color: var(--activity-amber);
+  font: 7.5px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.cs-xticks {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: #4f5d6a;
+  pointer-events: none;
+}
+
+.cs-plot-note {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  right: 10px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  pointer-events: none;
+}
+.cs-plot-note p {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #7c8b99;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Anchored to the $0 gridline (grid inset bottom = 14px); tracks must not lift above it. */
+.cs-tracks {
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  bottom: 14px;
+  height: 0;
+  pointer-events: none;
+}
+.cs-tracks .ln {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -5px;
+  height: 11px;
+  opacity: 0.75;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.cs-tracks .ln.is-dim { opacity: 0.18; }
+.cs-tracks .ln.is-selected { opacity: 1; filter: drop-shadow(0 0 3px currentColor); }
+.cs-tracks .ln:focus-visible { outline: 1px solid var(--signal-cyan-hot); outline-offset: 3px; }
+.cs-days {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -1.5px;
+  display: flex;
+  justify-content: space-between;
+}
+.cs-days .day {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 3px;
+}
+.cs-days .pt {
+  flex: 0 0 auto;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  opacity: 0.9;
+}
+
+.cs-badge {
+  font-family: var(--font-display);
+  font-stretch: 112%;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border: 1px dashed var(--activity-amber);
+  color: var(--activity-amber);
+  border-radius: 1px;
+}
+
+.cs-legend {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  padding: 2px 0 14px 8px;
+  border-left: 1px solid rgba(94, 231, 255, 0.1);
+  min-width: 0;
+}
+.cs-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  width: 100%;
+  padding: 3px 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.cs-legend-row:hover,
+.cs-legend-row.is-selected { border-color: color-mix(in oklab, var(--signal-cyan) 50%, transparent); background: rgba(70, 190, 240, 0.07); }
+.cs-legend-row.is-dim { opacity: 0.42; }
+.cs-legend-row:focus-visible { outline: 1px solid var(--signal-cyan-hot); outline-offset: 1px; }
+.cs-legend-row i {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.cs-legend-row b {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: #d7eaf4;
+  line-height: 1.2;
+}
+.cs-legend-row span {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: #6d7d8d;
+}
+.cs-legend-note {
+  margin-top: 2px;
+  padding-left: 14px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: #4f5d6a;
+}
+
+/* ---------- KPI stack ---------- */
+
+.cs-kpis {
+  display: grid;
+  grid-template-rows: 1fr 1fr 1fr;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cs-kpi {
+  position: relative;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 20%, var(--edge-subtle));
+  background: color-mix(in oklab, var(--night-substrate) 78%, #04070d);
+  box-shadow: inset 0 1px 0 rgba(180, 230, 255, 0.045);
+  border-radius: var(--radius-panel);
+  padding: 5px 9px 5px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.cs-kpi-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.cs-kpi-line b {
+  font-size: 20px;
+  font-weight: 500;
+  color: #e7f4fb;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.cs-kpi-line em {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: #6d7d8d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cs-kpi small {
+  display: block;
+  color: #5f6f7e;
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cs-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 15px;
+  margin: 3px 0 3px;
+}
+.cs-spark i {
+  flex: 1 1 0;
+  min-width: 1px;
+  border-radius: 0.5px;
+  opacity: 0.85;
+}
+.cs-spark .cap {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: 5px;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: #5f6f7e;
+  white-space: nowrap;
+}
+.cs-spark-absent {
+  align-items: center;
+  border-bottom: 1px dashed rgba(240, 180, 41, 0.4);
+}
+.cs-spark-absent span {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-style: italic;
+  color: color-mix(in oklab, var(--activity-amber) 72%, #6d7d8d);
+  letter-spacing: 0.04em;
+}
+
+/* ---------- tables ---------- */
+
+.cs-mid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr) minmax(0, 1.08fr);
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+  flex: 0 0 184px;
+}
+.cs-mid-well { padding: 7px 8px; }
+.cs-mid-well header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+}
+.cs-mid-well header b {
+  font-size: 8.5px;
+  letter-spacing: 0.04em;
+}
+.cs-mid-well table { font-size: 10.5px; }
+.cs-mid-well td { padding-top: 2px; padding-bottom: 2px; }
+.cs-mid-well th {
+  font-size: 7.5px;
+  letter-spacing: 0.04em;
+}
+
+.cs-well table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.cs-well th {
+  text-align: left;
+  font-family: var(--font-display);
+  font-stretch: 112%;
+  font-size: 8px;
+  letter-spacing: 0.07em;
+  color: #8b99a8;
+  padding: 3px 0 4px;
+  border-bottom: 1px solid color-mix(in oklab, var(--signal-cyan) 16%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.cs-well td {
+  padding: 3.5px 0;
+  color: #c5d0da;
+  border-bottom: 1px solid rgba(90, 120, 140, 0.1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cs-well tbody tr[tabindex] { cursor: pointer; transition: opacity 120ms ease, background-color 120ms ease; }
+.cs-well tbody tr[tabindex]:hover,
+.cs-well tbody tr.is-selected { background: rgba(70, 190, 240, 0.08); }
+.cs-well tbody tr.is-dim { opacity: 0.4; }
+.cs-well tbody tr[tabindex]:focus-visible { outline: 1px solid var(--signal-cyan-hot); outline-offset: -1px; }
+.cs-well th.num,
+.cs-well td.num {
+  text-align: right;
+  padding-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.cs-well td.nul { color: #55636f; }
+.cs-well td.abs { color: var(--activity-amber); font-style: italic; }
+.cs-well tr.total td {
+  border-top: 1px solid color-mix(in oklab, var(--signal-cyan) 18%, transparent);
+  border-bottom: none;
+  color: #8b99a8;
+}
+.cs-well tr.total td:first-child {
+  font-family: var(--font-display);
+  font-stretch: 112%;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ---------- detail ledger ---------- */
+
+.cs-detail { min-height: 0; flex: 0 0 152px; }
+.cs-detail-table th.num { padding-left: 3px; }
+.cs-detail-table tr.grp th {
+  font-size: 7px;
+  letter-spacing: 0.12em;
+  color: #5f6f7e;
+  text-align: center;
+  padding: 1px 0 2px;
+  border-bottom: none;
+}
+.cs-detail-table tr.grp th:nth-child(2),
+.cs-detail-table tr.grp th:nth-child(3) {
+  border-bottom: 1px dotted rgba(139, 153, 168, 0.35);
+}
+.cs-well footer {
+  margin-top: auto;
+  padding-top: 4px;
+  font-size: 9.5px;
+  color: #6d7d8d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- inspector rail ---------- */
+
+.cs-inspect {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid color-mix(in oklab, var(--signal-cyan) 20%, var(--edge-subtle));
+  background: #080c14;
+  padding: 12px 12px 10px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cs-inspect-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding-right: 4px; }
+.cs-inspect h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-stretch: 112%;
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  color: var(--signal-cyan);
+  font-weight: 600;
+  line-height: 1.4;
+}
+.cs-flow-inspect { padding-bottom: 11px; margin-bottom: 11px; border-bottom: 1px solid rgba(94,231,255,.18); }
+.cs-flow-inspect h2 { margin-bottom: 8px; }
+.cs-open {
+  width: 100%;
+  margin-top: 8px;
+  padding: 7px 8px;
+  border: 1px solid rgba(94,231,255,.45);
+  border-radius: 3px;
+  background: rgba(11,39,52,.55);
+  color: var(--signal-cyan-hot);
+  font: 9px var(--font-mono);
+  letter-spacing: .08em;
+  cursor: pointer;
+}
+.cs-inspect .k {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+}
+.cs-inspect .k .cnt {
+  font-family: var(--font-mono);
+  font-style: normal;
+  font-size: 10px;
+  color: #d7eaf4;
+}
+.cs-inspect .k .cnt.abs { color: var(--activity-amber); font-style: italic; }
+.cs-block { margin: 11px 0 0; padding-top: 8px; border-top: 1px dotted rgba(94, 231, 255, 0.14); }
+.cs-block:first-of-type { border-top: none; padding-top: 0; margin-top: 10px; }
+.cs-block .k { margin-bottom: 4px; }
+
+.cs-prov {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+}
+.cs-prov li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: #d7eaf4;
+  padding: 2.5px 0;
+}
+.cs-prov li i {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.cs-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #c5d0da;
+  margin: 2px 0;
+  min-width: 0;
+}
+.cs-row span:first-child {
+  color: #8b99a8;
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.cs-row .r {
+  text-align: right;
+  color: #d7eaf4;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.cs-copy { font-size: 10.5px; line-height: 1.45; color: #9aa8b6; margin: 0; }
+.cs-hint {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 22%, transparent);
+  color: #9eb0be;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+@media (max-width: 1100px) {
+  .cs-root {
+    display: block;
+    overflow: auto;
+  }
+  .cs-main {
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+  }
+  .cs-top {
+    grid-template-columns: minmax(520px, 1fr) 210px;
+    min-height: 280px;
+    overflow-x: auto;
+  }
+  .cs-flow { flex-basis: 306px; }
+  .cs-flow-key { display: none; }
+  .cs-mid {
+    grid-template-columns: 1fr;
+  }
+  .cs-mid-well { min-height: 180px; }
+  .cs-detail {
+    min-height: 220px;
+    overflow-x: auto;
+  }
+  .cs-detail-table { min-width: 820px; }
+  .cs-inspect {
+    border-top: 1px solid color-mix(in oklab, var(--signal-cyan) 20%, var(--edge-subtle));
+    border-left: 0;
+    min-height: 440px;
+    overflow: visible;
+  }
+  .cs-inspect-body { overflow: visible; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cs-well tbody tr[tabindex] { transition: none; }
+}

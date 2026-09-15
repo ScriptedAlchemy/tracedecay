@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROCESS_HELPER="$SCRIPT_DIR/lib/portable_process.py"
+
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -14,8 +17,9 @@ Options:
   --lifecycle-label LABEL  Print start/stop messages using LABEL
 
 The harness creates an isolated TraceDecay profile and Unix socket, exports
-TRACEDECAY_DATA_DIR and TRACEDECAY_DAEMON_SOCKET to COMMAND, and removes the
-profile after the command and daemon have stopped.
+TRACEDECAY_DATA_DIR, TRACEDECAY_DAEMON_SOCKET and TRACEDECAY_DAEMON_PID (the
+daemon process id, for memory sampling) to COMMAND, and removes the profile
+after the command and daemon have stopped.
 EOF
   exit 2
 }
@@ -86,13 +90,21 @@ command -v python3 >/dev/null 2>&1 || {
   echo "error: python3 is required for the bounded daemon socket probe" >&2
   exit 2
 }
-command -v setsid >/dev/null 2>&1 || {
-  echo "error: setsid is required for bounded daemon process-group cleanup" >&2
+[[ -f "$PROCESS_HELPER" ]] || {
+  echo "error: portable process helper is missing: $PROCESS_HELPER" >&2
   exit 2
 }
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-daemon.XXXXXX")"
-export TRACEDECAY_DATA_DIR="$run_dir/profile"
+if [[ -n "${TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR:-}" ]]; then
+  [[ "$TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR" == /* ]] || {
+    echo "error: TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR must be absolute" >&2
+    exit 2
+  }
+  export TRACEDECAY_DATA_DIR="$TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR"
+else
+  export TRACEDECAY_DATA_DIR="$run_dir/profile"
+fi
 export TRACEDECAY_DAEMON_SOCKET="$run_dir/daemon.sock"
 export TRACEDECAY_DAEMON_HARNESS_ACTIVE=1
 # Keep explicit caller overrides inside the elected daemon's isolated profile.
@@ -105,41 +117,42 @@ mkdir -p "$TRACEDECAY_DATA_DIR"
 print_daemon_log() {
   echo "----- tracedecay daemon log -----" >&2
   if [[ -s "$daemon_log" ]]; then
-    cat "$daemon_log" >&2 || true
+    tail -c 16384 "$daemon_log" >&2 || true
   else
     echo "(no daemon output captured)" >&2
   fi
 }
 
 daemon_group_alive() {
-  [[ -n "$daemon_pid" ]] && kill -0 -- "-$daemon_pid" 2>/dev/null
+  [[ -n "$daemon_pid" ]] &&
+    python3 -S "$PROCESS_HELPER" group-alive --pid "$daemon_pid" >/dev/null 2>&1
 }
 
 stop_daemon() {
-  local deadline
+  local stop_status=0
 
   [[ -n "$daemon_pid" ]] || return 0
   if daemon_group_alive; then
     [[ -z "$lifecycle_label" ]] || echo "== stopping $lifecycle_label" >&2
-    kill -TERM -- "-$daemon_pid" 2>/dev/null || true
-    deadline=$((SECONDS + stop_timeout))
-    while daemon_group_alive && ((SECONDS < deadline)); do
-      sleep 0.1
-    done
-    if daemon_group_alive; then
+    python3 -S "$PROCESS_HELPER" stop-group \
+      --pid "$daemon_pid" --grace "$stop_timeout" || stop_status=$?
+    if ((stop_status == 2)); then
       [[ -z "$lifecycle_label" ]] || echo "== force stopping $lifecycle_label" >&2
-      kill -KILL -- "-$daemon_pid" 2>/dev/null || true
     fi
   fi
   wait "$daemon_pid" 2>/dev/null || true
+  return "$stop_status"
 }
 
 cleanup() {
-  local status=$?
+  local status=$? stop_status=0
 
   trap - EXIT INT TERM
-  stop_daemon
-  if ((status != 0)); then
+  stop_daemon || stop_status=$?
+  if ((status == 0 && stop_status != 0)); then
+    status="$stop_status"
+  fi
+  if ((status != 0 || stop_status != 0)); then
     print_daemon_log
   fi
   rm -rf "$run_dir"
@@ -151,45 +164,26 @@ trap 'exit 143' TERM
 
 [[ -z "$lifecycle_label" ]] || echo "== starting $lifecycle_label"
 if [[ "$daemon_mode" == "bin" ]]; then
-  setsid "$daemon_value" daemon run --socket "$TRACEDECAY_DAEMON_SOCKET" \
+  python3 -S "$PROCESS_HELPER" exec-session -- \
+    "$daemon_value" daemon run --socket "$TRACEDECAY_DAEMON_SOCKET" \
     >"$daemon_log" 2>&1 &
 else
   (
     cd "$daemon_value"
-    exec setsid cargo run -- daemon run --socket "$TRACEDECAY_DAEMON_SOCKET"
+    exec python3 -S "$PROCESS_HELPER" exec-session -- \
+      cargo run -- daemon run --socket "$TRACEDECAY_DAEMON_SOCKET"
   ) >"$daemon_log" 2>&1 &
 fi
 daemon_pid=$!
+# `exec-session` execs into the daemon, so this is the daemon's own PID. The
+# smoke command samples its resident memory per readiness probe; a timeout or
+# an OOM-killed daemon is then attributable to a phase and a peak, not a guess.
+export TRACEDECAY_DAEMON_PID="$daemon_pid"
 
-if ! python3 - "$TRACEDECAY_DAEMON_SOCKET" "$daemon_pid" "$ready_timeout" <<'PY'
-import os
-import socket
-import sys
-import time
-
-socket_path, daemon_pid, timeout = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-deadline = time.monotonic() + timeout
-while time.monotonic() < deadline:
-    try:
-        os.kill(daemon_pid, 0)
-    except ProcessLookupError:
-        print("error: tracedecay daemon exited before becoming ready", file=sys.stderr)
-        raise SystemExit(1)
-
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(min(0.25, max(0.01, deadline - time.monotonic())))
-    try:
-        client.connect(socket_path)
-    except (FileNotFoundError, ConnectionRefusedError, socket.timeout, OSError):
-        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-    else:
-        raise SystemExit(0)
-    finally:
-        client.close()
-
-print(f"error: tracedecay daemon did not become ready within {timeout} seconds", file=sys.stderr)
-raise SystemExit(1)
-PY
+if ! python3 -S "$PROCESS_HELPER" wait-unix-socket \
+  --path "$TRACEDECAY_DAEMON_SOCKET" \
+  --pid "$daemon_pid" \
+  --timeout "$ready_timeout"
 then
   exit 1
 fi

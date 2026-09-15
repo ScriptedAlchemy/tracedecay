@@ -1,0 +1,1 @@
+export { WorkPage } from "./WorkPage";

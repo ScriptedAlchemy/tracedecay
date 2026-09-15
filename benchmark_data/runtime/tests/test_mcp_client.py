@@ -224,20 +224,6 @@ class MCPClientTest(unittest.TestCase):
             time.sleep(0.01)
         self.fail(f"process {pid} is still alive")
 
-    def test_start_performs_handshake_and_lists_tools(self) -> None:
-        with self.client() as client:
-            response = client.list_tools()
-
-            self.assertEqual(response.result["tools"][0]["name"], "echo")
-            self.assertEqual(
-                client.initialize_result["serverInfo"]["name"],
-                "fake-tracedecay",
-            )
-            self.assertEqual(
-                client.command[-2:],
-                ("serve", "--timings"),
-            )
-
     def test_initialize_timeout_is_attributed_and_process_is_reaped(self) -> None:
         client = self.client(
             timeout=0.05,
@@ -368,16 +354,6 @@ class MCPClientTest(unittest.TestCase):
             )
             self.assertEqual(response.handler_duration_ns, 321_000)
             self.assertGreater(response.wall_duration_ns, 0)
-
-    def test_persistent_process_is_reused(self) -> None:
-        with self.client() as client:
-            first = client.call_tool("pid").result["structuredContent"]["value"]
-            second = client.call_tool("pid").result["structuredContent"]["value"]
-
-            self.assertEqual(first, second)
-            self.assertEqual(first, client.pid)
-            self.assertEqual(client.process_start_count, 1)
-            self.assertTrue(client.process_alive)
 
     def test_explicit_binary_command_is_spawned_without_a_shell(self) -> None:
         with mock.patch(

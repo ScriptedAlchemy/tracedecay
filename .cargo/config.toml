@@ -9,6 +9,10 @@ target-dir = "target"
 # setting; it has no effect on Rust code.
 CFLAGS = { value = "-DNDEBUG", force = false }
 CXXFLAGS = { value = "-DNDEBUG", force = false }
+# SQLite's sorter merges at most 16 runs, so 15 helpers are the largest
+# effective auxiliary width. Keep the bundled build deterministic across
+# developer and CI hosts instead of accepting SQLite's default ceiling of 8.
+LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15", force = true }
 
 # Global accounting (savings ledger, worldwide-counter flushes) is ON by
 # default for installed binaries, but `cargo test` / `cargo run` would then
@@ -22,17 +26,53 @@ TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 # any test (or `tracedecay` binary a test spawns) that doesn't set
 # TRACEDECAY_DATA_DIR itself resolves storage to the developer's real
 # ~/.tracedecay, enrolling temp fixture repos into the real profile and
-# contending with a live daemon. Tests that need a private profile override
-# this per-test (`force = false`); the HOME-fallback tests remove the variable
+# contending with a live daemon. `force = true` so an ambient export in the
+# developer's shell cannot redirect the whole test run back to the real
+# profile; tests that need a private profile still override per-test with
+# `set_var`/`Command::env`, and the HOME-fallback tests remove the variable
 # in-process. Installed binaries run outside cargo and are unaffected, but the
-# profile does apply to `cargo run` — use the installed binary (or set
-# TRACEDECAY_DATA_DIR yourself) for real `daemon install-service` runs.
-# Enforced by tests/test_profile_isolation_test.rs.
-TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false, relative = true }
+# profile does apply to `cargo run` — use the installed binary for real
+# `daemon install-service` runs.
+# Enforced by crates/tracedecay-cli/tests/core_cli_suite/test_profile_isolation_test.rs.
+TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = true, relative = true }
+
+# Cheaper Linux debuginfo handling, scoped to the gnu triples so Windows
+# (MSVC supports only packed split-debuginfo) and macOS (already defaults to
+# unpacked) keep their platform defaults. `split-debuginfo=unpacked` leaves
+# debuginfo in the object files instead of linking it into every binary; it
+# is linker-agnostic and a no-op for profiles that build without debuginfo.
+# Deliberately no linker flags here: rustc already links
+# x86_64-unknown-linux-gnu with its bundled rust-lld, CI symlinks ld -> mold
+# (see .github/actions/setup-linux-mold; `-fuse-ld=mold` needs GCC >= 12),
+# and driver-only flags such as `-B` would land on the raw linker command
+# line — and fail — for anyone who sets `target.<triple>.linker` or
+# CARGO_TARGET_<TRIPLE>_LINKER to a linker executable directly. Developers
+# who want mold locally opt in through their own linker config or RUSTFLAGS
+# (a user-set RUSTFLAGS env var replaces these flags entirely).
+# Hotpath lanes that need --cfg tokio_unstable must source
+# scripts/hotpath-rustflags.sh so the env still carries mold and
+# unpacked split-debuginfo.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "split-debuginfo=unpacked"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "split-debuginfo=unpacked"]
 
 [alias]
-# Local default for the full Rust test suite. Requires cargo-nextest:
+# Full Rust test suite. Requires cargo-nextest:
 # https://nexte.st/docs/installation/pre-built-binaries/
-test-all = "nextest run --workspace --no-fail-fast"
-test-ci = "nextest run --workspace --no-fail-fast"
-dogfood = "run --quiet --release --bin tracedecay -- dogfood"
+# Both aliases build with the perf cargo profile, which keeps the
+# critical-path kernels (code index, graph, sha2, …) optimized for the
+# generation-scale suites; see [profile.perf] in the root Cargo.toml.
+#
+# `test-ci` is the hosted acceptance selection: nextest's `ci` policy
+# (.config/nextest.toml: fail-fast off, one retry that still fails flaky
+# results, 8 threads, slow-timeout termination) and only the root fixture
+# feature. `.github/workflows/ci.yml` runs this exact alias, and its support
+# binaries/archives are built with `--profile perf` so they share artifacts
+# with it. Extra flags append: `cargo test-ci --locked -E 'binary(=x)'`.
+test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers --cargo-profile perf"
+# Deliberately broader than CI: every optional feature (test-transport
+# acceptance suites, hotpath, …) under the same cargo profile, with the
+# default nextest policy (no retries).
+test-all = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"

@@ -1,18 +1,16 @@
 ---
-description: Audit the repo or a directory for ship-blocking risk, panic sites, risk markers, dead code, and untested high-risk symbols.
+description: Audit a repository or directory for concrete ship-blocking code risks.
 argument-hint: "[path]"
 ---
 
 # Audit safety
 
-Run a read-only ship-readiness sweep over the whole repo, or `$ARGUMENTS` if a directory was given. Report findings; do not fix them here.
+Audit the whole repository, or `$ARGUMENTS` when it names a directory. This is
+read-only. Follow the bundled `reviewing-changes` safety-audit guidance and use
+only the scans the requested scope warrants: unsafe patterns, unfinished work,
+dead or unmounted code, diagnostics, and structural test risk.
 
-1. Panic & unsafe sites → `tracedecay_unsafe_patterns` (use `kinds` to narrow to `unwrap`/`unsafe`, `exclude_tests: true` for production-only, `path` to scope). Each hit carries file, line, kind, enclosing symbol, `in_test`.
-2. Unfinished work → `tracedecay_todos` (`kinds: ["FIXME","HACK","XXX","UNIMPLEMENTED"]`).
-3. Unreachable code → `tracedecay_dead_code` (`include_public: true` for workspace-internal audits) and `tracedecay_unused_imports`.
-4. Risky and untested → `tracedecay_test_risk`: high-complexity, high-fan-in symbols with weak coverage.
-5. Rank: production panic/unsafe in hot paths first (cross-check fan-in with `tracedecay_callers`), then UNIMPLEMENTED/HACK markers, then untested high-risk symbols, then dead code and imports.
-
-`unwrap`/`panic!` inside tests is normal — respect `exclude_tests`/`in_test` before flagging. An `unsafe { }` block is a review-attention site, not automatically a finding.
-
-Output: findings grouped Critical / Warning / Note with file + enclosing symbol, and a prioritized follow-up list. If any result includes a `tracedecay_metrics:` line, report the savings.
+Confirm reachability and a concrete failure mode before reporting a finding.
+Test panics and the mere presence of an unsafe block are not defects. Report
+prioritized findings with their file, enclosing symbol, evidence, and practical
+follow-up; do not fix them in this command.

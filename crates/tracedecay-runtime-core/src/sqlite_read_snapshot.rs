@@ -6,37 +6,420 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+#[cfg(test)]
+use std::cell::RefCell;
 
 use fs2::FileExt;
-use libsql::{Builder, Connection, OpenFlags};
+use rusqlite::backup::StepResult;
+use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_private_fs::framed_log::rename_noreplace;
+
+#[path = "sqlite_snapshot_connection.rs"]
+mod connection;
+#[path = "sqlite_snapshot_control.rs"]
+mod control;
+#[path = "sqlite_snapshot_materialize.rs"]
+mod materialize;
+
+pub use connection::SnapshotConnection;
+pub use control::SnapshotReadControl;
+pub use materialize::materialize;
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
-const SQLITE_OPEN_URI: i32 = 0x0000_0040;
+static NEXT_BACKUP_STAGING: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+type BeforePublishHook = Box<dyn FnOnce() -> io::Result<()>>;
+#[cfg(test)]
+type AfterPublishHook = Box<dyn FnOnce()>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_PUBLISH: RefCell<Option<BeforePublishHook>> = const { RefCell::new(None) };
+    static AFTER_PUBLISH: RefCell<Option<AfterPublishHook>> = const { RefCell::new(None) };
+}
+
+/// Test seam between the destination-family check and the no-replace rename,
+/// where a concurrent opener can bring a destination family into existence.
+#[cfg(test)]
+fn before_next_publish(hook: impl FnOnce() -> io::Result<()> + 'static) {
+    BEFORE_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+/// Test seam immediately after the destination name is published, where a
+/// legitimate opener of the new file can create its own WAL/SHM.
+#[cfg(test)]
+fn after_next_publish(hook: impl FnOnce() + 'static) {
+    AFTER_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> io::Result<()> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || backup_live_sqlite_database_sync(&source, &destination))
+        .await
+        .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
+}
+
+/// Online backup of a possibly-live `SQLite` family. This is the production
+/// Copy-mode authority: committed WAL frames are folded into one standalone
+/// file. Callers must not `fs::copy` a locked Windows store instead (#933).
+///
+/// The source is opened `SQLITE_OPEN_READ_ONLY` without `immutable=1`. That
+/// URI skips locking and ignores WAL/SHM; it is illegal on a changing family.
+/// Each attempt exclusively creates an owned staging file beside
+/// `destination` (`create_new`) and retires only that scratch. A colliding
+/// name is refused, not deleted.
+///
+/// `destination` is a fresh name the caller owns; this helper never replaces
+/// a destination and never removes anything found there. An existing main,
+/// `-wal`, `-shm`, or `-journal` at the destination is refused with
+/// `AlreadyExists` before the source is opened, and publication is a
+/// kernel-atomic no-replace rename, so a main created concurrently keeps its
+/// own family and fails the backup instead. `SQLite` durability is a
+/// family-level invariant: pathname existence cannot prove which main a later
+/// sidecar belongs to, so a displaced family can only be handled by an owner
+/// with lifecycle exclusion (see
+/// [`crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically`]).
+/// Production callers publish into a directory they exclusively created and
+/// swap that directory themselves.
+///
+/// A WAL family whose transient `-shm` is absent is copied as an offline
+/// unlocked family and folded in staging — opening it as a reader would
+/// reconstruct SHM in the source directory.
+fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
+    backup_live_sqlite_database_with(source, destination, || Ok(()))
+}
+
+fn backup_staging_path(destination: &Path, id: u64) -> PathBuf {
+    let mut staging = destination.as_os_str().to_os_string();
+    staging.push(format!(".{}.{id}.backup-partial", std::process::id()));
+    PathBuf::from(staging)
+}
+
+fn reserve_exclusive_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn reserve_attempt_staging(destination: &Path) -> io::Result<PathBuf> {
+    for _ in 0..32 {
+        let id = NEXT_BACKUP_STAGING.fetch_add(1, Ordering::Relaxed);
+        let staging = backup_staging_path(destination, id);
+        match reserve_exclusive_file(&staging) {
+            Ok(file) => {
+                drop(file);
+                return Ok(staging);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve an exclusive SQLite backup staging file",
+    ))
+}
+
+fn retire_attempt_scratch(staging: &Path) -> io::Result<()> {
+    for member in [
+        with_suffix(staging, "-wal"),
+        with_suffix(staging, "-shm"),
+        with_suffix(staging, "-journal"),
+        staging.to_path_buf(),
+    ] {
+        match fs::remove_file(member) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn reject_aliased_backup_paths(source: &Path, destination: &Path) -> io::Result<()> {
+    if source == destination {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite backup source and destination are the same path",
+        ));
+    }
+    Ok(())
+}
+
+fn occupied_destination_member(member: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "SQLite backup publishes only to an absent destination family; '{}' already exists and is never replaced or removed",
+            member.display()
+        ),
+    )
+}
+
+/// The whole destination family must be absent, not just the main. A stray
+/// `-wal` or `-journal` beside a freshly published main would be replayed
+/// into it on first open, and nothing found here is owned by this attempt.
+/// Refusing before the source is opened also keeps this attempt's staging
+/// out of a directory whose destination name someone else already holds.
+fn reject_occupied_destination_family(destination: &Path) -> io::Result<()> {
+    for member in [
+        destination.to_path_buf(),
+        with_suffix(destination, "-wal"),
+        with_suffix(destination, "-shm"),
+        with_suffix(destination, "-journal"),
+    ] {
+        match fs::symlink_metadata(&member) {
+            Ok(_) => return Err(occupied_destination_member(&member)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn backup_live_sqlite_database_with(
+    source: &Path,
+    destination: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    reject_aliased_backup_paths(source, destination)?;
+    reject_occupied_destination_family(destination)?;
+    // Cancel/deadline before any exclusive create so an early failure cannot
+    // treat a colliding name as this attempt's deletable scratch.
+    checkpoint()?;
+    let staging = reserve_attempt_staging(destination)?;
+    match backup_offline_wal_family_without_shm(source, &staging, &checkpoint) {
+        Ok(true) => publish_complete_backup(&staging, destination),
+        Ok(false) => match run_online_backup(source, &staging, checkpoint) {
+            Ok(()) => publish_complete_backup(&staging, destination),
+            Err(error) => Err(retire_failed_backup(error, &[staging.as_path()])),
+        },
+        Err(error) => Err(retire_failed_backup(error, &[staging.as_path()])),
+    }
+}
+
+#[cfg(test)]
+fn first_backup_step(source: &Path) -> io::Result<StepResult> {
+    let probe_dir = source
+        .parent()
+        .ok_or_else(|| io::Error::other("backup probe source has no parent"))?;
+    let probe = probe_dir.join(format!(
+        "backup-probe-{}.db",
+        NEXT_BACKUP_STAGING.fetch_add(1, Ordering::Relaxed)
+    ));
+    let source_conn = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    source_conn
+        .busy_timeout(Duration::ZERO)
+        .map_err(io::Error::other)?;
+    drop(reserve_exclusive_file(&probe)?);
+    let mut destination = Connection::open_with_flags(&probe, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    let backup =
+        rusqlite::backup::Backup::new(&source_conn, &mut destination).map_err(io::Error::other)?;
+    let step = backup.step(1).map_err(io::Error::other)?;
+    drop(backup);
+    drop(destination);
+    drop(source_conn);
+    retire_attempt_scratch(&probe)?;
+    Ok(step)
+}
+
+fn run_online_backup(
+    source: &Path,
+    staging_path: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    checkpoint()?;
+    let source = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    // Return Busy/Locked to the cooperative loop instead of blocking inside
+    // SQLite's busy handler. Cancel and deadline checkpoints run there.
+    source
+        .busy_timeout(Duration::ZERO)
+        .map_err(io::Error::other)?;
+    let mut staging = Connection::open_with_flags(staging_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    let backup = rusqlite::backup::Backup::new(&source, &mut staging).map_err(io::Error::other)?;
+    loop {
+        checkpoint()?;
+        match backup.step(128).map_err(io::Error::other)? {
+            StepResult::Done => break,
+            StepResult::More => {}
+            StepResult::Busy | StepResult::Locked => {
+                // Shared-lock waits stay cooperative: cancel and deadline
+                // checkpoints run on every retry, including Busy/Locked.
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "SQLite online backup returned unexpected step result {other:?}"
+                )));
+            }
+        }
+    }
+    drop(backup);
+    drop(source);
+    fold_staging_to_standalone(staging, staging_path, checkpoint)
+}
+
+fn backup_offline_wal_family_without_shm(
+    source: &Path,
+    staging_path: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<bool> {
+    let source_state = family_state(source)?;
+    let wal = with_suffix(source, "-wal");
+    let shm = with_suffix(source, "-shm");
+    let has_durable_wal = source_state
+        .iter()
+        .any(|state| state.path == wal && state.bytes > 0);
+    let has_shm = source_state.iter().any(|state| state.path == shm);
+    if !has_durable_wal || has_shm {
+        return Ok(false);
+    }
+    // Offline / crash-image family: the files are unlocked. Byte-copy them
+    // into owned staging and fold there so the source directory is not
+    // rewritten with a reconstructed `-shm`.
+    checkpoint()?;
+    fs::copy(source, staging_path)?;
+    checkpoint()?;
+    fs::copy(&wal, with_suffix(staging_path, "-wal"))?;
+    let staging = Connection::open_with_flags(staging_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    fold_staging_to_standalone(staging, staging_path, checkpoint)?;
+    Ok(true)
+}
+
+fn fold_staging_to_standalone(
+    staging: Connection,
+    staging_path: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    checkpoint()?;
+    // A WAL-mode backup file grows -wal/-shm the moment anything opens it.
+    // Fold to DELETE before publish so the caller receives one standalone file.
+    let mode: String = staging
+        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+        .map_err(io::Error::other)?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        return Err(io::Error::other(format!(
+            "SQLite left the backup staging file '{}' in journal mode '{mode}'",
+            staging_path.display()
+        )));
+    }
+    drop(staging);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        match fs::remove_file(with_suffix(staging_path, suffix)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    checkpoint()
+}
+
+fn publish_complete_backup(staging: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_PUBLISH.with(|slot| slot.borrow_mut().take())
+        && let Err(error) = hook()
+    {
+        return Err(retire_failed_backup(error, &[staging]));
+    }
+    // The destination name is claimed by a kernel-atomic no-replace rename.
+    // A main that appeared since the family check keeps its own WAL/SHM/
+    // journal and fails this attempt; only this attempt's staging is retired.
+    // Nothing at the destination is ever removed after publication: a sidecar
+    // there belongs to whoever opened the new file, and pathname existence
+    // cannot tell that family apart from a displaced one.
+    if let Err(error) = rename_noreplace(staging, destination) {
+        let error = if error.kind() == io::ErrorKind::AlreadyExists {
+            occupied_destination_member(destination)
+        } else {
+            error
+        };
+        return Err(retire_failed_backup(error, &[staging]));
+    }
+    #[cfg(test)]
+    if let Some(hook) = AFTER_PUBLISH.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+    Ok(())
+}
+
+fn retire_failed_backup(error: io::Error, paths: &[&Path]) -> io::Error {
+    for path in paths {
+        if let Err(cleanup) = retire_attempt_scratch(path) {
+            return io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; failed to retire incomplete SQLite backup family '{}': {cleanup}",
+                    path.display()
+                ),
+            );
+        }
+    }
+    error
+}
 
 pub struct SnapshotDatabase {
-    connection: Connection,
-    _database: libsql::Database,
+    connection: SnapshotConnection,
     source: PathBuf,
     source_state: Vec<FileState>,
+    /// The `file:...` URI used to ATTACH this snapshot. Percent-encoded and
+    /// carrying `mode=ro`/`immutable=1`, so it is never a valid filesystem
+    /// path — use `identity_path` for anything that touches the filesystem.
     path: PathBuf,
+    /// The real on-disk file this snapshot reads: the untouched source in
+    /// direct-immutable mode, or the scratch copy in copy mode.
+    identity_path: PathBuf,
     _scratch: Option<Arc<ScratchDirectory>>,
-    _authority: crate::db::DatabaseAuthority,
+    _authority: Option<crate::db::DatabaseAuthority>,
+    #[cfg(any(test, feature = "test-helpers"))]
     copied_bytes: u64,
 }
 
 impl SnapshotDatabase {
-    pub fn connection(&self) -> &Connection {
+    pub fn connection(&self) -> &SnapshotConnection {
         &self.connection
     }
 
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    pub fn attach_token(&self) -> io::Result<SnapshotAttachToken<'_>> {
+        let file_identity = crate::db::sqlite_generation_identity(&self.identity_path)
+            .map_err(|_| io::Error::other("could not identify immutable SQLite snapshot"))?;
+        Ok(SnapshotAttachToken {
+            snapshot: self,
+            file_identity,
+        })
+    }
+
     pub fn validate_source(&self) -> io::Result<()> {
-        if family_state(&self.source)? == self.source_state {
+        let current = family_state(&self.source)?;
+        if durable_family_state(&self.source, &current)
+            == durable_family_state(&self.source, &self.source_state)
+        {
             return Ok(());
         }
         Err(io::Error::other(format!(
@@ -52,8 +435,47 @@ impl SnapshotDatabase {
         }
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
+    }
+}
+
+pub struct SnapshotAttachToken<'snapshot> {
+    snapshot: &'snapshot SnapshotDatabase,
+    file_identity: u64,
+}
+
+impl SnapshotAttachToken<'_> {
+    pub fn verified_path(&self) -> io::Result<&Path> {
+        self.snapshot.validate_source()?;
+        let current = crate::db::sqlite_generation_identity(&self.snapshot.identity_path)
+            .map_err(|_| io::Error::other("could not re-identify immutable SQLite snapshot"))?;
+        if current != self.file_identity {
+            return Err(io::Error::other(
+                "immutable SQLite snapshot path was replaced before ATTACH",
+            ));
+        }
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = self.snapshot.identity_path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            if PathBuf::from(sidecar).exists() {
+                return Err(io::Error::other(
+                    "immutable SQLite snapshot has live WAL/SHM sidecars",
+                ));
+            }
+        }
+        Ok(&self.snapshot.path)
+    }
+
+    /// Returns the real frozen database file after the same generation and
+    /// sidecar checks as [`Self::verified_path`].
+    ///
+    /// Source-specific readers use this only when they must construct their
+    /// own immutable URI and query policy.
+    pub fn verified_identity_path(&self) -> io::Result<&Path> {
+        self.verified_path()?;
+        Ok(&self.snapshot.identity_path)
     }
 }
 
@@ -64,8 +486,27 @@ pub struct SourceGeneration {
 }
 
 impl SourceGeneration {
+    /// Capture the existing durable family identity before an external read or
+    /// copy. Validate after that operation to refuse a changing source.
+    pub fn capture(source: &Path) -> io::Result<Self> {
+        let states = family_state(source)?;
+        if !states.iter().any(|state| state.path == source) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("SQLite database '{}' does not exist", source.display()),
+            ));
+        }
+        Ok(Self {
+            source: source.to_path_buf(),
+            states,
+        })
+    }
+
     pub fn validate(&self) -> io::Result<()> {
-        if family_state(&self.source)? == self.states {
+        let current = family_state(&self.source)?;
+        if durable_family_state(&self.source, &current)
+            == durable_family_state(&self.source, &self.states)
+        {
             return Ok(());
         }
         Err(io::Error::other(format!(
@@ -78,45 +519,90 @@ impl SourceGeneration {
 pub struct SnapshotSet {
     databases: BTreeMap<PathBuf, SnapshotDatabase>,
     copied_bytes: u64,
-    #[allow(dead_code)]
-    scratch: Arc<ScratchDirectory>,
+    /// Held only so the scratch tempdir outlives every snapshot database.
+    _scratch: Arc<ScratchDirectory>,
 }
 
 impl SnapshotSet {
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
         let root = default_scratch_root(paths)?;
         Self::capture_in(paths, &root).await
     }
 
+    #[hotpath::skip]
     pub async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
-        let scratch = Arc::new(create_scratch_directory(root, expected_owner(paths)?)?);
-        let mut unique = paths.to_vec();
-        unique.sort();
-        unique.dedup();
-        let mut prepared = Vec::new();
-        let mut copied_bytes = 0_u64;
-        for (index, path) in unique.into_iter().enumerate() {
-            let snapshot = prepare_one(&path, &scratch, index)?;
-            copied_bytes = copied_bytes.saturating_add(snapshot.copy_bytes);
-            prepared.push(snapshot);
-        }
-        let available = fs2::available_space(&scratch.path)?;
-        if copied_bytes > available {
-            return Err(io::Error::other(format!(
-                "insufficient scratch space for SQLite read snapshots: required {copied_bytes} bytes, available {available} bytes at '{}'",
-                scratch.path.display()
-            )));
-        }
+        Self::capture_with_policy(
+            paths,
+            root,
+            SnapshotSourcePolicy::Owned,
+            SnapshotReadControl::unlimited(),
+        )
+        .await
+    }
+
+    #[hotpath::skip]
+    async fn capture_foreign_in(
+        paths: &[PathBuf],
+        root: &Path,
+        control: SnapshotReadControl,
+    ) -> io::Result<Self> {
+        Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Foreign, control).await
+    }
+
+    #[hotpath::measure(label = "runtime_core.db.snapshot.capture")]
+    async fn capture_with_policy(
+        paths: &[PathBuf],
+        root: &Path,
+        policy: SnapshotSourcePolicy,
+        control: SnapshotReadControl,
+    ) -> io::Result<Self> {
+        let owned_paths = paths.to_vec();
+        let owned_root = root.to_path_buf();
+        let preparation_control = control.clone();
+        let (scratch, prepared, copied_bytes) = tokio::task::spawn_blocking(move || {
+            preparation_control.checkpoint()?;
+            let scratch = Arc::new(create_scratch_directory(
+                &owned_root,
+                expected_owner(&owned_paths)?,
+            )?);
+            let mut unique = owned_paths;
+            unique.sort();
+            unique.dedup();
+            let mut prepared = Vec::new();
+            let mut copied_bytes = 0_u64;
+            for (index, path) in unique.into_iter().enumerate() {
+                preparation_control.checkpoint()?;
+                let snapshot = prepare_one(&path, &scratch, index, policy)?;
+                copied_bytes = copied_bytes.saturating_add(snapshot.copy_bytes);
+                prepared.push(snapshot);
+            }
+            let available = tracedecay_private_fs::available_space(&scratch.path)?;
+            preparation_control.checkpoint()?;
+            if copied_bytes > available {
+                return Err(insufficient_scratch_space(
+                    copied_bytes,
+                    available,
+                    &scratch.path,
+                ));
+            }
+            Ok((scratch, prepared, copied_bytes))
+        })
+        .await
+        .map_err(|error| {
+            io::Error::other(format!("snapshot preparation task failed: {error}"))
+        })??;
         let mut databases = BTreeMap::new();
         for snapshot in prepared {
             let source = snapshot.source.clone();
-            let database = finish_one(snapshot, Arc::clone(&scratch)).await?;
+            let database = finish_one(snapshot, Arc::clone(&scratch), control.clone()).await?;
             databases.insert(source, database);
         }
         Ok(Self {
             databases,
             copied_bytes,
-            scratch,
+            _scratch: scratch,
         })
     }
 
@@ -129,19 +615,8 @@ impl SnapshotSet {
         })
     }
 
-    pub fn validate_sources_unchanged(&self) -> io::Result<()> {
-        for database in self.databases.values() {
-            database.validate_source()?;
-        }
-        Ok(())
-    }
-
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
-    }
-
-    pub fn database_count(&self) -> usize {
-        self.databases.len()
     }
 }
 
@@ -151,14 +626,37 @@ struct PreparedSnapshot {
     target: PathBuf,
     mode: SnapshotMode,
     copy_bytes: u64,
-    authority: crate::db::DatabaseAuthority,
+    authority: Option<crate::db::DatabaseAuthority>,
 }
 
 #[derive(Clone, Copy)]
 enum SnapshotMode {
+    #[cfg_attr(windows, allow(dead_code))]
     DirectImmutable,
     Reflink,
     Copy,
+}
+
+fn snapshot_admission_bytes(
+    mode: SnapshotMode,
+    main_bytes: u64,
+    wal_bytes: u64,
+    shm_bytes: u64,
+) -> u64 {
+    match mode {
+        SnapshotMode::DirectImmutable => 0,
+        // Reflink still copies WAL/SHM beside the clone.
+        SnapshotMode::Reflink => wal_bytes.saturating_add(shm_bytes),
+        // Copy-mode publishes one standalone backup. SHM is never written.
+        // WAL frames can grow the logical size, so they remain an upper bound.
+        SnapshotMode::Copy => main_bytes.saturating_add(wal_bytes),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SnapshotSourcePolicy {
+    Owned,
+    Foreign,
 }
 
 struct ScratchDirectory {
@@ -193,6 +691,7 @@ struct FileState {
 /// Opens one source family without mutating it. Checkpointed DBs are read
 /// directly through `SQLite` immutable mode. WAL-backed DBs are reflinked when
 /// supported, then fall back to one full copy with WAL/SHM copied alongside.
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture(&[path.to_path_buf()]).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
@@ -203,14 +702,100 @@ pub async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     })
 }
 
-pub async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
-    let mut snapshots = SnapshotSet::capture_in(&[path.to_path_buf()], root).await?;
+/// Opens one foreign `SQLite` family as a private, immutable read snapshot.
+///
+/// Foreign host databases do not participate in `TraceDecay`'s database
+/// authority system. This boundary therefore never opens the source as the
+/// returned snapshot: it first reflinks or copies the database family into
+/// private scratch, verifies the source generation, and materializes any WAL
+/// frames into the private standalone database.
+pub async fn open_foreign_in(
+    path: &Path,
+    root: &Path,
+    control: SnapshotReadControl,
+) -> io::Result<SnapshotDatabase> {
+    let mut snapshots =
+        SnapshotSet::capture_foreign_in(&[path.to_path_buf()], root, control).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!("no frozen SQLite snapshot for '{}'", path.display()),
         )
     })
+}
+
+/// Inspects a checkpointed, offline database through the canonical immutable
+/// snapshot boundary. This is intentionally purpose-bound: callers cannot
+/// obtain a connection or issue arbitrary SQL.
+pub fn checkpointed_database_has_any_rows(path: &Path, tables: &[&str]) -> io::Result<bool> {
+    let mut has_rows = false;
+    for table in tables {
+        if table.is_empty()
+            || !table
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid SQLite table identifier '{table}'"),
+            ));
+        }
+    }
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = with_suffix(path, suffix);
+        if fs::metadata(&sidecar).is_ok_and(|metadata| metadata.len() > 0) {
+            return Err(io::Error::other(format!(
+                "checkpointed SQLite inspection refused live sidecar '{}'",
+                sidecar.display()
+            )));
+        }
+    }
+
+    let _authority = crate::db::DatabaseAuthority::for_runtime(
+        path,
+        "inspect checkpointed SQLite family for offline maintenance",
+    )
+    .map_err(io::Error::other)?;
+    let before = family_state(path)?;
+    let uri = PathBuf::from(immutable_uri(path)?);
+    let snapshot = SnapshotConnection::open(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    let connection = snapshot
+        .connection
+        .lock()
+        .map_err(|_| io::Error::other("snapshot connection lock poisoned"))?;
+    for table in tables {
+        let exists = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1
+                 )",
+                [table],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(io::Error::other)?;
+        if !exists {
+            continue;
+        }
+        let sql = format!("SELECT EXISTS(SELECT 1 FROM \"{table}\" LIMIT 1)");
+        if connection
+            .query_row(&sql, [], |row| row.get::<_, bool>(0))
+            .map_err(io::Error::other)?
+        {
+            has_rows = true;
+            break;
+        }
+    }
+    drop(connection);
+    if family_state(path)? != before {
+        return Err(changed_during_snapshot(path));
+    }
+    Ok(has_rows)
 }
 
 pub fn family_fingerprint(path: &Path) -> io::Result<String> {
@@ -238,7 +823,10 @@ pub fn family_fingerprint(path: &Path) -> io::Result<String> {
         }
         hash.update(label);
         hash.update(bytes.to_be_bytes());
-        let mut file = fs::File::open(&member)?;
+        let mut file = hotpath::io!(
+            fs::File::open(&member)?,
+            label = "runtime_core.db.snapshot.fingerprint"
+        );
         let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             let read = file.read(&mut buffer)?;
@@ -251,19 +839,85 @@ pub fn family_fingerprint(path: &Path) -> io::Result<String> {
     if family_state(path)? != before {
         return Err(changed_during_snapshot(path));
     }
-    Ok(hex::encode(hash.finalize()))
+    Ok(encode_lowercase_hex(&hash.finalize()))
+}
+
+/// How long a bounded probe waits on a lock before giving up.
+///
+/// Short on purpose, and the same bound everywhere: a probe reports its store
+/// as unsampled rather than delaying a live daemon writing to it.
+pub const BOUNDED_PROBE_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Opens `path` strictly read-only with a bounded busy timeout, for callers
+/// that only need to read a pragma or check whether a table exists.
+///
+/// This is the deliberately cheap counterpart to [`SnapshotSet::capture_in`]:
+/// it copies nothing and freezes nothing, so it is only appropriate where a
+/// torn read is acceptable and a busy store degrades to "not sampled" instead
+/// of being retried. Anything that needs a consistent view of a live family
+/// must take a real snapshot.
+///
+/// `SQLITE_OPEN_NO_MUTEX` is sound here because `rusqlite::Connection` is not
+/// `Sync`, so the returned connection stays owned by one thread at a time.
+pub fn open_read_only_probe(path: &Path, busy_timeout: Duration) -> rusqlite::Result<Connection> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(busy_timeout)?;
+    Ok(connection)
+}
+
+/// Opens `path` through the canonical immutable read-only URI, for callers that
+/// read a database nothing can be writing.
+///
+/// `immutable=1` promises `SQLite` the family cannot change, so it skips locking
+/// and ignores WAL/SHM sidecars entirely. That promise is the caller's to keep:
+/// use this only for a quiesced file the caller owns, never for a live store.
+///
+/// `SQLITE_OPEN_NO_MUTEX` is sound here for the same reason it is in
+/// [`open_read_only_probe`]: `rusqlite::Connection` is not `Sync`, so the
+/// returned connection stays owned by one thread at a time.
+pub fn open_immutable_read_only(path: &Path) -> io::Result<Connection> {
+    Connection::open_with_flags(
+        immutable_uri(path)?,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)
+}
+
+/// Reads `PRAGMA <pragma>` as a non-negative count, or `None` when the pragma
+/// is unavailable or does not answer with an integer.
+///
+/// A negative answer clamps to zero: every pragma read through this is a page
+/// or byte count, for which a negative value is not a smaller number but a
+/// missing one.
+#[must_use]
+pub fn pragma_u64(connection: &Connection, pragma: &str) -> Option<u64> {
+    connection
+        .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get::<_, i64>(0))
+        .ok()
+        .map(|value: i64| value.max(0) as u64)
 }
 
 fn prepare_one(
     source: &Path,
     scratch: &ScratchDirectory,
     index: usize,
+    policy: SnapshotSourcePolicy,
 ) -> io::Result<PreparedSnapshot> {
-    let authority = crate::db::DatabaseAuthority::for_runtime(
-        source,
-        "capture SQLite family for offline maintenance",
-    )
-    .map_err(io::Error::other)?;
+    let authority = match policy {
+        SnapshotSourcePolicy::Owned => Some(
+            crate::db::DatabaseAuthority::for_runtime(
+                source,
+                "capture SQLite family for offline maintenance",
+            )
+            .map_err(io::Error::other)?,
+        ),
+        SnapshotSourcePolicy::Foreign => None,
+    };
     let directory = scratch.path.join(index.to_string());
     create_private_directory(&directory)?;
     let target = directory.join("database.db");
@@ -280,7 +934,7 @@ fn prepare_one(
     let has_wal = source_state
         .iter()
         .any(|state| state.path == with_suffix(source, "-wal"));
-    let mode = if has_wal {
+    let mode = if has_wal || matches!(policy, SnapshotSourcePolicy::Foreign) {
         if reflink_copy::reflink(source, &target).is_ok() {
             SnapshotMode::Reflink
         } else {
@@ -290,22 +944,15 @@ fn prepare_one(
     } else {
         checkpointed_snapshot_mode()
     };
-    let mut copy_bytes = if matches!(mode, SnapshotMode::Copy) {
-        main.bytes
-    } else {
-        0
-    };
-    if !matches!(mode, SnapshotMode::DirectImmutable) {
-        for suffix in ["-wal", "-shm"] {
-            let source_member = with_suffix(source, suffix);
-            if let Some(state) = source_state
-                .iter()
-                .find(|state| state.path == source_member)
-            {
-                copy_bytes = copy_bytes.saturating_add(state.bytes);
-            }
-        }
-    }
+    let wal_bytes = source_state
+        .iter()
+        .find(|state| state.path == with_suffix(source, "-wal"))
+        .map_or(0, |state| state.bytes);
+    let shm_bytes = source_state
+        .iter()
+        .find(|state| state.path == with_suffix(source, "-shm"))
+        .map_or(0, |state| state.bytes);
+    let copy_bytes = snapshot_admission_bytes(mode, main.bytes, wal_bytes, shm_bytes);
     if family_state(source)? != source_state {
         return Err(changed_during_snapshot(source));
     }
@@ -336,61 +983,100 @@ fn checkpointed_snapshot_mode() -> SnapshotMode {
 async fn finish_one(
     prepared: PreparedSnapshot,
     scratch: Arc<ScratchDirectory>,
+    control: SnapshotReadControl,
 ) -> io::Result<SnapshotDatabase> {
-    if matches!(prepared.mode, SnapshotMode::Copy) {
-        fs::copy(&prepared.source, &prepared.target)?;
-    }
+    let copy_control = control.clone();
+    let (prepared, scratch) =
+        tokio::task::spawn_blocking(move || copy_snapshot_family(prepared, scratch, &copy_control))
+            .await
+            .map_err(|error| io::Error::other(format!("snapshot copy task failed: {error}")))??;
     if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
-        for suffix in ["-wal", "-shm"] {
-            let source_member = with_suffix(&prepared.source, suffix);
-            let Some(_) = prepared
-                .source_state
-                .iter()
-                .find(|state| state.path == source_member)
-            else {
-                continue;
-            };
-            fs::copy(&source_member, with_suffix(&prepared.target, suffix))?;
-        }
+        materialize::materialize(&prepared.target, control.clone()).await?;
     }
-    if family_state(&prepared.source)? != prepared.source_state {
-        return Err(changed_during_snapshot(&prepared.source));
-    }
-    let (open_path, flags, scratch) = if matches!(prepared.mode, SnapshotMode::DirectImmutable) {
-        (
-            PathBuf::from(immutable_uri(&prepared.source)?),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::from_bits_retain(SQLITE_OPEN_URI),
-            None,
-        )
-    } else {
-        (
-            prepared.target.clone(),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-            Some(scratch),
-        )
-    };
-    let database = Builder::new_local(&open_path)
-        .flags(flags)
-        .build()
-        .await
-        .map_err(io::Error::other)?;
-    let connection = database.connect().map_err(io::Error::other)?;
+    control.checkpoint()?;
+    // `identity_path` is the real file on disk; `attach_path` is the URI used
+    // to ATTACH it. They are never interchangeable — the URI is percent-encoded
+    // and carries query parameters, so passing it to the filesystem fails.
+    let (open_path, attach_path, identity_path, flags, scratch) =
+        if matches!(prepared.mode, SnapshotMode::DirectImmutable) {
+            let uri = PathBuf::from(immutable_uri(&prepared.source)?);
+            (
+                uri.clone(),
+                uri,
+                prepared.source.clone(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+                None,
+            )
+        } else {
+            let uri = PathBuf::from(immutable_uri(&prepared.target)?);
+            (
+                uri.clone(),
+                uri,
+                prepared.target.clone(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+                Some(scratch),
+            )
+        };
+    let connection = SnapshotConnection::open(&open_path, flags).map_err(io::Error::other)?;
     connection
-        .execute_batch("PRAGMA query_only = ON;")
+        .execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;")
         .await
         .map_err(io::Error::other)?;
+    control.checkpoint()?;
     let snapshot = SnapshotDatabase {
         connection,
-        _database: database,
         source: prepared.source,
         source_state: prepared.source_state,
-        path: open_path,
+        path: attach_path,
+        identity_path,
         _scratch: scratch,
         _authority: prepared.authority,
-        copied_bytes: prepared.copy_bytes,
+        #[cfg(any(test, feature = "test-helpers"))]
+        copied_bytes: if matches!(prepared.mode, SnapshotMode::Copy) {
+            fs::metadata(&prepared.target)?.len()
+        } else {
+            prepared.copy_bytes
+        },
     };
     snapshot.validate_source()?;
     Ok(snapshot)
+}
+
+fn copy_snapshot_family(
+    prepared: PreparedSnapshot,
+    scratch: Arc<ScratchDirectory>,
+    control: &SnapshotReadControl,
+) -> io::Result<(PreparedSnapshot, Arc<ScratchDirectory>)> {
+    control.checkpoint()?;
+    match prepared.mode {
+        SnapshotMode::Copy => {
+            // Production Copy-mode: online backup of the live family. Do not
+            // byte-copy locked Windows main/WAL/SHM files (lock 33; #933) and
+            // do not open the changing source with immutable=1.
+            backup_live_sqlite_database_with(&prepared.source, &prepared.target, || {
+                control.checkpoint()
+            })?;
+        }
+        SnapshotMode::Reflink => {
+            for suffix in ["-wal", "-shm"] {
+                let source_member = with_suffix(&prepared.source, suffix);
+                let Some(_) = prepared
+                    .source_state
+                    .iter()
+                    .find(|state| state.path == source_member)
+                else {
+                    continue;
+                };
+                control.copy_file(&source_member, &with_suffix(&prepared.target, suffix))?;
+            }
+        }
+        SnapshotMode::DirectImmutable => {}
+    }
+    control.checkpoint()?;
+    if family_state(&prepared.source)? != prepared.source_state {
+        return Err(changed_during_snapshot(&prepared.source));
+    }
+    Ok((prepared, scratch))
 }
 
 fn changed_during_snapshot(source: &Path) -> io::Error {
@@ -398,6 +1084,16 @@ fn changed_during_snapshot(source: &Path) -> io::Error {
         "SQLite database family '{}' changed while taking a read snapshot",
         source.display()
     ))
+}
+
+fn insufficient_scratch_space(copied_bytes: u64, available: u64, scratch_path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::StorageFull,
+        format!(
+            "insufficient scratch space for SQLite read snapshots: required {copied_bytes} bytes, available {available} bytes at '{}'",
+            scratch_path.display()
+        ),
+    )
 }
 
 fn create_scratch_directory(
@@ -431,6 +1127,8 @@ fn create_scratch_directory(
     ))
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))] // Preserve the fallible Unix contract.
 fn default_scratch_root(paths: &[PathBuf]) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -446,6 +1144,7 @@ fn default_scratch_root(paths: &[PathBuf]) -> io::Result<PathBuf> {
     }
 }
 
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))] // Preserve the fallible Unix contract.
 fn expected_owner(paths: &[PathBuf]) -> io::Result<Option<u32>> {
     #[cfg(unix)]
     {
@@ -475,7 +1174,7 @@ fn ensure_private_root(root: &Path, expected_uid: Option<u32>) -> io::Result<()>
             )));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            create_private_directory(root)?;
+            create_private_directory_all(root)?;
         }
         Err(error) => return Err(error),
     }
@@ -496,17 +1195,100 @@ fn ensure_private_root(root: &Path, expected_uid: Option<u32>) -> io::Result<()>
             fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
         }
     }
+    #[cfg(not(unix))]
+    let _ = expected_uid;
     Ok(())
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    let mut builder = builder;
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
     builder.create(path)
+}
+
+fn create_private_directory_all(path: &Path) -> io::Result<()> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    // Walk up only as far as the deepest component that already exists. The
+    // components below it are the ones this call creates, and the loop below
+    // re-checks each of them. Ancestors above it belong to the operating system
+    // and are routinely symlinks -- macOS reaches the default temporary
+    // directory through `/var` -> `/private/var` -- so requiring the whole
+    // chain to be symlink-free rejected every scratch path on that platform.
+    // The scratch root's own owner and mode are verified by
+    // `ensure_private_root`, which is what actually keeps it private.
+    let mut missing = Vec::new();
+    let mut current = path.as_path();
+    loop {
+        let is_ancestor = current != path.as_path();
+        match fs::symlink_metadata(current) {
+            // The target itself must never be a symlink; an ancestor may be, so
+            // long as it leads to a directory.
+            Ok(metadata) if is_ancestor && metadata.file_type().is_symlink() => {
+                if !fs::metadata(current)?.is_dir() {
+                    return Err(io::Error::other(format!(
+                        "SQLite scratch path component '{}' is not a regular directory",
+                        current.display()
+                    )));
+                }
+                break;
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(io::Error::other(format!(
+                    "SQLite scratch path component '{}' is not a regular directory",
+                    current.display()
+                )));
+            }
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing.push(current.to_path_buf());
+            }
+            Err(error) => return Err(error),
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+
+    for directory in missing.into_iter().rev() {
+        match create_private_directory(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&directory)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(io::Error::other(format!(
+                        "SQLite scratch path component '{}' is not a regular directory",
+                        directory.display()
+                    )));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    if metadata.permissions().mode() & 0o077 != 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!(
+                                "concurrently created SQLite scratch directory '{}' is not private",
+                                directory.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn open_private_lock(path: &Path, create: bool) -> io::Result<File> {
@@ -583,7 +1365,16 @@ fn family_state(path: &Path) -> io::Result<Vec<FileState>> {
     Ok(states)
 }
 
-fn family_paths(path: &Path) -> [PathBuf; 3] {
+fn durable_family_state(path: &Path, states: &[FileState]) -> Vec<FileState> {
+    let wal = with_suffix(path, "-wal");
+    states
+        .iter()
+        .filter(|state| state.path == path || (state.path == wal && state.bytes > 0))
+        .cloned()
+        .collect()
+}
+
+pub(super) fn family_paths(path: &Path) -> [PathBuf; 3] {
     [
         path.to_path_buf(),
         with_suffix(path, "-wal"),
@@ -591,13 +1382,17 @@ fn family_paths(path: &Path) -> [PathBuf; 3] {
     ]
 }
 
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+pub(super) fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
 }
 
-fn immutable_uri(path: &Path) -> io::Result<String> {
+pub(crate) fn immutable_uri(path: &Path) -> io::Result<String> {
+    Ok(format!("{}&immutable=1", read_only_uri(path)?))
+}
+
+fn read_only_uri(path: &Path) -> io::Result<String> {
     let raw = path.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -613,27 +1408,119 @@ fn immutable_uri(path: &Path) -> io::Result<String> {
             other => encoded.push(other),
         }
     }
-    Ok(format!("file:{encoded}?immutable=1&mode=ro"))
+    Ok(format!("file:{encoded}?mode=ro"))
 }
+
+#[cfg(test)]
+#[path = "sqlite_read_snapshot_cancellation_tests.rs"]
+mod cancellation_tests;
+
+#[cfg(test)]
+#[path = "sqlite_read_snapshot_backup_tests.rs"]
+mod backup_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[test]
+    fn captured_source_generation_refuses_durable_main_and_wal_changes() {
+        for journal_mode in ["DELETE", "WAL"] {
+            let temp = TempDir::new().unwrap();
+            let source = temp.path().join("source.db");
+            let writer = Connection::open(&source).unwrap();
+            writer
+                .execute_batch(&format!(
+                    "PRAGMA journal_mode={journal_mode};
+                     PRAGMA wal_autocheckpoint=0;
+                     CREATE TABLE durable(value BLOB);"
+                ))
+                .unwrap();
+            let generation = SourceGeneration::capture(&source).unwrap();
+            generation.validate().unwrap();
+            writer
+                .execute("INSERT INTO durable VALUES (zeroblob(65536))", [])
+                .unwrap();
+            assert!(
+                generation.validate().is_err(),
+                "the copied family must be refused after a {journal_mode} write"
+            );
+            SourceGeneration::capture(&source)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        let temp = TempDir::new().unwrap();
+        assert_eq!(
+            SourceGeneration::capture(&temp.path().join("missing.db"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn copy_mode_admission_excludes_shm_and_charges_main_plus_wal() {
+        assert_eq!(
+            snapshot_admission_bytes(SnapshotMode::Copy, 100, 50, 32),
+            150
+        );
+        assert_eq!(
+            snapshot_admission_bytes(SnapshotMode::Reflink, 100, 50, 32),
+            82
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            snapshot_admission_bytes(SnapshotMode::DirectImmutable, 100, 50, 32),
+            0
+        );
+    }
+
+    #[test]
+    fn insufficient_scratch_space_is_storage_full_not_other() {
+        let error = insufficient_scratch_space(1024, 8, Path::new("/tmp/scratch"));
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        let message = error.to_string();
+        assert!(
+            message.contains("required 1024 bytes") && message.contains("available 8 bytes"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn checkpointed_inspection_is_purpose_bound_and_refuses_live_wal() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE durable(value TEXT NOT NULL);
+                 CREATE TABLE empty(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('retained');",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(checkpointed_database_has_any_rows(&path, &["empty", "durable"]).unwrap());
+        assert!(!checkpointed_database_has_any_rows(&path, &["empty"]).unwrap());
+        assert!(checkpointed_database_has_any_rows(&path, &["bad-name"]).is_err());
+
+        fs::write(with_suffix(&path, "-wal"), b"live").unwrap();
+        assert!(checkpointed_database_has_any_rows(&path, &["durable"]).is_err());
+    }
+
     #[tokio::test]
     async fn snapshot_reads_wal_rows_without_touching_source_bytes_or_mtime() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        let connection = database.connect().unwrap();
+        let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
                  CREATE TABLE durable(value TEXT NOT NULL);
                  INSERT INTO durable(value) VALUES ('wal-resident');",
             )
-            .await
             .unwrap();
         assert!(with_suffix(&path, "-wal").metadata().unwrap().len() > 0);
         let before = family_state(&path).unwrap();
@@ -653,7 +1540,115 @@ mod tests {
                 .unwrap(),
             "wal-resident"
         );
+        assert_eq!(
+            snapshot.attach_token().unwrap().verified_path().unwrap(),
+            snapshot.path()
+        );
+        assert!(
+            ["-wal", "-shm"].into_iter().all(|suffix| !with_suffix(
+                &snapshot.identity_path,
+                suffix
+            )
+            .exists())
+        );
         assert_eq!(family_state(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn foreign_snapshot_is_private_and_leaves_checkpointed_source_untouched() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("foreign.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('foreign');",
+            )
+            .unwrap();
+        let before = family_state(&path).unwrap();
+
+        let snapshot = open_foreign_in(
+            &path,
+            &temp.path().join("scratch"),
+            SnapshotReadControl::unlimited(),
+        )
+        .await
+        .unwrap();
+        let identity_path = snapshot
+            .attach_token()
+            .unwrap()
+            .verified_identity_path()
+            .unwrap()
+            .to_path_buf();
+        let mut rows = snapshot
+            .connection()
+            .query("SELECT value FROM durable", ())
+            .await
+            .unwrap();
+
+        assert_ne!(identity_path, path);
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "foreign"
+        );
+        assert_eq!(family_state(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn foreign_wal_snapshot_reads_wal_frames_and_leaves_live_source_untouched() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("foreign.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('checkpointed');
+                 PRAGMA wal_checkpoint(TRUNCATE);
+                 INSERT INTO durable(value) VALUES ('wal-resident');",
+            )
+            .unwrap();
+        assert!(with_suffix(&path, "-wal").metadata().unwrap().len() > 0);
+        let before = family_state(&path).unwrap();
+
+        let snapshot = open_foreign_in(
+            &path,
+            &temp.path().join("scratch"),
+            SnapshotReadControl::unlimited(),
+        )
+        .await
+        .unwrap();
+        let identity_path = snapshot
+            .attach_token()
+            .unwrap()
+            .verified_identity_path()
+            .unwrap()
+            .to_path_buf();
+        let mut rows = snapshot
+            .connection()
+            .query("SELECT value FROM durable ORDER BY rowid", ())
+            .await
+            .unwrap();
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            values.push(row.get::<String>(0).unwrap());
+        }
+
+        assert_eq!(values, ["checkpointed", "wal-resident"]);
+        assert_ne!(identity_path, path);
+        assert!(
+            ["-wal", "-shm"]
+                .into_iter()
+                .all(|suffix| !with_suffix(&identity_path, suffix).exists()),
+            "the materialized snapshot must be one standalone file"
+        );
+        assert_eq!(family_state(&path).unwrap(), before);
+        drop(writer);
     }
 
     #[cfg(not(windows))]
@@ -661,17 +1656,14 @@ mod tests {
     async fn checkpointed_database_reads_directly_without_copy_or_metadata_change() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        let connection = database.connect().unwrap();
+        let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE durable(value TEXT NOT NULL);
                  INSERT INTO durable(value) VALUES ('checkpointed');",
             )
-            .await
             .unwrap();
         drop(connection);
-        drop(database);
         let before = family_state(&path).unwrap();
         let snapshots = SnapshotSet::capture(std::slice::from_ref(&path))
             .await
@@ -696,19 +1688,99 @@ mod tests {
         assert_eq!(family_state(&path).unwrap(), before);
     }
 
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn direct_immutable_attach_token_verifies_the_filesystem_identity() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .unwrap();
+
+        let snapshot = open(&path).await.unwrap();
+        assert_ne!(snapshot.path(), snapshot.identity_path);
+        assert_eq!(
+            snapshot.attach_token().unwrap().verified_path().unwrap(),
+            snapshot.path()
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_executor_cannot_mutate_main_or_attached_inputs() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.db");
+        let other = temp.path().join("other.db");
+        Connection::open(&source)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('original');",
+            )
+            .unwrap();
+        let other_writer = Connection::open(&other).unwrap();
+        other_writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('original');",
+            )
+            .unwrap();
+        assert!(with_suffix(&other, "-wal").is_file());
+        let source_before = family_state(&source).unwrap();
+        let other_before = family_state(&other).unwrap();
+        let snapshots = SnapshotSet::capture(&[source.clone(), other.clone()])
+            .await
+            .unwrap();
+        let source_snapshot = snapshots.get(&source).unwrap();
+        let other_snapshot = snapshots.get(&other).unwrap();
+        source_snapshot
+            .connection()
+            .execute(
+                "ATTACH DATABASE ?1 AS other",
+                crate::db::engine::params![other_snapshot.path().to_string_lossy().to_string()],
+            )
+            .await
+            .unwrap();
+        source_snapshot
+            .connection()
+            .execute_batch("PRAGMA query_only = OFF;")
+            .await
+            .unwrap();
+
+        assert!(
+            source_snapshot
+                .connection()
+                .execute("INSERT INTO main.durable(value) VALUES ('changed')", ())
+                .await
+                .is_err()
+        );
+        assert!(
+            source_snapshot
+                .connection()
+                .execute("INSERT INTO other.durable(value) VALUES ('changed')", ())
+                .await
+                .is_err()
+        );
+        source_snapshot
+            .connection()
+            .execute("DETACH DATABASE other", ())
+            .await
+            .unwrap();
+        assert_eq!(family_state(&source).unwrap(), source_before);
+        assert_eq!(family_state(&other).unwrap(), other_before);
+        drop(other_writer);
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn checkpointed_snapshot_does_not_lock_source_against_copying() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        database
-            .connect()
+        Connection::open(&path)
             .unwrap()
             .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
-            .await
             .unwrap();
-        drop(database);
 
         let snapshots = SnapshotSet::capture(std::slice::from_ref(&path))
             .await
@@ -731,20 +1803,99 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn nested_missing_scratch_root_is_created_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let first = temp.path().join("missing");
+        let second = first.join("nested");
+        let scratch_root = second.join("sqlite-read");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .unwrap();
+
+        let snapshots = SnapshotSet::capture_in(&[path], &scratch_root)
+            .await
+            .unwrap();
+
+        for directory in [&first, &second, &scratch_root, &snapshots._scratch.path] {
+            assert_eq!(
+                fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{} must be owner-only",
+                directory.display()
+            );
+        }
+    }
+
+    /// macOS reaches its default temporary directory through the system
+    /// `/var` -> `/private/var` symlink, so a symlinked ancestor that leads to a
+    /// directory has to be usable. The scratch root's own owner and mode are
+    /// what keep it private.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_scratch_root_accepts_a_symlinked_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let real = temp.path().join("real");
+        let linked = temp.path().join("linked");
+        fs::create_dir(&real).unwrap();
+        fs::create_dir(real.join("existing")).unwrap();
+        symlink(&real, &linked).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .unwrap();
+
+        SnapshotSet::capture_in(&[path], &linked.join("existing/sqlite-read"))
+            .await
+            .expect("a symlinked ancestor that leads to a directory is usable");
+        assert!(real.join("existing/sqlite-read").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scratch_root_rejects_a_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let real = temp.path().join("real");
+        let linked = temp.path().join("linked");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &linked).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .unwrap();
+
+        let error = match SnapshotSet::capture_in(&[path], &linked).await {
+            Ok(_) => panic!("a symlinked scratch root must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("not a directory"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn scratch_is_private_and_next_capture_cleans_crash_debris() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
         let scratch_root = temp.path().join("private-scratch");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        database
-            .connect()
+        Connection::open(&path)
             .unwrap()
             .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
-            .await
             .unwrap();
-        drop(database);
 
         ensure_private_root(
             &scratch_root,
@@ -768,14 +1919,14 @@ mod tests {
             0o700
         );
         assert_eq!(
-            fs::metadata(&snapshots.scratch.path)
+            fs::metadata(&snapshots._scratch.path)
                 .unwrap()
                 .permissions()
                 .mode()
                 & 0o777,
             0o700
         );
-        let live = snapshots.scratch.path.clone();
+        let live = snapshots._scratch.path.clone();
         drop(snapshots);
         assert!(
             !live.exists(),

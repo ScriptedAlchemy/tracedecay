@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Generic complexity counting for tree-sitter AST nodes.
 //!
 //! Walks descendants of a function/method node and counts branches,
@@ -6,7 +5,12 @@
 //! are language-agnostic — each extractor supplies the node type names
 //! that correspond to each category.
 
+use tracedecay_domain::ComplexityAnalysisV1;
 use tree_sitter::Node as TsNode;
+
+/// Nodes one body walk may visit before it stops and reports itself
+/// incomplete. Every visited node counts, so the bound is the work performed.
+pub const TRAVERSAL_BUDGET: usize = 500_000;
 
 /// Configuration mapping tree-sitter node type names to complexity categories.
 pub struct ComplexityConfig {
@@ -38,7 +42,10 @@ pub struct ComplexityConfig {
 }
 
 /// Complexity metrics extracted from a function body.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// When `analysis` is not [`ComplexityAnalysisV1::Complete`], every counter is
+/// a lower bound over the nodes the walk reached before its budget ran out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ComplexityMetrics {
     pub branches: u32,
     pub loops: u32,
@@ -50,21 +57,36 @@ pub struct ComplexityMetrics {
     pub unchecked_calls: u32,
     /// Number of assertion calls (assert, `debug_assert`, assertEquals, etc.).
     pub assertions: u32,
+    /// Whether the walk covered the whole body.
+    pub analysis: ComplexityAnalysisV1,
 }
 
-/// Counts complexity metrics by iterating over all descendants of `node`.
-///
-/// Uses an explicit stack instead of recursion (NASA Power of 10, Rule 1).
-/// The nesting depth tracks how many nesting-type ancestors enclose each node.
-///
-/// `source` is needed to extract method/macro names for unchecked-call and
-/// assertion detection. Pass an empty slice to skip name-based matching.
+/// Counts complexity metrics over every descendant of `node`, visiting at most
+/// [`TRAVERSAL_BUDGET`] nodes; see [`count_complexity_bounded`].
 pub fn count_complexity(
     node: TsNode<'_>,
     config: &ComplexityConfig,
     source: &[u8],
 ) -> ComplexityMetrics {
-    const MAX_ITERATIONS: usize = 500_000;
+    count_complexity_bounded(node, config, source, TRAVERSAL_BUDGET)
+}
+
+/// Counts complexity metrics by walking the descendants of `node` in source
+/// order with a `TreeCursor`, so the pending state is one cursor plus the
+/// nesting depth rather than a stack of every enqueued sibling. The walk
+/// visits at most `budget` nodes; reaching the bound with nodes still
+/// unvisited yields [`ComplexityAnalysisV1::TraversalBudgetExhausted`] and the
+/// counters accumulated so far. The nesting depth is the number of
+/// nesting-type ancestors enclosing each node.
+///
+/// `source` is needed to extract method/macro names for unchecked-call and
+/// assertion detection. Pass an empty slice to skip name-based matching.
+pub fn count_complexity_bounded(
+    node: TsNode<'_>,
+    config: &ComplexityConfig,
+    source: &[u8],
+    budget: usize,
+) -> ComplexityMetrics {
     debug_assert!(
         !config.branch_types.is_empty() || !config.loop_types.is_empty(),
         "count_complexity called with config that has no branch or loop types"
@@ -74,120 +96,92 @@ pub fn count_complexity(
         "count_complexity called on a node with no children"
     );
     let mut metrics = ComplexityMetrics::default();
-
-    // Stack: (tree-sitter node, current nesting depth)
-    let mut stack: Vec<(TsNode<'_>, u32)> = Vec::new();
-
-    // Seed with direct children of the function node. Earlier revisions used
-    // `node.child(i)` in a `for i in 0..N` loop — tree-sitter's `child(i)`
-    // is O(i) because it walks sibling links from the first child, so the
-    // seed loop alone was O(N²) for high-fanout nodes (e.g. the giant
-    // `switch` in `kernel/bpf/verifier.c` with thousands of cases). Use a
-    // cursor for O(1) per step.
-    push_children(&mut stack, node, 0);
-
-    let mut iterations: usize = 0;
-
-    while let Some((current, depth)) = stack.pop() {
-        iterations += 1;
-        if iterations >= MAX_ITERATIONS {
-            break;
-        }
-
-        let kind = current.kind();
-
-        // Classify the node.
-        if config.branch_types.contains(&kind) {
-            metrics.branches += 1;
-        }
-        if config.loop_types.contains(&kind) {
-            metrics.loops += 1;
-        }
-        if config.return_types.contains(&kind) {
-            metrics.returns += 1;
-        }
-
-        // Unsafe blocks.
-        if config.unsafe_types.contains(&kind) {
-            metrics.unsafe_blocks += 1;
-        }
-
-        // Unchecked operator types (e.g. non_null_assertion_expression, `!!`).
-        if config.unchecked_types.contains(&kind) {
-            metrics.unchecked_calls += 1;
-        }
-
-        // Name-based detection for call expressions (unchecked methods + assertions).
-        if !source.is_empty() && config.call_expression_types.contains(&kind) {
-            if let Some(name) = extract_call_name(current, config.call_method_field, source) {
-                if config.unchecked_methods.contains(&name.as_str()) {
-                    metrics.unchecked_calls += 1;
-                }
-                if config.assertion_names.contains(&name.as_str()) {
-                    metrics.assertions += 1;
-                }
-            }
-        }
-
-        // Name-based detection for macro invocations (Rust assert!, debug_assert!, etc.).
-        if !source.is_empty() && config.macro_invocation_types.contains(&kind) {
-            if let Some(name) = extract_macro_name(current, source) {
-                if config.assertion_names.contains(&name.as_str()) {
-                    metrics.assertions += 1;
-                }
-                if config.unchecked_methods.contains(&name.as_str()) {
-                    metrics.unchecked_calls += 1;
-                }
-            }
-        }
-
-        // Track nesting.
-        let new_depth = if config.nesting_types.contains(&kind) {
-            let d = depth + 1;
-            if d > metrics.max_nesting {
-                metrics.max_nesting = d;
-            }
-            d
-        } else {
-            depth
-        };
-
-        // Push children via cursor — see `push_children`. Same O(N²) trap
-        // as the seed loop above.
-        push_children(&mut stack, current, new_depth);
+    let root = node.id();
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return metrics;
     }
 
-    debug_assert!(
-        metrics.max_nesting <= 500,
-        "max_nesting unexpectedly large, possible analysis error"
-    );
-    debug_assert!(
-        iterations <= MAX_ITERATIONS,
-        "iteration count invariant violated"
-    );
-    metrics
+    // Nesting-type ancestors of the cursor's node, excluding the root.
+    let mut depth: u32 = 0;
+    let mut visited: usize = 0;
+    loop {
+        if visited == budget {
+            metrics.analysis = ComplexityAnalysisV1::TraversalBudgetExhausted;
+            return metrics;
+        }
+        visited += 1;
+
+        let current = cursor.node();
+        classify(current, config, source, &mut metrics);
+        let nesting = u32::from(config.nesting_types.contains(&current.kind()));
+        let current_depth = depth + nesting;
+        metrics.max_nesting = metrics.max_nesting.max(current_depth);
+
+        if cursor.goto_first_child() {
+            depth = current_depth;
+            continue;
+        }
+        // Leaf: advance to the next sibling, ascending until one exists or
+        // the walk returns to the root.
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() || cursor.node().id() == root {
+                return metrics;
+            }
+            depth -= u32::from(config.nesting_types.contains(&cursor.node().kind()));
+        }
+    }
 }
 
-/// Pushes the direct children of `parent` onto `stack` in reverse order, so
-/// a LIFO pop reproduces left-to-right traversal. Iterates via a `TreeCursor`
-/// — sibling walks are O(1) each, vs. O(i) for `parent.child(i)`. Skipping
-/// this matters: high-fanout nodes (1 K+ children, common in switch-heavy
-/// C files like `kernel/bpf/verifier.c`) turn `for i in 0..N { child(i) }`
-/// into an O(N²) trap that dominated indexing time before this helper.
-fn push_children<'a>(stack: &mut Vec<(TsNode<'a>, u32)>, parent: TsNode<'a>, depth: u32) {
-    let start = stack.len();
-    let mut cursor = parent.walk();
-    if cursor.goto_first_child() {
-        loop {
-            stack.push((cursor.node(), depth));
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+/// Adds `current`'s contribution to every counter but nesting.
+fn classify(
+    current: TsNode<'_>,
+    config: &ComplexityConfig,
+    source: &[u8],
+    metrics: &mut ComplexityMetrics,
+) {
+    let kind = current.kind();
+    if config.branch_types.contains(&kind) {
+        metrics.branches += 1;
+    }
+    if config.loop_types.contains(&kind) {
+        metrics.loops += 1;
+    }
+    if config.return_types.contains(&kind) {
+        metrics.returns += 1;
+    }
+    if config.unsafe_types.contains(&kind) {
+        metrics.unsafe_blocks += 1;
+    }
+    // Unchecked operator types (e.g. non_null_assertion_expression, `!!`).
+    if config.unchecked_types.contains(&kind) {
+        metrics.unchecked_calls += 1;
+    }
+    if source.is_empty() {
+        return;
+    }
+    // Name-based detection for call expressions (unchecked methods + assertions).
+    if config.call_expression_types.contains(&kind)
+        && let Some(name) = extract_call_name(current, config.call_method_field, source)
+    {
+        if config.unchecked_methods.contains(&name) {
+            metrics.unchecked_calls += 1;
+        }
+        if config.assertion_names.contains(&name) {
+            metrics.assertions += 1;
         }
     }
-    // Reverse the slice we just appended so the next `pop()` sees the
-    // first child first.
-    stack[start..].reverse();
+    // Name-based detection for macro invocations (Rust assert!, debug_assert!, etc.).
+    if config.macro_invocation_types.contains(&kind)
+        && let Some(name) = extract_macro_name(current, source)
+    {
+        if config.assertion_names.contains(&name) {
+            metrics.assertions += 1;
+        }
+        if config.unchecked_methods.contains(&name) {
+            metrics.unchecked_calls += 1;
+        }
+    }
 }
 
 /// Extracts the method/function name from a call expression node.
@@ -195,16 +189,23 @@ fn push_children<'a>(stack: &mut Vec<(TsNode<'a>, u32)>, parent: TsNode<'a>, dep
 /// Tries the configured `method_field` first (e.g. "function", "method"),
 /// then falls back to common child patterns: last identifier before `(`,
 /// or a `field_expression`/`member_expression` selector.
-fn extract_call_name(node: TsNode<'_>, method_field: &str, source: &[u8]) -> Option<String> {
+///
+/// Returns a `&str` borrowed from `source`: this runs for every call
+/// expression in the per-node loop, so it must not allocate.
+fn extract_call_name<'s>(
+    node: TsNode<'_>,
+    method_field: &str,
+    source: &'s [u8],
+) -> Option<&'s str> {
     // Try the configured field name first.
-    if !method_field.is_empty() {
-        if let Some(field_node) = node.child_by_field_name(method_field) {
-            // For chained calls like `x.unwrap()`, the field may be a
-            // field_expression / member_expression — grab the rightmost identifier.
-            let text = rightmost_identifier(field_node, source);
-            if !text.is_empty() {
-                return Some(text);
-            }
+    if !method_field.is_empty()
+        && let Some(field_node) = node.child_by_field_name(method_field)
+    {
+        // For chained calls like `x.unwrap()`, the field may be a
+        // field_expression / member_expression — grab the rightmost identifier.
+        let text = rightmost_identifier(field_node, source);
+        if !text.is_empty() {
+            return Some(text);
         }
     }
 
@@ -214,10 +215,10 @@ fn extract_call_name(node: TsNode<'_>, method_field: &str, source: &[u8]) -> Opt
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "field_identifier" || ck == "property_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    return Some(text.to_string());
-                }
+            if (ck == "identifier" || ck == "field_identifier" || ck == "property_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                return Some(text);
             }
             // member_expression / field_expression: grab the property/field child.
             if ck.contains("member_expression") || ck.contains("field_expression") {
@@ -237,16 +238,17 @@ fn extract_call_name(node: TsNode<'_>, method_field: &str, source: &[u8]) -> Opt
 /// Extracts the macro name from a macro invocation node (e.g. `assert!`).
 ///
 /// Looks for the first identifier child, stripping a trailing `!` if present.
-fn extract_macro_name(node: TsNode<'_>, source: &[u8]) -> Option<String> {
+/// Returns a `&str` borrowed from `source` — see `extract_call_name`.
+fn extract_macro_name<'s>(node: TsNode<'_>, source: &'s [u8]) -> Option<&'s str> {
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "scoped_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    return Some(text.trim_end_matches('!').to_string());
-                }
+            if (ck == "identifier" || ck == "scoped_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                return Some(text.trim_end_matches('!'));
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -256,25 +258,26 @@ fn extract_macro_name(node: TsNode<'_>, source: &[u8]) -> Option<String> {
     None
 }
 
-/// Returns the text of the rightmost identifier-like child of `node`.
-fn rightmost_identifier(node: TsNode<'_>, source: &[u8]) -> String {
+/// Returns the text of the rightmost identifier-like child of `node`,
+/// borrowed from `source` (empty when no identifier child exists).
+fn rightmost_identifier<'s>(node: TsNode<'_>, source: &'s [u8]) -> &'s str {
     // If node itself is a simple identifier, return it.
     let nk = node.kind();
     if nk == "identifier" || nk == "field_identifier" || nk == "property_identifier" {
-        return node.utf8_text(source).unwrap_or("").to_string();
+        return node.utf8_text(source).unwrap_or("");
     }
     // Walk children via cursor and remember the rightmost match — `node.child(i)`
     // would be O(N²) for the right-to-left scan the previous revision did.
     let mut cursor = node.walk();
-    let mut found = String::new();
+    let mut found = "";
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "field_identifier" || ck == "property_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    found = text.to_string();
-                }
+            if (ck == "identifier" || ck == "field_identifier" || ck == "property_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                found = text;
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -283,10 +286,6 @@ fn rightmost_identifier(node: TsNode<'_>, source: &[u8]) -> String {
     }
     found
 }
-
-// ---------------------------------------------------------------------------
-// Per-language configurations
-// ---------------------------------------------------------------------------
 
 pub static RUST_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["if_expression", "match_arm", "else_clause"],
@@ -812,40 +811,6 @@ pub static NIX_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-vbnet")]
-pub static VBNET_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &[
-        "if_statement",
-        "elseif_clause",
-        "else_clause",
-        "select_case_statement",
-        "catch_clause",
-    ],
-    loop_types: &[
-        "for_statement",
-        "for_each_statement",
-        "while_statement",
-        "do_loop_statement",
-    ],
-    return_types: &["return_statement", "exit_statement", "throw_statement"],
-    nesting_types: &["block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["invocation_expression"],
-    call_method_field: "",
-    assertion_names: &[
-        "Assert",
-        "AreEqual",
-        "AreNotEqual",
-        "IsTrue",
-        "IsFalse",
-        "IsNull",
-        "IsNotNull",
-    ],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-powershell")]
 pub static POWERSHELL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &[
@@ -964,51 +929,6 @@ pub static FORTRAN_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-cobol")]
-pub static COBOL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_header", "evaluate_statement", "when_phrase"],
-    loop_types: &["perform_statement_loop"],
-    return_types: &["stop_statement", "goback_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["perform_statement_call_proc"],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-msbasic2")]
-pub static MSBASIC2_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_statement"],
-    loop_types: &["for_statement"],
-    return_types: &["return_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &[],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-gwbasic")]
-pub static GWBASIC_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_statement"],
-    loop_types: &["for_statement", "while_statement"],
-    return_types: &["return_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &[],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-qbasic")]
 pub static QBASIC_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["block_if_statement"],
@@ -1045,21 +965,6 @@ pub static R_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-sql")]
-pub static SQL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if", "when_clause"],
-    loop_types: &["loop"],
-    return_types: &["return"],
-    nesting_types: &["block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["invocation"],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-julia")]
 pub static JULIA_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["if_statement", "elseif_clause", "ternary_expression"],
@@ -1073,28 +978,6 @@ pub static JULIA_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     call_method_field: "",
     assertion_names: &["@assert", "assert", "@test", "@test_throws"],
     macro_invocation_types: &["macro_expression"],
-};
-
-#[cfg(feature = "lang-haskell")]
-pub static HASKELL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["alternative", "guard"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["where"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &["fromJust", "head"],
-    call_expression_types: &["apply"],
-    call_method_field: "",
-    assertion_names: &[
-        "assertBool",
-        "assertEqual",
-        "assertTrue",
-        "assertFailure",
-        "shouldBe",
-        "shouldSatisfy",
-    ],
-    macro_invocation_types: &[],
 };
 
 #[cfg(feature = "lang-ocaml")]
@@ -1115,51 +998,6 @@ pub static OCAML_COMPLEXITY: ComplexityConfig = ComplexityConfig {
         "assert_bool",
         "check_bool",
     ],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-clojure")]
-pub static CLOJURE_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["list_lit"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["list_lit"],
-    call_method_field: "",
-    assertion_names: &["assert", "is", "are", "testing"],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-erlang")]
-pub static ERLANG_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["cr_clause", "if_clause"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["clause_body"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["call"],
-    call_method_field: "",
-    assertion_names: &["assertEqual", "assert", "assertMatch", "assertError"],
-    macro_invocation_types: &["macro_application"],
-};
-
-#[cfg(feature = "lang-elixir")]
-pub static ELIXIR_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["stab_clause"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["do_block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["call"],
-    call_method_field: "",
-    assertion_names: &["assert", "assert_raise", "assert_receive", "refute"],
     macro_invocation_types: &[],
 };
 

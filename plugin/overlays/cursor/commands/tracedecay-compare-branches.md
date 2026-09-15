@@ -7,7 +7,7 @@ description: Compare or search another git branch's code graph without switching
 
 Use `tracedecay:exploring-code`.
 
-- **Args:** interpret `$ARGUMENTS` as a single target branch, or "<base> <head>" to diff two branches; if absent, start with `tracedecay_branch_list` and ask what to search/compare.
-- Read-only. If a target branch isn't tracked, tell the user to run `tracedecay branch add <branch>` first.
-
-Output: the cross-branch search hits or the added/removed/changed symbol lists, with any branch-fallback warning surfaced.
+Interpret `$ARGUMENTS` as one target branch or `<base> <head>`; if absent, list
+tracked branches and ask what to compare or search. This is read-only. If a
+target is untracked, give the user the `tracedecay branch add <branch>` command.
+Return the requested semantic result and surface any branch-fallback warning.

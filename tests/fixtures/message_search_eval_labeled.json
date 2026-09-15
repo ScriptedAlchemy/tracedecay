@@ -5,7 +5,7 @@
   "project_key": "eval-project",
   "other_project_key": "other-project",
   "metrics": {
-    "_comment": "Mean p@1/p@3/MRR over the 10 positive queries, recomputed by the test from the LIVE ranking. mean_p_at_1 and mean_mrr are 1.0 because every positive query now ranks its sole relevant message first — including exact_branch_impl_over_inventory, where the inventory downrank in search_session_messages (shared sessions::message_noise classifier) moves the branch-roster noise (inv-1/inv-2/inv-3) below the real implementation message impl-1. mean_p_at_3 stays 0.37: nine single-relevant queries contribute 1/3 each and multi_term_partial_coverage_order contributes 2/3, so (9*(1/3)+2/3)/10 = 0.3667 rounds to 0.37.",
+    "_comment": "Mean p@1/p@3/MRR over the 10 positive queries, recomputed by the test from the LIVE ranking. mean_p_at_1 and mean_mrr are 1.0 because every positive query now ranks its sole relevant message first — including exact_branch_impl_over_inventory, where the shared application session compatibility classifier moves the branch-roster noise (inv-1/inv-2/inv-3) below the real implementation message impl-1. mean_p_at_3 stays 0.37: nine single-relevant queries contribute 1/3 each and multi_term_partial_coverage_order contributes 2/3, so (9*(1/3)+2/3)/10 = 0.3667 rounds to 0.37.",
     "mean_p_at_1": 1.0,
     "mean_p_at_3": 0.37,
     "mean_mrr": 1.0
@@ -212,7 +212,7 @@
   "queries": [
     {
       "label": "exact_branch_impl_over_inventory",
-      "note": "Exact-branch query. The implementation session ranks above the branch-inventory noise: the inventory downrank in search_session_messages (shared sessions::message_noise classifier) demotes the branch-roster messages (inv-1/inv-2/inv-3) that merely name-drop the branch below impl-1, the session that actually implemented it. Before the fix, bm25 alone put the short, dense inv-3 roster on top.",
+      "note": "Exact-branch query. The implementation session ranks above the branch-inventory noise: the shared application session compatibility classifier demotes the branch-roster messages (inv-1/inv-2/inv-3) that merely name-drop the branch below impl-1, the session that actually implemented it. Before the fix, bm25 alone put the short, dense inv-3 roster on top.",
       "query": "codex/retrieval-evals-analytics",
       "provider": "codex",
       "project_key": "eval-project",

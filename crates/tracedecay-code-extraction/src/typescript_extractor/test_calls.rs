@@ -1,11 +1,10 @@
 use tree_sitter::Node as TsNode;
 
 use super::{ExtractionState, TypeScriptExtractor};
+use crate::common::local_node_id;
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, Node, NodeKind, Visibility, generate_node_id,
-};
+use crate::types::{Edge, EdgeKind, Node, NodeKind, Visibility};
 
 /// Root callee names that mark a call as a test-framework construct whose
 /// callback argument should be attributed as an executable test node.
@@ -27,7 +26,7 @@ const TEST_CALLEES: &[&str] = &[
 /// member accesses (`describe.only`, `it.each`) and curried calls
 /// (`test.each([...])('t', fn)`). Returns the base identifier text, e.g.
 /// `describe`, `it`, `test`.
-fn test_call_root_callee(state: &ExtractionState, call: TsNode<'_>) -> Option<String> {
+fn test_call_root_callee<'s>(state: &ExtractionState<'s>, call: TsNode<'_>) -> Option<&'s str> {
     // The callee is the first named child of the call_expression (the
     // "function" field); arguments follow.
     let mut callee = call.named_child(0)?;
@@ -48,13 +47,13 @@ fn test_call_root_callee(state: &ExtractionState, call: TsNode<'_>) -> Option<St
 
 /// Returns true if the given `call_expression` is a recognized test-framework
 /// call (`describe`, `it`, `test`, …) based on its root callee.
-pub(super) fn is_test_framework_call(state: &ExtractionState, call: TsNode<'_>) -> bool {
-    test_call_root_callee(state, call).is_some_and(|root| TEST_CALLEES.contains(&root.as_str()))
+pub(super) fn is_test_framework_call(state: &ExtractionState<'_>, call: TsNode<'_>) -> bool {
+    test_call_root_callee(state, call).is_some_and(|root| TEST_CALLEES.contains(&root))
 }
 
 /// Find the title argument (first string / template) of a test call's
 /// argument list, stripped of quotes and truncated.
-fn test_call_title(state: &ExtractionState, args: TsNode<'_>) -> Option<String> {
+fn test_call_title(state: &ExtractionState<'_>, args: TsNode<'_>) -> Option<String> {
     let mut cursor = args.walk();
     if !cursor.goto_first_child() {
         return None;
@@ -126,28 +125,37 @@ fn truncate_title(title: &str) -> String {
 /// The node is deliberately `NodeKind::Function` so it passes `is_callable`
 /// filters and the Function|Method coverage universes. The framework callee
 /// itself (e.g. `describe`) does NOT get a Calls ref.
-pub(super) fn visit_test_call(state: &mut ExtractionState, call: TsNode<'_>) {
+pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>) {
     // The arguments node holds the title and callback.
     let Some(args) = find_direct_child_by_kind(call, "arguments") else {
         return;
     };
 
-    let root = test_call_root_callee(state, call);
-    let title = test_call_title(state, args)
-        .or(root)
-        .unwrap_or_else(TypeScriptExtractor::anonymous_name);
+    // Empty suite titles are legal. Keep their containment and call edges, but
+    // use the extractor-wide anonymous placeholder instead of a blank name.
+    let title = TypeScriptExtractor::clean_name(
+        &test_call_title(state, args)
+            .or_else(|| test_call_root_callee(state, call).map(str::to_string))
+            .unwrap_or_else(TypeScriptExtractor::anonymous_name),
+    );
 
     let start_line = call.start_position().row as u32;
     let end_line = call.end_position().row as u32;
     let start_column = call.start_position().column as u32;
     let end_column = call.end_position().column as u32;
     let qualified_name = format!("{}::{}", state.qualified_prefix(), title);
-    let id = generate_node_id(&state.file_path, &NodeKind::Function, &title, start_line);
+    let id = local_node_id(
+        &state.file_path,
+        state.source,
+        &NodeKind::Function,
+        &title,
+        call,
+    );
 
     let callback = test_call_callback(args);
     let is_async = callback.is_some_and(|cb| TypeScriptExtractor::has_child_kind(cb, "async"));
     let metrics = callback
-        .map(|cb| count_complexity(cb, &TYPESCRIPT_COMPLEXITY, &state.source))
+        .map(|cb| count_complexity(cb, &TYPESCRIPT_COMPLEXITY, state.source))
         .unwrap_or_default();
 
     let call_text = state.node_text(call);
@@ -175,12 +183,12 @@ pub(super) fn visit_test_call(state: &mut ExtractionState, call: TsNode<'_>) {
         unsafe_blocks: metrics.unsafe_blocks,
         unchecked_calls: metrics.unchecked_calls,
         assertions: metrics.assertions,
+        complexity_analysis: metrics.analysis,
         updated_at: state.timestamp,
         parent_id: None,
     };
     state.nodes.push(graph_node);
 
-    // Contains edge from the enclosing parent (File or outer describe).
     if let Some(parent_id) = state.parent_node_id() {
         state.edges.push(Edge {
             source: parent_id.to_string(),
@@ -196,7 +204,6 @@ pub(super) fn visit_test_call(state: &mut ExtractionState, call: TsNode<'_>) {
         return;
     };
 
-    // Descend into the callback body under this test node.
     state.node_stack.push((title, id.clone()));
     if let Some(body) = find_direct_child_by_kind(callback, "statement_block") {
         visit_test_body(state, body, &id);
@@ -223,7 +230,7 @@ fn defines_own_callable(stmt: TsNode<'_>) -> bool {
 /// Walk the statement block of a test callback: recurse into nested
 /// test-framework calls, and for every other statement both register nested
 /// declarations (helpers/consts) AND attribute call sites to `test_id`.
-fn visit_test_body(state: &mut ExtractionState, body: TsNode<'_>, test_id: &str) {
+fn visit_test_body(state: &mut ExtractionState<'_>, body: TsNode<'_>, test_id: &str) {
     let mut cursor = body.walk();
     if !cursor.goto_first_child() {
         return;
@@ -231,14 +238,13 @@ fn visit_test_body(state: &mut ExtractionState, body: TsNode<'_>, test_id: &str)
     loop {
         let stmt = cursor.node();
         let mut handled = false;
-        if stmt.kind() == "expression_statement" {
-            if let Some(call) = find_direct_child_by_kind(stmt, "call_expression") {
-                if is_test_framework_call(state, call) {
-                    // Nested describe/it — recurse as its own test node.
-                    visit_test_call(state, call);
-                    handled = true;
-                }
-            }
+        if stmt.kind() == "expression_statement"
+            && let Some(call) = find_direct_child_by_kind(stmt, "call_expression")
+            && is_test_framework_call(state, call)
+        {
+            // Nested describe/it — recurse as its own test node.
+            visit_test_call(state, call);
+            handled = true;
         }
         if !handled {
             // Declarations inside describe (helpers, consts, nested classes)

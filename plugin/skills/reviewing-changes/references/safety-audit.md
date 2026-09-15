@@ -1,35 +1,16 @@
-# Safety audit & dead-code cleanup
+# Interpreting safety and dead-code evidence
 
-Ship-readiness sweep and delete-safely protocol for `tracedecay:reviewing-changes`.
+Scope panic/unsafe, unfinished-work, redundancy, and test-risk evidence to the
+requested review. Production panic reachability matters; test assertions and an
+unsafe block's mere existence are not defects. Verify the actual failure mode
+and callers before assigning severity.
 
-- Panic/unsafe, TODO, dead-code, and untested-risk discovery
-- Ranking ship-blockers
-- Zero-caller confirmation before deleting
+Unmounted-file results mean no indexed build root reaches the file, not proof
+that no runtime loader or external build can use it. Investigate that boundary
+before deleting a whole file. Zero indexed callers similarly does not establish
+that a public API, macro entry point, or external consumer is unused.
 
-## Safety audit (ship-readiness sweep)
-
-1. **Panic & unsafe sites → `tracedecay_unsafe_patterns`** (`kinds?` to
-   narrow to `unwrap`/`unsafe`, `exclude_tests: true` for production-only,
-   `path?`): each hit carries file, line, kind, enclosing symbol, `in_test`.
-2. **Unfinished work → `tracedecay_todos`** (`kinds:
-   ["FIXME","HACK","XXX","UNIMPLEMENTED"]`).
-3. **Unreachable code → `tracedecay_dead_code`** (`include_public: true` for
-   workspace-internal audits) and **`tracedecay_unused_imports`**.
-4. **Risky and untested → `tracedecay_test_risk`**: high-complexity,
-   high-fan-in symbols with weak coverage.
-5. **Rank:** production panic/unsafe in hot paths first (cross-check fan-in
-   with `tracedecay_callers`), then UNIMPLEMENTED/HACK markers, then untested
-   high-risk symbols, then dead code and imports.
-
-## Dead-code cleanup
-
-1. Discover with `tracedecay_dead_code` / `tracedecay_unused_imports` /
-   `tracedecay_redundancy`; focused pass → `tracedecay_simplify_scan` (`files`).
-2. **Before deleting anything → confirm zero real callers** with
-   `tracedecay_callers` / `tracedecay_rename_preview`. Be conservative with
-   `pub` items (they may be used outside the indexed scope). Never delete a
-   symbol whose callers/references are non-empty.
-3. Apply edits via `tracedecay:editing-safely`; verify with
-   `tracedecay_diagnostics` and the affected tests
-   (`tracedecay:assessing-impact`). Optionally bracket the cleanup with the
-   session-health delta in `tracedecay:code-health`.
+Body-similarity findings need semantic comparison; name-only and vector-only
+signals cannot justify consolidation alone. Structural test links identify
+candidate verification, not executed coverage. Verify changed behavior with the
+real build or host journey that owns the relevant boundary.

@@ -128,7 +128,7 @@ export const MEMBRANES = [
   },
   {
     label: 'impl RetrievalService',
-    file: 'crates/tracedecay-application/src/retrieval/service.rs',
+    file: 'crates/tracedecay-contracts/src/retrieval/service.rs',
     of: ['sibcall', 'focus', 'sibgraph'],
     kind: 'impl',
     hero: true,

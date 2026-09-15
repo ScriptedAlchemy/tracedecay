@@ -1,0 +1,73 @@
+{
+  "source": "core-branches.json",
+  "project": "core",
+  "projectId": "proj_2c558f8ce42d5cdf",
+  "localRefCount": 1173,
+  "prefixCount": 16,
+  "prefixes": [
+    {
+      "prefix": "ux/",
+      "count": 515
+    },
+    {
+      "prefix": "uitest/",
+      "count": 395
+    },
+    {
+      "prefix": "research/",
+      "count": 129
+    },
+    {
+      "prefix": "(unprefixed)",
+      "count": 30
+    },
+    {
+      "prefix": "cursor/",
+      "count": 30
+    },
+    {
+      "prefix": "codex/",
+      "count": 21
+    },
+    {
+      "prefix": "rslib/",
+      "count": 21
+    },
+    {
+      "prefix": "fix/",
+      "count": 9
+    },
+    {
+      "prefix": "feat/",
+      "count": 8
+    },
+    {
+      "prefix": "dependabot/",
+      "count": 7
+    },
+    {
+      "prefix": "chore/",
+      "count": 2
+    },
+    {
+      "prefix": "ci/",
+      "count": 2
+    },
+    {
+      "prefix": "Nsttt/",
+      "count": 1
+    },
+    {
+      "prefix": "docs/",
+      "count": 1
+    },
+    {
+      "prefix": "int/",
+      "count": 1
+    },
+    {
+      "prefix": "refactor/",
+      "count": 1
+    }
+  ]
+}

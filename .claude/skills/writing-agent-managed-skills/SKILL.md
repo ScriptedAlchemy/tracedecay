@@ -1,51 +1,58 @@
 ---
 name: writing-agent-managed-skills
-description: 'TraceDecay Dev: Use when creating, revising, validating, approving, installing, or auditing TraceDecay agent-managed automation skills and skill-writer drafts.'
+description: "Create, revise, or audit TraceDecay managed skills and their writer validation, activation, and materialization."
 ---
 
-# TraceDecay Dev: Writing Agent-Managed Skills
+# Writing Agent-Managed Skills
 
-Agent-managed skills are profile-owned drafts produced by automation. Treat
-them as generated artifacts with lifecycle state, validation evidence, and
-usage telemetry; bundled `plugin/skills/` changes are a separate release path.
+Managed skills are profile-owned artifacts. The writer validates, activates,
+and materializes accepted output automatically; bundled `plugin/skills/`
+and repository development skills follow their own source release path.
 
-## Workflow
+## Choose the relevant path
 
-1. Inspect before editing: `tracedecay_skill_list` for inventory, then
-   `tracedecay_skill_view` with support files for the target draft.
-2. Read the writer run evidence:
-   `tracedecay_automation_run_artifact_view` for `generated_evals`,
-   `validation_gate`, `optimizer_diagnosis`, and `codex_handoff` artifacts.
-3. Decide the path:
-   - managed draft fix: update through `tracedecay automation skills ...`
-     commands or dashboard flow;
-   - bundled reusable guidance: edit `plugin/skills/<slug>/SKILL.md` and run
-     agent-suite validation.
-4. Validate discovery text: description starts with `Use when`, names concrete
-   triggers, avoids workflow summaries, and stays host-portable.
-5. Check adoption after install with analytics diagnostics and skill usage
-   events before declaring the skill effective.
+- For an existing managed skill, use `tracedecay_skill_list`, then
+  `tracedecay_skill_view` with support files for its exact id. Inspect writer
+  evidence with `tracedecay automation runs list` and
+  `tracedecay automation runs view <run_id>`. Read only artifact kinds the
+  record advertises, through `tracedecay_automation_run_artifact_view` or
+  `tracedecay automation runs artifact <run_id> <kind> --json`.
+- For source-owned guidance, edit its source `SKILL.md` and relevant support
+  files. Reconcile shared text across repository host copies while preserving
+  host metadata. Do not edit hash-tracked managed materializations as source.
+- For a requested managed-skill administrative change, use the supported skill
+  administration surface for the exact target. A writer-run audit alone does
+  not authorize create, update, disable, archive, or restore operations.
+  Subagents inspect and recommend; they do not mutate profile stores.
 
-## Quality Bar
+## Write guidance that earns its context
 
-| Check | Pass condition |
-|---|---|
-| Trigger | Another agent can identify when to load it from description alone. |
-| Body | Short imperative workflow, no session narrative, no stale environment facts. |
-| Evidence | Run artifact or transcript shows the failure this skill prevents. |
-| Validation | Draft has a validation gate or bundled skill passes plugin tests. |
-| Adoption | Usage telemetry or follow-up session proves it was invoked. |
+- Give the description a concise capability and precise trigger. Do not require
+  a magic opening phrase, attract neighboring tasks, or list every tool.
+- Keep only guidance that changes a capable agent's decisions: domain facts,
+  useful routing, and real correctness, safety, or authorization constraints.
+- Keep shared essentials in `SKILL.md`; link substantial conditional procedures
+  or examples from support files and say when to read them. A short skill needs
+  no router. Do not load every reference at entry.
+- Preserve user scope and existing authorization. Avoid mandatory rituals,
+  universal audit lanes, fixed output counts, and premature approval pauses.
+  Complete authorized preparation and validation before any required decision.
+- Prefer one canonical rule over repeated host copies or conflicting prose.
+  Keep necessary host copies aligned; do not copy profile-owned state into a
+  bundle merely because it exists.
 
-## Guardrails
+## Validate and finish
 
-- Never approve or install a managed skill without explicit user intent.
-- Never copy managed-skill state into bundled skills unless the pattern is
-  reusable across projects.
-- Do not mutate profile stores from subagents. Subagents may inspect and
-  recommend only.
+Use the owning validator for structural or packaging changes. For changed
+routing or substantial behavior, evaluate a realistic intended task and a
+neighboring task that should not trigger it, using the existing neutral routing
+evaluator when available. Keep routing success separate from task usefulness;
+invocation counts alone prove neither effectiveness nor failure.
 
-## Deliverable
+For writer review, accepted output must be active and materialized, rejected
+output must not be active, and terminal status must agree with advertised
+validation and deployment evidence. Do not invent a manual settlement gate.
 
-Return the skill id or bundled path, lifecycle state, validation artifacts read,
-edits made or recommended, adoption evidence, and the exact approve/install
-command when mutation is appropriate.
+Report the target, changes or findings, relevant validation, and unresolved
+limitations. Include writer state and adoption evidence only when that was
+part of the task; future telemetry is not a prerequisite to finishing an edit.

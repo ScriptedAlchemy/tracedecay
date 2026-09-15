@@ -47,7 +47,7 @@ CONDITIONS = ("full", "no-hints", "no-skills", "bare", "cli-only")
 KNOWN_HOSTS = ("claude", "codex")
 
 # Distinctive fragments of the hook-injected tool hints. These MIRROR the
-# `message`/`context` strings in src/hooks/tool_hints.rs CATEGORY_SPECS: if that
+# `message`/`context` strings in crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs CATEGORY_SPECS: if that
 # table's wording changes, refresh these. They are chosen to be specific enough
 # that they only appear in an injected hint, never in a raw MCP tool
 # *description* or the CLAUDE.md steering block, so matching one in the
@@ -71,7 +71,7 @@ HINT_SIGNATURES = (
     "for subagent handoff, include focused tracedecay context",  # subagent_start_context
     "for build/type-check errors, use tracedecay's diagnostics tools",  # build_diagnostics
     "for reviewing diffs or pr changes, use tracedecay's change-context",  # review_changes
-    "for durable facts, prefer tracedecay_fact_store",  # memory_store
+    "for durable facts, prefer tracedecay_fact_store_add",  # memory_store
     "enriches each hit with its enclosing symbol",  # search context
     "gives a file's table of contents",           # file_read context
     "usage this session —",                        # escalation prefix
@@ -87,14 +87,16 @@ CH_CLI = "cli-only"                     # plugin guidance drove supported CLI fa
 CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_CLI, CH_NONE)
 
 # The HINT_SIGNATURES above are hand-mirrored fragments of the hook messages in
-# src/hooks/tool_hints.rs. That mirror is load-bearing: if the source wording
+# crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. That mirror is load-bearing: if the source wording
 # drifts and a signature stops matching, the hint text still fires in live
 # transcripts but grade.py no longer recognizes it, so genuinely hint-driven
 # adoptions get silently misfiled as `steering-or-description` and the whole
 # channel-efficacy table lies. `check_hint_drift()` / `grade.py --check-hints`
 # turn the README's "refresh these if the table changes" footnote into an
 # enforced check; run.sh runs it before spending a single live token.
-HINT_SOURCE_REL = os.path.join("src", "hooks", "tool_hints.rs")
+HINT_SOURCE_REL = os.path.join(
+    "crates", "tracedecay-agent-hosts", "src", "hooks", "tool_hints.rs"
+)
 
 
 def find_hint_source(start: str) -> Optional[str]:
@@ -134,7 +136,7 @@ def hint_signature_drift(source_text: str) -> list[str]:
 _SKILL_IDS = (
     "exploring-code", "tracing-functions", "assessing-impact", "reviewing-changes",
     "project-memory", "editing-safely", "fixing-build-and-type-errors",
-    "managing-session-context", "using-tracedecay", "using-the-cli", "code-health",
+    "managing-session-context", "using-the-cli", "code-health",
     "diagnosing-analytics", "discovering-tracedecay", "inspecting-managed-skills",
 )
 # Substrings/regexes that must never appear in a scenario prompt (case-insensitive).
@@ -171,6 +173,10 @@ def lint_scenarios(scenarios: dict) -> list[str]:
     """Return human-readable violation lines across all scenarios (empty = ok)."""
     problems = []
     for sid in sorted(scenarios):
+        # Scenario ids become transcript basenames in the runner. Generated
+        # cases must not escape the artifact directory or inject TSV records.
+        if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", sid):
+            problems.append(f"{sid!r}: unsafe scenario id")
         hits = lint_prompt(scenarios[sid].get("prompt", ""))
         if hits:
             problems.append(f"{sid}: prompt names {sorted(set(hits))}")
@@ -510,6 +516,18 @@ def invoked_agents(tr: Transcript) -> list[str]:
     return invoked
 
 
+def invoked_skills(tr: Transcript) -> list[str]:
+    """Read explicit host skill invocations, never prose that merely names a skill."""
+    skills = set()
+    for call in tr.tools:
+        if not _is_skill_invocation(call):
+            continue
+        values = _string_leaves(call.input) if call.canon == "Skill" else [call.raw_name]
+        for value in values:
+            skills.update(re.findall(r"tracedecay:([a-z][a-z0-9-]*)", value))
+    return sorted(skills)
+
+
 def _has_hint_signature(text: str) -> bool:
     low = text.lower()
     return any(sig in low for sig in HINT_SIGNATURES)
@@ -595,6 +613,11 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     subs["efficiency"] = 1.0 if count <= budget else 0.0
     details["tool_call_count"] = count
     details["budget"] = budget
+    # Claude Code defers most MCP schemas behind ToolSearch; count those loads
+    # so a graph-tool miss can be told apart from "never discovered the tool".
+    details["tool_search_calls"] = sum(
+        1 for tc in tr.tools if (tc.raw_name or tc.canon) == "ToolSearch"
+    )
 
     # 4. outcome (fraction of ground-truth fragments present in final answer)
     if ground_truth:
@@ -639,6 +662,38 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         details["expected_agent"] = expected_agent
         details["invoked_agent"] = agents[0] if agents else None
         details["invoked_agents"] = agents
+
+    # Routing is reported separately: loading a skill is not task success.
+    if "expected_skill" in scn or "allowed_skills" in scn:
+        expected = scn.get("expected_skill")
+        allowed = scn.get("allowed_skills", [expected] if expected else [])
+        # Codex reads skill files through exec/read tools, without a reliable
+        # invocation event in the supported transcript normalizer. Absence of a
+        # Claude-style Skill event therefore cannot establish a Codex miss.
+        skills_available = run_meta.get("channel_condition", "full") not in {"no-skills", "bare"}
+        measured = tr.host == "claude" and skills_available
+        if not skills_available:
+            unmeasured_reason = "skills_unavailable_in_condition"
+        elif tr.host != "claude":
+            unmeasured_reason = "host_skill_evidence_unsupported"
+        else:
+            unmeasured_reason = None
+        selected = invoked_skills(tr) if measured else None
+        details["skill_routing"] = {
+            "measured": measured,
+            "unmeasured_reason": unmeasured_reason,
+            "expected": expected,
+            "allowed": allowed,
+            "invoked": selected,
+            "missed": bool(expected and expected not in selected) if measured else None,
+            "unexpected": [skill for skill in selected if skill not in allowed] if measured else None,
+        }
+    td_calls = sum(call.is_tracedecay for call in meaningful)
+    details["tracedecay_call_count"] = td_calls
+    if "max_tracedecay_calls" in scn:
+        details["tracedecay_call_budget"] = scn["max_tracedecay_calls"]
+        details["excess_tracedecay_calls"] = max(0, td_calls - scn["max_tracedecay_calls"])
+        subs["efficiency"] *= float(td_calls <= scn["max_tracedecay_calls"])
 
     # weighted score
     total_w = sum(WEIGHTS[k] for k in subs)
@@ -710,7 +765,32 @@ def aggregate(results: list[dict]) -> dict:
                 "mean_score": round(sum(r["score"] for r in crs) / len(crs), 4) if crs else 0.0,
             }
 
+        skill_counts: dict[str, dict[str, int]] = {}
+        no_skill_cases = no_skill_overtrigger = unmeasured_skill_cases = 0
+        for result in rs:
+            routing = result["details"].get("skill_routing")
+            if routing is None:
+                continue
+            if not routing["measured"]:
+                unmeasured_skill_cases += 1
+                continue
+            expected = routing["expected"]
+            if not routing["allowed"]:
+                no_skill_cases += 1
+                no_skill_overtrigger += bool(routing["invoked"])
+            for skill in set(routing["invoked"]) | ({expected} if expected else set()):
+                counts = skill_counts.setdefault(skill, {"tp": 0, "fn": 0, "fp": 0})
+                if skill == expected:
+                    counts["tp" if skill in routing["invoked"] else "fn"] += 1
+                elif skill in routing["unexpected"]:
+                    counts["fp"] += 1
+
         agg[host] = {
+            "skill_routing": skill_counts,
+            "unmeasured_skill_cases": unmeasured_skill_cases,
+            "no_skill_cases": no_skill_cases,
+            "no_skill_overtrigger": no_skill_overtrigger,
+            "excess_tracedecay_calls": sum(r["details"].get("excess_tracedecay_calls", 0) for r in rs),
             "n": n,
             "mean_score": round(sum(r["score"] for r in rs) / n, 4) if n else 0.0,
             "first_tool_choice_rate": rate("first_tool_choice"),
@@ -738,6 +818,18 @@ def render_report(scoreboard: dict) -> str:
     lines.append(f"- git: `{meta.get('git_sha','?')}`")
     lines.append(f"- graded: {len(scoreboard['results'])} transcript(s)")
     lines.append(f"- invalid launches excluded: {len(meta.get('invalid_runs', []))}")
+    lines.append("")
+    lines.append("## Skill routing (separate from task outcomes)")
+    lines.append("")
+    lines.append("| host/model | skill | correct | missed | unexpected |")
+    lines.append("|---|---|---:|---:|---:|")
+    for host, values in scoreboard["aggregate"].items():
+        for skill, counts in values.get("skill_routing", {}).items():
+            lines.append(f"| {host} | {skill} | {counts['tp']} | {counts['fn']} | {counts['fp']} |")
+        lines.append(f"{host}: {values.get('no_skill_overtrigger', 0)} over-triggers in "
+                     f"{values.get('no_skill_cases', 0)} no-skill cases; "
+                     f"{values.get('excess_tracedecay_calls', 0)} excess TraceDecay calls; "
+                     f"{values.get('unmeasured_skill_cases', 0)} skill-routing cases unmeasured.")
     lines.append("")
     lines.append("## Per-host aggregate")
     lines.append("")
@@ -818,10 +910,13 @@ def parse_transcript_base(base: str) -> Optional[tuple[str, str, str, str]]:
     """Split a basename into (scenario_id, host, condition, model).
 
     Accepts legacy `<id>__<host>[__<condition>]` and matrix
-    `<id>__<host>__<model>[__<condition>]` shapes. Scenario ids use single
-    underscores, so `__` separators are unambiguous.
+    `<id>__<host>__<model>[__<condition>][__r<N>]` shapes. Scenario ids use
+    single underscores, so `__` separators are unambiguous; a trailing `r<N>`
+    is the repetition index and carries no identity.
     """
     parts = base.split("__")
+    if len(parts) >= 3 and re.fullmatch(r"r[1-9][0-9]*", parts[-1]):
+        parts.pop()
     if len(parts) < 2:
         return None
     condition = "full"
@@ -841,6 +936,8 @@ def load_scenarios(scenarios_dir: str) -> dict[str, dict]:
         if fn.endswith(".json"):
             with open(os.path.join(scenarios_dir, fn)) as f:
                 s = json.load(f)
+            if s["id"] in scenarios:
+                raise ValueError(f"duplicate scenario id: {s['id']!r}")
             scenarios[s["id"]] = s
     return scenarios
 
@@ -858,7 +955,7 @@ def main() -> int:
     ap.add_argument(
         "--check-hints",
         action="store_true",
-        help="Only verify HINT_SIGNATURES still match src/hooks/tool_hints.rs; "
+        help="Only verify HINT_SIGNATURES still match crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs; "
         "exit non-zero on drift. Skips (exit 0) if the source tree is absent.",
     )
     args = ap.parse_args()

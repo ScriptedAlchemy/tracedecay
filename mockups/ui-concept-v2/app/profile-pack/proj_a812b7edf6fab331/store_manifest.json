@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "project_id": "proj_a812b7edf6fab331",
+  "store_kind": "code_project",
+  "storage_mode": "profile_sharded",
+  "project_root": "/Users/zackjackson/plugins/movie-library",
+  "data_root": "/Users/zackjackson/.tracedecay/projects/proj_a812b7edf6fab331",
+  "graph_db_relpath": "tracedecay.db",
+  "sessions_db_relpath": "sessions.db",
+  "branch_meta_relpath": "branch-meta.json"
+}

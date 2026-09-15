@@ -1,0 +1,18 @@
+name: Install ast-grep
+description: Install the pinned ast-grep CLI globally and verify it runs.
+
+inputs:
+  version:
+    description: Exact @ast-grep/cli version to install.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        npm install --global "@ast-grep/cli@${VERSION}"
+        ast-grep --version
+      env:
+        VERSION: ${{ inputs.version }}

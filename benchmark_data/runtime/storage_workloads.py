@@ -20,7 +20,7 @@ DECLARED_CRATE_LANES = (
     "tracedecay-store",
     "tracedecay-query",
     "tracedecay-code-index",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay-rusqlite-runtime",
     "tracedecay",
 )
@@ -252,26 +252,26 @@ _EXACT_LANES = (
     "tracedecay-domain",
     "tracedecay-query",
     "tracedecay-code-index",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay",
 )
 _QUERY_LANES = (
     "tracedecay-query",
     "tracedecay-code-index",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay",
 )
 _STORAGE_LANES = (
     "tracedecay-store",
     "tracedecay-rusqlite-runtime",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay",
 )
 _SESSION_LANES = (
     "tracedecay-store",
     "tracedecay-rusqlite-runtime",
     "tracedecay-query",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay",
 )
 
@@ -484,7 +484,7 @@ WORKLOADS = (
         (
             "tracedecay-store",
             "tracedecay-code-index",
-            "tracedecay-application",
+            "tracedecay-contracts",
             "tracedecay",
         ),
         {"format": "json"},

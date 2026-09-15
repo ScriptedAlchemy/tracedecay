@@ -2,6 +2,28 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root"
 
-git stripspace --strip-comments < "$1" | npm run --silent lint:commit --
+msg_file="$1"
+if [[ "$msg_file" != /* ]]; then
+    msg_file="$repo_root/$msg_file"
+fi
+
+lint_root="$repo_root"
+if [[ ! -d "$repo_root/node_modules" ]]; then
+    git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+    primary_root="${git_common_dir%/}"
+    primary_root="${primary_root%/.git}"
+    if [[ -z "$primary_root" || "$primary_root" == "$git_common_dir" ]]; then
+        echo "commit-msg: unable to derive primary checkout from git-common-dir ($git_common_dir)" >&2
+        exit 1
+    fi
+    lint_root="$primary_root"
+fi
+
+if [[ ! -d "$lint_root/node_modules" || ! -e "$lint_root/node_modules/.bin/commitlint" ]]; then
+    echo "commit-msg: commitlint is unavailable at $lint_root" >&2
+    exit 1
+fi
+
+cd "$lint_root"
+git stripspace --strip-comments < "$msg_file" | npm run --silent lint:commit --

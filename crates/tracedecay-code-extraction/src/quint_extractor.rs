@@ -19,21 +19,24 @@
 /// sufficient to populate `Module` / `Function` / `Const` / `Static` /
 /// `TypeAlias` nodes and `Contains` edges from each definition to its
 /// enclosing scope.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+use crate::common::local_node_id;
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 pub struct QuintExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
+    errors: Vec<String>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
     /// Nested scopes. The first entry is the file; subsequent entries are
@@ -43,28 +46,28 @@ struct ExtractionState {
     scope_stack: Vec<(String, String, u32)>,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         let file_node_id = generate_node_id(file_path, &NodeKind::File, file_path, 0);
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
+            errors: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
             scope_stack: Vec::new(),
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_str(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
+    }
+
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        self.node_str(node)
     }
 }
 
@@ -79,11 +82,140 @@ enum PendingKind {
     TypeAlias,
 }
 
-impl QuintExtractor {
-    pub fn extract_quint(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
+#[derive(Default)]
+struct TokenWalker {
+    depth: u32,
+    pending: Option<PendingKind>,
+    pending_open: Option<(String, String)>,
+    import_collect: Option<(Vec<String>, u32)>,
+}
 
+impl TokenWalker {
+    fn visit(&mut self, state: &mut ExtractionState, child: TsNode<'_>) {
+        let kind = child.kind();
+        // The `.` operator extends an import path; everything else
+        // is a terminator handled below.
+        let extends_import =
+            matches!(kind, "identifier") || (kind == "operator" && state.node_str(child) == ".");
+        if !extends_import && let Some((parts, line)) = self.import_collect.take() {
+            QuintExtractor::commit_import(state, &parts, line);
+        }
+
+        match kind {
+            "{" => {
+                self.depth += 1;
+                if let Some((qn, id)) = self.pending_open.take() {
+                    state.scope_stack.push((qn, id, self.depth));
+                }
+            }
+            "}" => {
+                self.depth = self.depth.saturating_sub(1);
+                // Pop module frames whose opening depth is now above the live
+                // depth. Never pop the file frame.
+                while state.scope_stack.len() > 1 {
+                    let opened_at = match state.scope_stack.last() {
+                        Some((_, _, depth)) => *depth,
+                        None => 0,
+                    };
+                    if opened_at > self.depth {
+                        state.scope_stack.pop();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "keyword" => {
+                let text = state.node_str(child);
+                if text == "module" {
+                    self.pending = Some(PendingKind::Module);
+                } else if text == "import" {
+                    self.import_collect = Some((Vec::new(), child.start_position().row as u32));
+                    self.pending = None;
+                }
+            }
+            "storage_modifier" => {
+                // `pure` prefixes `def`/`val`; we just keep updating `pending`
+                // until the meaningful storage modifier arrives.
+                if let Some(kind) = quint_storage_kind(state.node_str(child)) {
+                    self.pending = Some(kind);
+                }
+            }
+            "identifier" => {
+                if let Some((parts, _)) = self.import_collect.as_mut() {
+                    parts.push(state.node_text(child).to_string());
+                } else if let Some(pending) = self.pending.take() {
+                    let name = state.node_text(child);
+                    let id = QuintExtractor::emit_node(state, child, pending, name);
+                    if matches!(pending, PendingKind::Module) {
+                        let qualified = match state.scope_stack.last() {
+                            Some((qualified_name, _, _)) => format!("{qualified_name}::{name}"),
+                            None => name.to_string(),
+                        };
+                        self.pending_open = Some((qualified, id));
+                    }
+                }
+            }
+            "operator" => {
+                // `.` inside an import path is part of the dotted module name
+                // and shouldn't reset pending.
+                if self.import_collect.is_none() {
+                    self.pending = None;
+                }
+            }
+            "line_comment" | "block_comment" | "hashbang" => {
+                // Comments don't reset `pending`: `def /* doc */ f` is still
+                // a definition of `f`.
+            }
+            _ => {
+                // Any other token (string, number, constant, storage_type,
+                // punctuation `( ) [ ] , ;`, etc.) breaks a pending pattern.
+                self.pending = None;
+            }
+        }
+    }
+
+    fn finish(&mut self, state: &mut ExtractionState) {
+        // An import at the end of the selected token stream still needs its
+        // Uses edge.
+        if let Some((parts, line)) = self.import_collect.take() {
+            QuintExtractor::commit_import(state, &parts, line);
+        }
+    }
+}
+
+impl QuintExtractor {
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = Self::initialize_state(
+            file_path,
+            source,
+            crate::common::file_end_line(source, tree),
+        );
+
+        let mut walker = TokenWalker::default();
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            walker.visit(&mut state, child);
+        });
+        walker.finish(&mut state);
+
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
+    }
+
+    fn initialize_state<'s>(
+        file_path: &str,
+        source: &'s str,
+        end_line: u32,
+    ) -> ExtractionState<'s> {
+        let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
             kind: NodeKind::File,
@@ -92,7 +224,7 @@ impl QuintExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -106,6 +238,7 @@ impl QuintExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -113,148 +246,16 @@ impl QuintExtractor {
         state
             .scope_stack
             .push((file_path.to_string(), state.file_node_id.clone(), 0));
+        state
+    }
 
-        match Self::parse(source) {
-            Ok(tree) => Self::walk_tokens(&mut state, tree.root_node()),
-            Err(_msg) => {
-                // Parse failed; skip extraction rather than emitting bogus structure.
-            }
-        }
-
+    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {
             nodes: state.nodes,
             edges: state.edges,
             unresolved_refs: Vec::new(),
-            errors: Vec::new(),
+            errors: state.errors,
             duration_ms: start.elapsed().as_millis() as u64,
-        }
-    }
-
-    fn parse(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("quint")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Quint grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
-    }
-
-    fn walk_tokens(state: &mut ExtractionState, root: TsNode<'_>) {
-        let mut depth: u32 = 0;
-        let mut pending: Option<PendingKind> = None;
-        // When we just emitted a Module node, hold its info here. We push
-        // it onto the scope stack on the next `{` so we know the depth at
-        // which the matching `}` should pop it.
-        let mut pending_open: Option<(String, String)> = None; // (qualified_name, id)
-        // Active import collection: dotted parts seen since the `import`
-        // keyword, plus the line of that keyword. Committed (i.e. emits a
-        // Uses edge) when we hit any token that doesn't extend the path
-        // (`from`, `as`, end of stream, another keyword, a storage_modifier,
-        // etc.). The shallow grammar gives us identifiers and `.` operators
-        // — that's enough to reconstruct the dotted import path.
-        let mut import_collect: Option<(Vec<String>, u32)> = None;
-
-        let mut cursor = root.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                let kind = child.kind();
-                // The `.` operator extends an import path; everything else
-                // is a terminator handled below.
-                let extends_import = matches!(kind, "identifier")
-                    || (kind == "operator" && state.node_text(child) == ".");
-                if !extends_import {
-                    if let Some((parts, line)) = import_collect.take() {
-                        Self::commit_import(state, &parts, line);
-                    }
-                }
-
-                match kind {
-                    "{" => {
-                        depth += 1;
-                        if let Some((qn, id)) = pending_open.take() {
-                            state.scope_stack.push((qn, id, depth));
-                        }
-                    }
-                    "}" => {
-                        depth = depth.saturating_sub(1);
-                        // Pop module frames whose opening depth is now
-                        // above the live depth. Never pop the file frame.
-                        while state.scope_stack.len() > 1 {
-                            let opened_at = match state.scope_stack.last() {
-                                Some((_, _, d)) => *d,
-                                None => 0,
-                            };
-                            if opened_at > depth {
-                                state.scope_stack.pop();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    "keyword" => {
-                        let txt = state.node_text(child);
-                        if txt == "module" {
-                            pending = Some(PendingKind::Module);
-                        } else if txt == "import" {
-                            import_collect = Some((Vec::new(), child.start_position().row as u32));
-                            pending = None;
-                        }
-                    }
-                    "storage_modifier" => {
-                        // `pure` prefixes `def`/`val`; we just keep
-                        // updating `pending` until the meaningful
-                        // storage_modifier arrives.
-                        if let Some(p) = quint_storage_kind(&state.node_text(child)) {
-                            pending = Some(p);
-                        }
-                    }
-                    "identifier" => {
-                        if let Some((parts, _)) = import_collect.as_mut() {
-                            parts.push(state.node_text(child));
-                        } else if let Some(p) = pending.take() {
-                            let name = state.node_text(child);
-                            let id = Self::emit_node(state, child, p, &name);
-                            if matches!(p, PendingKind::Module) {
-                                let qualified = match state.scope_stack.last() {
-                                    Some((qn, _, _)) => format!("{qn}::{name}"),
-                                    None => name.clone(),
-                                };
-                                pending_open = Some((qualified, id));
-                            }
-                        }
-                    }
-                    "operator" => {
-                        // `.` inside an import path is part of the dotted
-                        // module name and shouldn't reset pending.
-                        if import_collect.is_none() {
-                            pending = None;
-                        }
-                    }
-                    "line_comment" | "block_comment" | "hashbang" => {
-                        // Comments don't reset `pending`: `def /* doc */ f`
-                        // is still a definition of `f`.
-                    }
-                    _ => {
-                        // Any other token (string, number, constant,
-                        // storage_type, punctuation `( ) [ ] , ;`, etc.)
-                        // breaks a pending pattern.
-                        pending = None;
-                    }
-                }
-
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-
-        // End-of-file flush: an import at the very end of the file with
-        // no following terminator still needs its Uses edge.
-        if let Some((parts, line)) = import_collect.take() {
-            Self::commit_import(state, &parts, line);
         }
     }
 
@@ -305,7 +306,7 @@ impl QuintExtractor {
             None => state.file_path.clone(),
         };
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &kind, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, name, ident_node);
 
         let node_obj = Node {
             id: id.clone(),
@@ -329,6 +330,7 @@ impl QuintExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -370,7 +372,16 @@ impl crate::LanguageExtractor for QuintExtractor {
         "Quint"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_quint(file_path, source)
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

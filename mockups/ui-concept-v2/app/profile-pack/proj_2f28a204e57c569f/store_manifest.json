@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "project_id": "proj_2f28a204e57c569f",
+  "store_kind": "code_project",
+  "storage_mode": "profile_sharded",
+  "project_root": "/Volumes/bigssd/projects/mqvpn",
+  "data_root": "/Users/zackjackson/.tracedecay/projects/proj_2f28a204e57c569f",
+  "graph_db_relpath": "tracedecay.db",
+  "sessions_db_relpath": "sessions.db",
+  "branch_meta_relpath": "branch-meta.json"
+}

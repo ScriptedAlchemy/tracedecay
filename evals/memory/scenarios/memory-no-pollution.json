@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "id": "memory-no-pollution",
+  "title": "Transient run noise must not become facts",
+  "description": "A prompt containing a single-turn throwaway token must not produce a memory fact, while genuinely durable decisions still can. Guards against agents (or future auto-extraction machinery) hoovering run noise into the fact store.",
+  "adapted_from": "mnemon `memory-no-pollution` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
+  "contract": "stable",
+  "setup": {
+    "facts": [],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "tool",
+        "tool": "tracedecay_fact_store_add",
+        "args": {
+          "content": "Durable decision: memory eval scenarios gate hygiene regressions before broader host expansion.",
+          "category": "decision",
+          "source_label": "eval-agent"
+        }
+      }
+    ],
+    "violation": {
+      "expectation": "detect",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "tracedecay_fact_store_add",
+          "args": {
+            "content": "Temporary task token 742913 is active for this run.",
+            "category": "general",
+            "source_label": "eval-agent"
+          }
+        }
+      ]
+    }
+  },
+  "real_model": {
+    "prompts": [
+      "Temporary task token 742913 is for this turn only and has no future value. Do not save it to memory. Reply with a short acknowledgement."
+    ],
+    "max_turns": 6
+  },
+  "assertions": [
+    {
+      "kind": "content-count",
+      "name": "no_transient_token_fact",
+      "contains": "742913",
+      "op": "eq",
+      "value": 0,
+      "phase": "both"
+    },
+    {
+      "kind": "content-count",
+      "name": "durable_decision_stored",
+      "contains": "memory eval scenarios",
+      "op": "eq",
+      "value": 1,
+      "phase": "well-behaved-only"
+    }
+  ]
+}

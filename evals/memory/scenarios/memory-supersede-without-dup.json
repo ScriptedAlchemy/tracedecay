@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "memory-supersede-without-dup",
+  "title": "Preference pivots update the existing fact instead of duplicating it",
+  "description": "When a stored preference is superseded (npm -> pnpm), the canonical update operation changes the existing fact instead of creating a duplicate.",
+  "adapted_from": "mnemon `memory-merge-supersede` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
+  "contract": "stable",
+  "contract_notes": "The deterministic journey captures the seeded canonical FactId and updates that exact fact through the retained surface.",
+  "setup": {
+    "facts": [
+      {
+        "content": "User prefers npm as the package manager for this project.",
+        "category": "user_pref",
+        "source_label": "eval-seed",
+        "trust": 0.7
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "tool",
+        "tool": "tracedecay_fact_store_update",
+        "args": {
+          "fact_id": "$fact:eval-seed",
+          "content": "User prefers pnpm as the package manager for this project (supersedes earlier npm preference)."
+        }
+      }
+    ],
+    "violation": null
+  },
+  "real_model": {
+    "prompts": [
+      "Use your memory tools to update existing project memory. The durable preference is now pnpm, superseding the earlier npm preference. Update or replace the existing entry instead of adding a duplicate. Reply done."
+    ],
+    "max_turns": 8
+  },
+  "assertions": [
+    {
+      "kind": "content-count",
+      "name": "single_package_manager_fact",
+      "contains": "package manager",
+      "op": "eq",
+      "value": 1,
+      "phase": "well-behaved-only"
+    },
+    {
+      "kind": "content-count",
+      "name": "pivot_to_pnpm_present",
+      "contains": "pnpm",
+      "op": "eq",
+      "value": 1,
+      "phase": "well-behaved-only"
+    },
+    {
+      "kind": "content-count",
+      "name": "stale_npm_preference_gone",
+      "contains": "prefers npm",
+      "op": "eq",
+      "value": 0,
+      "phase": "well-behaved-only"
+    }
+  ]
+}

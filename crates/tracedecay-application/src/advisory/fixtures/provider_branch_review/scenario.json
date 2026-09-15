@@ -1,0 +1,42 @@
+{
+  "schema": "tracedecay.advisory.source-backed-composite.v1",
+  "sources": {
+    "pull_request": "pull_request.json",
+    "review": "review.json",
+    "review_comment": "review_comment.json",
+    "review_thread": "review_thread.graphql.json",
+    "workflow_run": "workflow_run.json",
+    "workflow_job": "workflow_job.json",
+    "check_run": "check_run.json",
+    "check_annotations": "check_annotations.json",
+    "proximity_sessions": "proximity_sessions.json"
+  },
+  "identity": {
+    "repository_id": 1261602522,
+    "pull_request_id": 4026204542,
+    "pull_request_number": 421,
+    "base_sha": "8339371d01311289e2b7cd7b0669ea3549308b8c",
+    "head_sha": "e29900448db98ae58e90d08770a3bb8bfa710846",
+    "merge_base_sha": "8339371d01311289e2b7cd7b0669ea3549308b8c",
+    "branch": "codex/tracedecay-total-redesign-plan"
+  },
+  "expected_derivations": {
+    "github_review_lifecycle": "outdated",
+    "github_ingress_outcome": "complete",
+    "github_author_class": "bot",
+    "github_review_state": "commented",
+    "ci_localization_state": "partial",
+    "ci_coverage": "partial",
+    "ci_failure_kind": "lint_failure",
+    "proximity_scope": "same_branch_worktree",
+    "proximity_threshold": "required_from_plan20_effective_snapshot",
+    "advisory_only": true
+  },
+  "composition": {
+    "diagnostics_and_impact": "acceptance_supplies_existing_feedback_result_for_identity",
+    "github_review": "fixture_loader",
+    "ci_localization": "fixture_loader",
+    "proximity": "fixture_sessions_plus_acceptance_graph_address",
+    "plan09_findings": "AdvisoryFindingContributorV1"
+  }
+}
