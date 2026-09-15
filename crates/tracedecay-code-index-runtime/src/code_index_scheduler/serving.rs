@@ -541,17 +541,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         };
         let mut exact_groups = Vec::new();
         for key in source.payload.exact_keys(source.occurrence.eligibility) {
-            let page = self
-                .hydration
-                .clone_exact_page(&source.occurrence, &key, None, limit, control)
-                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
-            let members = page
-                .members
-                .into_iter()
-                .filter(|member| {
-                    member.occurrence.symbol_occurrence_id != source.occurrence.symbol_occurrence_id
-                })
-                .collect::<Vec<_>>();
+            let members = self.verified_exact_clone_members(&source, &key, limit, control)?;
             if !members.is_empty() {
                 exact_groups.push(
                     tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 { key, members },
@@ -569,6 +559,49 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 near,
             },
         ))
+    }
+
+    /// Continue paging past filter rejects until `limit` verified members exist.
+    fn verified_exact_clone_members(
+        &self,
+        source: &tracedecay_code_index::clones::CodeIndexCloneBodyV1,
+        key: &tracedecay_code_index::clones::CloneExactKeyV1,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<
+        Vec<tracedecay_query::retrieval::lexical::CloneExactArtifactMemberV1>,
+        RetrievalPortError,
+    > {
+        let mut members = Vec::new();
+        let mut cursor = None;
+        while members.len() < limit {
+            let page = self
+                .hydration
+                .clone_exact_page(&source.occurrence, key, cursor.as_ref(), limit, control)
+                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+            for member in page.members {
+                if member.occurrence.symbol_occurrence_id == source.occurrence.symbol_occurrence_id
+                {
+                    continue;
+                }
+                if !tracedecay_code_index::clones::verify_exact_clone_payload(
+                    &source.payload,
+                    &member.payload,
+                    key,
+                ) {
+                    continue;
+                }
+                members.push(member);
+                if members.len() >= limit {
+                    break;
+                }
+            }
+            match page.next_cursor {
+                Some(next) if members.len() < limit => cursor = Some(next),
+                _ => break,
+            }
+        }
+        Ok(members)
     }
 
     #[cfg(test)]

@@ -651,6 +651,42 @@ fn select_rightmost_minima(hashes: &[u64]) -> Vec<usize> {
     selected
 }
 
+pub fn verify_exact_clone_payload(
+    source: &CloneBodyPayloadV1,
+    candidate: &CloneBodyPayloadV1,
+    key: &CloneExactKeyV1,
+) -> bool {
+    fn tokens_for_key<'a>(
+        payload: &'a CloneBodyPayloadV1,
+        key: &CloneExactKeyV1,
+    ) -> Option<&'a [ConservativeCloneTokenV1]> {
+        match key.class {
+            CloneNormalizationClassV1::Conservative
+                if payload.conservative_normalization_revision == key.normalization_revision
+                    && payload.conservative_digest == key.digest =>
+            {
+                Some(&payload.conservative_tokens)
+            }
+            CloneNormalizationClassV1::Rename
+                if payload.rename_normalization_revision == Some(key.normalization_revision)
+                    && payload.rename_digest.as_ref() == Some(&key.digest) =>
+            {
+                payload.rename_tokens.as_deref()
+            }
+            CloneNormalizationClassV1::Conservative | CloneNormalizationClassV1::Rename => None,
+        }
+    }
+
+    source.validate().is_ok()
+        && candidate.validate().is_ok()
+        && source.language == candidate.language
+        && source.symbol_kind == candidate.symbol_kind
+        && matches!(
+            (tokens_for_key(source, key), tokens_for_key(candidate, key)),
+            (Some(source), Some(candidate)) if source == candidate
+        )
+}
+
 pub fn verify_clone_token_anchor(
     left: &[ConservativeCloneTokenV1],
     left_position: u32,
@@ -1128,13 +1164,15 @@ fn directional_coverage(shared: u32, total: usize) -> Option<u32> {
 #[cfg(test)]
 mod fingerprint_tests {
     use tracedecay_code_extraction::{
-        CloneBodyRenameStatusV1, ConservativeCloneTokenV1, LanguageExtractor, TypeScriptExtractor,
+        CloneBodyEligibilityV1, CloneBodyRenameStatusV1, ConservativeCloneTokenV1,
+        LanguageExtractor, TypeScriptExtractor,
     };
 
     use super::{
         CLONE_FINGERPRINT_K_V1, CLONE_FINGERPRINT_WINDOW_V1, CloneAlignmentStopReasonV1,
         CloneBodyPayloadV1, CloneNormalizationClassV1, CloneTokenAnchorV1, align_clone_tokens,
-        select_rightmost_minima, verify_clone_token_anchor, winnow_clone_tokens,
+        select_rightmost_minima, verify_clone_token_anchor, verify_exact_clone_payload,
+        winnow_clone_tokens,
     };
 
     fn tokens(prefix: &str, count: usize) -> Vec<ConservativeCloneTokenV1> {
@@ -1365,5 +1403,48 @@ mod fingerprint_tests {
             CloneAlignmentStopReasonV1::WorkBudgetExhausted
         );
         assert_eq!(stopped.work, (CLONE_FINGERPRINT_K_V1 - 1) as u64);
+    }
+
+    #[test]
+    fn exact_clone_verification_compares_canonical_token_bytes_after_digest_lookup() {
+        let source = TypeScriptExtractor.extract_artifact(
+            "src/source.ts",
+            "function source(input) { const one = parse(input); const two = use(one); const three = use(two); return finish(three, input, one, two); }",
+        );
+        let renamed = TypeScriptExtractor.extract_artifact(
+            "src/renamed.ts",
+            "function renamed(value) { const first = parse(value); const second = use(first); const third = use(second); return finish(third, value, first, second); }",
+        );
+        let different = TypeScriptExtractor.extract_artifact(
+            "src/different.ts",
+            "function different(value) { const first = open(value); const second = store(first); const third = store(second); return close(third, value, first, second); }",
+        );
+        let source = CloneBodyPayloadV1::from_extracted(
+            source.clone_bodies.first().expect("source clone body"),
+        )
+        .expect("source payload");
+        let renamed = CloneBodyPayloadV1::from_extracted(
+            renamed.clone_bodies.first().expect("renamed clone body"),
+        )
+        .expect("renamed payload");
+        let different = CloneBodyPayloadV1::from_extracted(
+            different
+                .clone_bodies
+                .first()
+                .expect("different clone body"),
+        )
+        .expect("different payload");
+        let rename_key = source
+            .exact_keys(CloneBodyEligibilityV1::Eligible)
+            .into_iter()
+            .find(|key| key.class == CloneNormalizationClassV1::Rename)
+            .expect("rename key");
+
+        assert!(verify_exact_clone_payload(&source, &renamed, &rename_key));
+        assert!(!verify_exact_clone_payload(
+            &source,
+            &different,
+            &rename_key
+        ));
     }
 }
