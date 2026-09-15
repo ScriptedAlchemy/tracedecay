@@ -26,7 +26,9 @@ use super::publication_support::{
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::generation::{metadata_manifest_from_source, validate_supplied_manifest_binding};
-use crate::generation_runtime::{GenerationContentsDeletion, GenerationStageOutcome};
+use crate::generation_runtime::{
+    GenerationContentsDeletion, GenerationStageOutcome, SealedReleaseReceiptAuthority,
+};
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
@@ -340,38 +342,22 @@ impl GraphDbRegistry {
         // artifact may stand in for the staging rows: normally the verified
         // head, or the unique cleanup tombstone for a shipped legacy
         // per-generation projection after its head and replay were retired.
-        // The runtime verifies the sealed store's recovered digest against
-        // that evidence, opens the staging engine if it is hibernated,
-        // releases, and re-hibernates. The staging commit is enough to adopt
-        // an existing sealed artifact without replaying the canonical source:
-        // cleanup must stay bounded and leave artifact repair to activation.
-        if database.installed_verified_generation(&locator)?.is_none() {
-            if let Some(commit) = database.staging_generation_commit(&locator)? {
-                let identity = GraphGenerationManifestIdentity::new(
-                    locator.projection.clone(),
-                    locator.generation.clone(),
-                    commit.source_generation,
-                    commit.watermark,
-                    Vec::new(),
-                );
-                database.open_sealed_generation_store_if_present(
-                    &identity,
-                    &relational_recovered_digest,
-                    &|| check_all(&registration, context, "generation.release_sealed_staging"),
-                )?;
-            } else if database.sealed_generation_reader(&locator).is_none() {
-                // No staging commit means there are no rows for this sweep:
-                // the generation was sealed straight from its manifest, or a
-                // prior release already removed them.
-                return Ok(SealedStagingRelease::AlreadyReleased);
-            }
-        }
-        if let Some(installed) = database.installed_verified_generation(&locator)? {
-            database.open_installed_sealed_generation_store_if_present(&installed)?;
+        // Release authorizes from that evidence plus the on-disk receipt or a
+        // seated reader already in this process. It does not recover or prove
+        // the sealed generation; that work belongs to activation.
+        if database.installed_verified_generation(&locator)?.is_none()
+            && database.staging_generation_commit(&locator)?.is_none()
+            && database.sealed_generation_reader(&locator).is_none()
+        {
+            // No staging commit means there are no rows for this sweep:
+            // the generation was sealed straight from its manifest, or a
+            // prior release already removed them.
+            return Ok(SealedStagingRelease::AlreadyReleased);
         }
         database.release_sealed_generation_staging_rows_with(
             &locator,
             Some(relational_recovered_digest.as_str()),
+            SealedReleaseReceiptAuthority::Permitted,
             &|| check_all(&registration, context, "generation.release_sealed_staging"),
         )
     }

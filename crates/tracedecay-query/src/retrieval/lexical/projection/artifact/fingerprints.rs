@@ -5,7 +5,8 @@ use rusqlite::{Connection, OptionalExtension};
 use tracedecay_code_index::clones::{
     CLONE_FINGERPRINT_K_V1, CloneAlignedDifferenceV1, CloneAlignmentStopReasonV1,
     CloneBodyEligibilityV1, CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneBodyRenameStatusV1,
-    CloneNormalizationClassV1, CloneTokenAnchorV1, align_clone_tokens, verify_clone_token_anchor,
+    CloneNormalizationClassV1, CloneSelectedBlockV1, CloneTokenAnchorV1, ConservativeCloneTokenV1,
+    align_clone_tokens, verify_clone_token_anchor,
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ManifestDigest, RetrieverCoverage, SymbolOccurrenceId, canonical_sha256};
@@ -49,6 +50,7 @@ pub struct CloneNearMatchArtifactV1 {
     pub source_coverage_millionths: u32,
     pub candidate_coverage_millionths: u32,
     pub differences: Vec<CloneAlignedDifferenceV1>,
+    pub(super) selected_block_containment: Option<CloneSelectedBlockContainmentClassV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,6 +96,30 @@ pub struct CloneFingerprintArtifactReadV1 {
     pub accounting: CloneFingerprintReadAccountingV1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CloneSelectedBlockContainmentClassV1 {
+    Equal,
+    CandidateContainsSelectedBlock,
+    SelectedBlockContainsCandidate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneSelectedBlockArtifactCandidateV1 {
+    pub payload: CloneBodyPayloadV1,
+    pub occurrences: Vec<CloneBodyOccurrenceV1>,
+    pub anchors: Vec<CloneTokenAnchorV1>,
+    pub containment: CloneSelectedBlockContainmentClassV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneSelectedBlockArtifactReadV1 {
+    pub page: CloneArtifactPageV1<CloneSelectedBlockArtifactCandidateV1>,
+    pub stream: CloneFingerprintStreamDescriptorV1,
+    pub coverage: RetrieverCoverage,
+    pub partial_reasons: Vec<CloneFingerprintPartialReasonV1>,
+    pub accounting: CloneFingerprintReadAccountingV1,
+}
+
 struct CandidateAccumulatorV1 {
     payload: CloneBodyPayloadV1,
     occurrences: BTreeMap<SymbolOccurrenceId, CloneBodyOccurrenceV1>,
@@ -107,6 +133,7 @@ pub(super) struct CloneFingerprintReadRequestV1<'a> {
     pub(super) authority_digest: &'a ManifestDigest,
     pub(super) authority: &'a CloneBodyOccurrenceV1,
     pub(super) source: &'a CloneBodyPayloadV1,
+    pub(super) selected_block: Option<&'a CloneSelectedBlockV1>,
     pub(super) cursor: Option<&'a CloneArtifactCursorV1>,
     pub(super) limit: usize,
     pub(super) control: &'a dyn CodeIndexExecutionControlV1,
@@ -123,6 +150,7 @@ pub(super) fn read_clone_fingerprint_page(
         authority_digest,
         authority,
         source,
+        selected_block,
         cursor,
         limit,
         control,
@@ -137,39 +165,67 @@ pub(super) fn read_clone_fingerprint_page(
             "clone fingerprint page limit must be within 1..={MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1}"
         )));
     }
-    if authority.payload_digest != source.payload_digest || source.validate().is_err() {
+    if authority.payload_digest != source.payload_digest
+        || source.validate().is_err()
+        || selected_block.is_some_and(|block| {
+            block.source_payload_digest() != &source.payload_digest
+                || block.source_body_digest() != &source.body_digest
+        })
+    {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "clone fingerprint source payload does not match its occurrence".to_owned(),
         ));
     }
-    let Some(stream) = source.fingerprint_stream(authority.eligibility) else {
-        let accounting = CloneFingerprintReadAccountingV1 {
-            elapsed_micros: started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
-            ..CloneFingerprintReadAccountingV1::default()
-        };
-        return Ok(CloneFingerprintArtifactReadV1 {
-            page: CloneArtifactPageV1 {
-                members: Vec::new(),
-                next_cursor: None,
+    let (descriptor, source_tokens, source_positions) = match selected_block {
+        Some(block) => (
+            CloneFingerprintStreamDescriptorV1 {
+                language: block.language().to_owned(),
+                class: block.class(),
+                normalization_revision: block.normalization_revision(),
+                rename_tier_unavailable: block.rename_tier_unavailable(),
             },
-            stream: None,
-            source_eligibility: authority.eligibility,
-            minimum_directional_coverage_millionths:
-                CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1,
-            coverage: RetrieverCoverage {
-                examined: 1,
-                excluded: 1,
-                ..RetrieverCoverage::default()
-            },
-            partial_reasons: Vec::new(),
-            accounting,
-        });
-    };
-    let descriptor = CloneFingerprintStreamDescriptorV1 {
-        language: source.language.clone(),
-        class: stream.class,
-        normalization_revision: stream.normalization_revision,
-        rename_tier_unavailable: stream.rename_tier_unavailable,
+            block.tokens(),
+            block
+                .fingerprint_positions()
+                .map_err(CodeLexicalArtifactErrorV1::Contract)?,
+        ),
+        None => {
+            let Some(stream) = source.fingerprint_stream(authority.eligibility) else {
+                let accounting = CloneFingerprintReadAccountingV1 {
+                    elapsed_micros: started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+                    ..CloneFingerprintReadAccountingV1::default()
+                };
+                return Ok(CloneFingerprintArtifactReadV1 {
+                    page: CloneArtifactPageV1 {
+                        members: Vec::new(),
+                        next_cursor: None,
+                    },
+                    stream: None,
+                    source_eligibility: authority.eligibility,
+                    minimum_directional_coverage_millionths:
+                        CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1,
+                    coverage: RetrieverCoverage {
+                        examined: 1,
+                        excluded: 1,
+                        ..RetrieverCoverage::default()
+                    },
+                    partial_reasons: Vec::new(),
+                    accounting,
+                });
+            };
+            (
+                CloneFingerprintStreamDescriptorV1 {
+                    language: source.language.clone(),
+                    class: stream.class,
+                    normalization_revision: stream.normalization_revision,
+                    rename_tier_unavailable: stream.rename_tier_unavailable,
+                },
+                stream.tokens,
+                source
+                    .fingerprint_positions(authority.eligibility)
+                    .map_err(CodeLexicalArtifactErrorV1::Contract)?,
+            )
+        }
     };
     let request_digest = canonical_sha256(&(
         "tracedecay.clone-fingerprint-request.v1",
@@ -180,6 +236,7 @@ pub(super) fn read_clone_fingerprint_page(
         &descriptor.language,
         descriptor.class,
         descriptor.normalization_revision,
+        selected_block.map(CloneSelectedBlockV1::tokens),
     ))
     .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
     let after = match cursor {
@@ -209,12 +266,9 @@ pub(super) fn read_clone_fingerprint_page(
         None => None,
     };
 
-    let source_positions = source
-        .fingerprint_positions(authority.eligibility)
-        .map_err(CodeLexicalArtifactErrorV1::Contract)?;
     if source_positions.is_empty() {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "eligible clone body has no winnowed fingerprints".to_owned(),
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "clone fingerprint source has no winnowed fingerprints".to_owned(),
         ));
     }
     let mut positions_by_fingerprint = BTreeMap::<u64, Vec<u32>>::new();
@@ -224,7 +278,10 @@ pub(super) fn read_clone_fingerprint_page(
             .or_default()
             .push(position.token_position);
     }
-    let mut accounting = CloneFingerprintReadAccountingV1::default();
+    let mut accounting = CloneFingerprintReadAccountingV1 {
+        token_work: u64::try_from(source_tokens.len()).map_err(contract_number)?,
+        ..CloneFingerprintReadAccountingV1::default()
+    };
     let mut partial_reasons = BTreeSet::new();
     let mut ordered_lists = Vec::with_capacity(positions_by_fingerprint.len());
     let mut count_statement = connection
@@ -360,8 +417,9 @@ pub(super) fn read_clone_fingerprint_page(
             }
             if occurrence.symbol_occurrence_id == authority.symbol_occurrence_id
                 || payload.language != source.language
-                || payload.symbol_kind != source.symbol_kind
-                || !candidate_size_ratio_admitted(source.token_count, payload.token_count)
+                || (selected_block.is_none()
+                    && (payload.symbol_kind != source.symbol_kind
+                        || !candidate_size_ratio_admitted(source.token_count, payload.token_count)))
             {
                 continue;
             }
@@ -450,7 +508,7 @@ pub(super) fn read_clone_fingerprint_page(
                     u64::try_from(CLONE_FINGERPRINT_K_V1).map_err(contract_number)?,
                 );
                 if verify_clone_token_anchor(
-                    stream.tokens,
+                    source_tokens,
                     *source_position,
                     candidate_tokens,
                     candidate_position,
@@ -519,10 +577,15 @@ pub(super) fn read_clone_fingerprint_page(
                 )
             })?
             .tokens;
+        let selected_block_containment =
+            selected_block.and_then(|block| containment_class(block.tokens(), candidate_tokens));
+        if selected_block.is_some() && selected_block_containment.is_none() {
+            continue;
+        }
         let remaining_work =
             CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1.saturating_sub(accounting.token_work);
         let alignment = align_clone_tokens(
-            stream.tokens,
+            source_tokens,
             candidate_tokens,
             &candidate.anchors.iter().copied().collect::<Vec<_>>(),
             remaining_work,
@@ -553,9 +616,11 @@ pub(super) fn read_clone_fingerprint_page(
                 break;
             }
         };
-        if alignment.left_coverage_millionths >= CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1
-            && alignment.right_coverage_millionths
+        if selected_block_containment.is_some()
+            || (alignment.left_coverage_millionths
                 >= CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1
+                && alignment.right_coverage_millionths
+                    >= CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1)
         {
             accounting.pairs_verified = accounting.pairs_verified.saturating_add(1);
             let shared_fingerprints = alignment
@@ -577,6 +642,7 @@ pub(super) fn read_clone_fingerprint_page(
                 source_coverage_millionths: alignment.left_coverage_millionths,
                 candidate_coverage_millionths: alignment.right_coverage_millionths,
                 differences: alignment.differences,
+                selected_block_containment,
             });
         }
         if members.len() == limit {
@@ -624,6 +690,27 @@ fn candidate_size_ratio_admitted(left: u32, right: u32) -> bool {
     let minimum = u64::from(left.min(right));
     let maximum = u64::from(left.max(right));
     minimum.saturating_mul(100) >= maximum.saturating_mul(70)
+}
+
+fn containment_class(
+    selected: &[ConservativeCloneTokenV1],
+    candidate: &[ConservativeCloneTokenV1],
+) -> Option<CloneSelectedBlockContainmentClassV1> {
+    if selected == candidate {
+        Some(CloneSelectedBlockContainmentClassV1::Equal)
+    } else if candidate
+        .windows(selected.len())
+        .any(|window| window == selected)
+    {
+        Some(CloneSelectedBlockContainmentClassV1::CandidateContainsSelectedBlock)
+    } else if selected
+        .windows(candidate.len())
+        .any(|window| window == candidate)
+    {
+        Some(CloneSelectedBlockContainmentClassV1::SelectedBlockContainsCandidate)
+    } else {
+        None
+    }
 }
 
 fn interrupt(

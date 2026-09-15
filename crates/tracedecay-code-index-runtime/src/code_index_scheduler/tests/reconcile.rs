@@ -751,7 +751,10 @@ fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v5() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
     assert!(
-        restarted.servable_retained_text_generation().is_none(),
+        restarted
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .is_none(),
         "a retained v3 Rust extraction must not enter a v5 serving slot"
     );
 
@@ -7876,6 +7879,7 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     );
     let metadata = reopened
         .servable_retained_text_generation()
+        .expect("publication store")
         .expect("authenticated retained text generation")
         .metadata()
         .clone();
@@ -7927,6 +7931,7 @@ fn unverified_restart_probe_requests_a_pass_without_fabricating_an_observed_chan
     let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
     let metadata = reopened
         .servable_retained_text_generation()
+        .expect("publication store")
         .expect("authenticated retained text generation")
         .metadata()
         .clone();
@@ -8011,6 +8016,7 @@ fn graph_off_change_after_capture_refuses_stale_publication() {
         .expect("generation A pointer");
     let metadata_a = scheduler
         .servable_retained_text_generation()
+        .expect("publication store")
         .expect("verified generation A text handle")
         .metadata()
         .clone();
@@ -8090,6 +8096,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
         .expect("generation A pointer");
     let metadata_a = scheduler
         .servable_retained_text_generation()
+        .expect("publication store")
         .expect("verified generation A text handle")
         .metadata()
         .clone();
