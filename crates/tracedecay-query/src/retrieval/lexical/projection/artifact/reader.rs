@@ -99,6 +99,20 @@ pub struct CloneArtifactCursorV1 {
     pub(super) after: CloneArtifactCursorPositionV1,
 }
 
+impl CloneArtifactCursorV1 {
+    /// Digests identifying the last completed fingerprint candidate when this
+    /// cursor continues a near-clone page; `None` for exact-posting cursors.
+    pub fn fingerprint_continuation_digests(&self) -> Option<(&ManifestDigest, &ManifestDigest)> {
+        match &self.after {
+            CloneArtifactCursorPositionV1::Fingerprint {
+                body_digest,
+                payload_digest,
+            } => Some((body_digest, payload_digest)),
+            CloneArtifactCursorPositionV1::Exact(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum CloneArtifactCursorPositionV1 {
     Exact(SymbolOccurrenceId),

@@ -52,12 +52,11 @@ use tracedecay_query::retrieval::exact::{
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneArtifactCursorPositionV1,
-    CloneFingerprintCancellationPointV1, CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1,
-    CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1,
-    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
-    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneFingerprintCancellationPointV1,
+    CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
+    CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
@@ -2271,15 +2270,11 @@ fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
         .last()
         .expect("at least one completed candidate");
     let cursor = read.page.next_cursor.expect("partial read cursor");
-    let CloneArtifactCursorPositionV1::Fingerprint {
-        body_digest,
-        payload_digest,
-    } = cursor.after
-    else {
-        panic!("fingerprint read emitted an exact cursor");
-    };
+    let (body_digest, payload_digest) = cursor
+        .fingerprint_continuation_digests()
+        .expect("fingerprint read emitted an exact cursor");
     assert_eq!(
-        (&body_digest, &payload_digest),
+        (body_digest, payload_digest),
         (
             &last_completed.payload.body_digest,
             &last_completed.payload.payload_digest,
