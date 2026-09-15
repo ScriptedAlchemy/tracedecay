@@ -1137,7 +1137,7 @@ fn retained_lexical_projection_preserves_progress_across_bounded_windows() {
                 &generation,
                 ordinal,
                 &format!("pub fn {symbol}() -> usize {{ {ordinal} }}\n"),
-                CodeSearchChunkGrainV1::SymbolSignature,
+                CodeSearchChunkGrainV1::SymbolBody,
                 &symbol,
             )
         })
@@ -5073,7 +5073,7 @@ fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
             &generation,
             1,
             "pub fn reserve_stock() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
+            CodeSearchChunkGrainV1::SymbolBody,
             "reserve_stock",
         ),
         admitted_rust_chunk(
@@ -5153,7 +5153,7 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
             &generation,
             2,
             "pub fn reserve_stock() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
+            CodeSearchChunkGrainV1::SymbolBody,
             "reserve_stock",
         ),
     ];
@@ -5290,21 +5290,21 @@ fn duplicate_whole_terms_do_not_consume_the_global_fuzzy_budget() {
             &generation,
             1,
             "pub fn reserve() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
+            CodeSearchChunkGrainV1::SymbolBody,
             "reserve",
         ),
         admitted_rust_chunk(
             &generation,
             2,
             "pub fn reserved() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
+            CodeSearchChunkGrainV1::SymbolBody,
             "reserved",
         ),
         admitted_rust_chunk(
             &generation,
             3,
             "pub fn other() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
+            CodeSearchChunkGrainV1::SymbolBody,
             "other",
         ),
     ];
@@ -5347,7 +5347,7 @@ fn lexical_projection_reports_freshness_coverage_and_page_cutoff() {
                 &generation,
                 ordinal,
                 "pub fn target() {}\n",
-                CodeSearchChunkGrainV1::SymbolSignature,
+                CodeSearchChunkGrainV1::SymbolBody,
                 "target",
             )
         })
@@ -5394,7 +5394,7 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
             &first_generation,
             1,
             "pub fn target() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
+            CodeSearchChunkGrainV1::SymbolBody,
             "target",
         )],
         BTreeMap::new(),
@@ -5406,7 +5406,7 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
             &second_generation,
             1,
             "pub fn target() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
+            CodeSearchChunkGrainV1::SymbolBody,
             "target",
         )],
         BTreeMap::new(),
