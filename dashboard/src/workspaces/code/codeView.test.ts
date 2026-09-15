@@ -59,15 +59,11 @@ describe('Code view availability', () => {
     });
   });
 
-  it('states the unmounted projection each pending view needs', () => {
+  it('blocks only views whose required selection or projection is unavailable', () => {
     expect(codeViewBlocker('atlas', 'absent')?.detail).toMatch(
       /structural treemap/i,
     );
-    expect(codeViewBlocker('shared-code', 'absent')?.detail).toMatch(
-      /clone family/i,
-    );
-    expect(codeViewBlocker('compare', 'absent')?.detail).toMatch(
-      /revision-pair/i,
-    );
+    expect(codeViewBlocker('shared-code', 'absent')).toBeNull();
+    expect(codeViewBlocker('compare', 'absent')).toBeNull();
   });
 });

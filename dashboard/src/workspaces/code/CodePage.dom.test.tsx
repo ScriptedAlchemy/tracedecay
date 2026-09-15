@@ -234,10 +234,7 @@ describe('the URL-stable Code view shell', () => {
     expect(await screen.findByText('Trace needs a selected symbol')).toBeTruthy();
   });
 
-  it.each([
-    ['shared-code', 'Shared Code is unavailable', /clone family projections/i],
-    ['compare', 'Compare is unavailable', /revision-pair identity/i],
-  ] as const)('restores the pending %s view from the URL', async (view, title, detail) => {
+  it('mounts Shared Code as a source-bound family view', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -245,14 +242,45 @@ describe('the URL-stable Code view shell', () => {
         return jsonOk(resolveFixture(pathname, search));
       }),
     );
-    renderCode(`/code?view=${view}`);
+    renderCode('/code?view=shared-code');
 
-    expect(await screen.findByText(title)).toBeTruthy();
-    expect(screen.getByText(detail)).toBeTruthy();
+    expect(await screen.findByText('Shared Code needs a source occurrence')).toBeTruthy();
+    expect(screen.getByText(/select a function or method in Topology/i)).toBeTruthy();
     expect(
-      screen
-        .getByRole('button', { name: title.replace(' is unavailable', '') })
-        .getAttribute('aria-current'),
+      screen.getByRole('button', { name: 'Shared Code' }).getAttribute('aria-current'),
+    ).toBe('page');
+  });
+
+  it('keeps a selected source visible while its family read is unavailable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const { pathname, search } = new URL(String(input), 'http://localhost');
+        return jsonOk(resolveFixture(pathname, search));
+      }),
+    );
+    renderCode('/code?view=shared-code&symbol=sym-0');
+
+    expect(await screen.findByRole('heading', { name: /subgraph_payload/i })).toBeTruthy();
+    expect(screen.getByText(/shared-code family read is not mounted/i)).toBeTruthy();
+    expect(screen.getByText(/complete, partial, excluded too small/i)).toBeTruthy();
+  });
+
+  it('mounts Compare without drawing an unverified revision layout', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const { pathname, search } = new URL(String(input), 'http://localhost');
+        return jsonOk(resolveFixture(pathname, search));
+      }),
+    );
+    renderCode('/code?view=compare');
+
+    expect(await screen.findByText('Revision comparison unavailable')).toBeTruthy();
+    expect(screen.getByText(/two exact revisions, one shared scope, and a union layout/i)).toBeTruthy();
+    expect(screen.getByText(/no regions or lens measurements are drawn/i)).toBeTruthy();
+    expect(
+      screen.getByRole('button', { name: 'Compare' }).getAttribute('aria-current'),
     ).toBe('page');
   });
 });
