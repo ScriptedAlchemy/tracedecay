@@ -335,6 +335,67 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
     fixture.registry.shutdown().await;
 }
 
+/// The published pass waits for the owners the seat needs — exact and
+/// lexical — and nothing more. The clone-fingerprint successor that follows
+/// the admission artifact re-decodes the whole sealed source into a second
+/// artifact; on the 772-file lifecycle fixture that pass alone held graph
+/// activation back by ~27 s (#1103). Fresh graph activation must start while
+/// that successor is still pending, and the successor must still finish on a
+/// later pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_graph_activation_starts_while_the_clone_successor_is_pending() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-before-clone-successor", |_| {})
+            .await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let gate = install_injected_activation_gate(&scope.worktree_id);
+    drop(admission);
+
+    tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
+        .await
+        .expect("fresh graph activation starts once exact and lexical owners are ready");
+    let canonical = fixture.project.canonicalize().expect("canonical project");
+    let text = {
+        let mounted = fixture.registry.mounted.lock().await;
+        mounted
+            .get(&canonical)
+            .expect("mounted worktree")
+            .text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    .expect("the publication installed its text owner before activation");
+    assert!(
+        text.query_owners_are_ready(),
+        "graph activation must not start before exact and lexical owners are ready"
+    );
+    assert!(
+        text.text_projection_needs_work(),
+        "the clone-fingerprint successor must still be pending when activation starts"
+    );
+    gate.release();
+
+    let deadline = tokio::time::Instant::now() + CONVERGENCE_DEADLINE;
+    while text.text_projection_needs_work() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the clone successor must finish on a follow-up pass after the seat"
+        );
+        fixture.wake_without_new_input().await;
+        tokio::time::sleep(POLL_SPACING).await;
+    }
+    assert!(
+        text.query_owners_are_ready(),
+        "finishing the successor must keep exact and lexical owners ready"
+    );
+    fixture.registry.shutdown().await;
+}
+
 fn run_git_in(root: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

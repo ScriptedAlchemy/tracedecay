@@ -1638,6 +1638,17 @@ impl CodeIndexSchedulerRegistryV1 {
                 if let Some(outcome) = published_text_projection_outcome.take() {
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
+                            // The seat needs only the ready exact/lexical
+                            // owners. A clone-fingerprint successor left in
+                            // the slot is retained-owner work: queue the
+                            // follow-up pass now so the backfill resumes right
+                            // after this seat instead of on the next hint.
+                            if graph_text
+                                .as_ref()
+                                .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work)
+                            {
+                                Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                            }
                             // Large text projections can outlive the bounded
                             // source proof established before publication. The
                             // serving swap must bind to source truth observed
