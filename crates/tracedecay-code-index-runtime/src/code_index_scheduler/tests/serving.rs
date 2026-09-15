@@ -1259,6 +1259,8 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
 #[cfg(unix)]
 #[test]
 fn text_artifact_builder_creates_an_owner_private_artifacts_root() {
+    use std::os::unix::fs::PermissionsExt;
+
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn private_artifact() {}\n")]);
     let store = TempDir::new().expect("store root");
     let mut scheduler = scheduler(
@@ -1273,8 +1275,12 @@ fn text_artifact_builder_creates_an_owner_private_artifacts_root() {
         .advance_text_serving(1)
         .expect("start text-artifact build");
 
-    tracedecay_private_fs::validate_private_directory(&store.path().join("code-text-artifacts-v1"))
-        .expect("the artifact namespace must be owner-private");
+    let mode = std::fs::symlink_metadata(store.path().join("code-text-artifacts-v1"))
+        .expect("artifacts-root metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "the artifact namespace must be owner-private");
 }
 
 #[cfg(unix)]
