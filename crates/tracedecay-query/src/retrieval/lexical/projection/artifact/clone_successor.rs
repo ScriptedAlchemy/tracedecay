@@ -19,7 +19,7 @@ use super::format::{
     RECEIPT_RESERVATION_BYTES, VerifiedCodeLexicalArtifactV1, artifact_digest,
     decode_padded_receipt, metadata_digest, new_verified_receipt, padded_receipt,
 };
-use super::schema::{CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, LexicalArtifactLayoutV1};
+use super::schema::{CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15, LexicalArtifactLayoutV1};
 use super::{CodeLexicalArtifactErrorV1, checkpoint, open_builder_connection, sqlite_error};
 
 pub struct CodeLexicalCloneSuccessorV1 {
@@ -72,7 +72,7 @@ impl CodeLexicalCloneSuccessorV1 {
                 ))
             })?;
         if prior_digest != prior.artifact_digest().as_str()
-            || format_revision != i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1)
+            || format_revision != i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15)
             || metadata_digest(&metadata)? != *prior.metadata_digest()
         {
             return Err(CodeLexicalArtifactErrorV1::Incompatible(
@@ -206,7 +206,7 @@ impl CodeLexicalCloneSuccessorV1 {
             source.import_dictionary_digest(),
             source.cumulative_digest(),
             &sections,
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
+            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15,
         )?;
         let file_size = sqlite_file_size(&transaction)?;
         let receipt = new_verified_receipt(
@@ -222,7 +222,10 @@ impl CodeLexicalCloneSuccessorV1 {
         transaction
             .execute(
                 "UPDATE artifact_state SET format_revision = ?1, receipt = ?2 WHERE singleton = 1",
-                params![i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1), encoded,],
+                params![
+                    i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15),
+                    encoded,
+                ],
             )
             .map_err(sqlite_error)?;
         checkpoint(control)?;
@@ -288,7 +291,7 @@ fn initialize_successor(
         .execute(
             "UPDATE artifact_state SET format_revision = ?1, receipt = ?2 WHERE singleton = 1",
             params![
-                i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1),
+                i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15),
                 vec![0u8; RECEIPT_RESERVATION_BYTES],
             ],
         )

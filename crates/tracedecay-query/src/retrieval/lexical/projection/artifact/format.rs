@@ -793,7 +793,8 @@ pub(super) fn encode_ngram_bitmap(
         LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13
         | LexicalArtifactLayoutV1::V14
-        | LexicalArtifactLayoutV1::V15 => encode_ngram_delta_varints_v12(bitmap),
+        | LexicalArtifactLayoutV1::V15
+        | LexicalArtifactLayoutV1::V16 => encode_ngram_delta_varints_v12(bitmap),
     }
 }
 
@@ -882,7 +883,8 @@ pub(super) fn decode_ngram_bitmap(
         LexicalArtifactLayoutV1::V12
         | LexicalArtifactLayoutV1::V13
         | LexicalArtifactLayoutV1::V14
-        | LexicalArtifactLayoutV1::V15 => decode_ngram_delta_varints_v12(encoded),
+        | LexicalArtifactLayoutV1::V15
+        | LexicalArtifactLayoutV1::V16 => decode_ngram_delta_varints_v12(encoded),
     }
 }
 
