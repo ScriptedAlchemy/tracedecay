@@ -249,7 +249,7 @@ pub(super) fn read_clone_fingerprint_page(
                 CloneArtifactCursorPositionV1::Fingerprint {
                     body_digest,
                     payload_digest,
-                } => Some((body_digest.as_str(), payload_digest.as_str())),
+                } => Some((body_digest.clone(), payload_digest.clone())),
                 CloneArtifactCursorPositionV1::Exact(_) => {
                     return Err(CodeLexicalArtifactErrorV1::Contract(
                         "clone cursor position does not match a fingerprint read".to_owned(),
@@ -541,12 +541,15 @@ pub(super) fn read_clone_fingerprint_page(
         .into_iter()
         .filter(|(_, candidate)| !candidate.anchors.is_empty())
         .filter(|((body_digest, payload_digest), _)| {
-            after.is_none_or(|after| (body_digest.as_str(), payload_digest.as_str()) > after)
+            after.as_ref().is_none_or(|after| {
+                (body_digest.as_str(), payload_digest.as_str())
+                    > (after.0.as_str(), after.1.as_str())
+            })
         })
         .collect::<Vec<_>>();
     let candidate_count = candidates.len();
     let mut members = Vec::new();
-    let mut last_compared = None;
+    let mut last_compared = after;
     let mut has_more = false;
     for (ordinal, (key, candidate)) in candidates.into_iter().enumerate() {
         if accounting.candidate_bodies_compared == CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1 {
