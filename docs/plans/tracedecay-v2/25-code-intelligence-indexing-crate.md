@@ -85,8 +85,12 @@ preserve symbol lineage, and attach Git, diagnostics, and tests to the exact
 source generation they describe. The retrieval service then serves those generations through the
 Plan 15 exact/lexical/graph contracts with a non-demotable exact tier,
 deterministic compact-candidate fusion, late hydration, and a versioned
-lexical profile. Source-bound shared-code operations read the same frozen
-generation without becoming a fourth retrieval lane.
+lexical profile. Source-bound shared-code operations pin a frozen generation
+vector for the selected scope (one generation for single-tip reads; one
+generation per selected snapshot or authorized project for revision-pair,
+branch-diff, PR change-set, and cross-project families) without becoming a
+fourth retrieval lane. Each returned occurrence stays bound to its owning
+generation.
 
 ## Owns
 
@@ -230,6 +234,10 @@ generation without becoming a fourth retrieval lane.
 - Update clone payloads, occurrences, and postings at changed-symbol
   granularity. A no-op generation reuses them. Clone backfill never blocks
   exact, lexical, graph, Git, diagnostic, or test retrieval.
+- Repository, revision-pair, branch-diff, PR change-set, and
+  authorized-project-set families select a frozen generation per included
+  snapshot or project. Comparisons never collapse those selections into a
+  single tip generation.
 
 ### Code-search chunk and projection contract
 
@@ -373,8 +381,12 @@ pub struct ProjectionBatchReceiptV1 {
   supported languages, graph edge-authority classes, privacy domain/key epoch,
   source coverage, exclusions, partial states, and manifest digest. Consumers
   must reject a missing, incompatible, mixed-generation, or unauthorized
-  base manifest before candidate production. Clone payload and posting coverage
-  belongs to this manifest without changing lexical or graph readiness.
+  base manifest before candidate production. Generation-time clone extraction
+  coverage (payloads and occurrence bindings sealed with the generation)
+  belongs to this base manifest. Asynchronous clone-posting backfill coverage
+  lives in a separately sealed projection or artifact manifest so posting can
+  complete after publication without rewriting the immutable base seal or
+  delaying lexical/graph readiness.
 - A no-op generation emits empty `added_or_changed` and `deleted` sets plus
   explicit `reused` counts and causes zero projection calls. An edit reprojects
   only changed symbol chunks, affected ancestors/file windows, and explicit
