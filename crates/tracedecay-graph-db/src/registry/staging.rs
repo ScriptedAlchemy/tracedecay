@@ -31,9 +31,7 @@ pub struct VerifiedGenerationBatchApply {
 pub enum VerifiedGenerationBeginV1 {
     Begun(SemanticVectorStageRecord),
     Recovered(SemanticVectorStageRecord),
-    Occupied {
-        existing: SemanticVectorStageRecord,
-    },
+    Occupied { existing: SemanticVectorStageRecord },
 }
 
 impl GraphDbRegistry {
@@ -105,7 +103,10 @@ impl GraphDbRegistry {
             } => {
                 return Err(GraphDbError::conflict_observed(
                     "staging.begin_verified_generation",
-                    format!("prior_verified_head={:?}", plan.expected_prior_verified_head),
+                    format!(
+                        "prior_verified_head={:?}",
+                        plan.expected_prior_verified_head
+                    ),
                     format!("prior_verified_head={actual:?}"),
                 ));
             }
