@@ -120,9 +120,9 @@ describe('Code page trace chunk', () => {
     expect(await screen.findByRole('button', { name: HUB })).toBeTruthy();
     expect(
       screen
-        .getByRole('button', { name: /CORTEX.*repository/i })
+        .getByRole('button', { name: 'Topology' })
         .getAttribute('aria-current'),
-    ).toBe('step');
+    ).toBe('page');
     // And the page takes input while the trace module is still unfetched.
     const search = screen.getByRole<HTMLInputElement>('searchbox', {
       name: /symbol search/i,
@@ -147,8 +147,8 @@ describe('Code page trace chunk', () => {
     const fallback = await screen.findByTestId('trace-chunk-fallback');
     expect(chunk.requests).toBe(1);
     expect(
-      screen.getByRole('button', { name: /TRACE.*symbol/i }).getAttribute('aria-current'),
-    ).toBe('step');
+      screen.getByRole('button', { name: 'Trace' }).getAttribute('aria-current'),
+    ).toBe('page');
 
     // Says loading, and says outright that this is not an empty neighbourhood.
     const status = within(fallback).getByRole('status');
