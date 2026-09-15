@@ -2140,7 +2140,12 @@ mod tests {
 
     struct PartitionedSealFixture {
         _temporary: TempDir,
+        project_id: ProjectId,
+        repository: RepositoryId,
+        generation: CodeGenerationId,
         pool_manifest: std::path::PathBuf,
+        replay_root: std::path::PathBuf,
+        generations_root: std::path::PathBuf,
         segments_root: std::path::PathBuf,
         digest: String,
     }
@@ -2186,6 +2191,9 @@ mod tests {
         )
         .unwrap();
         scheduler.reconcile_now().unwrap();
+        let generation = scheduler.latest_complete().unwrap().generation();
+        let repository = generation.snapshot().repository.clone();
+        let generation = generation.manifest().generation_id.clone();
         drop(scheduler);
         let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
             &std::fs::read(scoped_store.join("active-code-generation-v1.json")).unwrap(),
@@ -2220,10 +2228,80 @@ mod tests {
         }
         PartitionedSealFixture {
             _temporary: temporary,
+            project_id,
+            repository,
+            generation,
             pool_manifest,
+            replay_root,
+            generations_root: scoped_store.join("code-generations-v1"),
             segments_root,
             digest,
         }
+    }
+
+    #[test]
+    fn replay_pool_partitioned_bundle_survives_origin_route_retirement() {
+        let fixture = partitioned_seal_fixture("route-retirement");
+        let replay_bundle = fixture
+            .replay_root
+            .join("code-generation-replay-segments-v1")
+            .join(format!("generation-{}", fixture.digest));
+        std::fs::create_dir_all(&replay_bundle).unwrap();
+        for entry in std::fs::read_dir(&fixture.segments_root).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::hard_link(entry.path(), replay_bundle.join(entry.file_name())).unwrap();
+        }
+
+        let shard = StoreShardIdV1::project(
+            BrainId::new("brain.route-retirement").unwrap(),
+            UserProfileId::new("profile.route-retirement").unwrap(),
+            fixture.project_id.clone(),
+        );
+        let provider = DaemonCodeGraphManifestProviderV1::default();
+        let origin = provider
+            .bind(
+                shard.clone(),
+                fixture.project_id.clone(),
+                fixture.repository.clone(),
+                fixture.generations_root,
+                fixture.replay_root.clone(),
+            )
+            .unwrap();
+        drop(origin);
+        let sibling_store = fixture._temporary.path().join("sibling-store");
+        let sibling_generations = sibling_store.join("code-generations-v1");
+        std::fs::create_dir_all(&sibling_generations).unwrap();
+        let _sibling = provider
+            .bind(
+                shard.clone(),
+                fixture.project_id,
+                fixture.repository.clone(),
+                sibling_generations,
+                fixture.replay_root,
+            )
+            .unwrap();
+        let owner = GraphProjectionIdentityV1 {
+            shard_id: shard,
+            namespace: GraphNamespaceV1::new("namespace.route-retirement").unwrap(),
+            projection: GraphProjectionIdV1::new("code-generation").unwrap(),
+        };
+        let source = SealedCodeGenerationReplay {
+            repository: fixture.repository,
+            generation: fixture.generation,
+            sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+                "sha256:{}",
+                fixture.digest
+            ))
+            .unwrap(),
+            projector_revision: GraphProjectorRevision::try_from(
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )
+            .unwrap(),
+        };
+
+        provider
+            .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
+            .expect("durable replay bundle must not depend on the retired origin route");
     }
 
     struct RouteSealFixture {
