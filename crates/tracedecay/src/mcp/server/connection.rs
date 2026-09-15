@@ -1,6 +1,7 @@
 //! Connection lifecycle: the JSON-RPC read/write loop, shutdown
 //! policy, and daemon-owned host-admission replay driving.
 
+use super::McpResponse as HandlerResponse;
 use super::*;
 use tracedecay_mcp::serialize_response_line;
 
@@ -400,7 +401,7 @@ struct ConcurrentReadCompletion {
     request_key: Option<String>,
     _request_activity: Option<tracedecay_mcp::McpRequestActivity>,
     revocable_tool_call: Option<(Value, String)>,
-    response: Option<JsonRpcResponse>,
+    response: Option<HandlerResponse>,
     selected_response_lease: Option<crate::mcp::server::routing::SelectedProjectResponseLease>,
     connection_scope: String,
     connection_closed: bool,
@@ -532,12 +533,13 @@ impl ConnectionResponseWriter {
                 return Ok(false);
             }
         }
-        let Some(response) = completion.response.as_ref() else {
+        let Some(response) = completion.response.take() else {
             return Ok(true);
         };
+        let response = response.into_legacy();
         let json_line = hotpath::measure_block!(
             "mcp.server.response.serialize",
-            serialize_response_line(response)
+            serialize_response_line(&response)
         );
         server
             .write_response_line_or_revoke(transport, &format!("{json_line}\n"), response_revoked)
@@ -593,7 +595,7 @@ impl McpServer {
         pending_lines: &mut VecDeque<QueuedRequestLine>,
         pending_cancellations: &mut HashSet<String>,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-    ) -> Result<(Option<JsonRpcResponse>, bool)> {
+    ) -> Result<(Option<HandlerResponse>, bool)> {
         let connection_scope = connection.memory_request_scope().to_owned();
         let pre_cancelled = request
             .id
@@ -750,7 +752,7 @@ impl McpServer {
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
         pending_lines: &mut VecDeque<QueuedRequestLine>,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-    ) -> Result<(Option<JsonRpcResponse>, bool)> {
+    ) -> Result<(Option<HandlerResponse>, bool)> {
         let connection_scope = connection.memory_request_scope().to_owned();
         let handling = Box::pin(self.handle_request_for_connection(
             request,
@@ -1130,7 +1132,7 @@ impl McpServer {
                             _request_activity: request_activity,
                             revocable_tool_call: None,
                             response: request.id.clone().map(|id| {
-                                JsonRpcResponse::error(
+                                HandlerResponse::error(
                                     id,
                                     ErrorCode::InternalError,
                                     "TraceDecay daemon is draining for upgrade; retry the request"
@@ -1192,7 +1194,7 @@ impl McpServer {
             let response = if rejecting_for_drain {
                 parsed.as_ref().ok().and_then(|request| {
                     request.id.clone().map(|id| {
-                        JsonRpcResponse::error(
+                        HandlerResponse::error(
                             id,
                             ErrorCode::InternalError,
                             "TraceDecay daemon is draining for upgrade; retry the request"
@@ -1239,7 +1241,7 @@ impl McpServer {
                             response
                         }
                     }
-                    Err(e) => Some(JsonRpcResponse::error(
+                    Err(e) => Some(HandlerResponse::error(
                         Value::Null,
                         ErrorCode::ParseError,
                         format!("failed to parse JSON-RPC request: {e}"),

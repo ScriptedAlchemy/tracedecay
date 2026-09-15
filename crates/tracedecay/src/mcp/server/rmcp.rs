@@ -19,9 +19,12 @@ use rmcp::{RoleServer, ServerHandler};
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, Semaphore};
 
-use tracedecay_mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use tracedecay_mcp::transport::{JsonRpcError, JsonRpcRequest};
 
-use super::{ConnectionRouteState, McpServer};
+#[cfg(test)]
+use tracedecay_mcp::transport::JsonRpcResponse;
+
+use super::{ConnectionRouteState, McpResponse, McpResponseBody, McpServer};
 
 /// Per-RMCP-connection handoff from handler completion to the transport write.
 ///
@@ -113,7 +116,7 @@ impl RmcpSelectedProjectResponseAuthority {
 /// Allows daemon routing to enrich the legacy `initialize` response without
 /// coupling this MCP module to daemon route types.
 pub(crate) type RmcpInitializeResponseDecorator =
-    Arc<dyn Fn(&mut JsonRpcResponse) + Send + Sync + 'static>;
+    Arc<dyn Fn(&mut McpResponse) + Send + Sync + 'static>;
 
 /// Connection-local Work-delivery ledger input for the RMCP transport.
 ///
@@ -311,7 +314,7 @@ impl RmcpConnectionAdapter {
         &self,
         context: RequestContext<RoleServer>,
         request: McpRequest,
-    ) -> Result<JsonRpcResponse, ErrorData> {
+    ) -> Result<McpResponse, ErrorData> {
         let queued_at = std::time::Instant::now();
         let queued = RmcpQueueDepthGuard::enter();
         let request_permit = self.acquire_request_permit().await?;
@@ -344,7 +347,7 @@ impl RmcpConnectionAdapter {
         &self,
         context: RequestContext<RoleServer>,
         request: McpRequest,
-    ) -> Result<JsonRpcResponse, ErrorData> {
+    ) -> Result<McpResponse, ErrorData> {
         let request_id = context.id;
         let request_cancellation = context.ct;
         let id = request_id.into_json_value();
@@ -380,7 +383,7 @@ impl RmcpConnectionAdapter {
         id: Value,
         request_cancellation: tokio_util::sync::CancellationToken,
         connection: &mut ConnectionRouteState,
-    ) -> Result<JsonRpcResponse, ErrorData> {
+    ) -> Result<McpResponse, ErrorData> {
         let pre_cancelled = request_cancellation.is_cancelled();
         let response = if pre_cancelled {
             Some(
@@ -460,12 +463,23 @@ impl RmcpConnectionAdapter {
     }
 }
 
-fn response_value(response: JsonRpcResponse) -> Result<Value, ErrorData> {
+fn response_body(response: McpResponse) -> Result<McpResponseBody, ErrorData> {
     match (response.result, response.error) {
         (Some(result), None) => Ok(result),
         (_, Some(error)) => Err(rmcp_error(error)),
         _ => Err(ErrorData::internal_error(
             "TraceDecay MCP handler returned neither result nor error",
+            None,
+        )),
+    }
+}
+
+fn response_value(response: McpResponse) -> Result<Value, ErrorData> {
+    match response_body(response)? {
+        McpResponseBody::ToolsCall(result) => Ok(result.value),
+        McpResponseBody::Raw(result) => Ok(result),
+        _ => Err(ErrorData::internal_error(
+            "TraceDecay MCP handler returned the wrong typed response body",
             None,
         )),
     }
@@ -535,12 +549,15 @@ fn annotations_from_value(value: Value, context: &str) -> Result<Annotations, Er
     let priority = object
         .remove("priority")
         .map(|value| {
-            value.as_f64().map(|priority| priority as f32).ok_or_else(|| {
-                ErrorData::internal_error(
-                    format!("TraceDecay MCP {context} priority was not numeric"),
-                    None,
-                )
-            })
+            value
+                .as_f64()
+                .map(|priority| priority as f32)
+                .ok_or_else(|| {
+                    ErrorData::internal_error(
+                        format!("TraceDecay MCP {context} priority was not numeric"),
+                        None,
+                    )
+                })
         })
         .transpose()?;
     let last_modified = object
@@ -582,7 +599,7 @@ fn content_block_from_value(value: Value) -> Result<ContentBlock, ErrorData> {
     Ok(ContentBlock::Text(content))
 }
 
-fn call_tool_result(response: JsonRpcResponse) -> Result<CallToolResult, ErrorData> {
+fn call_tool_result(response: McpResponse) -> Result<CallToolResult, ErrorData> {
     let mut object = value_object(response_value(response)?, "tools/call result")?;
     let content = match object.remove("content") {
         Some(Value::Array(content)) => content
@@ -601,10 +618,7 @@ fn call_tool_result(response: JsonRpcResponse) -> Result<CallToolResult, ErrorDa
         .remove("isError")
         .map(|value| {
             value.as_bool().ok_or_else(|| {
-                ErrorData::internal_error(
-                    "TraceDecay MCP tools/call isError was not boolean",
-                    None,
-                )
+                ErrorData::internal_error("TraceDecay MCP tools/call isError was not boolean", None)
             })
         })
         .transpose()?;
@@ -628,7 +642,9 @@ fn tool_annotations_from_value(value: Value) -> Result<ToolAnnotations, ErrorDat
     annotations.title = object
         .remove("title")
         .and_then(|value| value.as_str().map(str::to_owned));
-    annotations.read_only_hint = object.remove("readOnlyHint").and_then(|value| value.as_bool());
+    annotations.read_only_hint = object
+        .remove("readOnlyHint")
+        .and_then(|value| value.as_bool());
     annotations.destructive_hint = object
         .remove("destructiveHint")
         .and_then(|value| value.as_bool());
@@ -648,10 +664,7 @@ fn tool_from_value(value: Value) -> Result<Tool, ErrorData> {
     let input_schema = object
         .remove("inputSchema")
         .ok_or_else(|| {
-            ErrorData::internal_error(
-                "TraceDecay MCP tool definition omitted inputSchema",
-                None,
-            )
+            ErrorData::internal_error("TraceDecay MCP tool definition omitted inputSchema", None)
         })
         .and_then(|value| value_object(value, "tool input schema"))?;
     let annotations = object
@@ -665,28 +678,77 @@ fn tool_from_value(value: Value) -> Result<Tool, ErrorData> {
     Ok(tool)
 }
 
-fn list_tools_result(response: JsonRpcResponse) -> Result<ListToolsResult, ErrorData> {
-    let mut object = value_object(response_value(response)?, "tools/list result")?;
-    let tools = match object.remove("tools") {
-        Some(Value::Array(tools)) => tools
-            .into_iter()
-            .map(tool_from_value)
-            .collect::<Result<Vec<_>, _>>()?,
+fn tool_from_definition(definition: tracedecay_mcp::ToolDefinition) -> Result<Tool, ErrorData> {
+    let input_schema = value_object(definition.input_schema, "tool input schema")?;
+    let annotations = definition
+        .annotations
+        .map(tool_annotations_from_value)
+        .transpose()?;
+    let meta = definition
+        .meta
+        .map(|value| value_object(value, "tool metadata").map(MetaObject))
+        .transpose()?;
+    let mut tool = Tool::new(
+        definition.name,
+        definition.description,
+        Arc::new(input_schema),
+    );
+    tool.annotations = annotations;
+    tool.meta = meta;
+    Ok(tool)
+}
+
+fn list_tools_result(response: McpResponse) -> Result<ListToolsResult, ErrorData> {
+    let (tools, meta) = match response_body(response)? {
+        McpResponseBody::ToolsList(tools) => (
+            tools
+                .into_iter()
+                .map(tool_from_definition)
+                .collect::<Result<Vec<_>, _>>()?,
+            None,
+        ),
+        McpResponseBody::Raw(value) => {
+            let mut object = value_object(value, "tools/list result")?;
+            let tools = match object.remove("tools") {
+                Some(Value::Array(tools)) => tools
+                    .into_iter()
+                    .map(tool_from_value)
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => {
+                    return Err(ErrorData::internal_error(
+                        "TraceDecay MCP tools/list result omitted tools",
+                        None,
+                    ));
+                }
+            };
+            let meta = take_meta(&mut object, "_meta", "tools/list metadata")?;
+            (tools, meta)
+        }
         _ => {
             return Err(ErrorData::internal_error(
-                "TraceDecay MCP tools/list result omitted tools",
+                "TraceDecay MCP handler returned the wrong tools/list body",
                 None,
             ));
         }
     };
     let mut result = ListToolsResult::with_all_items(tools);
     result.result_type = None;
-    result.meta = take_meta(&mut object, "_meta", "tools/list metadata")?;
+    result.meta = meta;
     Ok(result)
 }
 
-fn initialize_result(response: JsonRpcResponse) -> Result<InitializeResult, ErrorData> {
-    let mut object = value_object(response_value(response)?, "initialize result")?;
+fn initialize_result(response: McpResponse) -> Result<InitializeResult, ErrorData> {
+    let value = match response_body(response)? {
+        McpResponseBody::Initialize(result) => return Ok(result),
+        McpResponseBody::Raw(value) => value,
+        _ => {
+            return Err(ErrorData::internal_error(
+                "TraceDecay MCP handler returned the wrong initialize body",
+                None,
+            ));
+        }
+    };
+    let mut object = value_object(value, "initialize result")?;
     let instructions = object
         .remove("instructions")
         .and_then(|value| value.as_str().map(str::to_owned));
@@ -728,8 +790,18 @@ fn resource_from_value(value: Value) -> Result<Resource, ErrorData> {
     Ok(resource)
 }
 
-fn list_resources_result(response: JsonRpcResponse) -> Result<ListResourcesResult, ErrorData> {
-    let mut object = value_object(response_value(response)?, "resources/list result")?;
+fn list_resources_result(response: McpResponse) -> Result<ListResourcesResult, ErrorData> {
+    let value = match response_body(response)? {
+        McpResponseBody::ResourcesList(result) => return Ok(result),
+        McpResponseBody::Raw(value) => value,
+        _ => {
+            return Err(ErrorData::internal_error(
+                "TraceDecay MCP handler returned the wrong resources/list body",
+                None,
+            ));
+        }
+    };
+    let mut object = value_object(value, "resources/list result")?;
     let resources = match object.remove("resources") {
         Some(Value::Array(resources)) => resources
             .into_iter()
@@ -748,8 +820,18 @@ fn list_resources_result(response: JsonRpcResponse) -> Result<ListResourcesResul
     Ok(result)
 }
 
-fn read_resource_result(response: JsonRpcResponse) -> Result<ReadResourceResult, ErrorData> {
-    let mut object = value_object(response_value(response)?, "resources/read result")?;
+fn read_resource_result(response: McpResponse) -> Result<ReadResourceResult, ErrorData> {
+    let value = match response_body(response)? {
+        McpResponseBody::ResourcesRead(result) => return Ok(result),
+        McpResponseBody::Raw(value) => value,
+        _ => {
+            return Err(ErrorData::internal_error(
+                "TraceDecay MCP handler returned the wrong resources/read body",
+                None,
+            ));
+        }
+    };
+    let mut object = value_object(value, "resources/read result")?;
     let contents = match object.remove("contents") {
         Some(Value::Array(contents)) => contents
             .into_iter()
@@ -1072,11 +1154,14 @@ mod tests {
             let server = McpServer::new_with_registered_test_context(context, Vec::new())
                 .await
                 .expect("registered RMCP wire server");
-            let initialize_response_decorator = Some(Arc::new(|response: &mut JsonRpcResponse| {
-                response.result.as_mut().expect("initialize result")["_meta"]["tracedecayInitializeRoute"] = json!({
-                    "projectPath": "/wire/oracle",
-                    "allowInit": false,
-                });
+            let initialize_response_decorator = Some(Arc::new(|response: &mut McpResponse| {
+                response.insert_result_meta(
+                    "tracedecayInitializeRoute",
+                    json!({
+                        "projectPath": "/wire/oracle",
+                        "allowInit": false,
+                    }),
+                );
             })
                 as RmcpInitializeResponseDecorator);
             let (client, client_messages, server_messages, serving) =
@@ -1226,17 +1311,18 @@ mod tests {
                     fixture
                         .client
                         .call_tool(
-                            CallToolRequestParams::new("tracedecay_fact_store_list").with_arguments(
-                                json!({
-                                    "category": "project",
-                                    "min_trust": 0.0,
-                                    "limit": 200,
-                                    "format": "json",
-                                })
-                                .as_object()
-                                .cloned()
-                                .expect("object arguments"),
-                            ),
+                            CallToolRequestParams::new("tracedecay_fact_store_list")
+                                .with_arguments(
+                                    json!({
+                                        "category": "project",
+                                        "min_trust": 0.0,
+                                        "limit": 200,
+                                        "format": "json",
+                                    })
+                                    .as_object()
+                                    .cloned()
+                                    .expect("object arguments"),
+                                ),
                         )
                         .await
                         .expect("large RMCP benchmark call");
@@ -1291,15 +1377,25 @@ mod tests {
         let mut initialize_result =
             crate::mcp::server::initialize_result(crate::mcp::server::SERVER_INSTRUCTIONS)
                 .expect("initialize oracle");
-        initialize_result["protocolVersion"] = json!("2025-11-25");
-        initialize_result["_meta"]["tracedecayInitializeRoute"] = json!({
-            "projectPath": "/wire/oracle",
-            "allowInit": false,
-        });
+        initialize_result.protocol_version = ProtocolVersion::V_2025_11_25;
+        initialize_result.meta = Some(MetaObject(
+            json!({
+                "tracedecayInitializeRoute": {
+                    "projectPath": "/wire/oracle",
+                    "allowInit": false,
+                },
+            })
+            .as_object()
+            .cloned()
+            .expect("initialize metadata object"),
+        ));
         assert_eq!(
             fixture.last_response(),
-            serde_json::to_value(JsonRpcResponse::success(initialize_id, initialize_result))
-                .expect("serialize initialize oracle"),
+            serde_json::to_value(JsonRpcResponse::success(
+                initialize_id,
+                serde_json::to_value(initialize_result).expect("serialize initialize result"),
+            ))
+            .expect("serialize initialize oracle"),
             "rmcp negotiates the client protocol version while preserving the legacy payload",
         );
         assert_eq!(
@@ -1507,10 +1603,11 @@ mod tests {
 
     #[test]
     fn response_conversion_preserves_tool_content_and_rpc_errors() {
-        let complete: CallToolResponse = call_tool_result(JsonRpcResponse::success(
+        let complete: CallToolResponse =
+            call_tool_result(McpResponse::from_legacy(JsonRpcResponse::success(
                 json!(7),
                 json!({"content": [{"type": "text", "text": "ok"}]}),
-            ))
+            )))
             .map(Into::into)
             .expect("tool response");
         let CallToolResponse::Complete(CallToolResult { content, .. }) = complete else {
@@ -1521,12 +1618,12 @@ mod tests {
             Some("ok")
         );
 
-        let error = list_tools_result(JsonRpcResponse::error_with_data(
-                json!("request"),
-                tracedecay_mcp::transport::ErrorCode::InvalidParams,
-                "invalid arguments".to_owned(),
-                Some(json!({"reason": "missing_query"})),
-            ))
+        let error = list_tools_result(McpResponse::from_legacy(JsonRpcResponse::error_with_data(
+            json!("request"),
+            tracedecay_mcp::transport::ErrorCode::InvalidParams,
+            "invalid arguments".to_owned(),
+            Some(json!({"reason": "missing_query"})),
+        )))
         .expect_err("error response");
         assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
         assert_eq!(error.message, "invalid arguments");
@@ -1536,12 +1633,13 @@ mod tests {
     #[test]
     fn adapter_accepts_the_legacy_initialize_response_shape() {
         crate::product_runtime::register_fixture_product_runtime();
-        let initialized: InitializeResult = initialize_result(JsonRpcResponse::success(
-                json!(1),
-                crate::mcp::server::initialize_result("TraceDecay instructions")
-                    .expect("fixture product runtime registered"),
-            ))
-            .expect("rmcp must preserve legacy MCP initialization compatibility");
+        let typed = crate::mcp::server::initialize_result("TraceDecay instructions")
+            .expect("fixture product runtime registered");
+        let initialized: InitializeResult = initialize_result(McpResponse::typed(
+            json!(1),
+            McpResponseBody::Initialize(typed),
+        ))
+        .expect("rmcp must preserve legacy MCP initialization compatibility");
 
         assert_eq!(
             serde_json::to_value(&initialized).expect("serialize initialized response")["protocolVersion"],

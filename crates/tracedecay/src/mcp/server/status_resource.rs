@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::{ErrorCode, JsonRpcResponse, McpServer};
+use super::{ErrorCode, McpResponse as JsonRpcResponse, McpServer};
 
 impl McpServer {
     /// Returns project identity and typed graph-statistics availability.
