@@ -368,6 +368,42 @@ const CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 1] = [
     "clone_fingerprint_postings",
     "INSERT",
 )];
+/// Revision 16 stages fingerprint postings per batch in arrival order
+/// (`clone_fingerprint_postings_pages`) under the same private-builder gate
+/// and immutability guards as the row dictionary pages; finalization sorts
+/// them once into the keyed `clone_fingerprint_postings` tree and drops the
+/// staging table.
+const CLONE_FINGERPRINT_PAGES_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
+    (
+        "builder_gate_clone_fingerprint_postings_pages_insert",
+        "clone_fingerprint_postings_pages",
+        "INSERT",
+    ),
+    (
+        "builder_gate_clone_fingerprint_postings_pages_update",
+        "clone_fingerprint_postings_pages",
+        "UPDATE",
+    ),
+    (
+        "builder_gate_clone_fingerprint_postings_pages_delete",
+        "clone_fingerprint_postings_pages",
+        "DELETE",
+    ),
+];
+const CLONE_FINGERPRINT_PAGES_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
+    (
+        "immutable_clone_fingerprint_postings_pages_update",
+        "clone_fingerprint_postings_pages",
+        "UPDATE",
+        "immutable clone fingerprint posting pages",
+    ),
+    (
+        "immutable_clone_fingerprint_postings_pages_delete",
+        "clone_fingerprint_postings_pages",
+        "DELETE",
+        "immutable clone fingerprint posting pages",
+    ),
+];
 const CLONE_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 6] = [
     (
         "immutable_clone_body_payloads_update",
@@ -1466,6 +1502,19 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact was staged without incremental field statistics".to_owned(),
             ));
         }
+        // Likewise, a revision-16 staging file still accepting pages must
+        // carry the fingerprint staging table; one written straight into the
+        // keyed tree (an older builder) is refused as incompatible so the
+        // scheduler discards and restages it instead of retrying an `Io`.
+        if layout.has_clone_fingerprints()
+            && receipt.is_none()
+            && finalization.is_none()
+            && !table_exists(&connection, "clone_fingerprint_postings_pages")?
+        {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "lexical artifact was staged without fingerprint posting pages".to_owned(),
+            ));
+        }
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
         crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
@@ -1986,9 +2035,23 @@ impl CodeLexicalArtifactBuilderV1 {
             let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
             verify_staged_source_chain(&transaction, source, control)?;
             if self.layout.has_clone_fingerprints() {
-                with_cancellable_sqlite_statement(&transaction, control, || {
-                    derive_clone_fingerprint_counts(&transaction)
-                })?;
+                // The sorted pass and the count aggregation are the heaviest
+                // sorter statements in finalization; run them under the same
+                // sorter CPU admission as the pre-digest index wakes.
+                super::with_builder_sorter_cpu_admission(&transaction, || {
+                    hotpath::measure_block!(
+                        "query.artifact.finalization.derive_clone_fingerprint_postings",
+                        with_cancellable_sqlite_statement(&transaction, control, || {
+                            derive_clone_fingerprint_postings(&transaction, &self.mutation_gate)
+                        })
+                    )?;
+                    hotpath::measure_block!(
+                        "query.artifact.finalization.derive_clone_fingerprint_counts",
+                        with_cancellable_sqlite_statement(&transaction, control, || {
+                            derive_clone_fingerprint_counts(&transaction)
+                        })
+                    )
+                })??;
             }
             let content_epoch = authenticated_authority_epoch(&transaction, source)?;
             install_base_freeze(&transaction, self.layout)?;
@@ -3763,9 +3826,15 @@ fn append_prepared_clone_fingerprints(
     }) {
         return Ok(());
     }
+    // Staged in arrival order, not into the keyed tree: fingerprints are
+    // hashes, so a direct insert lands every row on a random leaf of
+    // `clone_fingerprint_postings` and each batch commit rewrites (and
+    // journals) most of that tree. Measured on the 1,560-file bench corpus:
+    // 273k postings, 78 MiB final table, 2.1 GiB written through 28 commits
+    // (27x amplification); staged and sorted once at finalization, 0.4 GiB.
     let mut insert = transaction
         .prepare_cached(
-            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .map_err(sqlite_error)?;
     for body in pages.iter().flat_map(|page| &page.clone_bodies) {
@@ -3815,6 +3884,29 @@ fn append_prepared_imports(
             .map_err(sqlite_error)?;
     }
     Ok(())
+}
+
+/// Move the staged fingerprint postings into the keyed
+/// `clone_fingerprint_postings` tree in one sorted pass, so the tree is
+/// written sequentially once instead of being rewritten under every batch
+/// commit, then drop the staging table so its pages are reused by the
+/// serving indexes built in the same finalization phase. The keyed table
+/// keeps its private-builder insert gate, so the pass holds the mutation
+/// authority exactly as a batch append does.
+fn derive_clone_fingerprint_postings(
+    transaction: &Transaction<'_>,
+    mutation_gate: &Arc<AtomicU8>,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
+    transaction
+        .execute_batch(
+            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest)
+             SELECT language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest
+             FROM clone_fingerprint_postings_pages
+             ORDER BY language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position;
+             DROP TABLE clone_fingerprint_postings_pages;",
+        )
+        .map_err(sqlite_error)
 }
 
 fn derive_clone_fingerprint_counts(
@@ -4367,9 +4459,24 @@ fn create_schema(
                     body_digest TEXT NOT NULL,
                     PRIMARY KEY(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position)
                 ) WITHOUT ROWID;
+                CREATE TABLE clone_fingerprint_postings_pages (
+                    language TEXT NOT NULL,
+                    class INTEGER NOT NULL,
+                    normalization_revision INTEGER NOT NULL,
+                    fingerprint INTEGER NOT NULL,
+                    symbol_occurrence_id TEXT NOT NULL,
+                    token_position INTEGER NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    body_digest TEXT NOT NULL
+                );
                 CREATE TRIGGER builder_gate_clone_fingerprint_postings_insert BEFORE INSERT ON clone_fingerprint_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_insert BEFORE INSERT ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_update BEFORE UPDATE ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_delete BEFORE DELETE ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
                 CREATE TRIGGER immutable_clone_fingerprint_postings_update BEFORE UPDATE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
                 CREATE TRIGGER immutable_clone_fingerprint_postings_delete BEFORE DELETE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
+                CREATE TRIGGER immutable_clone_fingerprint_postings_pages_update BEFORE UPDATE ON clone_fingerprint_postings_pages BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint posting pages'); END;
+                CREATE TRIGGER immutable_clone_fingerprint_postings_pages_delete BEFORE DELETE ON clone_fingerprint_postings_pages BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint posting pages'); END;
                 CREATE TRIGGER immutable_clone_fingerprint_counts_update BEFORE UPDATE ON clone_fingerprint_counts BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint counts'); END;
                 CREATE TRIGGER immutable_clone_fingerprint_counts_delete BEFORE DELETE ON clone_fingerprint_counts BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint counts'); END;
                 ",
@@ -4412,7 +4519,8 @@ fn verify_layout_dependent_triggers(
     let has_field_stats_staging = table_exists(connection, "field_stats_staging")?;
     let has_clone_index = table_exists(connection, "clone_body_payloads")?;
     let has_clone_fingerprints = table_exists(connection, "clone_fingerprint_postings")?;
-    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 5] = [
+    let has_clone_fingerprint_pages = table_exists(connection, "clone_fingerprint_postings_pages")?;
+    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 6] = [
         (
             has_exact_vocabulary,
             &EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT,
@@ -4430,8 +4538,12 @@ fn verify_layout_dependent_triggers(
             has_clone_fingerprints,
             &CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT,
         ),
+        (
+            has_clone_fingerprint_pages,
+            &CLONE_FINGERPRINT_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
     ];
-    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 5] = [
+    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 6] = [
         (true, &IMMUTABLE_TRIGGER_LAYOUT),
         (
             has_exact_vocabulary,
@@ -4445,6 +4557,10 @@ fn verify_layout_dependent_triggers(
         (
             has_clone_fingerprints,
             &CLONE_FINGERPRINT_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_clone_fingerprint_pages,
+            &CLONE_FINGERPRINT_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
         ),
     ];
     verify_trigger_layouts(
@@ -6692,6 +6808,95 @@ mod tests {
         BuilderMutationGuardV1::enter(&gate).expect("enter test builder mutation authority")
     }
 
+    /// Fingerprint postings are appended to an arrival-ordered staging table
+    /// and reach the keyed tree only through the sorted finalization pass:
+    /// the staging table is gated like every other builder table, the pass
+    /// preserves every row in key order, and nothing of the staging table
+    /// survives it (so a finalized artifact verifies without it).
+    #[test]
+    fn fingerprint_postings_stage_in_arrival_order_and_seal_sorted_once() {
+        let mut connection = Connection::open_in_memory().expect("fingerprint database");
+        let gate =
+            register_builder_mutation_gate(&connection).expect("register builder mutation gate");
+        create_schema(&connection, LexicalArtifactLayoutV1::V16).expect("create v16 schema");
+        verify_builder_mutation_gate_schema(&connection).expect("staging triggers present");
+
+        let refused = connection.execute(
+            "INSERT INTO clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES ('rust', 1, 1, 9, 'symbol.b', 0, 'payload.b', 'body.b')",
+            [],
+        );
+        assert!(
+            refused
+                .expect_err("ungated staging insert must be refused")
+                .to_string()
+                .contains("private lexical builder mutation required")
+        );
+
+        // Arrival order deliberately disagrees with key order.
+        let arrivals = [
+            ("rust", 9_i64, "symbol.b", 3_i64),
+            ("rust", 2, "symbol.b", 1),
+            ("go", 5, "symbol.a", 0),
+            ("rust", 2, "symbol.a", 7),
+        ];
+        {
+            let _authority = BuilderMutationGuardV1::enter(&gate).expect("enter authority");
+            for (language, fingerprint, symbol, position) in arrivals {
+                connection
+                    .execute(
+                        "INSERT INTO clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, 1, 1, ?2, ?3, ?4, 'payload', 'body')",
+                        params![language, fingerprint, symbol, position],
+                    )
+                    .expect("stage fingerprint posting");
+            }
+        }
+        let keyed_before: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM clone_fingerprint_postings",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count keyed rows");
+        assert_eq!(keyed_before, 0, "appends must not touch the keyed tree");
+
+        let transaction = connection.transaction().expect("finalization transaction");
+        derive_clone_fingerprint_postings(&transaction, &gate).expect("sorted pass");
+        transaction.commit().expect("commit sorted pass");
+
+        assert!(
+            !table_exists(&connection, "clone_fingerprint_postings_pages").expect("table probe"),
+            "staging table must not survive finalization"
+        );
+        verify_builder_mutation_gate_schema(&connection)
+            .expect("finalized layout verifies without the staging table");
+        let mut statement = connection
+            .prepare(
+                "SELECT language, fingerprint, symbol_occurrence_id, token_position FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position",
+            )
+            .expect("prepare keyed read");
+        let sealed = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .expect("read keyed rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect keyed rows");
+        assert_eq!(
+            sealed,
+            vec![
+                ("go".to_owned(), 5, "symbol.a".to_owned(), 0),
+                ("rust".to_owned(), 2, "symbol.a".to_owned(), 7),
+                ("rust".to_owned(), 2, "symbol.b".to_owned(), 1),
+                ("rust".to_owned(), 9, "symbol.b".to_owned(), 3),
+            ]
+        );
+    }
+
     #[test]
     fn field_statistics_preserve_posting_sums_and_omit_absent_fields() {
         for empty in [false, true] {
@@ -6774,6 +6979,38 @@ mod tests {
                 &ActiveControl,
             ) {
                 Ok(_) => panic!("resume must not seal statistics without staged totals"),
+                Err(error) => error,
+            };
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
+    }
+
+    /// A revision-16 staging file written by the builder that inserted
+    /// fingerprint postings straight into the keyed tree has no staging table;
+    /// resuming it must be a typed incompatibility (discard and restage), not
+    /// a missing-table `Io` the scheduler would retry forever.
+    #[test]
+    fn resume_refuses_staging_without_fingerprint_posting_pages() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("no-fingerprint-staging.sqlite");
+        let metadata = test_metadata();
+        drop(
+            CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
+                .expect("create current staging artifact"),
+        );
+        let connection = Connection::open(&path).expect("open staging artifact for fixture setup");
+        connection
+            .execute_batch("DROP TABLE clone_fingerprint_postings_pages;")
+            .expect("install pre-staging fingerprint layout");
+        drop(connection);
+
+        let error =
+            match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &path,
+                metadata,
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &ActiveControl,
+            ) {
+                Ok(_) => panic!("resume must not accept a staging file without fingerprint pages"),
                 Err(error) => error,
             };
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
