@@ -320,6 +320,7 @@ pub async fn run_code_generation_retention(
             if release_reconcile_failed {
                 CodeGenerationRetentionOutcomeV1::Failed
             } else if release_backlog_remains
+                || report.generation_segment_batch_exhausted
                 || !report.deleted_generations.is_empty()
                 || !report.deleted_text_artifacts.is_empty()
             {
