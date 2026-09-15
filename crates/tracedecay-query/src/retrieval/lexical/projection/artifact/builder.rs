@@ -7311,6 +7311,8 @@ mod tests {
                 FinalizationSectionV1::CloneOccurrences
                     | FinalizationSectionV1::CloneExactPostings
                     | FinalizationSectionV1::CloneBodyPayloads
+                    | FinalizationSectionV1::CloneFingerprintCounts
+                    | FinalizationSectionV1::CloneFingerprintPostings
             )
         }) {
             let plan = explain_native_seek_plan(&connection, section)
