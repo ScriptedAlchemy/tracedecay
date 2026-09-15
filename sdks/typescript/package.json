@@ -1,6 +1,6 @@
 {
   "name": "@tracedecay/sdk",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.38",
   "type": "module",
   "description": "Generated TraceDecay API contracts with a strict lifecycle client.",
   "author": "ScriptedAlchemy",
