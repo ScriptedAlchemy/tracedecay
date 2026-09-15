@@ -274,9 +274,14 @@ impl McpServer {
         if now - last < 30 {
             return;
         }
-        if !claim_worldwide_flush(&self.last_flush_at, last, now) {
+        let Some(flush_lease) = claim_worldwide_flush(
+            &self.last_flush_at,
+            Arc::clone(&self.worldwide_flush_in_flight),
+            last,
+            now,
+        ) else {
             return;
-        }
+        };
 
         let (Some(tokens_saved), Some(last_flushed_tokens)) =
             (&self.tokens_saved, &self.last_flushed_tokens)
@@ -296,6 +301,7 @@ impl McpServer {
 
         let server = Arc::clone(self);
         self.spawn_observed_ledger_write(async move {
+            let _flush_lease = flush_lease;
             let upload_enabled = match server.canonical_upload_enabled().await {
                 Ok(enabled) => enabled,
                 Err(error) => {
@@ -557,6 +563,16 @@ impl McpServer {
     }
 }
 
+struct WorldwideFlushLease {
+    in_flight: Arc<AtomicBool>,
+}
+
+impl Drop for WorldwideFlushLease {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
 fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
     let mut config = tracedecay_session_memory::user_config::UserConfig::load();
     config.pending_upload = config.pending_upload.saturating_add(delta);
@@ -576,10 +592,20 @@ fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
     }
 }
 
-fn claim_worldwide_flush(last_flush_at: &AtomicI64, expected: i64, now: i64) -> bool {
+fn claim_worldwide_flush(
+    last_flush_at: &AtomicI64,
+    in_flight: Arc<AtomicBool>,
+    expected: i64,
+    now: i64,
+) -> Option<WorldwideFlushLease> {
+    in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .ok()?;
+    let lease = WorldwideFlushLease { in_flight };
     last_flush_at
         .compare_exchange(expected, now, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
+        .ok()
+        .map(|_| lease)
 }
 
 #[cfg(test)]
@@ -645,16 +671,18 @@ mod tests {
     #[test]
     fn concurrent_boundary_calls_claim_exactly_one_worldwide_flush() {
         let last_flush_at = Arc::new(AtomicI64::new(10));
+        let in_flight = Arc::new(AtomicBool::new(false));
         let barrier = Arc::new(std::sync::Barrier::new(16));
         let claimed = Arc::new(AtomicU64::new(0));
         let workers = (0..16)
             .map(|_| {
                 let last_flush_at = Arc::clone(&last_flush_at);
+                let in_flight = Arc::clone(&in_flight);
                 let barrier = Arc::clone(&barrier);
                 let claimed = Arc::clone(&claimed);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    if claim_worldwide_flush(&last_flush_at, 10, 40) {
+                    if claim_worldwide_flush(&last_flush_at, in_flight, 10, 40).is_some() {
                         claimed.fetch_add(1, Ordering::AcqRel);
                     }
                 })
@@ -666,6 +694,21 @@ mod tests {
 
         assert_eq!(claimed.load(Ordering::Acquire), 1);
         assert_eq!(last_flush_at.load(Ordering::Acquire), 40);
+    }
+
+    #[test]
+    fn flush_claim_remains_single_flight_past_next_boundary() {
+        let last_flush_at = AtomicI64::new(10);
+        let in_flight = Arc::new(AtomicBool::new(false));
+
+        let first = claim_worldwide_flush(&last_flush_at, Arc::clone(&in_flight), 10, 40);
+        assert!(first.is_some());
+        assert!(
+            claim_worldwide_flush(&last_flush_at, Arc::clone(&in_flight), 40, 71).is_none(),
+            "an unfinished flush must retain ownership past the next time boundary"
+        );
+        drop(first);
+        assert!(claim_worldwide_flush(&last_flush_at, in_flight, 40, 71).is_some());
     }
 
     #[test]
