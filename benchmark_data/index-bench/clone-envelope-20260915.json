@@ -1,6 +1,7 @@
 {
   "schema": "tracedecay.clone-envelope.v1",
-  "campaign_tip": "ec35eb7f48808e51562ff76a0c0e6ce7f807f0f0",
+  "harness_commit": "e725037b10c304ffd27f94dcdf3483a70151812a",
+  "campaign_base_commit": "ec35eb7f48808e51562ff76a0c0e6ce7f807f0f0",
   "corpus": {
     "revision": "index-bench-corpus.v1",
     "content_digest": "sha256:e6d9f163e2971e2826045645f1cd71eb52b8919ea5156c169373aeeefa0ff4df"
@@ -47,7 +48,8 @@
         "payloads_reused": 56180
       },
       "exact_lookup": {
-        "cold_micros": 659,
+        "first_reader_micros": 659,
+        "first_reader_cache_state": "same_process_after_artifact_write",
         "warm_p95_micros": 382
       }
     },
@@ -96,7 +98,8 @@
         "payloads_reused": 64607
       },
       "exact_lookup": {
-        "cold_micros": 749,
+        "first_reader_micros": 749,
+        "first_reader_cache_state": "same_process_after_artifact_write",
         "warm_micros": [
           456,
           377,
