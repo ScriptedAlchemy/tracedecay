@@ -429,9 +429,7 @@ impl DaemonSessionSyncService {
         let task_key = key.clone();
         let task_cancellation = request.cancellation().clone();
         let task = tokio::spawn(async move {
-            service
-                .run_operation(context, project_sessions, key.clone(), request)
-                .await;
+            Box::pin(service.run_operation(context, project_sessions, key.clone(), request)).await;
             service
                 .active
                 .lock()
