@@ -1045,7 +1045,8 @@ impl ProjectOpenInputs<'_> {
                     Arc::clone(&core.ports.code_index.graph_projection_read_port),
                     self.canonical_project_path,
                     &core.project_id,
-                )?,
+                )
+                .await?,
             )
         };
         // Publish the graph/search/diagnostic core before session admission.
@@ -1427,7 +1428,8 @@ impl ProjectOpenInputs<'_> {
                     Arc::clone(&core.ports.code_index.graph_projection_read_port),
                     self.canonical_project_path,
                     &core.project_id,
-                )?,
+                )
+                .await?,
             )
         };
         self.log_phase("source_edit_preview_ready", None, full_setup_started);

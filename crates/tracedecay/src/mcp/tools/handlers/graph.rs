@@ -406,8 +406,9 @@ where
             }
             if (scope_prefix.is_some()
                 || dependency_hints::should_check_external_import_hint(result_count, limit))
-                && let Some(hint) =
-                    graph_evidence.external_import_hint(ctx, query, limit, scope_prefix)
+                && let Some(hint) = graph_evidence
+                    .external_import_hint(ctx, query, limit, scope_prefix)
+                    .await
             {
                 output["external_import_hint"] = hint;
             }
