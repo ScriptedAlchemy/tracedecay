@@ -29,8 +29,6 @@
 //! stays coherent per stream. Unifying them is safe only once both streams
 //! share one sequence.
 
-#[cfg(test)]
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_contracts::now_micros;
@@ -63,21 +61,6 @@ const CONFIGURATION_REVISION: &str = "registered-project-session.v1";
 const ANALYTICS_POLICY_REVISION: &str = "adoption-analytics.v1";
 #[cfg(test)]
 const ANALYTICS_CONSENT_PRODUCER_REVISION_V1: &str = "analytics-consent-observer.v1";
-
-/// One process-wide identity for this producer lane, distinct from
-/// [`super::emit`]'s so the two totally ordered streams never interleave
-/// sequence numbers under a shared boot id.
-#[cfg(test)]
-fn boot_id() -> &'static str {
-    static BOOT: OnceLock<String> = OnceLock::new();
-    BOOT.get_or_init(|| {
-        format!(
-            "retrieval-observability-{}-{}",
-            std::process::id(),
-            now_micros().0
-        )
-    })
-}
 
 fn next_sequence() -> u64 {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
