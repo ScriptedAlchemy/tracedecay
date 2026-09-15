@@ -382,6 +382,15 @@ pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     )
 }
 
+pub(super) fn def_redundancy(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_redundancy",
+        "Repository Shared Implementations",
+        "Report token-verified exact and rename-normalized implementation families in one authorized repository. Results are ranked by reviewable source bytes and carry bounded family and member coverage.",
+        input_schema,
+    )
+}
+
 pub(super) fn def_type_hierarchy() -> ToolDefinition {
     def(
         "tracedecay_type_hierarchy",

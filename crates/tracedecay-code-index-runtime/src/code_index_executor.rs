@@ -1457,6 +1457,157 @@ where
     })
 }
 
+pub fn code_index_redundancy_executor<A, S>(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    project_id: tracedecay_domain::ProjectId,
+    admission_provider: A,
+    scope_resolver: S,
+) -> code_search::CodeIndexRedundancyExecutor
+where
+    A: CodeIndexMcpReadAdmissionV1,
+    S: CodeIndexScopeResolverV1,
+{
+    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
+        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
+    ));
+    Arc::new(move |request| {
+        let schedulers = schedulers.clone();
+        let project_id = project_id.clone();
+        let admission_provider = admission_provider.clone();
+        let scope_resolver = scope_resolver.clone();
+        let execution_admission = Arc::clone(&execution_admission);
+        Box::pin(async move {
+            let unavailable = |reason| Err(reason);
+            if request.family_limit == 0
+                || request.family_limit
+                    > tracedecay_contracts::retrieval::MAX_REDUNDANCY_FAMILIES_V1 as usize
+                || request.member_limit < 2
+                || request.member_limit
+                    > tracedecay_query::retrieval::lexical::MAX_CLONE_EXACT_PAGE_MEMBERS_V1
+                || request.work_limit < 3
+                || request.work_limit
+                    > tracedecay_contracts::retrieval::MAX_REDUNDANCY_WORK_V1 as usize
+                || request.match_classes.is_empty()
+                || request.path.as_deref().is_some_and(|path| {
+                    tracedecay_domain::validate_code_logical_path(path).is_err()
+                })
+            {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                );
+            }
+            let scope = match scope_resolver
+                .resolved_scope_for_project(&request.project_root, &project_id)
+            {
+                Ok(scope) => scope,
+                Err(crate::mcp_admission::CodeIndexScopeUnavailableV1) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    );
+                }
+            };
+            if request.project_id != scope.project_id
+                || request.repository_id != scope.repository_id
+            {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                );
+            }
+            if schedulers.automatic_admission_for_scope(&scope)
+                == Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
+            {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled,
+                );
+            }
+            let admission = match admission_provider.admit_current(&scope) {
+                Ok(admission) => admission,
+                Err(_) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    );
+                }
+            };
+            if admission
+                .authorize(&scope, request.authority.as_ref())
+                .is_err()
+            {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                );
+            }
+            let control = Arc::new(McpRetrievalExecutionControlV1 {
+                started: std::time::Instant::now(),
+                admission_provider,
+                deadline: request.deadline.clone(),
+                cancellation: request.cancellation.clone(),
+            });
+            if let Some(reason) = control.request_termination() {
+                return unavailable(reason);
+            }
+            let permit = match execution_admission.try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                    );
+                }
+            };
+            let Some((generation, _)) = schedulers
+                .latest_text_serving_freshness_for_scope(&scope)
+                .await
+            else {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                );
+            };
+            match generation.finish_query_owner_warmup_for_request(control.as_ref()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                    );
+                }
+                Err(_) => {
+                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
+                }
+            }
+            match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                    );
+                }
+                Err(_) => {
+                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
+                }
+            }
+            let owners = match generation.production_query_owners_with_budget(
+                &code_index_scheduler::queries::maximum_retrieval_budget(),
+            ) {
+                Ok(owners) => owners,
+                Err(_) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                    );
+                }
+            };
+            let read = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                owners.redundancy(&request, control.as_ref())
+            })
+            .await;
+            match read {
+                Ok(Ok(outcome)) => Ok(outcome),
+                Ok(Err(_)) | Err(_) => {
+                    unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
+                }
+            }
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

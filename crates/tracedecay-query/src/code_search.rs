@@ -437,6 +437,38 @@ pub type CodeIndexSimilarFuture = std::pin::Pin<
 pub type CodeIndexSimilarExecutor =
     Arc<dyn Fn(CodeIndexSimilarRequestV1) -> CodeIndexSimilarFuture + Send + Sync + 'static>;
 
+#[derive(Clone, Debug)]
+pub struct CodeIndexRedundancyQueryV1 {
+    pub project_root: PathBuf,
+    pub project_id: tracedecay_domain::ProjectId,
+    pub repository_id: tracedecay_domain::RepositoryId,
+    pub match_classes: Vec<tracedecay_code_index::clones::CloneNormalizationClassV1>,
+    pub path: Option<String>,
+    pub include_generated_paths: bool,
+    pub family_limit: usize,
+    pub member_limit: usize,
+    pub work_limit: usize,
+    pub cursor: Option<String>,
+    pub authority: Option<CodeIndexSearchAuthorityV1>,
+    pub deadline: Option<tracedecay_contracts::Deadline>,
+    pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
+}
+
+pub type CodeIndexRedundancyFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<
+                    tracedecay_contracts::retrieval::RedundancyResultV1,
+                    CodeIndexSearchUnavailableReasonV1,
+                >,
+            > + Send
+            + 'static,
+    >,
+>;
+
+pub type CodeIndexRedundancyExecutor =
+    Arc<dyn Fn(CodeIndexRedundancyQueryV1) -> CodeIndexRedundancyFuture + Send + Sync + 'static>;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct CodeIndexBranchSymbolV1 {
     pub symbol_identity: tracedecay_domain::SymbolIdentityDigest,

@@ -413,6 +413,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_circular(),
         def_hotspots(),
         def_similar(request_schema("similar")?),
+        def_redundancy(request_schema("redundancy")?),
         def_rename_preview(request_schema("rename_preview")?),
         def_unmounted_files(),
         def_rank(),

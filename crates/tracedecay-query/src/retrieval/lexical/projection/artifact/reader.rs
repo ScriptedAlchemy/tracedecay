@@ -1,3 +1,7 @@
+mod family_report;
+
+pub use family_report::{CloneExactFamilyArtifactCandidateV1, CloneExactFamilyArtifactPageV1};
+
 #[cfg(test)]
 use std::cell::Cell;
 use std::cmp::Reverse;

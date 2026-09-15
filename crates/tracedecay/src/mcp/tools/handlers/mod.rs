@@ -303,6 +303,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_reconcile_sink: Option<crate::mcp::server::CodeIndexReconcileSink>,
     pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
     pub(crate) code_index_similar_executor: Option<crate::mcp::server::CodeIndexSimilarExecutor>,
+    pub(crate) code_index_redundancy_executor:
+        Option<crate::mcp::server::CodeIndexRedundancyExecutor>,
     pub(crate) code_index_branch_diff_executor:
         Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
@@ -374,6 +376,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_reconcile_sink: None,
             code_index_search_executor: None,
             code_index_similar_executor: None,
+            code_index_redundancy_executor: None,
             code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             admitted_project_scope: None,

@@ -7,7 +7,8 @@ use tracedecay_domain::errors::Result;
 use super::{
     handle_by_qualified_name, handle_callees, handle_callers, handle_callers_for, handle_context,
     handle_derives, handle_find_exact_symbol, handle_impact, handle_implementations, handle_impls,
-    handle_node, handle_rename_preview, handle_search, handle_signature, handle_similar,
+    handle_node, handle_redundancy, handle_rename_preview, handle_search, handle_signature,
+    handle_similar,
 };
 use crate::ToolResult;
 use crate::handlers::ast_grep::handle_ast_grep_search;
@@ -73,6 +74,7 @@ pub async fn dispatch_tool(
         "tracedecay_impact" => handle_impact(&open(read("impact")?).await?, args).await,
         "tracedecay_node" => handle_node(&open(read("node")?).await?, args).await,
         "tracedecay_similar" => handle_similar(ctx, args).await,
+        "tracedecay_redundancy" => handle_redundancy(ctx, args).await,
         "tracedecay_rename_preview" => {
             handle_rename_preview(ctx, &open(read("rename_preview")?).await?, args).await
         }

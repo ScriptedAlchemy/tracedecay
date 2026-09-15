@@ -616,16 +616,14 @@ fn admitted_tool_context<'a>(
         scope.and(options.code_index_search_authority.as_ref()),
         options.code_index_search_executor.as_ref(),
         options.code_index_similar_executor.as_ref(),
+        options.code_index_redundancy_executor.as_ref(),
         options.code_index_branch_diff_executor.as_ref(),
     ) {
-        (Some(authority), search, similar, branch_diff) => Some(AdmittedCodeIndex::new(
-            authority,
-            search,
-            similar,
-            branch_diff,
-        )?),
-        (None, None, None, None) => None,
-        (None, _, _, _) => {
+        (Some(authority), search, similar, redundancy, branch_diff) => Some(
+            AdmittedCodeIndex::new(authority, search, similar, redundancy, branch_diff)?,
+        ),
+        (None, None, None, None, None) => None,
+        (None, _, _, _, _) => {
             return Err(TraceDecayError::project_route(
                 "mcp_tool_binding_code_index_without_authority",
                 false,
