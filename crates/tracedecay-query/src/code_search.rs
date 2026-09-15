@@ -413,7 +413,7 @@ pub struct CodeIndexSimilarCompletedV1 {
 
 #[derive(Clone, Debug)]
 pub enum CodeIndexSimilarOutcomeV1 {
-    Complete(CodeIndexSimilarCompletedV1),
+    Complete(Box<CodeIndexSimilarCompletedV1>),
     NotFound,
     Unavailable(CodeIndexSearchUnavailableReasonV1),
 }

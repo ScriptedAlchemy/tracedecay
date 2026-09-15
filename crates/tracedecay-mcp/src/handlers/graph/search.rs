@@ -1126,7 +1126,7 @@ pub async fn handle_similar(
     })
     .await
     {
-        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Complete(similar) => similar,
+        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Complete(similar) => *similar,
         tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::NotFound => {
             return Err(TraceDecayError::ProjectRoute {
                 reason_code: "similar-source-not-found".to_owned(),
