@@ -141,3 +141,21 @@ hauler exec -- cargo run --release -p tracedecay-query \
   --clone-envelope --corpus benchmark_data/index-bench/corpus/java \
   --replicas 50 --format-revision 16
 ```
+
+### Receipts
+
+`clone-envelope-20260915.json` is the first envelope receipt. Its 101,154-symbol
+sample failed the 60 s clone-work target (+68.8 s of artifact ingest over the
+revision-14 control). Hotpath put the wait in `query.artifact.batch.sqlite`:
+`clone_fingerprint_postings` was filled row by row in document order into its
+hash-keyed tree, so every batch commit rewrote and journaled leaves across the
+whole tree (27× write amplification on the fingerprint table alone).
+
+`clone-envelope-20260915-fingerprint-staging.json` re-measures the same corpus
+after revision 16 started staging fingerprint postings in arrival order and
+sorting them into the keyed tree once at finalization. It names its own host
+and harness commit, records process write volume, and flags the 23-replica
+samples as swap-assisted because that host has less memory than the run's peak
+RSS. The one-body refresh target still fails there; the receipt attributes the
+wall to the generation-wide `code_index.build.assemble` pass, which costs the
+same without clone tables.
