@@ -52,10 +52,11 @@ use tracedecay_query::retrieval::exact::{
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneFingerprintCancellationPointV1,
-    CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
-    CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneArtifactCursorPositionV1,
+    CloneFingerprintCancellationPointV1, CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1,
+    CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
@@ -2222,6 +2223,69 @@ fn fingerprint_candidate_and_posting_budgets_report_partial_coverage() {
     );
     assert_eq!(posting_page.accounting.posting_rows_examined, 16_384);
     assert_eq!(posting_page.accounting.hot_postings_skipped, 0);
+}
+
+#[test]
+fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
+    let shared = (0..1_500)
+        .map(|ordinal| format!("shared_step_{ordinal}(); "))
+        .collect::<String>();
+    let fixture = real_lexical_source_fixture_from_sources(
+        (0..4)
+            .map(|ordinal| {
+                (
+                    format!("file.clone.cursor.{ordinal}"),
+                    format!("src/cursor-{ordinal}.ts"),
+                    format!(
+                        "export function cursor_{ordinal}() {{ {shared} unique_{ordinal}(); }}"
+                    )
+                    .into_bytes(),
+                )
+            })
+            .collect(),
+    );
+    let (_directory, pages, reader) = build_clone_artifact(&fixture);
+    let source = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .find(|body| body.occurrence.path == "src/cursor-0.ts")
+        .expect("cursor source body");
+    let read = reader
+        .clone_fingerprint_page(
+            &source.occurrence,
+            &source.payload,
+            None,
+            256,
+            &ArtifactControl { cancelled: false },
+        )
+        .expect("bounded fingerprint read");
+
+    assert!(
+        read.partial_reasons
+            .contains(&CloneFingerprintPartialReasonV1::VerificationWorkBudget),
+        "fixture must exhaust alignment work: {read:#?}"
+    );
+    let last_completed = read
+        .page
+        .members
+        .last()
+        .expect("at least one completed candidate");
+    let cursor = read.page.next_cursor.expect("partial read cursor");
+    let CloneArtifactCursorPositionV1::Fingerprint {
+        body_digest,
+        payload_digest,
+    } = cursor.after
+    else {
+        panic!("fingerprint read emitted an exact cursor");
+    };
+    assert_eq!(
+        (&body_digest, &payload_digest),
+        (
+            &last_completed.payload.body_digest,
+            &last_completed.payload.payload_digest,
+        ),
+        "the unfinished candidate must remain behind the continuation cursor"
+    );
 }
 
 #[test]
