@@ -2878,12 +2878,16 @@ impl CodeIndexPublishedGenerationV1 {
                         .find(|(candidate, _)| candidate == language)
                         .map(|(_, revision)| revision)?;
                     (prior_extractor_revision == current_extractor_revision).then_some(())?;
-                    if !file.artifacts.symbols.iter().all(|symbol| {
-                        prior_descriptor
-                            .symbol_identities
-                            .binary_search(&symbol.identity)
-                            .is_ok()
-                    }) {
+                    let mut current_identities = file
+                        .artifacts
+                        .symbols
+                        .iter()
+                        .map(|symbol| symbol.identity.clone())
+                        .collect::<Vec<_>>();
+                    current_identities.sort();
+                    current_identities.dedup();
+                    if current_identities.as_slice() != prior_descriptor.symbol_identities.as_slice()
+                    {
                         return None;
                     }
                     let mut descriptor = (*prior_descriptor).clone();
