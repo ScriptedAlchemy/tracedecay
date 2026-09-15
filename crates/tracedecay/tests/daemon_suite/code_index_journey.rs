@@ -18,6 +18,30 @@ use crate::common::{DaemonProcess, tracedecay_command_with_home};
 
 pub const RECEIPT_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Lanes a terminal receipt still waits for.
+///
+/// Every lane must answer from the current complete generation. The lexical
+/// lane may do so `partial` with the typed reason `candidate_sources_pruned`:
+/// the query's identifier split produced a term whose document frequency
+/// exceeds the lexical candidate budget (`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`),
+/// so recall for that route is policy-bounded, not missing. A journey whose
+/// probe symbol shares its identifier parts with the whole fixture batch
+/// (`cancellation_probe_NNNN_MMM`) trips that policy by construction. Only
+/// the current-generation form is terminal: `generation` names an older
+/// generation whenever the request fell back to one, and that stays warming.
+fn lanes_short_of_terminal(search: &Value) -> Vec<&'static str> {
+    crate::common::incomplete_code_index_query_lanes(search)
+        .into_iter()
+        .filter(|lane| {
+            let coverage = &search["coverage"][*lane];
+            !(*lane == "lexical"
+                && coverage["status"] == "partial"
+                && coverage["reason"] == "candidate_sources_pruned"
+                && coverage["generation"].is_null())
+        })
+        .collect()
+}
+
 pub fn daemon_log_for_failure() -> String {
     let Some(path) = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG") else {
         return "daemon log path unavailable".to_owned();
@@ -416,7 +440,7 @@ pub async fn wait_for_terminal_generation(
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             }
-            let incomplete = crate::common::incomplete_code_index_query_lanes(&last_search);
+            let incomplete = lanes_short_of_terminal(&last_search);
             if !incomplete.is_empty() {
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
@@ -440,7 +464,7 @@ pub async fn wait_for_terminal_generation(
     .unwrap_or_else(|_| {
         panic!(
             "timed out waiting for terminal generation for {query}; incomplete lanes={:?}; status={last_status}; search={last_search}; daemon_log={}",
-            crate::common::incomplete_code_index_query_lanes(&last_search),
+            lanes_short_of_terminal(&last_search),
             daemon_log_for_failure()
         )
     })
