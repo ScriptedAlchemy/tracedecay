@@ -540,12 +540,7 @@ pub(super) fn read_clone_fingerprint_page(
     let candidates = candidates
         .into_iter()
         .filter(|(_, candidate)| !candidate.anchors.is_empty())
-        .filter(|((body_digest, payload_digest), _)| {
-            after.as_ref().is_none_or(|after| {
-                (body_digest.as_str(), payload_digest.as_str())
-                    > (after.0.as_str(), after.1.as_str())
-            })
-        })
+        .filter(|(key, _)| after.as_ref().is_none_or(|after| key > after))
         .collect::<Vec<_>>();
     let candidate_count = candidates.len();
     let mut members = Vec::new();
