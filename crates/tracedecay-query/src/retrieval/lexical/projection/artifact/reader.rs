@@ -19,8 +19,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::clones::{
-    CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneNormalizationClassV1,
-    CloneSelectedBlockV1, CodeIndexCloneBodyV1,
+    CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
+    CodeIndexCloneBodyV1,
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
@@ -144,26 +144,18 @@ pub(super) enum CloneArtifactCursorPositionV1 {
         body_digest: ManifestDigest,
         payload_digest: ManifestDigest,
     },
-    Family {
-        reviewable_source_bytes: u64,
-        member_count: usize,
-        class: CloneNormalizationClassV1,
-        normalization_revision: u16,
-        digest: ManifestDigest,
-    },
 }
 
 impl CloneArtifactCursorV1 {
     /// Digests identifying the last completed fingerprint candidate when this
-    /// cursor continues a near-clone page; `None` for exact or family cursors.
+    /// cursor continues a near-clone page; `None` for exact-posting cursors.
     pub fn fingerprint_continuation_digests(&self) -> Option<(&ManifestDigest, &ManifestDigest)> {
         match &self.after {
             CloneArtifactCursorPositionV1::Fingerprint {
                 body_digest,
                 payload_digest,
             } => Some((body_digest, payload_digest)),
-            CloneArtifactCursorPositionV1::Exact(_)
-            | CloneArtifactCursorPositionV1::Family { .. } => None,
+            CloneArtifactCursorPositionV1::Exact(_) => None,
         }
     }
 
