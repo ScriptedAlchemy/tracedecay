@@ -2032,8 +2032,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = self
                 .cache
-                .lock_state()
-                .expect("decoded cache lock before poison");
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             panic!("poison decoded-generation cache");
         }));
     }
