@@ -1255,6 +1255,7 @@ fn sweep_unreferenced_generation_segments(
 
     let mut found = false;
     let mut reclaimed = 0_u64;
+    let mut reclaimed_segments = 0_usize;
     for entry in entries {
         if observe_cancel(is_cancelled) {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -1287,6 +1288,10 @@ fn sweep_unreferenced_generation_segments(
         }
         std::fs::remove_file(&path).map_err(storage)?;
         reclaimed = reclaimed.saturating_add(metadata.len());
+        reclaimed_segments += 1;
+        if reclaimed_segments == MAX_CODE_GENERATION_RETENTION_BATCH_V1 {
+            break;
+        }
     }
     if reclaimed > 0 {
         sync_directory(&segments_root)?;
