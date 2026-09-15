@@ -1374,6 +1374,11 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
             format!("export function beta() {{ {body} }}\n").into_bytes(),
         ),
         (
+            "file.clone.delta".to_owned(),
+            "src/delta.ts".to_owned(),
+            format!("export function delta() {{ {body} }}\n").into_bytes(),
+        ),
+        (
             "file.clone.gamma".to_owned(),
             "src/gamma.ts".to_owned(),
             b"export function gamma() { return 1; }\n".to_vec(),
@@ -1384,7 +1389,7 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         .iter()
         .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
         .collect::<Vec<_>>();
-    assert_eq!(clone_bodies.len(), 3);
+    assert_eq!(clone_bodies.len(), 4);
     let excluded = clone_bodies
         .iter()
         .find(|body| body.payload.token_count < 30)
@@ -1568,7 +1573,7 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
             .query_row("SELECT COUNT(*) FROM clone_occurrences", [], |row| row
                 .get::<_, i64>(0))
             .expect("occurrence count"),
-        3
+        4
     );
     let (fingerprint_rows, counted_rows): (i64, i64) = connection
         .query_row(
@@ -1621,7 +1626,7 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
     assert_eq!(fingerprints.accounting.candidates_admitted, 1);
     assert_eq!(fingerprints.accounting.pairs_verified, 1);
     assert!(!fingerprints.page.members[0].ordered_anchors.is_empty());
-    assert_eq!(fingerprints.page.members[0].occurrences.len(), 1);
+    assert_eq!(fingerprints.page.members[0].occurrences.len(), 2);
     let cancelled = reader
         .clone_fingerprint_page(
             &authority,
@@ -1759,7 +1764,7 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
             .expect("query after deletion")
             .members
             .len(),
-        1,
+        0,
         "deleted occurrences and postings must not remain active"
     );
     drop(reader);
