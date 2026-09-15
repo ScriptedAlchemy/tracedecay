@@ -2203,6 +2203,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_generation_changed,
             serving_generation_installation,
             graph_activation,
+            graph_cursor_retention: Arc::default(),
             ignored_dependency_admissions,
             hints,
             wake: Arc::clone(&wake),
