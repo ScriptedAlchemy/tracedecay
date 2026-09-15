@@ -15,6 +15,7 @@ use tracedecay_runtime_core::git_repository::{
     GitHistoryBudget, GitHistoryOptions, GitHistoryTermination, GitRepositoryAuthority,
     GitRepositoryError,
 };
+use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 struct Fixture {
     directory: TempDir,
@@ -58,8 +59,8 @@ impl Fixture {
                 "-c",
                 "core.longpaths=true",
             ])
-            .args(args)
-            .current_dir(self.path())
+            .args(plain_git_args(args))
+            .current_dir(plain_host_path(self.path()))
             .output()
             .expect("git executable");
         assert!(
@@ -80,7 +81,7 @@ impl Fixture {
         let mut child = Command::new("git")
             .arg("fast-import")
             .arg("--quiet")
-            .current_dir(self.path())
+            .current_dir(plain_host_path(self.path()))
             .stdin(Stdio::piped())
             .spawn()
             .expect("git fast-import");
@@ -629,20 +630,22 @@ fn authority_reports_shallow_history_as_truncated_evidence() {
     // `excludesFile` value.
     let clone_source_url = format!(
         "file:///{}",
-        tracedecay_runtime_core::path_safety::plain_host_path(source.path())
+        plain_host_path(source.path())
             .to_string_lossy()
             .replace('\\', "/")
             .trim_start_matches('/')
     );
+    let clone_dest = plain_host_path(shallow.path());
+    let clone_dest_arg = clone_dest.to_str().unwrap();
     let output = Command::new("git")
-        .args([
+        .args(plain_git_args(&[
             "clone",
             "--quiet",
             "--depth",
             "1",
             &clone_source_url,
-            shallow.path().to_str().unwrap(),
-        ])
+            clone_dest_arg,
+        ]))
         .output()
         .unwrap();
     assert!(
