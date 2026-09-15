@@ -1336,9 +1336,14 @@ where
         let execution_admission = Arc::clone(&execution_admission);
         Box::pin(async move {
             let unavailable = |reason| code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason);
-            if request.limit == 0
-                || request.limit
-                    > tracedecay_query::retrieval::lexical::MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1
+            if request.result_limit == 0
+                || request.result_limit
+                    > tracedecay_query::retrieval::lexical::MAX_CLONE_EXACT_PAGE_MEMBERS_V1
+                || request.work_limit < 2
+                || request.work_limit
+                    > tracedecay_query::retrieval::lexical::MAX_CLONE_EXACT_PAGE_MEMBERS_V1 + 1
+                || request.match_classes.is_empty()
+                || (request.cursor.is_some() && request.match_classes.len() != 1)
             {
                 return unavailable(
                     code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
@@ -1380,8 +1385,8 @@ where
             let control = Arc::new(McpRetrievalExecutionControlV1 {
                 started: std::time::Instant::now(),
                 admission_provider,
-                deadline: request.deadline,
-                cancellation: request.cancellation,
+                deadline: request.deadline.clone(),
+                cancellation: request.cancellation.clone(),
             });
             if let Some(reason) = control.request_termination() {
                 return unavailable(reason);
@@ -1402,11 +1407,6 @@ where
                     code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                 );
             };
-            if generation.metadata().manifest().generation_id.as_str() != request.code_generation {
-                return unavailable(
-                    code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-                );
-            }
             match generation.finish_query_owner_warmup_for_request(control.as_ref()) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -1439,11 +1439,9 @@ where
                     );
                 }
             };
-            let symbol = request.symbol_occurrence_id;
-            let limit = request.limit;
             let read = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                owners.similar(&symbol, limit, control.as_ref())
+                owners.similar(&request, control.as_ref())
             })
             .await;
             match read {

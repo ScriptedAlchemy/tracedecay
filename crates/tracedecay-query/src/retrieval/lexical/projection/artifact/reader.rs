@@ -23,8 +23,8 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1,
     FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, SymbolOccurrenceId,
-    canonical_sha256,
+    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, SourceSpan,
+    SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_private_fs::open_private_file;
 
@@ -125,12 +125,21 @@ pub struct CloneExactArtifactMemberV1 {
 
 pub const MAX_CLONE_EXACT_PAGE_MEMBERS_V1: usize = 1_000;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct CloneArtifactCursorV1 {
     pub(super) artifact_digest: ManifestDigest,
     pub(super) generation: CodeGenerationId,
     pub(super) request_digest: ManifestDigest,
     pub(super) after: CloneArtifactCursorPositionV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(super) enum CloneArtifactCursorPositionV1 {
+    Exact(SymbolOccurrenceId),
+    Fingerprint {
+        body_digest: ManifestDigest,
+        payload_digest: ManifestDigest,
+    },
 }
 
 impl CloneArtifactCursorV1 {
@@ -145,15 +154,19 @@ impl CloneArtifactCursorV1 {
             CloneArtifactCursorPositionV1::Exact(_) => None,
         }
     }
-}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum CloneArtifactCursorPositionV1 {
-    Exact(SymbolOccurrenceId),
-    Fingerprint {
-        body_digest: ManifestDigest,
-        payload_digest: ManifestDigest,
-    },
+    pub fn encode(&self) -> Result<String, CodeLexicalArtifactErrorV1> {
+        serde_json::to_vec(self)
+            .map(hex::encode)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
+    }
+
+    pub fn decode(encoded: &str) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let bytes = hex::decode(encoded)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -688,8 +701,8 @@ impl CodeLexicalArtifactReaderV1 {
                  LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id \
                  LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest \
                  WHERE posting.class = ?1 AND posting.normalization_revision = ?2 AND posting.digest = ?3 \
-                 AND posting.symbol_occurrence_id > ?4 \
-                 ORDER BY posting.symbol_occurrence_id LIMIT ?5",
+                 AND posting.symbol_occurrence_id != ?4 AND posting.symbol_occurrence_id > ?5 \
+                 ORDER BY posting.symbol_occurrence_id LIMIT ?6",
             )
             .map_err(sqlite_error)?;
         let mut rows = statement
@@ -697,6 +710,7 @@ impl CodeLexicalArtifactReaderV1 {
                 i64::from(key.class as u8),
                 i64::from(key.normalization_revision),
                 key.digest.as_str(),
+                authority.symbol_occurrence_id.as_str(),
                 after,
                 i64::try_from(fetch)
                     .map_err(|error| { CodeLexicalArtifactErrorV1::Contract(error.to_string()) })?,
@@ -801,6 +815,79 @@ impl CodeLexicalArtifactReaderV1 {
         {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "clone body lookup failed canonical validation".to_owned(),
+            ));
+        }
+        Ok(Some(CodeIndexCloneBodyV1 {
+            payload,
+            occurrence,
+        }))
+    }
+
+    pub fn clone_body_by_source_range(
+        &self,
+        path: &str,
+        span: SourceSpan,
+    ) -> Result<Option<CodeIndexCloneBodyV1>, CodeLexicalArtifactErrorV1> {
+        if !self.layout.has_clone_index() {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "clone lookup requires lexical artifact revision 15".to_owned(),
+            ));
+        }
+        span.validate()
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let connection = self.lock_connection()?;
+        let row = connection
+            .query_row(
+                "SELECT occurrence.occurrence, payload.payload \
+                 FROM clone_occurrences AS occurrence \
+                 LEFT JOIN clone_body_payloads AS payload \
+                 ON payload.payload_digest = occurrence.payload_digest \
+                 WHERE occurrence.path = ?1 AND occurrence.body_start <= ?2 \
+                 AND occurrence.body_end >= ?3 \
+                 ORDER BY occurrence.body_end - occurrence.body_start, \
+                 occurrence.symbol_occurrence_id \
+                 LIMIT 1",
+                rusqlite::params![
+                    path,
+                    i64::try_from(span.start_byte).map_err(|error| {
+                        CodeLexicalArtifactErrorV1::Contract(error.to_string())
+                    })?,
+                    i64::try_from(span.end_byte).map_err(|error| {
+                        CodeLexicalArtifactErrorV1::Contract(error.to_string())
+                    })?,
+                ],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        let Some((occurrence, payload)) = row else {
+            return Ok(None);
+        };
+        let payload = payload.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "clone occurrence is missing its payload".to_owned(),
+            )
+        })?;
+        let occurrence: CloneBodyOccurrenceV1 =
+            serde_json::from_slice(&occurrence).map_err(|error| {
+                CodeLexicalArtifactErrorV1::Corrupt(format!(
+                    "clone occurrence is not canonical JSON: {error}"
+                ))
+            })?;
+        let payload: CloneBodyPayloadV1 = serde_json::from_slice(&payload).map_err(|error| {
+            CodeLexicalArtifactErrorV1::Corrupt(format!(
+                "clone body payload is not canonical JSON: {error}"
+            ))
+        })?;
+        self.validate_clone_lookup_authority(&occurrence)?;
+        if occurrence.path != path
+            || occurrence.body_span.start_byte > span.start_byte
+            || occurrence.body_span.end_byte < span.end_byte
+            || occurrence.payload_digest != payload.payload_digest
+            || payload.validate().is_err()
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "source range lookup disagrees with its clone occurrence".to_owned(),
             ));
         }
         Ok(Some(CodeIndexCloneBodyV1 {

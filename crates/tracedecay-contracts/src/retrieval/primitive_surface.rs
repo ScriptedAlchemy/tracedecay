@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::ComplexityAnalysisV1;
+use tracedecay_domain::{
+    CodeGenerationId, ComplexityAnalysisV1, ManifestDigest, ProjectId, RepositoryId, SourceSpan,
+    SymbolOccurrenceId, WorktreeId,
+};
 
 use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
@@ -124,10 +127,34 @@ pub struct NodeSurfaceRequestV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SimilarTargetV1 {
+    SymbolOccurrence {
+        symbol_occurrence_id: SymbolOccurrenceId,
+    },
+    SourceRange {
+        path: String,
+        span: SourceSpan,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimilarMatchClassV1 {
+    ConservativeExact,
+    RenameNormalizedExact,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimilarSurfaceRequestV1 {
-    pub symbol: String,
-    pub limit: Option<u32>,
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub target: SimilarTargetV1,
+    pub match_classes: Vec<SimilarMatchClassV1>,
+    pub result_limit: u32,
+    pub work_limit: u32,
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -394,46 +421,46 @@ pub enum NodeResultV1 {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SimilarSymbolV1 {
-    pub id: String,
-    pub name: String,
-    pub kind: String,
-    pub file: String,
-    pub line: u32,
-    pub signature: Option<String>,
-    pub utility_micros: u64,
+pub struct SimilarOccurrenceV1 {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: Option<WorktreeId>,
+    pub source_generation: CodeGenerationId,
+    pub snapshot_digest: ManifestDigest,
+    pub symbol_occurrence_id: SymbolOccurrenceId,
+    pub path: String,
+    pub body_span: SourceSpan,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SimilarExactGroupV1 {
-    pub class: String,
-    pub members: Vec<SimilarSymbolV1>,
+pub struct SimilarFamilyV1 {
+    pub match_class: SimilarMatchClassV1,
+    pub normalization_revision: u16,
+    pub family_digest: ManifestDigest,
+    pub representative_payload_digest: ManifestDigest,
+    pub member_count: usize,
+    pub members: Vec<SimilarOccurrenceV1>,
+    pub complete: bool,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SimilarAlignedDifferenceV1 {
-    pub left_token_count: usize,
-    pub right_token_count: usize,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SimilarNearPairV1 {
-    pub source: SimilarSymbolV1,
-    pub candidate: SimilarSymbolV1,
-    pub source_coverage_millionths: u32,
-    pub candidate_coverage_millionths: u32,
-    pub differences: Vec<SimilarAlignedDifferenceV1>,
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SimilarCoverageV1 {
+    Complete,
+    Partial,
+    ExcludedTooSmall { minimum_tokens: u32 },
+    ExcludedIncompleteTokenization,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimilarResultV1 {
-    pub source: SimilarSymbolV1,
-    pub exact_groups: Vec<SimilarExactGroupV1>,
-    pub near_pairs: Vec<SimilarNearPairV1>,
+    pub source: SimilarOccurrenceV1,
+    pub families: Vec<SimilarFamilyV1>,
+    pub source_generation: CodeGenerationId,
+    pub coverage: SimilarCoverageV1,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
