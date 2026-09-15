@@ -1273,9 +1273,17 @@ pub fn sum_positive(values: &[i32]) -> i32 {{
             pairs.iter().any(|pair| {
                 pair["source"]["name"] == "sum_alpha"
                     && pair["candidate"]["name"] == "sum_positive"
-                    && pair["source_coverage_millionths"].as_u64().unwrap_or_default() >= 700_000
-                    && pair["candidate_coverage_millionths"].as_u64().unwrap_or_default() >= 700_000
-                    && pair["differences"].as_array().is_some_and(|value| !value.is_empty())
+                    && pair["source_coverage_millionths"]
+                        .as_u64()
+                        .unwrap_or_default()
+                        >= 700_000
+                    && pair["candidate_coverage_millionths"]
+                        .as_u64()
+                        .unwrap_or_default()
+                        >= 700_000
+                    && pair["differences"]
+                        .as_array()
+                        .is_some_and(|value| !value.is_empty())
             })
         }),
         "near clones must be explicit non-transitive pair edges: {payload}"

@@ -541,8 +541,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         };
         let mut exact_groups = Vec::new();
         for key in source.payload.exact_keys(source.occurrence.eligibility) {
-            let members =
-                self.verified_exact_clone_members(&source, &key, limit, control)?;
+            let members = self.verified_exact_clone_members(&source, &key, limit, control)?;
             if !members.is_empty() {
                 exact_groups.push(
                     tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 { key, members },
@@ -578,13 +577,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         while members.len() < limit {
             let page = self
                 .hydration
-                .clone_exact_page(
-                    &source.occurrence,
-                    key,
-                    cursor.as_ref(),
-                    limit,
-                    control,
-                )
+                .clone_exact_page(&source.occurrence, key, cursor.as_ref(), limit, control)
                 .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
             for member in page.members {
                 if member.occurrence.symbol_occurrence_id == source.occurrence.symbol_occurrence_id
