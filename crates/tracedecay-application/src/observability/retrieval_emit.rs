@@ -29,19 +29,19 @@
 //! stays coherent per stream. Unifying them is safe only once both streams
 //! share one sequence.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_contracts::now_micros;
+#[cfg(test)]
+use tracedecay_domain::{
+    AnalyticsConsentChangedV1, AnalyticsModeV1, ContextOutcomeObservedV1, CoverageStateV1,
+};
 use tracedecay_domain::{
     ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
     ObservabilityTerminalResultV1, RetrievalPlannerObservedV1, RetrievalSourceObservedV1,
     RetrievalSynthesisObservedV1, RetrieverObservedV1,
-};
-#[cfg(test)]
-use tracedecay_domain::{
-    AnalyticsConsentChangedV1, AnalyticsModeV1, ContextOutcomeObservedV1, CoverageStateV1,
 };
 use tracedecay_query::retrieval::observation::{
     ObservedWithCoverageV1, RetrievalPipelineObservationV1,
