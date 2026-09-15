@@ -604,13 +604,7 @@ impl CodeLexicalArtifactReaderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CloneArtifactPageV1<CloneExactArtifactMemberV1>, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
-        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
-            || self.metadata.generation != authority.source_generation
-        {
-            return Err(CodeLexicalArtifactErrorV1::Missing(
-                "clone lookup authority is unavailable".to_owned(),
-            ));
-        }
+        self.validate_clone_lookup_authority(authority)?;
         if !self.layout.has_clone_index() {
             return Err(CodeLexicalArtifactErrorV1::Incompatible(
                 "clone lookup requires lexical artifact revision 15".to_owned(),
@@ -687,13 +681,7 @@ impl CodeLexicalArtifactReaderV1 {
         limit: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CloneFingerprintArtifactReadV1, CodeLexicalArtifactErrorV1> {
-        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
-            || self.metadata.generation != authority.source_generation
-        {
-            return Err(CodeLexicalArtifactErrorV1::Missing(
-                "clone lookup authority is unavailable".to_owned(),
-            ));
-        }
+        self.validate_clone_lookup_authority(authority)?;
         let authority_digest = clone_authority_digest(authority)?;
         let connection = self.lock_connection()?;
         read_clone_fingerprint_page(
@@ -709,6 +697,25 @@ impl CodeLexicalArtifactReaderV1 {
                 control,
             },
         )
+    }
+
+    fn validate_clone_lookup_authority(
+        &self,
+        authority: &CloneBodyOccurrenceV1,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id) {
+            return Err(CodeLexicalArtifactErrorV1::Missing(
+                "clone lookup repository authority is unavailable".to_owned(),
+            ));
+        }
+        if self.metadata.generation != authority.source_generation {
+            return Err(CodeLexicalArtifactErrorV1::Missing(format!(
+                "clone lookup generation {} is stale; the artifact serves {}",
+                authority.source_generation.as_str(),
+                self.metadata.generation.as_str()
+            )));
+        }
+        Ok(())
     }
 
     fn clone_exact_after<'a>(

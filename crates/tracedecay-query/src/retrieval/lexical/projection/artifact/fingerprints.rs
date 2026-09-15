@@ -3,9 +3,9 @@ use std::time::Instant;
 
 use rusqlite::{Connection, OptionalExtension};
 use tracedecay_code_index::clones::{
-    CLONE_FINGERPRINT_K_V1, CloneBodyEligibilityV1, CloneBodyOccurrenceV1, CloneBodyPayloadV1,
-    CloneBodyRenameStatusV1, CloneNormalizationClassV1, ConservativeCloneTokenV1,
-    verify_clone_token_anchor,
+    CLONE_FINGERPRINT_K_V1, CloneAlignedDifferenceV1, CloneAlignmentStopReasonV1,
+    CloneBodyEligibilityV1, CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneBodyRenameStatusV1,
+    CloneNormalizationClassV1, CloneTokenAnchorV1, align_clone_tokens, verify_clone_token_anchor,
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ManifestDigest, RetrieverCoverage, SymbolOccurrenceId, canonical_sha256};
@@ -18,6 +18,9 @@ use super::{CodeLexicalArtifactErrorV1, sqlite_error};
 pub const CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1: u64 = 16_384;
 pub const CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1: usize = 256;
 pub const CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1: u64 = 1_024;
+pub const CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1: u64 = 64;
+pub const CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1: u64 = 2_000_000;
+pub const CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1: u32 = 700_000;
 pub const MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,18 +31,24 @@ pub struct CloneFingerprintStreamDescriptorV1 {
     pub rename_tier_unavailable: Option<CloneBodyRenameStatusV1>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CloneFingerprintArtifactAnchorV1 {
-    pub fingerprint: u64,
-    pub source_token_position: u32,
-    pub candidate_token_position: u32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloneNearMatchExtentV1 {
+    WholeBody,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloneFingerprintArtifactCandidateV1 {
+pub struct CloneNearMatchArtifactV1 {
+    pub source: CloneBodyOccurrenceV1,
     pub payload: CloneBodyPayloadV1,
     pub occurrences: Vec<CloneBodyOccurrenceV1>,
-    pub anchors: Vec<CloneFingerprintArtifactAnchorV1>,
+    pub class: CloneNormalizationClassV1,
+    pub extent: CloneNearMatchExtentV1,
+    pub shared_fingerprints: Vec<u64>,
+    pub ordered_anchors: Vec<CloneTokenAnchorV1>,
+    pub shared_ordered_token_count: u32,
+    pub source_coverage_millionths: u32,
+    pub candidate_coverage_millionths: u32,
+    pub differences: Vec<CloneAlignedDifferenceV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,6 +56,8 @@ pub enum CloneFingerprintPartialReasonV1 {
     PostingRowBudget,
     CandidateBodyBudget,
     HotPostings,
+    VerificationBodyBudget,
+    VerificationWorkBudget,
     Cancelled,
     DeadlineExceeded,
 }
@@ -56,6 +67,7 @@ pub enum CloneFingerprintCancellationPointV1 {
     FingerprintCountRead,
     PostingRead,
     CandidateVerification,
+    CandidateAlignment,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -64,6 +76,7 @@ pub struct CloneFingerprintReadAccountingV1 {
     pub hot_postings_skipped: u64,
     pub hot_posting_rows_skipped: u64,
     pub candidates_admitted: u64,
+    pub candidate_bodies_compared: u64,
     pub pairs_verified: u64,
     pub token_work: u64,
     pub elapsed_micros: u64,
@@ -72,9 +85,10 @@ pub struct CloneFingerprintReadAccountingV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloneFingerprintArtifactReadV1 {
-    pub page: CloneArtifactPageV1<CloneFingerprintArtifactCandidateV1>,
+    pub page: CloneArtifactPageV1<CloneNearMatchArtifactV1>,
     pub stream: Option<CloneFingerprintStreamDescriptorV1>,
     pub source_eligibility: CloneBodyEligibilityV1,
+    pub minimum_directional_coverage_millionths: u32,
     pub coverage: RetrieverCoverage,
     pub partial_reasons: Vec<CloneFingerprintPartialReasonV1>,
     pub accounting: CloneFingerprintReadAccountingV1,
@@ -83,7 +97,7 @@ pub struct CloneFingerprintArtifactReadV1 {
 struct CandidateAccumulatorV1 {
     payload: CloneBodyPayloadV1,
     occurrences: BTreeMap<SymbolOccurrenceId, CloneBodyOccurrenceV1>,
-    anchors: BTreeSet<CloneFingerprintArtifactAnchorV1>,
+    anchors: BTreeSet<CloneTokenAnchorV1>,
     selected_positions: BTreeSet<(u64, u32)>,
 }
 
@@ -140,6 +154,8 @@ pub(super) fn read_clone_fingerprint_page(
             },
             stream: None,
             source_eligibility: authority.eligibility,
+            minimum_directional_coverage_millionths:
+                CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1,
             coverage: RetrieverCoverage {
                 examined: 1,
                 excluded: 1,
@@ -208,10 +224,7 @@ pub(super) fn read_clone_fingerprint_page(
             .or_default()
             .push(position.token_position);
     }
-    let mut accounting = CloneFingerprintReadAccountingV1 {
-        token_work: u64::try_from(stream.tokens.len()).map_err(contract_number)?,
-        ..CloneFingerprintReadAccountingV1::default()
-    };
+    let mut accounting = CloneFingerprintReadAccountingV1::default();
     let mut partial_reasons = BTreeSet::new();
     let mut ordered_lists = Vec::with_capacity(positions_by_fingerprint.len());
     let mut count_statement = connection
@@ -376,9 +389,6 @@ pub(super) fn read_clone_fingerprint_page(
                     .map(|position| (position.fingerprint, position.token_position))
                     .collect();
                 accounting.candidates_admitted = accounting.candidates_admitted.saturating_add(1);
-                accounting.token_work = accounting.token_work.saturating_add(
-                    u64::try_from(candidate_stream.tokens.len()).map_err(contract_number)?,
-                );
                 candidates.insert(
                     key.clone(),
                     CandidateAccumulatorV1 {
@@ -416,9 +426,26 @@ pub(super) fn read_clone_fingerprint_page(
                     "clone fingerprint source position is unavailable".to_owned(),
                 )
             })?;
-            let candidate_tokens = fingerprint_tokens(&candidate.payload, descriptor.class)?;
+            let candidate_tokens = candidate
+                .payload
+                .fingerprint_stream(occurrence.eligibility)
+                .ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "clone fingerprint candidate lost its canonical token stream".to_owned(),
+                    )
+                })?
+                .tokens;
             let mut verified = None;
             for source_position in source_positions {
+                if accounting
+                    .token_work
+                    .saturating_add(CLONE_FINGERPRINT_K_V1 as u64)
+                    > CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1
+                {
+                    partial_reasons.insert(CloneFingerprintPartialReasonV1::VerificationWorkBudget);
+                    stop = true;
+                    break;
+                }
                 accounting.token_work = accounting.token_work.saturating_add(
                     u64::try_from(CLONE_FINGERPRINT_K_V1).map_err(contract_number)?,
                 );
@@ -428,18 +455,18 @@ pub(super) fn read_clone_fingerprint_page(
                     candidate_tokens,
                     candidate_position,
                 ) {
-                    verified = Some(CloneFingerprintArtifactAnchorV1 {
+                    verified = Some(CloneTokenAnchorV1 {
                         fingerprint,
-                        source_token_position: *source_position,
-                        candidate_token_position: candidate_position,
+                        left_token_position: *source_position,
+                        right_token_position: candidate_position,
                     });
                     break;
                 }
             }
+            if stop {
+                break;
+            }
             if let Some(anchor) = verified {
-                if candidate.anchors.is_empty() {
-                    accounting.pairs_verified = accounting.pairs_verified.saturating_add(1);
-                }
                 candidate.anchors.insert(anchor);
                 candidate
                     .occurrences
@@ -452,28 +479,119 @@ pub(super) fn read_clone_fingerprint_page(
         }
     }
 
-    let mut candidates = candidates
+    let candidates = candidates
         .into_iter()
         .filter(|(_, candidate)| !candidate.anchors.is_empty())
         .filter(|((body_digest, payload_digest), _)| {
             after.is_none_or(|after| (body_digest.as_str(), payload_digest.as_str()) > after)
         })
-        .map(|(_, candidate)| CloneFingerprintArtifactCandidateV1 {
-            payload: candidate.payload,
-            occurrences: candidate.occurrences.into_values().collect(),
-            anchors: candidate.anchors.into_iter().collect(),
-        })
         .collect::<Vec<_>>();
-    let has_more = candidates.len() > limit;
-    candidates.truncate(limit);
+    let candidate_count = candidates.len();
+    let mut members = Vec::new();
+    let mut last_compared = None;
+    let mut has_more = false;
+    for (ordinal, (key, candidate)) in candidates.into_iter().enumerate() {
+        if accounting.candidate_bodies_compared == CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1 {
+            partial_reasons.insert(CloneFingerprintPartialReasonV1::VerificationBodyBudget);
+            has_more = true;
+            break;
+        }
+        last_compared = Some(key.clone());
+        accounting.candidate_bodies_compared =
+            accounting.candidate_bodies_compared.saturating_add(1);
+        let candidate_tokens = candidate
+            .payload
+            .fingerprint_stream(
+                candidate
+                    .occurrences
+                    .values()
+                    .next()
+                    .ok_or_else(|| {
+                        CodeLexicalArtifactErrorV1::Corrupt(
+                            "clone fingerprint candidate has no verified occurrence".to_owned(),
+                        )
+                    })?
+                    .eligibility,
+            )
+            .ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "clone fingerprint candidate lost its canonical token stream".to_owned(),
+                )
+            })?
+            .tokens;
+        let remaining_work =
+            CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1.saturating_sub(accounting.token_work);
+        let alignment = align_clone_tokens(
+            stream.tokens,
+            candidate_tokens,
+            &candidate.anchors.iter().copied().collect::<Vec<_>>(),
+            remaining_work,
+            || control.is_cancelled() || control.is_deadline_exceeded(),
+        );
+        let alignment = match alignment {
+            Ok(alignment) => {
+                accounting.token_work = accounting.token_work.saturating_add(alignment.work);
+                alignment
+            }
+            Err(stopped) => {
+                accounting.token_work = accounting.token_work.saturating_add(stopped.work);
+                match stopped.reason {
+                    CloneAlignmentStopReasonV1::WorkBudgetExhausted => {
+                        partial_reasons
+                            .insert(CloneFingerprintPartialReasonV1::VerificationWorkBudget);
+                    }
+                    CloneAlignmentStopReasonV1::Interrupted => {
+                        interrupt(
+                            control,
+                            CloneFingerprintCancellationPointV1::CandidateAlignment,
+                            &mut accounting,
+                            &mut partial_reasons,
+                        );
+                    }
+                }
+                has_more = ordinal.saturating_add(1) < candidate_count;
+                break;
+            }
+        };
+        if alignment.left_coverage_millionths >= CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1
+            && alignment.right_coverage_millionths
+                >= CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1
+        {
+            accounting.pairs_verified = accounting.pairs_verified.saturating_add(1);
+            let shared_fingerprints = alignment
+                .ordered_anchors
+                .iter()
+                .map(|anchor| anchor.fingerprint)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            members.push(CloneNearMatchArtifactV1 {
+                source: authority.clone(),
+                payload: candidate.payload,
+                occurrences: candidate.occurrences.into_values().collect(),
+                class: descriptor.class,
+                extent: CloneNearMatchExtentV1::WholeBody,
+                shared_fingerprints,
+                ordered_anchors: alignment.ordered_anchors,
+                shared_ordered_token_count: alignment.shared_token_count,
+                source_coverage_millionths: alignment.left_coverage_millionths,
+                candidate_coverage_millionths: alignment.right_coverage_millionths,
+                differences: alignment.differences,
+            });
+        }
+        if members.len() == limit {
+            has_more = ordinal.saturating_add(1) < candidate_count;
+            break;
+        }
+    }
     let next_cursor = if has_more {
-        candidates.last().map(|candidate| CloneArtifactCursorV1 {
+        last_compared.map(|(body_digest, payload_digest)| CloneArtifactCursorV1 {
             artifact_digest: receipt.artifact_digest().clone(),
             generation: receipt.generation().clone(),
             request_digest,
             after: CloneArtifactCursorPositionV1::Fingerprint {
-                body_digest: candidate.payload.body_digest.clone(),
-                payload_digest: candidate.payload.payload_digest.clone(),
+                body_digest,
+                payload_digest,
             },
         })
     } else {
@@ -490,29 +608,16 @@ pub(super) fn read_clone_fingerprint_page(
     accounting.elapsed_micros = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
     Ok(CloneFingerprintArtifactReadV1 {
         page: CloneArtifactPageV1 {
-            members: candidates,
+            members,
             next_cursor,
         },
         stream: Some(descriptor),
         source_eligibility: authority.eligibility,
+        minimum_directional_coverage_millionths: CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1,
         coverage,
         partial_reasons: partial_reasons.into_iter().collect(),
         accounting,
     })
-}
-
-fn fingerprint_tokens(
-    payload: &CloneBodyPayloadV1,
-    class: CloneNormalizationClassV1,
-) -> Result<&[ConservativeCloneTokenV1], CodeLexicalArtifactErrorV1> {
-    match class {
-        CloneNormalizationClassV1::Conservative => Ok(&payload.conservative_tokens),
-        CloneNormalizationClassV1::Rename => payload.rename_tokens.as_deref().ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Corrupt(
-                "rename fingerprint payload is missing canonical tokens".to_owned(),
-            )
-        }),
-    }
 }
 
 fn candidate_size_ratio_admitted(left: u32, right: u32) -> bool {
