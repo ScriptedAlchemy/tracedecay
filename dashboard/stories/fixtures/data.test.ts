@@ -37,6 +37,8 @@ import {
   GraphSearchPayloadV1Schema,
   GraphPathPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
+  RevisionPairUnionLayoutV1Schema,
+  SimilarResultV1Schema,
   LcmOverviewPayloadV1Schema,
   LcmTimelinePayloadV1Schema,
   LoomTemporalPayloadV1Schema,
@@ -105,6 +107,9 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   // `StructureReadV12` is the schemars-deduplicated alias whose `measured`
   // variant carries `StrataMeasurementV1`.
   '/api/plugins/graph/strata': DashboardEnvelopeV1Schema(StructureReadV12Schema),
+  '/api/plugins/graph/compare/union-layout': DashboardEnvelopeV1Schema(
+    RevisionPairUnionLayoutV1Schema,
+  ),
   '/api/loom/temporal': DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
   '/api/delivery/overview': DashboardEnvelopeV1Schema(DeliveryOverviewV1Schema),
   '/api/plugins/savings/overview': DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
@@ -188,6 +193,24 @@ const DYNAMIC: ReadonlyArray<{
     pathname: '/api/plugins/graph/subgraph',
     search: '?node_id=sym-0',
     schema: DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
+  },
+  {
+    label: 'code_read_api::shared_family conservative, first page',
+    pathname: '/api/plugins/graph/shared-code/family',
+    search: '?symbol_occurrence_id=sym-0&match_class=conservative_exact&limit=100',
+    schema: DashboardEnvelopeV1Schema(SimilarResultV1Schema),
+  },
+  {
+    label: 'code_read_api::shared_family conservative, cursor page',
+    pathname: '/api/plugins/graph/shared-code/family',
+    search: '?symbol_occurrence_id=sym-0&match_class=conservative_exact&limit=100&cursor=cursor.family.page-2',
+    schema: DashboardEnvelopeV1Schema(SimilarResultV1Schema),
+  },
+  {
+    label: 'code_read_api::shared_family rename-normalized',
+    pathname: '/api/plugins/graph/shared-code/family',
+    search: '?symbol_occurrence_id=sym-0&match_class=rename_normalized_exact&limit=100',
+    schema: DashboardEnvelopeV1Schema(SimilarResultV1Schema),
   },
 ];
 

@@ -2,6 +2,7 @@ import { cn } from '../../ui/cn.ts';
 import {
   CODE_VIEW_DEFINITIONS,
   CODE_VIEWS,
+  codeViewNeedsFocus,
   type CodeView,
 } from './codeView.ts';
 
@@ -17,11 +18,13 @@ export function codeViewNote(view: CodeView): string {
 
 export function CodeViewSwitcher({
   active,
-  traceAvailable,
+  focusAvailable,
   onSelect,
 }: {
   active: CodeView;
-  traceAvailable: boolean;
+  /** A symbol occurrence is selected and resolved: the gate for every view
+   * that reads one symbol (Trace, Shared Code). */
+  focusAvailable: boolean;
   onSelect: (view: CodeView) => void;
 }) {
   return (
@@ -35,7 +38,7 @@ export function CodeViewSwitcher({
           const definition = CODE_VIEW_DEFINITIONS[view];
           const selected = view === active;
           const disabled =
-            definition.status === 'pending' || (view === 'trace' && !traceAvailable);
+            definition.status === 'pending' || (codeViewNeedsFocus(view) && !focusAvailable);
           return (
             <li key={view}>
               <button
