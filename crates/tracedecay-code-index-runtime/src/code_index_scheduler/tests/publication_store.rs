@@ -11,8 +11,10 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
-    DurablePublicationPointerV1, acquire_code_generation_store_lock,
-    durable_generation_index_digest,
+    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
+    MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
+    durable_generation_index_digest, execute_code_generation_retention_cancellable,
+    prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, SanitizerRevision, UtcMicros, encode_lowercase_hex,
@@ -37,7 +39,7 @@ use crate::{
 };
 
 #[test]
-fn partitioned_publication_reuses_unchanged_file_segments() {
+fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
     let unchanged = (0..256).fold(String::new(), |mut source, index| {
         writeln!(
             source,
@@ -263,79 +265,154 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
          {first_generation_segment_bytes}-byte first generation"
     );
 
-    let orphan_bytes = b"evidence pack committed before its manifest";
-    let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
-    let orphan_pack = segment_root.join(format!("segment-{orphan_digest}.json"));
-    std::fs::write(&orphan_pack, orphan_bytes).expect("write committed orphan evidence pack");
-    // A vector-readable mark holds the single superseded generation; the
-    // pointer index it is still named by would not.
-    let first_generation = CodeGenerationId::new(
-        first_pointer["generation_id"]
-            .as_str()
-            .expect("first generation id"),
-    )
-    .expect("valid first generation id");
-    let orphan_report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
-        store.path(),
-        &BTreeSet::from([first_generation]),
-        tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
-        UtcMicros(8_000_000),
-        None,
-    )
-    .expect("sweep committed orphan without collecting a generation");
-    assert!(
-        orphan_report.deleted_generations.is_empty(),
-        "the vector-readable mark must retain the superseded generation"
-    );
-    assert!(
-        !orphan_pack.exists(),
-        "retention must sweep an unreferenced final pack even without a generation deletion"
-    );
-    for live_segment in [&shared_segment, &first_evidence_pack, &second_evidence_pack] {
-        assert!(
-            segment_root
-                .join(format!(
-                    "segment-{}.json",
-                    sha256_hex_suffix(live_segment).expect("tagged live segment digest")
-                ))
-                .is_file(),
-            "active, retained, and parent-reused segment {live_segment} must remain marked"
-        );
-    }
-
-    // Without that reserve the same generation is collectable while the
-    // pointer still names it, and its segments part by whether the active
-    // generation reuses them.
-    let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
-        UtcMicros(9_000_000),
-        None,
-    )
-    .expect("collect retired partitioned generation");
-    assert_eq!(report.deleted_generations.len(), 1);
     let segment_path = |digest: &str| {
         segment_root.join(format!(
             "segment-{}.json",
             sha256_hex_suffix(digest).expect("tagged segment digest")
         ))
     };
+    let retained_segment_bytes = first_components
+        .keys()
+        .chain(second_components.keys())
+        .map(|digest| {
+            (
+                digest.clone(),
+                std::fs::read(segment_path(digest)).expect("read retained segment"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let orphan_paths = (0..=(MAX_CODE_GENERATION_RETENTION_BATCH_V1 * 2))
+        .map(|index| {
+            let bytes = format!("unreferenced segment {index}");
+            let digest = encode_lowercase_hex(&Sha256::digest(bytes.as_bytes()));
+            let path = segment_root.join(format!("segment-{digest}.json"));
+            std::fs::write(&path, bytes).expect("write unreferenced segment");
+            path
+        })
+        .collect::<Vec<_>>();
+    let first_generation = CodeGenerationId::new(
+        first_pointer["generation_id"]
+            .as_str()
+            .expect("first generation id"),
+    )
+    .expect("valid first generation id");
+    let second_generation = CodeGenerationId::new(
+        second_pointer["generation_id"]
+            .as_str()
+            .expect("second generation id"),
+    )
+    .expect("valid second generation id");
+    let retained_generations = BTreeSet::from([first_generation.clone()]);
+    let interrupted_plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &retained_generations,
+        &|| false,
+        None,
+    )
+    .expect("plan interrupted segment sweep");
+    let error = execute_code_generation_retention_cancellable(
+        store.path(),
+        interrupted_plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(8_000_000),
+        None,
+        &|| orphan_paths.iter().any(|path| !path.exists()),
+    )
+    .expect_err("interrupt segment sweep after its first unlink");
     assert!(
-        segment_path(&shared_segment).is_file(),
-        "retention must preserve a segment referenced by the active generation"
+        matches!(error, CodeGenerationRetentionErrorV1::Cancelled),
+        "the interrupted sweep must preserve cancellation: {error}"
     );
-    assert!(
-        !segment_path(&retired_edited_segment).exists(),
-        "retention must collect a segment referenced only by the retired generation"
+    assert_eq!(
+        orphan_paths.iter().filter(|path| !path.exists()).count(),
+        1,
+        "the injected interruption must land between segment unlinks"
     );
-    assert!(
-        segment_path(&second_evidence_pack).is_file(),
-        "retention must preserve the active generation's packed evidence"
+
+    drop(scheduler);
+    let reopened = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("reopen after interrupted segment sweep");
+    for generation in [&first_generation, &second_generation] {
+        assert!(
+            reopened
+                .load_generation(generation)
+                .expect("load retained generation after interrupted sweep")
+                .is_some(),
+            "retained generation {generation} must remain restart-readable"
+        );
+    }
+    drop(reopened);
+    for (digest, expected) in &retained_segment_bytes {
+        assert_eq!(
+            std::fs::read(segment_path(digest)).expect("read retained segment after interruption"),
+            *expected,
+            "retained segment {digest} must remain byte-identical after interruption"
+        );
+    }
+
+    let mut completed_sweeps = 0;
+    while orphan_paths.iter().any(|path| path.exists()) {
+        assert!(completed_sweeps < 3, "segment reclamation must converge");
+        let before = orphan_paths.iter().filter(|path| path.exists()).count();
+        let report = run_code_generation_retention(
+            store.path(),
+            &retained_generations,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(8_100_000 + completed_sweeps),
+            None,
+        )
+        .expect("resume bounded segment reclamation");
+        assert!(
+            report.deleted_generations.is_empty(),
+            "the retained superseded generation must not be collected"
+        );
+        let after = orphan_paths.iter().filter(|path| path.exists()).count();
+        assert!(
+            before - after <= MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+            "one maintenance unit reclaimed more than its segment batch"
+        );
+        completed_sweeps += 1;
+    }
+    assert_eq!(
+        completed_sweeps, 2,
+        "the interrupted sweep must resume as two bounded maintenance units"
     );
-    assert!(
-        !segment_path(&first_evidence_pack).exists(),
-        "retention must collect packed evidence referenced only by the retired generation"
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(9_000_000),
+        None,
+    )
+    .expect("collect retired partitioned generation");
+    assert_eq!(report.deleted_generations.len(), 1);
+    for (digest, expected) in retained_segment_bytes {
+        let path = segment_path(&digest);
+        if second_components.contains_key(&digest) {
+            assert_eq!(
+                std::fs::read(path).expect("read active retained segment"),
+                expected,
+                "active segment {digest} must remain byte-identical"
+            );
+        } else {
+            assert!(
+                !path.exists(),
+                "segment {digest} referenced only by the retired generation must be reclaimed"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_dir(&segment_root)
+            .expect("read reclaimed segment directory")
+            .count(),
+        second_components.len(),
+        "only segments referenced by the active manifest may remain"
     );
 }
 
