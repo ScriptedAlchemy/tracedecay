@@ -1404,12 +1404,6 @@ impl LatestCodeTextGenerationV1 {
     /// Return exact and lexical query owners bound to the latest complete
     /// published generation. Clone-section backfill remains background work
     /// after the lexical predecessor is seated.
-    ///
-    /// One bounded advance cannot finalize even a one-file generation, so
-    /// this owner-warmup entry keeps advancing until the build reports
-    /// completion. Every advance stays bounded and
-    /// cancellation-checkpointed, so a shutdown or epoch bump still surfaces
-    /// immediately through `?` rather than being absorbed by this loop.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn production_query_owners(
