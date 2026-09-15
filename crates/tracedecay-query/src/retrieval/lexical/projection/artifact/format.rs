@@ -1207,6 +1207,8 @@ pub(super) struct ArtifactRowV1 {
     pub symbol_simple_name: Option<String>,
     pub symbol_qualified_name: Option<String>,
     pub symbol_kind: Option<String>,
+    pub symbol_signature: Option<String>,
+    pub symbol_documentation: Option<String>,
     pub field_lengths: BTreeMap<LexicalFieldV1, usize>,
     pub normalized_text: String,
 }
@@ -1223,6 +1225,8 @@ impl From<ProjectedChunkV1> for ArtifactRowV1 {
             symbol_simple_name: row.symbol_simple_name,
             symbol_qualified_name: row.symbol_qualified_name,
             symbol_kind: row.symbol_kind,
+            symbol_signature: row.symbol_signature,
+            symbol_documentation: row.symbol_documentation,
             field_lengths: row.field_lengths,
             normalized_text: row.normalized_text,
         }

@@ -21,7 +21,7 @@ use tracedecay_code_index::chunks::{
 };
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_domain::{
     CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactTechnicalTermV1, FileOccurrenceId,
@@ -1209,6 +1209,16 @@ impl FinalizationWakeMetricsV1 {
             FinalizationSectionV1::CloneBodyPayloads => {
                 hotpath::gauge!("query.artifact.finalization.phase.clone_body_payloads_total")
                     .inc(1u64);
+            }
+            FinalizationSectionV1::CloneFingerprintCounts => {
+                hotpath::gauge!("query.artifact.finalization.phase.clone_fingerprint_counts_total")
+                    .inc(1u64);
+            }
+            FinalizationSectionV1::CloneFingerprintPostings => {
+                hotpath::gauge!(
+                    "query.artifact.finalization.phase.clone_fingerprint_postings_total"
+                )
+                .inc(1u64);
             }
             FinalizationSectionV1::FieldStatistics => {
                 hotpath::gauge!("query.artifact.finalization.phase.field_stats_total").inc(1u64);
@@ -3157,10 +3167,29 @@ fn prepare_page_batch_admission(
     Ok((current, fresh_start))
 }
 
+fn symbol_field_size(display: Option<&VerifiedSealedLexicalSymbolDisplayV1>) -> (usize, usize) {
+    display.map_or((0, 0), |display| {
+        let bytes = display
+            .simple_name()
+            .len()
+            .saturating_add(display.qualified_name().len())
+            .saturating_add(display.signature().map_or(0, str::len))
+            .saturating_add(display.documentation().map_or(0, str::len));
+        // Source byte lengths bound token counts. Qualified names receive a
+        // second budget for derived owner/member spelling.
+        let entries = display
+            .simple_name()
+            .len()
+            .saturating_add(display.qualified_name().len().saturating_mul(2))
+            .saturating_add(display.signature().map_or(0, str::len))
+            .saturating_add(display.documentation().map_or(0, str::len));
+        (bytes, entries)
+    })
+}
+
 /// The widest transient upper bound one staged chunk or import can require.
 /// It is evaluated a record at a time without allocations and aborts once
-/// `abort_above` is exceeded; that returned lower bound already fails
-/// admission.
+/// `abort_above` is exceeded. The returned lower bound already fails admission.
 fn page_transient_peak_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
@@ -3168,13 +3197,12 @@ fn page_transient_peak_bytes(
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let mut peak = 0usize;
     for (admitted, display) in page.chunks().iter().zip(page.symbol_displays()) {
-        let qualified_name_bytes = display
-            .as_ref()
-            .map_or(0, |display| display.qualified_name().len());
+        let (symbol_field_bytes, symbol_field_entries) = symbol_field_size(display.as_ref());
         peak = peak.max(projected_chunk_transient_bytes(
             metadata,
             admitted,
-            qualified_name_bytes,
+            symbol_field_bytes,
+            symbol_field_entries,
         )?);
         if peak > abort_above {
             return Ok(peak);
@@ -3215,14 +3243,13 @@ fn page_prepared_retained_upper_bound_bytes(
     let chunk_bytes = page.chunks().iter().zip(page.symbol_displays()).try_fold(
         0usize,
         |total, (admitted, display)| {
-            let qualified_name_bytes = display
-                .as_ref()
-                .map_or(0, |display| display.qualified_name().len());
+            let (symbol_field_bytes, symbol_field_entries) = symbol_field_size(display.as_ref());
             total
                 .checked_add(projected_chunk_prepared_retained_upper_bound_bytes(
                     metadata,
                     admitted,
-                    qualified_name_bytes,
+                    symbol_field_bytes,
+                    symbol_field_entries,
                 )?)
                 .ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Contract(
@@ -3255,11 +3282,17 @@ fn page_prepared_retained_upper_bound_bytes(
 fn projected_chunk_prepared_retained_upper_bound_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     admitted: &ExtractionAdmittedCodeSearchChunkV1,
-    qualified_name_bytes: usize,
+    symbol_field_bytes: usize,
+    symbol_field_entries: usize,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
-    let transient = projected_chunk_transient_bytes(metadata, admitted, qualified_name_bytes)?;
+    let transient = projected_chunk_transient_bytes(
+        metadata,
+        admitted,
+        symbol_field_bytes,
+        symbol_field_entries,
+    )?;
     let text_bytes = admitted.chunk().sanitized_text.as_str().len();
-    let normalized_text_bytes = text_bytes;
+    let normalized_text_bytes = text_bytes.saturating_add(symbol_field_bytes);
     let (_, normalized_scratch) = document_ngram_scratch(normalized_text_bytes)?;
     let (_, raw_scratch) = document_ngram_scratch(text_bytes)?;
     // Every authorized n-gram slot may become a distinct ordered-map key with
@@ -3346,7 +3379,8 @@ fn prepared_page_authority_upper_bound_bytes(
 fn projected_chunk_transient_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     admitted: &ExtractionAdmittedCodeSearchChunkV1,
-    qualified_name_bytes: usize,
+    symbol_field_bytes: usize,
+    symbol_field_entries: usize,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let chunk = admitted.chunk();
     let clone_bytes = chunk_owned_bytes(chunk);
@@ -3371,24 +3405,25 @@ fn projected_chunk_transient_bytes(
     let exact_bytes = chunk.exact_terms.iter().fold(0usize, |total, term| {
         total.saturating_add(term.canonical_bytes().len())
     });
-    let normalized_text_bytes = text_bytes;
+    let normalized_text_bytes = text_bytes
+        .saturating_add(logical_path.len())
+        .saturating_add(symbol_field_bytes);
     // The projection indexes both the complete verified name and its symbol
     // suffix. The complete name length bounds each field string, frequency
     // entry and encoded posting.
     let field_text_bytes = normalized_text_bytes
-        .saturating_add(qualified_name_bytes.saturating_mul(2))
         .saturating_add(logical_path.len())
         .saturating_add(subtoken_bytes)
         .saturating_add(exact_bytes.saturating_mul(2));
     let field_entries = lexical_token_count(chunk.sanitized_text.as_str())
-        .saturating_add(usize::from(qualified_name_bytes != 0).saturating_mul(2))
+        .saturating_add(symbol_field_entries)
         .saturating_add(1)
         .saturating_add(chunk.subtokens.len())
         .saturating_add(chunk.exact_terms.len().saturating_mul(2));
     let field_bytes = field_text_bytes
         .saturating_add(field_entries.saturating_mul(std::mem::size_of::<String>()))
         .saturating_add(
-            6usize.saturating_mul(std::mem::size_of::<(LexicalFieldV1, Vec<String>)>()),
+            9usize.saturating_mul(std::mem::size_of::<(LexicalFieldV1, Vec<String>)>()),
         );
     let frequency_bytes = field_entries
         .saturating_mul(std::mem::size_of::<(&str, u32)>() + BTREE_MAP_ENTRY_OVERHEAD_BYTES);
@@ -3396,8 +3431,9 @@ fn projected_chunk_transient_bytes(
     let (_, raw_scratch) = document_ngram_scratch(text_bytes)?;
     let row_bytes = clone_bytes
         .saturating_add(logical_path.len())
+        .saturating_add(symbol_field_bytes)
         .saturating_add(normalized_text_bytes)
-        .saturating_add(6usize.saturating_mul(std::mem::size_of::<(LexicalFieldV1, usize)>()));
+        .saturating_add(9usize.saturating_mul(std::mem::size_of::<(LexicalFieldV1, usize)>()));
     let serialized_bytes = row_bytes
         .saturating_add(field_bytes)
         .saturating_mul(6)

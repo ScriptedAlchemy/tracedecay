@@ -155,6 +155,8 @@ fn lexical_evidence() -> LexicalLaneEvidence {
         matched_whole_terms: vec!["canonical".to_owned(), "execution".to_owned()],
         matched_subtokens: vec!["query".to_owned()],
         matched_phrases: vec!["canonical execution".to_owned()],
+        matched_proximities: Vec::new(),
+        spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
     }

@@ -1004,7 +1004,7 @@ fn core_search_request(query: &str) -> super::query_runtime::QuerySearchExecutio
             graph_max_depth: 1,
             page_size: 10,
             cursor: None,
-            lexical_routing: LexicalRoutingV1::query_only(),
+            lexical_routing: LexicalRoutingV1::default(),
         },
     )
 }

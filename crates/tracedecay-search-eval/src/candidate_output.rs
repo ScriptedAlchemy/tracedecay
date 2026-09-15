@@ -26,6 +26,7 @@ use tracedecay_code_index::production::{
     CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
+    VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -62,7 +63,8 @@ use tracedecay_query::retrieval::graph::{
 };
 use tracedecay_query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
+    LexicalLaneRequest, LexicalLaneRetriever, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
+    LexicalRoutingV1, lexical_query_parts, merge_lexical_routes,
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 use tracedecay_query::search_quality::candidate_output::{
@@ -259,7 +261,7 @@ fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
 fn build_query_projections(
     generation: &CodeIndexPublishedGenerationV1,
     file_scopes: &BTreeMap<String, String>,
-    qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
+    symbol_displays: Arc<BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>>,
     queries: &[WorkloadQueryV1],
 ) -> Result<(ScopedLexicalProjections, ScopedGraphEvidence), CandidateOutputError> {
     let generation_id = generation.manifest().generation_id.clone();
@@ -268,9 +270,6 @@ fn build_query_projections(
         id::<ComponentRevision>("policy.candidate.v1")?,
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    // Every scoped projection shares these two immutable inputs; the lexical
-    // build reads only the names of the chunks it projects, so one corpus-wide
-    // map serves every scope without a per-scope slice or clone.
     let metadata = Arc::new(CodeLexicalProjectionMetadataV1 {
         generation: generation_id.clone(),
         repository_id: Some(generation.snapshot().repository.clone()),
@@ -345,7 +344,7 @@ fn build_query_projections(
             CodeLexicalProjectionAdapterV1::new_admitted(
                 Arc::clone(&metadata),
                 chunks,
-                Arc::clone(&qualified_names),
+                Arc::clone(&symbol_displays),
             )
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
@@ -775,27 +774,40 @@ fn compose_production_query(
         .retrieve_exact(&exact_request)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
-    let lexical_parts = lexical_query_parts(query_view.as_str())
+    let lexical_routing = LexicalRoutingV1::default()
+        .with_aliases(query.lexical_aliases.clone())
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let lexical_request = LexicalLaneRequest {
-        base: request.clone(),
-        query_view: &query_view,
-        generation: generation_id.clone(),
-        whole_terms: lexical_parts.whole_terms,
-        subtokens: lexical_parts.subtokens,
-        phrases: lexical_parts.phrases,
-        field_filters: Vec::new(),
-        fuzzy_budget: 8,
-        lexical_profile_revision: id(
-            tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
-        )?,
-        score_domain: id(tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1)?,
-        budget,
-        control: &ActiveControl,
-    };
-    let lexical_outcome = lexical_lane
-        .retrieve_lexical(&lexical_request)
+    let route_plan = LexicalRoutePlanV1::plan(query_view.as_str(), &lexical_routing)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let mut route_outcomes = Vec::with_capacity(route_plan.routes().len());
+    for route in route_plan.routes() {
+        let lexical_outcome = lexical_lane
+            .retrieve_lexical(&LexicalLaneRequest {
+                base: request.clone(),
+                query_view: &query_view,
+                generation: generation_id.clone(),
+                whole_terms: route.parts.whole_terms.clone(),
+                subtokens: route.parts.subtokens.clone(),
+                phrases: route.parts.phrases.clone(),
+                proximities: route.proximities.clone(),
+                field_filters: route.field_filters.clone(),
+                fuzzy_budget: 8,
+                lexical_profile_revision: id(
+                    tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+                )?,
+                score_domain: id(tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1)?,
+                budget,
+                control: &ActiveControl,
+            })
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+        route_outcomes.push(LexicalRouteOutcomeV1 {
+            kind: route.kind.clone(),
+            outcome: lexical_outcome,
+        });
+    }
+    let (lexical_outcome, _) =
+        merge_lexical_routes(&generation_id, &budget, &request.budget, route_outcomes)
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
     let seed_anchors = graph_seeds_from_outcomes(&exact_outcome, &lexical_outcome);
     let graph_outcome = if seed_anchors.is_empty() {
@@ -1229,12 +1241,17 @@ fn publish_corpus_with_scale(
             "eligible chunk count mismatch for {copies}x corpus: declared {expected_chunks}, observed {observed_chunks}"
         )));
     }
-    let qualified_names: Arc<BTreeMap<_, _>> = Arc::new(
+    let symbol_displays: Arc<BTreeMap<_, _>> = Arc::new(
         generation
             .symbols()
             .symbols
             .iter()
-            .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+            .map(|symbol| {
+                (
+                    symbol.occurrence.clone(),
+                    VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref()),
+                )
+            })
             .collect(),
     );
     let mut occurrence_map = BTreeMap::new();
@@ -1246,7 +1263,8 @@ fn publish_corpus_with_scale(
             .anchor
             .symbol_occurrence_id
             .as_ref()
-            .and_then(|symbol| qualified_names.get(symbol));
+            .and_then(|symbol| symbol_displays.get(symbol))
+            .map(VerifiedSealedLexicalSymbolDisplayV1::qualified_name);
         let display_anchors = display_anchors_for_chunk(chunk, document, qualified_name);
         if let Some(symbol) = &chunk.anchor.symbol_occurrence_id {
             occurrence_map.insert(
@@ -1283,7 +1301,7 @@ fn publish_corpus_with_scale(
     let (lexical_projections, graph_projections) = build_query_projections(
         &generation,
         &file_scopes,
-        qualified_names,
+        symbol_displays,
         &workload.queries,
     )?;
     Ok(PublishedCorpus {
@@ -1304,11 +1322,11 @@ fn publish_corpus_with_scale(
 fn display_anchors_for_chunk(
     chunk: &CodeSearchChunkV1,
     document: &CorpusDocumentV1,
-    qualified_name: Option<&String>,
+    qualified_name: Option<&str>,
 ) -> Vec<String> {
     let mut anchors = BTreeSet::from([document.document_id.clone()]);
     if let Some(qualified_name) = qualified_name {
-        anchors.insert(qualified_name.clone());
+        anchors.insert(qualified_name.to_owned());
         anchors.insert(display_qualified_anchor(document, qualified_name));
     }
     for term in &chunk.exact_terms {

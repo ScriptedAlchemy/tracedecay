@@ -2,15 +2,19 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision, ExactFieldV1,
     ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileOccurrenceId, LanguageDescriptorRevision,
     RepositoryId, RetrievalAnchorId, ScoreDomainId, SourceFreshness, exact_search_canonical,
-    technical_tokens, validate_code_logical_path,
+    split_subtokens, technical_tokens, validate_code_logical_path,
 };
 
-use super::{LexicalFieldV1, LexicalLaneRequest};
+use super::{
+    LexicalFieldV1, LexicalLaneRequest, LexicalProximityV1, LexicalSpellingVariantV1,
+    normalize_lexical,
+};
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneRequest};
 use crate::retrieval::ports::{RetrievalPortError, contract_error};
 
@@ -108,6 +112,8 @@ struct ProjectedChunkV1 {
     symbol_simple_name: Option<String>,
     symbol_qualified_name: Option<String>,
     symbol_kind: Option<String>,
+    symbol_signature: Option<String>,
+    symbol_documentation: Option<String>,
     field_lengths: BTreeMap<LexicalFieldV1, usize>,
     normalized_text: String,
 }
@@ -119,58 +125,88 @@ impl ProjectedChunkV1 {
     fn from_ref(
         chunk: &CodeSearchChunkV1,
         logical_path: String,
-        display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
+        display: Option<&VerifiedSealedLexicalSymbolDisplayV1>,
     ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
-        let fields =
-            Self::projected_fields(chunk, &logical_path, display.map(|d| d.qualified_name()));
+        let signature = (chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature)
+            .then(|| display.and_then(|value| value.signature()))
+            .flatten();
+        let documentation = (chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature)
+            .then(|| display.and_then(|value| value.documentation()))
+            .flatten();
+        let fields = Self::projected_fields(chunk, &logical_path, display);
+        let field_lengths = fields
+            .iter()
+            .map(|(field, terms)| (*field, terms.len()))
+            .collect();
         let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
-        Self::from_parts(
-            chunk.id.clone(),
-            chunk.anchor.clone(),
-            chunk.language_descriptor_revision.clone(),
-            chunk.exact_terms.clone(),
-            chunk.sanitized_text.clone(),
-            logical_path,
-            display.map(|display| display.simple_name().to_owned()),
-            display.map(|display| display.qualified_name().to_owned()),
-            display.map(|display| display.kind().to_owned()),
-            normalized_text,
+        (
+            Self {
+                id: chunk.id.clone(),
+                anchor: chunk.anchor.clone(),
+                language_descriptor_revision: chunk.language_descriptor_revision.clone(),
+                exact_terms: chunk.exact_terms.clone(),
+                sanitized_text: chunk.sanitized_text.clone(),
+                logical_path,
+                symbol_simple_name: display.map(|value| value.simple_name().to_owned()),
+                symbol_qualified_name: display.map(|value| value.qualified_name().to_owned()),
+                symbol_kind: display.map(|value| value.kind().to_owned()),
+                symbol_signature: signature.map(str::to_owned),
+                symbol_documentation: documentation.map(str::to_owned),
+                field_lengths,
+                normalized_text,
+            },
             fields,
         )
     }
 
-    /// `qualified_name` is the parser-attested extracted qualified name of the
-    /// symbol this chunk anchors. Rust (and every language whose declarations
-    /// name the type and the member separately) never spells `Type::member` in
-    /// source, so the whole-term postings derived from chunk text and the
-    /// simple-name whole-symbol term cannot answer a qualified-name query. The
-    /// extractor is the only authority for that complete name, so the
-    /// projection indexes it directly instead of re-deriving one.
+    /// Names come from parser-attested display authority. Signature and
+    /// documentation are indexed only for signature chunks. Qualified names
+    /// also contribute direct owner/member spelling.
     fn projected_fields(
         chunk: &CodeSearchChunkV1,
         logical_path: &str,
-        qualified_name: Option<&str>,
+        display: Option<&VerifiedSealedLexicalSymbolDisplayV1>,
     ) -> BTreeMap<LexicalFieldV1, Vec<String>> {
         let mut fields: BTreeMap<LexicalFieldV1, Vec<String>> = BTreeMap::new();
-        if let Some(qualified_name) = qualified_name.filter(|name| !name.is_empty()) {
+        let signature_display =
+            (chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature).then_some(display);
+        for (field, value) in [
+            (
+                LexicalFieldV1::SymbolName,
+                display.map(VerifiedSealedLexicalSymbolDisplayV1::simple_name),
+            ),
+            (
+                LexicalFieldV1::QualifiedName,
+                display.map(VerifiedSealedLexicalSymbolDisplayV1::qualified_name),
+            ),
+            (
+                LexicalFieldV1::Signature,
+                signature_display
+                    .flatten()
+                    .and_then(VerifiedSealedLexicalSymbolDisplayV1::signature),
+            ),
+            (
+                LexicalFieldV1::Documentation,
+                signature_display
+                    .flatten()
+                    .and_then(VerifiedSealedLexicalSymbolDisplayV1::documentation),
+            ),
+        ] {
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
+                fields.insert(field, lexical_field_tokens(value));
+            }
+        }
+        if let Some(qualified_name) = display
+            .map(VerifiedSealedLexicalSymbolDisplayV1::qualified_name)
+            .filter(|name| !name.is_empty())
+        {
             let qualified_name_postings = fields.entry(LexicalFieldV1::QualifiedName).or_default();
-            qualified_name_postings.push(normalize_lexical(qualified_name));
-            // The extractor attests the qualified name with the declaring
-            // logical path ahead of the symbol path
-            // (`src/watermark.rs::VectorWatermark::merge_max`), but an operator
-            // names the symbol path alone (`VectorWatermark::merge_max`).
-            // Postings are whole terms and cannot match a suffix, so index the
-            // attested symbol path as its own key. Only the logical path this
-            // chunk already carries is removed - nothing is re-derived from
-            // source text, so a wrong qualifier still misses. A path-only
-            // qualification leaves a bare simple name, which `SymbolName`
-            // already answers from the whole-symbol exact term.
-            if let Some(symbol_path) = qualified_name
-                .strip_prefix(logical_path)
-                .and_then(|suffix| suffix.strip_prefix("::"))
-                .filter(|symbol_path| symbol_path.contains("::"))
+            if let Some((owner_path, simple_name)) = qualified_name.rsplit_once("::")
+                && let Some(owner_name) = owner_path.rsplit("::").next()
             {
-                qualified_name_postings.push(normalize_lexical(symbol_path));
+                qualified_name_postings.extend(lexical_field_tokens(&format!(
+                    "{owner_name}::{simple_name}"
+                )));
             }
         }
         let text_field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
@@ -179,7 +215,7 @@ impl ProjectedChunkV1 {
             LexicalFieldV1::BodyText
         };
         fields.insert(text_field, lexical_tokens(chunk.sanitized_text.as_str()));
-        fields.insert(LexicalFieldV1::Path, vec![normalize_lexical(logical_path)]);
+        fields.insert(LexicalFieldV1::Path, lexical_field_tokens(logical_path));
         fields.insert(
             LexicalFieldV1::Subtoken,
             chunk
@@ -225,43 +261,17 @@ impl ProjectedChunkV1 {
                 _ => {}
             }
         }
+        for field in [
+            LexicalFieldV1::SymbolName,
+            LexicalFieldV1::QualifiedName,
+            LexicalFieldV1::Path,
+        ] {
+            if let Some(terms) = fields.get_mut(&field) {
+                terms.sort();
+                terms.dedup();
+            }
+        }
         fields
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn from_parts(
-        id: CodeSearchChunkId,
-        anchor: CodeSearchChunkAnchorV1,
-        language_descriptor_revision: LanguageDescriptorRevision,
-        exact_terms: Vec<ExactTechnicalTermV1>,
-        sanitized_text: BoundedSanitizedText,
-        logical_path: String,
-        symbol_simple_name: Option<String>,
-        symbol_qualified_name: Option<String>,
-        symbol_kind: Option<String>,
-        normalized_text: String,
-        fields: BTreeMap<LexicalFieldV1, Vec<String>>,
-    ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
-        let field_lengths = fields
-            .iter()
-            .map(|(field, terms)| (*field, terms.len()))
-            .collect();
-        (
-            Self {
-                id,
-                anchor,
-                language_descriptor_revision,
-                exact_terms,
-                sanitized_text,
-                logical_path,
-                symbol_simple_name,
-                symbol_qualified_name,
-                symbol_kind,
-                field_lengths,
-                normalized_text,
-            },
-            fields,
-        )
     }
 }
 
@@ -283,6 +293,8 @@ struct LexicalRowScoreV1 {
     matched_whole_terms: Vec<String>,
     matched_subtokens: Vec<String>,
     matched_phrases: Vec<String>,
+    matched_proximities: Vec<LexicalProximityV1>,
+    spelling_variants: Vec<LexicalSpellingVariantV1>,
     matched_kinds: Vec<ExactTechnicalTermKindV1>,
     typo_recovery_applied: bool,
     echo_penalty_applied: bool,
@@ -418,8 +430,14 @@ struct PreparedLexicalQueryV1<'request> {
     subtokens: Vec<(&'request str, String)>,
     /// `(original, normalized)` per request phrase.
     phrases: Vec<(&'request str, String)>,
+    proximities: Vec<PreparedLexicalProximityV1<'request>>,
     /// The normalized quote-trimmed query for the echo penalty.
     echo_query: String,
+}
+
+struct PreparedLexicalProximityV1<'request> {
+    original: &'request LexicalProximityV1,
+    terms: Vec<String>,
 }
 
 impl<'request> PreparedLexicalQueryV1<'request> {
@@ -439,6 +457,18 @@ impl<'request> PreparedLexicalQueryV1<'request> {
                 .phrases
                 .iter()
                 .map(|phrase| (phrase.as_str(), normalize_lexical(phrase)))
+                .collect(),
+            proximities: request
+                .proximities
+                .iter()
+                .map(|proximity| PreparedLexicalProximityV1 {
+                    original: proximity,
+                    terms: proximity
+                        .terms
+                        .iter()
+                        .map(|term| normalize_lexical(term))
+                        .collect(),
+                })
                 .collect(),
             echo_query: normalize_lexical(request.query_view.as_str().trim_matches('"')),
         }
@@ -503,14 +533,168 @@ fn retrieval_anchor(value: String) -> Result<RetrievalAnchorId, RetrievalPortErr
     RetrievalAnchorId::new(value).map_err(contract_error)
 }
 
-fn normalize_lexical(value: &str) -> String {
-    value.to_ascii_lowercase()
-}
-
 fn lexical_tokens(value: &str) -> Vec<String> {
     technical_tokens(value)
         .map(|(_, token)| normalize_lexical(token))
         .collect()
+}
+
+fn lexical_field_tokens(value: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for (_, token) in technical_tokens(value) {
+        let normalized = normalize_lexical(token);
+        terms.push(normalized.clone());
+        terms.extend(
+            split_subtokens(token)
+                .into_iter()
+                .filter(|term| term != &normalized),
+        );
+    }
+    terms
+}
+
+fn normalized_search_text(row: &impl LexicalFieldTextV1) -> String {
+    let mut fields = vec![row.normalized_text().to_owned()];
+    fields.extend(
+        [
+            Some(row.logical_path()),
+            row.symbol_simple_name(),
+            row.symbol_qualified_name(),
+            row.symbol_signature(),
+            row.symbol_documentation(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(normalize_lexical),
+    );
+    fields.join("\n")
+}
+
+trait LexicalFieldTextV1 {
+    fn grain(&self) -> CodeSearchChunkGrainV1;
+    fn normalized_text(&self) -> &str;
+    fn logical_path(&self) -> &str;
+    fn field_lengths(&self) -> &BTreeMap<LexicalFieldV1, usize>;
+    fn symbol_simple_name(&self) -> Option<&str>;
+    fn symbol_qualified_name(&self) -> Option<&str>;
+    fn symbol_signature(&self) -> Option<&str>;
+    fn symbol_documentation(&self) -> Option<&str>;
+}
+
+impl LexicalFieldTextV1 for ProjectedChunkV1 {
+    fn grain(&self) -> CodeSearchChunkGrainV1 {
+        self.anchor.grain
+    }
+
+    fn normalized_text(&self) -> &str {
+        &self.normalized_text
+    }
+
+    fn logical_path(&self) -> &str {
+        &self.logical_path
+    }
+
+    fn field_lengths(&self) -> &BTreeMap<LexicalFieldV1, usize> {
+        &self.field_lengths
+    }
+
+    fn symbol_simple_name(&self) -> Option<&str> {
+        self.symbol_simple_name.as_deref()
+    }
+
+    fn symbol_qualified_name(&self) -> Option<&str> {
+        self.symbol_qualified_name.as_deref()
+    }
+
+    fn symbol_signature(&self) -> Option<&str> {
+        self.symbol_signature.as_deref()
+    }
+
+    fn symbol_documentation(&self) -> Option<&str> {
+        self.symbol_documentation.as_deref()
+    }
+}
+
+fn normalized_field_text<'a>(
+    row: &'a impl LexicalFieldTextV1,
+    field: LexicalFieldV1,
+) -> Option<Cow<'a, str>> {
+    match field {
+        LexicalFieldV1::SymbolName => row
+            .symbol_simple_name()
+            .map(normalize_lexical)
+            .map(Cow::Owned),
+        LexicalFieldV1::QualifiedName => row
+            .symbol_qualified_name()
+            .map(normalize_lexical)
+            .map(Cow::Owned),
+        LexicalFieldV1::Path => Some(Cow::Owned(normalize_lexical(row.logical_path()))),
+        LexicalFieldV1::Signature => row
+            .symbol_signature()
+            .map(normalize_lexical)
+            .map(Cow::Owned),
+        LexicalFieldV1::Documentation => row
+            .symbol_documentation()
+            .map(normalize_lexical)
+            .map(Cow::Owned),
+        LexicalFieldV1::BodyText if row.grain() != CodeSearchChunkGrainV1::FilePreamble => {
+            Some(Cow::Borrowed(row.normalized_text()))
+        }
+        LexicalFieldV1::PreambleText if row.grain() == CodeSearchChunkGrainV1::FilePreamble => {
+            Some(Cow::Borrowed(row.normalized_text()))
+        }
+        LexicalFieldV1::BodyText
+        | LexicalFieldV1::PreambleText
+        | LexicalFieldV1::ExactTerm
+        | LexicalFieldV1::Subtoken => None,
+    }
+}
+
+fn matches_phrase(row: &impl LexicalFieldTextV1, phrase: &str) -> bool {
+    row.field_lengths().keys().any(|field| {
+        normalized_field_text(row, *field).is_some_and(|text| substring_count(&text, phrase) > 0)
+    })
+}
+
+fn proximity_count(text: &str, terms: &[String], maximum_gap: u32) -> usize {
+    let tokens = technical_tokens(text)
+        .flat_map(|(_, token)| {
+            let normalized = normalize_lexical(token);
+            let split = split_subtokens(token);
+            if split.len() == 1 && split[0] == normalized {
+                vec![normalized]
+            } else {
+                split
+            }
+        })
+        .collect::<Vec<_>>();
+    let maximum_gap = maximum_gap as usize;
+    let mut matches = 0usize;
+    for start in tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (token == &terms[0]).then_some(index))
+    {
+        let mut current = start;
+        let mut complete = true;
+        for term in &terms[1..] {
+            let end = current
+                .saturating_add(maximum_gap)
+                .saturating_add(2)
+                .min(tokens.len());
+            let Some(next) = tokens[current + 1..end]
+                .iter()
+                .position(|token| token == term)
+                .map(|offset| current + offset + 1)
+            else {
+                complete = false;
+                break;
+            };
+            current = next;
+        }
+        matches += usize::from(complete);
+    }
+    matches
 }
 
 fn substring_count(haystack: &str, needle: &str) -> usize {
@@ -539,6 +723,8 @@ fn field_weight_millis(field: LexicalFieldV1) -> u64 {
         LexicalFieldV1::SymbolName => 4_000,
         LexicalFieldV1::QualifiedName => 3_500,
         LexicalFieldV1::Path => 3_000,
+        LexicalFieldV1::Signature => 2_750,
+        LexicalFieldV1::Documentation => 1_250,
         LexicalFieldV1::ExactTerm => 2_500,
         LexicalFieldV1::Subtoken => 1_500,
         LexicalFieldV1::BodyText | LexicalFieldV1::PreambleText => 1_000,

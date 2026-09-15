@@ -83,6 +83,39 @@ fn daemon_tool_searches_the_active_project() {
     );
 }
 
+#[test]
+fn daemon_tool_search_discloses_configured_alias_recovery() {
+    let (_home, _project, home_path, project_path) = setup_daemon_project("pub fn cache() {}\n");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = common::poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(100),
+        || {
+            let output = run_tool(
+                &project_path,
+                &home_path,
+                &[
+                    "--project",
+                    &project_arg,
+                    "search",
+                    "--json",
+                    "--args",
+                    r#"{"query":"memoization","lexical_aliases":[{"strict_query":"memoization","alternative":"cache"}],"limit":10}"#,
+                ],
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            (output.status.success()
+                && stdout.contains("Strict query: `memoization`")
+                && stdout.contains("Alternative tried: `cache`")
+                && stdout.contains("Reason: configured vocabulary alias"))
+            .then_some(output)
+        },
+        || "daemon scheduler did not expose alias recovery for cache".to_owned(),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("cache"), "{stdout}");
+}
+
 /// A daemon-owned source edit is a preview-then-apply effect: an apply must
 /// carry a fresh `idempotency_key` and the `expected_state` its own preview
 /// returned, so the write is compare-and-set against the exact bytes the

@@ -58,16 +58,50 @@ use crate::retrieval::ports::{
 
 use super::super::{
     ECHO_SCORE_MILLIS, ExactMatchRowViewV1, FUZZY_SCORE_MILLIS, FuzzyExpansionsV1,
-    FuzzyQueryGroupV1, LexicalRowScoreV1, LiteralProofCacheV1, PHRASE_SCORE_MILLIS,
-    PreparedLexicalQueryV1, add_score, bm25_score_micros, collect_term_kinds, exact_matches,
-    field_weight_millis, fuzzy_distance_bound, normalize_lexical, retrieval_anchor,
-    substring_count,
+    FuzzyQueryGroupV1, LexicalFieldTextV1, LexicalRowScoreV1, LiteralProofCacheV1,
+    PHRASE_SCORE_MILLIS, PreparedLexicalQueryV1, add_score, bm25_score_micros, collect_term_kinds,
+    exact_matches, field_weight_millis, fuzzy_distance_bound, matches_phrase, normalize_lexical,
+    normalized_field_text, proximity_count, retrieval_anchor, substring_count,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
-    candidate_admission_outcome, field_admitted, lexical_checkpoint,
+    LexicalSpellingVariantV1, MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
+    admit_candidate_sources, candidate_admission_outcome, field_admitted, lexical_checkpoint,
 };
+
+impl LexicalFieldTextV1 for ArtifactRowV1 {
+    fn grain(&self) -> CodeSearchChunkGrainV1 {
+        self.anchor.grain
+    }
+
+    fn normalized_text(&self) -> &str {
+        &self.normalized_text
+    }
+
+    fn logical_path(&self) -> &str {
+        &self.logical_path
+    }
+
+    fn field_lengths(&self) -> &BTreeMap<LexicalFieldV1, usize> {
+        &self.field_lengths
+    }
+
+    fn symbol_simple_name(&self) -> Option<&str> {
+        self.symbol_simple_name.as_deref()
+    }
+
+    fn symbol_qualified_name(&self) -> Option<&str> {
+        self.symbol_qualified_name.as_deref()
+    }
+
+    fn symbol_signature(&self) -> Option<&str> {
+        self.symbol_signature.as_deref()
+    }
+
+    fn symbol_documentation(&self) -> Option<&str> {
+        self.symbol_documentation.as_deref()
+    }
+}
 
 #[derive(Clone)]
 pub struct CodeLexicalArtifactReaderV1 {
@@ -1869,7 +1903,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     .decode_row(&chunk_id, &bytes)
                     .map_err(map_query_artifact_error)?;
                 for (phrase, frequency) in &mut phrase_frequencies {
-                    if substring_count(&row.normalized_text, phrase) > 0 {
+                    if matches_phrase(&row, phrase) {
                         *frequency += 1;
                     }
                 }
@@ -1947,6 +1981,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 matched_whole_terms: score.matched_whole_terms,
                 matched_subtokens: score.matched_subtokens,
                 matched_phrases: score.matched_phrases,
+                matched_proximities: score.matched_proximities,
+                spelling_variants: score.spelling_variants,
                 typo_recovery_applied: score.typo_recovery_applied,
                 echo_penalty_applied: score.echo_penalty_applied,
             };
@@ -2104,6 +2140,13 @@ impl<'a> ArtifactQueryV1<'a> {
                 whole_terms.extend(expansions.iter().cloned());
             }
         }
+        whole_terms.extend(
+            request
+                .proximities
+                .iter()
+                .flat_map(|proximity| &proximity.terms)
+                .map(|term| normalize_lexical(term)),
+        );
         let subtokens = request
             .subtokens
             .iter()
@@ -2522,6 +2565,8 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut matched_whole_terms = BTreeSet::new();
         let mut matched_subtokens = BTreeSet::new();
         let mut matched_phrases = BTreeSet::new();
+        let mut matched_proximities = BTreeSet::new();
+        let mut spelling_variants = BTreeSet::new();
         let mut matched_kinds = BTreeSet::new();
         let mut typo_recovery_applied = false;
         for field in row.field_lengths.keys() {
@@ -2549,6 +2594,10 @@ impl<'a> ArtifactQueryV1<'a> {
                                 / 1_000;
                             add_score(&mut field_scores, *field, score);
                             matched_whole_terms.insert((*query_term).to_owned());
+                            spelling_variants.insert(LexicalSpellingVariantV1 {
+                                query: (*query_term).to_owned(),
+                                alternative: expansion.clone(),
+                            });
                             typo_recovery_applied = true;
                             collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
                         }
@@ -2569,30 +2618,47 @@ impl<'a> ArtifactQueryV1<'a> {
             }
         }
         for (phrase, normalized) in &prepared.phrases {
-            let tf = substring_count(&row.normalized_text, normalized);
-            if tf == 0 {
-                continue;
+            for field in row.field_lengths.keys() {
+                let Some(text) = normalized_field_text(row, *field) else {
+                    continue;
+                };
+                let tf = substring_count(&text, normalized);
+                if tf == 0 {
+                    continue;
+                }
+                let score = self
+                    .term_score_with_df(
+                        *field,
+                        tf,
+                        row,
+                        phrase_frequencies
+                            .get(normalized)
+                            .copied()
+                            .unwrap_or_default(),
+                        stats,
+                    )
+                    .saturating_mul(PHRASE_SCORE_MILLIS)
+                    / 1_000;
+                add_score(&mut field_scores, *field, score);
+                matched_phrases.insert((*phrase).to_owned());
             }
-            let field = if row.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
-                LexicalFieldV1::PreambleText
-            } else {
-                LexicalFieldV1::BodyText
-            };
-            let score = self
-                .term_score_with_df(
-                    field,
-                    tf,
-                    row,
-                    phrase_frequencies
-                        .get(normalized)
-                        .copied()
-                        .unwrap_or_default(),
-                    stats,
-                )
-                .saturating_mul(PHRASE_SCORE_MILLIS)
-                / 1_000;
-            add_score(&mut field_scores, field, score);
-            matched_phrases.insert((*phrase).to_owned());
+        }
+        for proximity in &prepared.proximities {
+            for field in row.field_lengths.keys() {
+                let Some(text) = normalized_field_text(row, *field) else {
+                    continue;
+                };
+                let tf = proximity_count(&text, &proximity.terms, proximity.original.maximum_gap);
+                if tf == 0 {
+                    continue;
+                }
+                let score = self
+                    .term_score_with_df(*field, tf, row, 1, stats)
+                    .saturating_mul(PHRASE_SCORE_MILLIS)
+                    / 1_000;
+                add_score(&mut field_scores, *field, score);
+                matched_proximities.insert(proximity.original.clone());
+            }
         }
         let echo_penalty_applied =
             !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
@@ -2606,6 +2672,8 @@ impl<'a> ArtifactQueryV1<'a> {
             matched_whole_terms: matched_whole_terms.into_iter().collect(),
             matched_subtokens: matched_subtokens.into_iter().collect(),
             matched_phrases: matched_phrases.into_iter().collect(),
+            matched_proximities: matched_proximities.into_iter().collect(),
+            spelling_variants: spelling_variants.into_iter().collect(),
             matched_kinds: matched_kinds.into_iter().collect(),
             typo_recovery_applied,
             echo_penalty_applied,
@@ -2676,6 +2744,9 @@ fn lexical_terms(
     }
     for (_, normalized) in &prepared.subtokens {
         terms.insert(normalized.clone());
+    }
+    for proximity in &prepared.proximities {
+        terms.extend(proximity.terms.iter().cloned());
     }
     terms
 }

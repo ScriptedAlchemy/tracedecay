@@ -21,10 +21,11 @@ use tracedecay_domain::ExactFieldV1;
 /// names, descriptor revisions) are interned once as `row_dictionary`
 /// entries and referenced by content-addressed id. Revision 15 adds
 /// content-addressed clone payloads, source-bound occurrences, and exact
-/// conservative/rename postings. Revision 16 adds positional winnowed
-/// fingerprint postings and stored posting-list counts. Readers accept all
-/// shipped layouts; writers emit 16 unless an explicit benchmark revision is
-/// selected.
+/// conservative/rename postings. Revision 16 adds signature and documentation
+/// fields without changing the shipped revision-14/15 row codec, positional
+/// winnowed fingerprint postings, and stored posting-list counts. Readers
+/// accept all shipped layouts; writers emit 16 unless an explicit benchmark
+/// revision is selected.
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10: u32 = 10;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11: u32 = 11;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12: u32 = 12;
@@ -50,6 +51,8 @@ const FIELD_BODY_TEXT: i64 = 4;
 const FIELD_PREAMBLE_TEXT: i64 = 5;
 const FIELD_EXACT_TERM: i64 = 6;
 const FIELD_SUBTOKEN: i64 = 7;
+const FIELD_SIGNATURE: i64 = 8;
+const FIELD_DOCUMENTATION: i64 = 9;
 
 pub(super) const REQUIRED_ARTIFACT_INDEXES_V10: [(&str, &str, &[&str]); 7] = [
     ("rows", "rows_by_chunk", &["chunk_id"]),
@@ -286,6 +289,8 @@ pub(super) fn field_code(field: LexicalFieldV1) -> i64 {
         LexicalFieldV1::SymbolName => FIELD_SYMBOL_NAME,
         LexicalFieldV1::QualifiedName => FIELD_QUALIFIED_NAME,
         LexicalFieldV1::Path => FIELD_PATH,
+        LexicalFieldV1::Signature => FIELD_SIGNATURE,
+        LexicalFieldV1::Documentation => FIELD_DOCUMENTATION,
         LexicalFieldV1::BodyText => FIELD_BODY_TEXT,
         LexicalFieldV1::PreambleText => FIELD_PREAMBLE_TEXT,
         LexicalFieldV1::ExactTerm => FIELD_EXACT_TERM,
@@ -298,6 +303,8 @@ pub(super) fn field_from_code(code: i64) -> Result<LexicalFieldV1, CodeLexicalAr
         FIELD_SYMBOL_NAME => Ok(LexicalFieldV1::SymbolName),
         FIELD_QUALIFIED_NAME => Ok(LexicalFieldV1::QualifiedName),
         FIELD_PATH => Ok(LexicalFieldV1::Path),
+        FIELD_SIGNATURE => Ok(LexicalFieldV1::Signature),
+        FIELD_DOCUMENTATION => Ok(LexicalFieldV1::Documentation),
         FIELD_BODY_TEXT => Ok(LexicalFieldV1::BodyText),
         FIELD_PREAMBLE_TEXT => Ok(LexicalFieldV1::PreambleText),
         FIELD_EXACT_TERM => Ok(LexicalFieldV1::ExactTerm),
@@ -665,6 +672,8 @@ mod tests {
             LexicalFieldV1::SymbolName,
             LexicalFieldV1::QualifiedName,
             LexicalFieldV1::Path,
+            LexicalFieldV1::Signature,
+            LexicalFieldV1::Documentation,
             LexicalFieldV1::BodyText,
             LexicalFieldV1::PreambleText,
             LexicalFieldV1::ExactTerm,

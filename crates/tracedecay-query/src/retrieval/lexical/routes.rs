@@ -1,14 +1,13 @@
 //! Additional ranked lexical routes fused into one lexical lane batch.
 //!
-//! A hybrid query may carry exact identifiers the caller already knows
-//! (`lexical_anchors`) and may ask for a symbol-name route built from the
-//! identifier-shaped tokens of its own text (`prefer_symbol`). Each route is
-//! ranked through the ordinary lexical lane against the same pinned
-//! generation, then the route batches are merged into the single lexical lane
-//! input that composition admits. The merge is deterministic: a candidate's
-//! lexical raw score is the checked sum of its route scores, the committed
-//! prefix is re-sorted under the lane's canonical order, and every surviving
-//! candidate keeps a receipt naming the routes that ranked it.
+//! The strict query always runs first. Caller anchors, preferred-symbol lookup,
+//! identifier splitting, and configured aliases are visible additive routes.
+//! Each route is ranked through the ordinary lexical lane against the same
+//! pinned generation, then merged into the single lexical lane input that
+//! composition admits. Strict hits retain precedence without alternative-score
+//! inflation; other additive route scores combine. The committed prefix is
+//! sorted strict-first under stable tie-breakers, and every surviving candidate
+//! keeps a receipt naming the routes that ranked it.
 //!
 //! Routes are ranked retrieval, not exhaustive grep; they never widen the
 //! lane cap and never mint exact-tier admission.
@@ -20,12 +19,12 @@ use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, FixedPointScore, RetrievalAnchorId, RetrievalBudget,
     RetrievalFailure, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, SourceOccurrenceId,
+    RetrieverOutcome, SourceOccurrenceId, split_subtokens,
 };
 
 use super::{
-    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalQueryPartsV1,
-    lexical_checkpoint_digest, lexical_query_parts,
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalProximityV1,
+    LexicalQueryPartsV1, lexical_checkpoint_digest, lexical_query_parts, normalize_lexical,
 };
 use crate::retrieval::ports::{RetrievalPortError, contract_error, lane_candidate_cap};
 
@@ -33,6 +32,8 @@ use crate::retrieval::ports::{RetrievalPortError, contract_error, lane_candidate
 pub const MAX_LEXICAL_ANCHORS_V1: usize = 8;
 /// Maximum UTF-8 bytes in one lexical anchor.
 pub const MAX_LEXICAL_ANCHOR_BYTES_V1: usize = 128;
+pub const MAX_LEXICAL_ALIASES_V1: usize = 8;
+pub const MAX_LEXICAL_ALIAS_BYTES_V1: usize = 128;
 /// Maximum identifier-shaped tokens the preferred-symbol route ranks; the
 /// tokens are taken in query order so the bound is deterministic.
 pub const MAX_PREFERRED_SYMBOL_TOKENS_V1: usize = 8;
@@ -103,6 +104,14 @@ pub enum LexicalRouteErrorV1 {
     AnchorNotOneTerm { index: usize },
     #[error("lexical anchor {index} repeats an earlier anchor")]
     DuplicateAnchor { index: usize },
+    #[error("lexical aliases accept at most {max} entries; {actual} were supplied")]
+    TooManyAliases { max: usize, actual: usize },
+    #[error("lexical alias {index} has an invalid {side}")]
+    InvalidAlias { index: usize, side: &'static str },
+    #[error("lexical alias {index} maps a query to itself")]
+    IdentityAlias { index: usize },
+    #[error("lexical alias {index} repeats an earlier alias")]
+    DuplicateAlias { index: usize },
 }
 
 /// One validated exact identifier or technical term ranked through its own
@@ -110,6 +119,13 @@ pub enum LexicalRouteErrorV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct LexicalAnchorV1(String);
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalAliasV1 {
+    pub strict_query: String,
+    pub alternative: String,
+}
 
 /// The admitted lexical lane batch plus the per-anchor route matches that
 /// produced it.
@@ -145,12 +161,58 @@ impl LexicalAnchorV1 {
     }
 }
 
-/// Caller-controlled lexical routing for one hybrid query. The query route
-/// always runs; anchors and the preferred-symbol route are additive.
+impl LexicalAliasV1 {
+    fn validate(
+        &self,
+        index: usize,
+    ) -> Result<(LexicalQueryPartsV1, LexicalQueryPartsV1), LexicalRouteErrorV1> {
+        let strict = validate_alias_text(&self.strict_query, index, "strict query")?;
+        let alternative = validate_alias_text(&self.alternative, index, "alternative")?;
+        if strict == alternative {
+            return Err(LexicalRouteErrorV1::IdentityAlias { index });
+        }
+        Ok((strict, alternative))
+    }
+}
+
+fn validate_alias_text(
+    value: &str,
+    index: usize,
+    side: &'static str,
+) -> Result<LexicalQueryPartsV1, LexicalRouteErrorV1> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > MAX_LEXICAL_ALIAS_BYTES_V1
+        || value.chars().any(char::is_control)
+    {
+        return Err(LexicalRouteErrorV1::InvalidAlias { index, side });
+    }
+    lexical_query_parts(value)
+        .map(normalized_query_parts)
+        .map_err(|_| LexicalRouteErrorV1::InvalidAlias { index, side })
+}
+
+fn normalized_query_parts(mut parts: LexicalQueryPartsV1) -> LexicalQueryPartsV1 {
+    for term in parts
+        .whole_terms
+        .iter_mut()
+        .chain(&mut parts.subtokens)
+        .chain(&mut parts.phrases)
+    {
+        *term = normalize_lexical(term);
+    }
+    parts
+}
+
+/// Caller-controlled options for the strict query and additive lexical routes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LexicalRoutingV1 {
     pub anchors: Vec<LexicalAnchorV1>,
     pub prefer_symbol: bool,
+    pub aliases: Vec<LexicalAliasV1>,
+    pub phrases: Vec<String>,
+    pub proximities: Vec<LexicalProximityV1>,
+    pub field_filters: Vec<LexicalFieldFilterV1>,
 }
 
 impl LexicalRoutingV1 {
@@ -176,30 +238,49 @@ impl LexicalRoutingV1 {
         Ok(Self {
             anchors: validated,
             prefer_symbol,
+            aliases: Vec::new(),
+            phrases: Vec::new(),
+            proximities: Vec::new(),
+            field_filters: Vec::new(),
         })
     }
 
-    /// The routing every request had before anchors existed: the query route
-    /// alone.
-    pub const fn query_only() -> Self {
-        Self {
-            anchors: Vec::new(),
-            prefer_symbol: false,
+    pub fn with_aliases(
+        mut self,
+        mut aliases: Vec<LexicalAliasV1>,
+    ) -> Result<Self, LexicalRouteErrorV1> {
+        if aliases.len() > MAX_LEXICAL_ALIASES_V1 {
+            return Err(LexicalRouteErrorV1::TooManyAliases {
+                max: MAX_LEXICAL_ALIASES_V1,
+                actual: aliases.len(),
+            });
         }
+        aliases.sort();
+        let mut seen = BTreeSet::new();
+        for (index, alias) in aliases.iter().enumerate() {
+            if !seen.insert(alias.validate(index)?) {
+                return Err(LexicalRouteErrorV1::DuplicateAlias { index });
+            }
+        }
+        self.aliases = aliases;
+        Ok(self)
     }
 
     /// Query route plus the preferred-symbol name route for name-first lexical
     /// lookup.
-    pub const fn prefer_symbol() -> Self {
+    pub fn prefer_symbol() -> Self {
         Self {
-            anchors: Vec::new(),
             prefer_symbol: true,
+            ..Self::default()
         }
     }
+}
 
-    pub fn is_query_only(&self) -> bool {
-        self.anchors.is_empty() && !self.prefer_symbol
-    }
+/// Why the lexical lane tried a configured alternative.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalAlternativeReasonV1 {
+    ConfiguredVocabularyAlias,
 }
 
 /// Which route ranked a candidate. Serialized into the response so a caller
@@ -207,12 +288,23 @@ impl LexicalRoutingV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(tag = "route", rename_all = "snake_case")]
 pub enum LexicalRouteKindV1 {
-    /// The natural-language query, tokenized exactly as before.
+    /// The caller's strict lexical query.
     Query,
     /// One caller-supplied exact identifier or term.
     Anchor { anchor: LexicalAnchorV1 },
     /// Identifier-shaped tokens of the query, restricted to symbol names.
     PreferredSymbol { tokens: Vec<String> },
+    /// Identifier and path components recovered from the strict query.
+    IdentifierSplit {
+        strict_query: String,
+        terms: Vec<String>,
+    },
+    /// A configured query-time vocabulary alternative.
+    Alias {
+        strict_query: String,
+        alternative: String,
+        reason: LexicalAlternativeReasonV1,
+    },
 }
 
 /// One planned lexical route: its identity plus the lane request terms.
@@ -220,6 +312,7 @@ pub enum LexicalRouteKindV1 {
 pub struct LexicalRouteV1 {
     pub kind: LexicalRouteKindV1,
     pub parts: LexicalQueryPartsV1,
+    pub proximities: Vec<LexicalProximityV1>,
     pub field_filters: Vec<LexicalFieldFilterV1>,
 }
 
@@ -230,15 +323,61 @@ pub struct LexicalRoutePlanV1 {
     routes: Vec<LexicalRouteV1>,
 }
 
+fn identifier_split_route(
+    query: &str,
+    query_parts: &LexicalQueryPartsV1,
+    field_filters: &[LexicalFieldFilterV1],
+) -> Option<LexicalRouteV1> {
+    let [whole_term] = query_parts.whole_terms.as_slice() else {
+        return None;
+    };
+    let canonical = whole_term.to_ascii_lowercase();
+    let mut seen = BTreeSet::new();
+    let terms = split_subtokens(whole_term)
+        .into_iter()
+        .take(MAX_PREFERRED_SYMBOL_TOKENS_V1)
+        .filter(|term| term != &canonical && seen.insert(term.clone()))
+        .collect::<Vec<_>>();
+    let (whole_terms, proximities) = match terms.as_slice() {
+        [] => return None,
+        [_] => (terms.clone(), Vec::new()),
+        _ => (
+            Vec::new(),
+            vec![LexicalProximityV1 {
+                terms: terms.clone(),
+                maximum_gap: 0,
+            }],
+        ),
+    };
+    Some(LexicalRouteV1 {
+        kind: LexicalRouteKindV1::IdentifierSplit {
+            strict_query: query.to_owned(),
+            terms,
+        },
+        parts: LexicalQueryPartsV1 {
+            whole_terms,
+            subtokens: Vec::new(),
+            phrases: Vec::new(),
+        },
+        proximities,
+        field_filters: field_filters.to_vec(),
+    })
+}
+
 impl LexicalRoutePlanV1 {
-    /// Plan the query route plus every additive route the caller asked for.
-    /// A preferred-symbol request whose query yields no identifier-shaped
-    /// token adds no route; the plan's descriptors make that visible.
+    /// Plan the strict query, caller-order anchors, preferred-symbol recovery,
+    /// identifier splitting, then byte-sorted matching aliases.
     pub fn plan(query: &str, routing: &LexicalRoutingV1) -> Result<Self, RetrievalPortError> {
+        let mut query_parts = lexical_query_parts(query)?;
+        let strict_parts = normalized_query_parts(query_parts.clone());
+        query_parts.phrases.extend(routing.phrases.iter().cloned());
+        query_parts.phrases.sort();
+        query_parts.phrases.dedup();
         let mut routes = vec![LexicalRouteV1 {
             kind: LexicalRouteKindV1::Query,
-            parts: lexical_query_parts(query)?,
-            field_filters: Vec::new(),
+            parts: query_parts.clone(),
+            proximities: routing.proximities.clone(),
+            field_filters: routing.field_filters.clone(),
         }];
         for anchor in &routing.anchors {
             routes.push(LexicalRouteV1 {
@@ -246,7 +385,8 @@ impl LexicalRoutePlanV1 {
                     anchor: anchor.clone(),
                 },
                 parts: lexical_query_parts(anchor.as_str())?,
-                field_filters: Vec::new(),
+                proximities: Vec::new(),
+                field_filters: routing.field_filters.clone(),
             });
         }
         if routing.prefer_symbol {
@@ -262,12 +402,31 @@ impl LexicalRoutePlanV1 {
                         subtokens: Vec::new(),
                         phrases: Vec::new(),
                     },
+                    proximities: Vec::new(),
                     field_filters: vec![LexicalFieldFilterV1 {
                         field: LexicalFieldV1::SymbolName,
                         include: true,
                     }],
                 });
             }
+        }
+        if let Some(route) = identifier_split_route(query, &query_parts, &routing.field_filters) {
+            routes.push(route);
+        }
+        for alias in &routing.aliases {
+            if normalized_query_parts(lexical_query_parts(&alias.strict_query)?) != strict_parts {
+                continue;
+            }
+            routes.push(LexicalRouteV1 {
+                kind: LexicalRouteKindV1::Alias {
+                    strict_query: query.to_owned(),
+                    alternative: alias.alternative.clone(),
+                    reason: LexicalAlternativeReasonV1::ConfiguredVocabularyAlias,
+                },
+                parts: lexical_query_parts(&alias.alternative)?,
+                proximities: Vec::new(),
+                field_filters: routing.field_filters.clone(),
+            });
         }
         Ok(Self { routes })
     }
@@ -359,6 +518,7 @@ pub struct LexicalRouteMatchV1 {
     pub route: LexicalRouteKindV1,
     pub score_micros: u64,
     pub matched_terms: Vec<String>,
+    pub spelling_variants: Vec<super::LexicalSpellingVariantV1>,
 }
 
 /// Route evidence for one composed lexical lane, keyed by candidate anchor so
@@ -373,9 +533,8 @@ pub struct LexicalRouteReceiptV1 {
 }
 
 impl LexicalRouteReceiptV1 {
-    /// Whether the caller asked for anything beyond the query route.
-    pub fn has_additional_routes(&self) -> bool {
-        self.routes.len() > 1
+    pub fn has_disclosure(&self) -> bool {
+        self.routes.len() > 1 || !self.matches_by_anchor.is_empty()
     }
 }
 
@@ -424,12 +583,29 @@ pub fn merge_lexical_routes(
     };
     let additional: Vec<LexicalRouteOutcomeV1> = routes.collect();
     if additional.is_empty() {
-        // The query route alone is the pre-existing lexical lane: its batch
-        // passes through untouched and no per-candidate route evidence is
-        // recorded, so a plain query costs exactly what it always did.
+        let matches_by_anchor = query_batch
+            .candidates
+            .iter()
+            .filter_map(|candidate| {
+                let evidence = query_batch
+                    .evidence_by_occurrence
+                    .get(&candidate.source_occurrence_id)?;
+                (!evidence.spelling_variants.is_empty()).then(|| {
+                    (
+                        candidate.anchor_id.clone(),
+                        vec![LexicalRouteMatchV1 {
+                            route: LexicalRouteKindV1::Query,
+                            score_micros: candidate.raw_score.micros(),
+                            matched_terms: matched_terms(evidence),
+                            spelling_variants: evidence.spelling_variants.clone(),
+                        }],
+                    )
+                })
+            })
+            .collect();
         let receipt = LexicalRouteReceiptV1 {
             routes: descriptors,
-            matches_by_anchor: BTreeMap::new(),
+            matches_by_anchor,
         };
         let outcome = match partial_reason {
             Some(reason) => RetrieverOutcome::Partial {
@@ -507,6 +683,10 @@ fn route_label(kind: &LexicalRouteKindV1) -> String {
         LexicalRouteKindV1::PreferredSymbol { tokens } => {
             format!("preferred_symbol:{}", tokens.join(","))
         }
+        LexicalRouteKindV1::IdentifierSplit { terms, .. } => {
+            format!("identifier_split:{}", terms.join(","))
+        }
+        LexicalRouteKindV1::Alias { alternative, .. } => format!("alias:{alternative}"),
     }
 }
 
@@ -527,6 +707,7 @@ struct MergedCandidate {
     candidate: CompactCandidate,
     evidence: LexicalLaneEvidence,
     matches: Vec<LexicalRouteMatchV1>,
+    strict: bool,
 }
 
 #[derive(Default)]
@@ -543,6 +724,10 @@ impl MergedRoutes {
         kind: &LexicalRouteKindV1,
         batch: &RetrieverBatch<LexicalLaneEvidence>,
     ) -> Result<(), RetrievalPortError> {
+        let is_alternative = matches!(
+            kind,
+            LexicalRouteKindV1::IdentifierSplit { .. } | LexicalRouteKindV1::Alias { .. }
+        );
         batch.validate().map_err(contract_error)?;
         let route_exhausted = batch
             .continuation
@@ -577,6 +762,7 @@ impl MergedRoutes {
                 route: kind.clone(),
                 score_micros: candidate.raw_score.micros(),
                 matched_terms: matched_terms(evidence),
+                spelling_variants: evidence.spelling_variants.clone(),
             };
             match self.by_occurrence.get_mut(&candidate.source_occurrence_id) {
                 Some(existing) => {
@@ -589,6 +775,10 @@ impl MergedRoutes {
                             "lexical routes disagree on the identity of one source occurrence"
                                 .to_owned(),
                         ));
+                    }
+                    if is_alternative && existing.strict {
+                        existing.matches.push(route_match);
+                        continue;
                     }
                     existing.candidate.raw_score = existing
                         .candidate
@@ -605,6 +795,7 @@ impl MergedRoutes {
                             candidate: candidate.clone(),
                             evidence: evidence.clone(),
                             matches: vec![route_match],
+                            strict: !is_alternative,
                         },
                     );
                 }
@@ -619,14 +810,11 @@ impl MergedRoutes {
         cap: usize,
     ) -> Result<MergedLexicalBatch, RetrievalPortError> {
         let mut admitted: Vec<MergedCandidate> = self.by_occurrence.into_values().collect();
-        // The lane's canonical order: recomputed score descending, then
-        // occurrence identity, then evidence anchor. Route execution order
-        // can never select a different prefix.
         admitted.sort_by(|left, right| {
             right
-                .candidate
-                .raw_score
-                .cmp(&left.candidate.raw_score)
+                .strict
+                .cmp(&left.strict)
+                .then_with(|| right.candidate.raw_score.cmp(&left.candidate.raw_score))
                 .then_with(|| {
                     left.candidate
                         .source_occurrence_id
@@ -721,6 +909,16 @@ fn merge_evidence(
     );
     union_terms(&mut existing.matched_subtokens, &incoming.matched_subtokens);
     union_terms(&mut existing.matched_phrases, &incoming.matched_phrases);
+    existing
+        .matched_proximities
+        .extend(incoming.matched_proximities.iter().cloned());
+    existing.matched_proximities.sort();
+    existing.matched_proximities.dedup();
+    existing
+        .spelling_variants
+        .extend(incoming.spelling_variants.iter().cloned());
+    existing.spelling_variants.sort();
+    existing.spelling_variants.dedup();
     existing.typo_recovery_applied |= incoming.typo_recovery_applied;
     existing.echo_penalty_applied |= incoming.echo_penalty_applied;
     Ok(())

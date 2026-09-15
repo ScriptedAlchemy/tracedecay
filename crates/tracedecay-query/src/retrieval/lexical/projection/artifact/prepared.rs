@@ -10,7 +10,7 @@ use tracedecay_domain::{ExactFieldV1, ManifestDigest};
 
 use super::super::{
     CodeLexicalProjectionMetadataV1, ProjectedChunkV1, canonical_projected_exact_term,
-    exact_field_for_kind,
+    exact_field_for_kind, normalized_search_text,
 };
 use super::format::{
     ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, encode_exact_field,
@@ -522,7 +522,8 @@ fn prepare_document(
         ));
     }
 
-    let mut ngram_postings = document_ngrams(row.normalized_text.as_bytes(), control)?
+    let search_text = normalized_search_text(&row);
+    let mut ngram_postings = document_ngrams(search_text.as_bytes(), control)?
         .into_iter()
         .map(|ngram| (NGRAM_NORMALIZED, i64::from(ngram)))
         .collect::<Vec<_>>();

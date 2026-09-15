@@ -22,6 +22,8 @@ use tracedecay_domain::{
     RetrievalAnchorId, RetrievalBudget, RetrieverKind, ScoreDomainCalibrationV1, ScoreDomainId,
 };
 
+use crate::retrieval::lexical::LexicalAliasV1;
+
 pub const WORKLOAD_RELATIVE: &str =
     "tests/fixtures/search_quality/query-lexical-graph-workload-v1.json";
 pub const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
@@ -167,6 +169,8 @@ pub struct WorkloadQueryV1 {
     pub strata: Vec<String>,
     pub query: String,
     pub allowed_scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lexical_aliases: Vec<LexicalAliasV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub historical_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

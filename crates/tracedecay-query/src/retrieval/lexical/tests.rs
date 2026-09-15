@@ -19,8 +19,8 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, admit_candidate_sources,
-    lexical_query_parts,
+    LexicalLaneRetriever, LexicalProximityV1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
+    admit_candidate_sources, lexical_query_parts,
 };
 use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{
@@ -267,6 +267,7 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         whole_terms: vec!["reserve".to_owned(), "stock".to_owned()],
         subtokens: vec!["res".to_owned()],
         phrases: Vec::new(),
+        proximities: Vec::new(),
         field_filters: Vec::new(),
         fuzzy_budget: 2,
         lexical_profile_revision: id("lexical-profile.v1"),
@@ -274,6 +275,23 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         budget: budget(max_candidates),
         control: &ACTIVE_CONTROL,
     }
+}
+
+#[test]
+fn lexical_request_owns_proximity_bounds() {
+    let mut request = lexical_request(8);
+    request.proximities = vec![LexicalProximityV1 {
+        terms: vec!["reserve".to_owned(), "stock".to_owned()],
+        maximum_gap: 9,
+    }];
+
+    assert!(
+        request
+            .validate()
+            .expect_err("the lane request rejects an excessive gap")
+            .to_string()
+            .contains("maximum gap")
+    );
 }
 
 /// Build one lexical candidate/evidence pair with per-field fixed-point
@@ -328,6 +346,8 @@ fn lexical_pair(
             .map(|subtoken| (*subtoken).to_owned())
             .collect(),
         matched_phrases: Vec::new(),
+        matched_proximities: Vec::new(),
+        spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
     };

@@ -154,7 +154,7 @@ fn search_request(
         source_reference: None,
         limit: 8,
         cursor: None,
-        lexical_routing: LexicalRoutingV1::query_only(),
+        lexical_routing: LexicalRoutingV1::default(),
         authority: None,
         deadline: None,
         cancellation,

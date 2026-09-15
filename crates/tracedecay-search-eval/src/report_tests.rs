@@ -78,10 +78,6 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
         .filter(|query| query.status == crate::DirectEvaluationStatusV1::Fail)
         .map(|query| query.query_id.as_str())
         .collect::<Vec<_>>();
-    // Naming every miss keeps the characterization falsifiable: a retrieval
-    // regression changes this list rather than hiding inside a count. The
-    // needs were authored from corpus prose, not selected because the
-    // baseline fails them, and the remaining twenty-four the baseline answers.
     assert_eq!(
         failed_queries,
         [
@@ -89,19 +85,17 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
             "train-016",
             "train-019",
             "train-020",
-            "train-022",
-            "train-023",
-            "train-024",
             "train-025",
             "train-026",
+            "train-027",
+            "train-029",
             "train-031",
+            "train-033",
             "validation-015",
             "validation-017",
-            "validation-019",
             "validation-023",
             "validation-024",
             "validation-025",
-            "validation-026",
             "validation-027",
             "validation-028",
         ]

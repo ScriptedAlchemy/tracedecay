@@ -6,11 +6,14 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{CodeGenerationSourceCommitmentsV1, ExactTechnicalTermV1};
+use tracedecay_domain::{
+    CodeGenerationSourceCommitmentsV1, CodeSearchChunkGrainV1, CodeSearchChunkV1,
+    ExactTechnicalTermV1,
+};
 
 use crate::{
     capabilities::expected_seal_digest, clones::CodeIndexCloneBodyV1,
-    intake::INTAKE_DIGEST_SEPARATOR,
+    intake::INTAKE_DIGEST_SEPARATOR, lineage::LineageSymbolRecordV1,
 };
 
 use super::partitioned_codec::PartitionedLexicalFileSourceV1;
@@ -305,13 +308,15 @@ impl VerifiedSealedLexicalCursorV1 {
     }
 }
 
-/// Compact parser-attested display identity for one symbol-backed chunk.
+/// Parser-attested display fields for one symbol-backed chunk.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct VerifiedSealedLexicalSymbolDisplayV1 {
     occurrence: SymbolOccurrenceId,
     simple_name: String,
     qualified_name: String,
     kind: String,
+    signature: Option<String>,
+    documentation: Option<String>,
 }
 
 impl VerifiedSealedLexicalSymbolDisplayV1 {
@@ -331,6 +336,14 @@ impl VerifiedSealedLexicalSymbolDisplayV1 {
         &self.kind
     }
 
+    pub fn signature(&self) -> Option<&str> {
+        self.signature.as_deref()
+    }
+
+    pub fn documentation(&self) -> Option<&str> {
+        self.documentation.as_deref()
+    }
+
     pub fn retained_owned_bytes(&self) -> usize {
         self.occurrence
             .as_str()
@@ -338,7 +351,41 @@ impl VerifiedSealedLexicalSymbolDisplayV1 {
             .saturating_add(self.simple_name.capacity())
             .saturating_add(self.qualified_name.capacity())
             .saturating_add(self.kind.capacity())
+            .saturating_add(self.signature.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.documentation.as_ref().map_or(0, String::capacity))
     }
+}
+
+impl From<&LineageSymbolRecordV1> for VerifiedSealedLexicalSymbolDisplayV1 {
+    fn from(symbol: &LineageSymbolRecordV1) -> Self {
+        Self {
+            occurrence: symbol.occurrence.clone(),
+            simple_name: symbol.simple_name.clone(),
+            qualified_name: symbol.qualified_name.clone(),
+            kind: symbol.kind.clone(),
+            signature: symbol.signature.clone(),
+            documentation: symbol.docstring.clone(),
+        }
+    }
+}
+
+fn symbol_display_for_chunk(
+    chunk: &CodeSearchChunkV1,
+    displays: &BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>,
+) -> Result<Option<VerifiedSealedLexicalSymbolDisplayV1>, CodeIndexProductionErrorV1> {
+    let Some(occurrence) = chunk.anchor.symbol_occurrence_id.as_ref() else {
+        return Ok(None);
+    };
+    let mut display = displays.get(occurrence).cloned().ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract(
+            "sealed lexical symbol chunk has no parser-attested display identity".to_owned(),
+        )
+    })?;
+    if chunk.anchor.grain != CodeSearchChunkGrainV1::SymbolSignature {
+        display.signature = None;
+        display.documentation = None;
+    }
+    Ok(Some(display))
 }
 
 /// One bounded page of parser-backed lexical and clone rows.
@@ -1875,21 +1922,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             while chunk_ordinal < admitted.chunks.len() {
                 checkpoint(control)?;
                 let chunk = admitted.chunks[chunk_ordinal].chunk();
-                let display = match chunk.anchor.symbol_occurrence_id.as_ref() {
-                    Some(occurrence) => Some(
-                        admitted
-                            .symbol_displays
-                            .get(occurrence)
-                            .cloned()
-                            .ok_or_else(|| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "sealed lexical symbol chunk has no parser-attested display identity"
-                                        .to_owned(),
-                                )
-                            })?,
-                    ),
-                    None => None,
-                };
+                let display = symbol_display_for_chunk(chunk, &admitted.symbol_displays)?;
                 let serialized_display = admitted.serialized_displays[chunk_ordinal].clone();
                 let serialized = admitted.serialized_chunks[chunk_ordinal].clone();
                 let next_symbol_display_bytes = symbol_display_bytes
@@ -3309,12 +3342,7 @@ fn admit_validated_file_parts(
         }
         let mut symbol_displays = BTreeMap::new();
         for symbol in &artifacts.symbols {
-            let display = VerifiedSealedLexicalSymbolDisplayV1 {
-                occurrence: symbol.occurrence.clone(),
-                simple_name: symbol.simple_name.clone(),
-                qualified_name: symbol.qualified_name.clone(),
-                kind: symbol.kind.clone(),
-            };
+            let display = VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref());
             if symbol_displays
                 .insert(symbol.occurrence.clone(), display)
                 .is_some()
@@ -3343,20 +3371,17 @@ fn admit_validated_file_parts(
                         &mut staging,
                         "sealed lexical chunk serialization failed",
                     )?);
-                    let serialized_display =
-                        match chunk.chunk().anchor.symbol_occurrence_id.as_ref() {
-                            Some(occurrence) => Some(serialize_page_row(
-                                symbol_displays.get(occurrence).ok_or_else(|| {
-                                    CodeIndexProductionErrorV1::Contract(
-                                        "sealed lexical symbol chunk has no parser-attested display identity"
-                                            .to_owned(),
-                                    )
-                                })?,
+                    let display = symbol_display_for_chunk(chunk.chunk(), &symbol_displays)?;
+                    let serialized_display = display
+                        .as_ref()
+                        .map(|display| {
+                            serialize_page_row(
+                                display,
                                 &mut staging,
                                 "sealed lexical symbol display serialization failed",
-                            )?),
-                            None => None,
-                        };
+                            )
+                        })
+                        .transpose()?;
                     serialized_displays.push(serialized_display);
                 }
                 let serialized_imports = imports

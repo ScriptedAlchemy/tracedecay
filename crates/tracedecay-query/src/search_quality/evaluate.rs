@@ -787,6 +787,7 @@ mod tests {
             strata: vec![stratum.to_owned()],
             query: id.to_owned(),
             allowed_scopes: vec!["research".to_owned()],
+            lexical_aliases: Vec::new(),
             historical_commit: None,
             label: Some(serde_json::json!({ "anchors": anchors })),
             need_provenance: None,
