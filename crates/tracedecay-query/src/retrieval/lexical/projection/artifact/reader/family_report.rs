@@ -62,6 +62,7 @@ pub struct CloneExactFamilyArtifactPageV1 {
 const GENERATED_PATH_FUNCTION: &str = "tracedecay_is_generated_path";
 
 impl CodeLexicalArtifactReaderV1 {
+    #[allow(clippy::too_many_arguments)] // mirrors sibling clone page readers' filter/cursor surface
     pub fn clone_exact_family_page(
         &self,
         project_id: &ProjectId,
