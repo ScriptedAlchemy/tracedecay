@@ -12,18 +12,26 @@ use inspection::{configuration_definition_digest, registered_store_is_empty};
 pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const CONFIGURATION_FORMAT_REVISION: i64 = 1;
 const FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
+    "sha256:14cfab8b33e57816605c7275e7f3140d6755c933a84239b1608dbdf653b56a1b";
+/// Tip shape that already retired credential references but still carried the
+/// semantic-retrieval state tables. Converges by dropping those tables only.
+const PRIOR_FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
     "sha256:c79fac916ce535c2b90bd46af0fec9dcd80bdb85ae7e226879dd6eb765e6ca63";
 /// The configuration shape every release from v0.1.0-beta.25 through
-/// v0.1.0-beta.37 published: the final shape plus the inert
-/// `configuration_credential_references` table and its two immutability
-/// triggers, which no shipped surface ever wrote. A store carrying it is a
-/// shipped shape that converges by retiring that table, never by reset.
+/// v0.1.0-beta.37 published. It includes the inert credential-reference table
+/// and the retired semantic-retrieval state tables.
 const RELEASED_CONFIGURATION_SCHEMA_DIGEST: &str =
     "sha256:99b8f5f5cebc584ab564181d8a67ee665031c20bbdf63b479c212d16a1c63746";
-const RETIRE_RELEASED_CREDENTIAL_REFERENCES_SQL: &str = "
-DROP TRIGGER IF EXISTS configuration_credential_references_immutable_update;
-DROP TRIGGER IF EXISTS configuration_credential_references_immutable_delete;
+const CONVERGE_RELEASED_CONFIGURATION_SQL: &str = "
 DROP TABLE configuration_credential_references;
+DROP TABLE configuration_semantic_retrieval_state_v1;
+DROP TABLE configuration_semantic_retrieval_pending_v1;
+DROP TABLE configuration_semantic_retrieval_inventory_v1;
+";
+const CONVERGE_PRIOR_FINAL_CONFIGURATION_SQL: &str = "
+DROP TABLE configuration_semantic_retrieval_state_v1;
+DROP TABLE configuration_semantic_retrieval_pending_v1;
+DROP TABLE configuration_semantic_retrieval_inventory_v1;
 ";
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -286,114 +294,6 @@ CREATE TABLE IF NOT EXISTS configuration_component_activation_events (
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
--- Semantic retrieval state is scoped compare-and-swap configuration: the
--- latest epoch per scope is current, and pending rows stage transitions until
--- a central commit lands them.
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
-    project_id TEXT NOT NULL,
-    scope_digest TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    epoch INTEGER NOT NULL CHECK (epoch >= 0),
-    configuration_revision TEXT NOT NULL,
-    transition_digest TEXT,
-    activation_receipt_digest TEXT,
-    active_vector_generation TEXT,
-    rollback_vector_generation TEXT,
-    state_json TEXT NOT NULL,
-    activation_receipt_json TEXT,
-    PRIMARY KEY (project_id, scope_digest, epoch)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS configuration_semantic_retrieval_transition_v1
-    ON configuration_semantic_retrieval_state_v1(project_id, scope_digest, transition_digest)
-    WHERE transition_digest IS NOT NULL;
-CREATE INDEX IF NOT EXISTS configuration_semantic_retrieval_active_vector_v1
-    ON configuration_semantic_retrieval_state_v1(
-        project_id, active_vector_generation, scope_digest, epoch
-    )
-    WHERE active_vector_generation IS NOT NULL;
-CREATE INDEX IF NOT EXISTS configuration_semantic_retrieval_rollback_vector_v1
-    ON configuration_semantic_retrieval_state_v1(
-        project_id, rollback_vector_generation, scope_digest, epoch
-    )
-    WHERE rollback_vector_generation IS NOT NULL;
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_pending_v1 (
-    project_id TEXT NOT NULL,
-    scope_digest TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    transition_digest TEXT NOT NULL,
-    base_epoch INTEGER NOT NULL CHECK (base_epoch >= 0),
-    base_configuration_revision TEXT NOT NULL,
-    transition_json TEXT NOT NULL,
-    resulting_state_json TEXT NOT NULL,
-    staged_at INTEGER NOT NULL,
-    PRIMARY KEY (project_id, scope_digest, transition_digest)
-);
-CREATE TRIGGER configuration_semantic_retrieval_state_scope_insert_v1
-BEFORE INSERT ON configuration_semantic_retrieval_state_v1
-WHEN json_valid(NEW.scope_json) != 1
-  OR json_extract(NEW.scope_json, '$.project_id') IS NULL
-  OR json_extract(NEW.scope_json, '$.project_id') != NEW.project_id
-  OR json_extract(NEW.scope_json, '$.scope_digest') IS NULL
-  OR json_extract(NEW.scope_json, '$.scope_digest') != NEW.scope_digest
-BEGIN
-    SELECT RAISE(ABORT, 'semantic retrieval state scope binding is invalid');
-END;
-CREATE TRIGGER configuration_semantic_retrieval_state_scope_update_v1
-BEFORE UPDATE ON configuration_semantic_retrieval_state_v1
-BEGIN
-    SELECT RAISE(ABORT, 'semantic retrieval state is append-only');
-END;
-CREATE TRIGGER configuration_semantic_retrieval_pending_scope_insert_v1
-BEFORE INSERT ON configuration_semantic_retrieval_pending_v1
-WHEN json_valid(NEW.scope_json) != 1
-  OR json_extract(NEW.scope_json, '$.project_id') IS NULL
-  OR json_extract(NEW.scope_json, '$.project_id') != NEW.project_id
-  OR json_extract(NEW.scope_json, '$.scope_digest') IS NULL
-  OR json_extract(NEW.scope_json, '$.scope_digest') != NEW.scope_digest
-BEGIN
-    SELECT RAISE(ABORT, 'semantic retrieval pending scope binding is invalid');
-END;
-CREATE TRIGGER configuration_semantic_retrieval_pending_scope_update_v1
-BEFORE UPDATE ON configuration_semantic_retrieval_pending_v1
-BEGIN
-    SELECT RAISE(ABORT, 'semantic retrieval pending transition is immutable');
-END;
--- The revision binds bounded project-wide semantic configuration inventory
--- pages. State and pending-transition changes both advance it so an inventory
--- can never become complete across a configuration transition it did not
--- observe.
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_inventory_v1 (
-    project_id TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision >= 0)
-);
-CREATE TRIGGER configuration_semantic_retrieval_state_inventory_insert_v1
-AFTER INSERT ON configuration_semantic_retrieval_state_v1
-BEGIN
-    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
-    VALUES (NEW.project_id, 1)
-    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
-END;
-CREATE TRIGGER configuration_semantic_retrieval_state_inventory_delete_v1
-AFTER DELETE ON configuration_semantic_retrieval_state_v1
-BEGIN
-    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
-    VALUES (OLD.project_id, 1)
-    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
-END;
-CREATE TRIGGER configuration_semantic_retrieval_pending_inventory_insert_v1
-AFTER INSERT ON configuration_semantic_retrieval_pending_v1
-BEGIN
-    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
-    VALUES (NEW.project_id, 1)
-    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
-END;
-CREATE TRIGGER configuration_semantic_retrieval_pending_inventory_delete_v1
-AFTER DELETE ON configuration_semantic_retrieval_pending_v1
-BEGIN
-    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
-    VALUES (OLD.project_id, 1)
-    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
-END;
 CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
     profile_digest TEXT PRIMARY KEY NOT NULL,
     authority_json TEXT NOT NULL
@@ -528,6 +428,8 @@ END;
 enum ConfigurationShape {
     Absent,
     Final,
+    /// Tip shape after credential retirement, before semantic-table retirement.
+    PriorFinal,
     /// The exact shape shipped by beta.25 through beta.37.
     Released,
 }
@@ -540,6 +442,8 @@ async fn validate_configuration_schema(
     };
     let shape = if definition_digest == FINAL_CONFIGURATION_SCHEMA_DIGEST {
         ConfigurationShape::Final
+    } else if definition_digest == PRIOR_FINAL_CONFIGURATION_SCHEMA_DIGEST {
+        ConfigurationShape::PriorFinal
     } else if definition_digest == RELEASED_CONFIGURATION_SCHEMA_DIGEST {
         ConfigurationShape::Released
     } else {
@@ -570,14 +474,16 @@ async fn validate_configuration_schema(
     Ok(shape)
 }
 
-/// Read-only admission: the final shape and the shipped shape are both
-/// admissible; the writer converges the shipped one on its next open.
+/// Read-only admission: the final shape and convergeable prior shapes are
+/// admissible; the writer converges prior shapes on its next open.
 pub async fn admit_configuration_schema(
     connection: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
 ) -> Result<(), ConfigurationSchemaError> {
     match validate_configuration_schema(connection).await? {
-        ConfigurationShape::Final | ConfigurationShape::Released => Ok(()),
+        ConfigurationShape::Final
+        | ConfigurationShape::PriorFinal
+        | ConfigurationShape::Released => Ok(()),
         ConfigurationShape::Absent if fresh_store.is_some() => Ok(()),
         ConfigurationShape::Absent => Err(ConfigurationSchemaError::ResetRequired {
             reason: "configuration schema is missing from a non-fresh registered store",
@@ -591,8 +497,11 @@ pub async fn ensure_configuration_schema(
 ) -> Result<(), ConfigurationSchemaError> {
     match validate_configuration_schema(connection).await? {
         ConfigurationShape::Final => return Ok(()),
+        ConfigurationShape::PriorFinal => {
+            return converge_prior_final_configuration(connection).await;
+        }
         ConfigurationShape::Released => {
-            return retire_released_credential_references(connection).await;
+            return converge_released_configuration(connection).await;
         }
         ConfigurationShape::Absent => {}
     }
@@ -616,9 +525,9 @@ pub async fn ensure_configuration_schema(
     }
 }
 
-/// Converges a shipped store to the final shape. The retired table never had
-/// a writer, so a row in it is unknown data this binary must not discard.
-async fn retire_released_credential_references(
+/// Converges a shipped store to the final shape. The credential table never
+/// had a writer, while semantic-retrieval rows have no remaining consumer.
+async fn converge_released_configuration(
     connection: &impl Executor,
 ) -> Result<(), ConfigurationSchemaError> {
     let mut rows = connection
@@ -634,13 +543,30 @@ async fn retire_released_credential_references(
     }
     drop(rows);
     connection
-        .execute_batch(RETIRE_RELEASED_CREDENTIAL_REFERENCES_SQL)
+        .execute_batch(CONVERGE_RELEASED_CONFIGURATION_SQL)
         .await?;
     if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
         Ok(())
     } else {
         Err(ConfigurationSchemaError::ResetRequired {
             reason: "released configuration store did not converge to the final shape",
+        })
+    }
+}
+
+/// Converges a tip store that already dropped credential references but still
+/// carries retired semantic-retrieval tables.
+async fn converge_prior_final_configuration(
+    connection: &impl Executor,
+) -> Result<(), ConfigurationSchemaError> {
+    connection
+        .execute_batch(CONVERGE_PRIOR_FINAL_CONFIGURATION_SQL)
+        .await?;
+    if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
+        Ok(())
+    } else {
+        Err(ConfigurationSchemaError::ResetRequired {
+            reason: "prior-final configuration store did not converge to the final shape",
         })
     }
 }
@@ -737,19 +663,14 @@ mod tests {
             .await
             .unwrap();
 
-        // The semantic retrieval state, pending-transition, and accepted
-        // profile tables are compare-and-swap surfaces whose rows are
-        // rewritten or cleared by production commits, so they are not part of
-        // the append-only contract.
+        // The accepted-profile table is a compare-and-swap surface, so it is
+        // not part of the append-only contract.
         let mut rows = connection
             .query(
                 "SELECT name FROM sqlite_master
                  WHERE type = 'table' AND name LIKE 'configuration_%'
                    AND name NOT IN (
-                        'configuration_semantic_accepted_profiles_v1',
-                        'configuration_semantic_retrieval_inventory_v1',
-                        'configuration_semantic_retrieval_pending_v1',
-                        'configuration_semantic_retrieval_state_v1'
+                        'configuration_semantic_accepted_profiles_v1'
                    )
                  ORDER BY name",
                 (),
