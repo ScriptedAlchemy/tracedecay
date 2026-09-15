@@ -638,12 +638,7 @@ fn occupied_pending_stage_reports_the_superseded_record() {
         let outcome = fixture
             .graph
             .registry
-            .begin_verified_generation(
-                fixture.registration(),
-                &mut authority,
-                context,
-                &second,
-            )
+            .begin_verified_generation(fixture.registration(), &mut authority, context, &second)
             .expect("occupied projection must return its pending stage");
         assert!(matches!(
             outcome,

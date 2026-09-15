@@ -264,8 +264,7 @@ impl GraphVectorGenerationStoreV1 {
                             VerifiedGenerationBeginV1::Occupied { existing } => {
                                 let is_superseded = existing.state
                                     == SemanticVectorStageState::Pending
-                                    && (existing.plan.key.build_id
-                                        != stage_plan.key.build_id
+                                    && (existing.plan.key.build_id != stage_plan.key.build_id
                                         || existing.plan.key.plan_digest
                                             != stage_plan.key.plan_digest);
                                 if superseded_stage || !is_superseded {
@@ -538,11 +537,9 @@ impl GraphVectorGenerationStoreV1 {
                 ))
             }
             SemanticVectorStageCancelOutcome::ReadyToPublish(_)
-            | SemanticVectorStageCancelOutcome::StaleFence { .. } => {
-                Err(map_graph_error(GraphDbError::conflict(
-                    "usecases.store.cancel_generation.stage_state",
-                )))
-            }
+            | SemanticVectorStageCancelOutcome::StaleFence { .. } => Err(map_graph_error(
+                GraphDbError::conflict("usecases.store.cancel_generation.stage_state"),
+            )),
         }
     }
 
