@@ -6,13 +6,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay_contracts::WorkAttemptListRequestV1;
+use tracedecay_contracts::{WorkAttemptListRequestV1, WorkflowRunGetRequest};
 use tracedecay_contracts::configuration::{
     ComponentConfigurationState, ConfigurationObservedStateRequestV1,
 };
+use tracedecay_domain::RunId;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
-use tracedecay_sdk::operations::{ApplicationConfigurationObservedState, WorkListAttempts};
+use tracedecay_sdk::operations::{
+    ApplicationConfigurationObservedState, WorkListAttempts, WorkflowGetRun,
+};
 
 use super::{common, wait_until};
 
@@ -58,6 +61,23 @@ pub(super) fn wait_for_work_mount(client: &Client) {
                 None
             }
             Err(error) => panic!("project Work runtime mount failed: {error}"),
+        }
+    });
+}
+
+pub(super) fn wait_for_workflow_mount(client: &Client, run_id: &RunId) {
+    wait_until("project Workflow runtime mount", || {
+        match client.execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
+            run_id: run_id.clone(),
+        }) {
+            Ok(_) => Some(()),
+            Err(ClientError::Problem(problem))
+                if problem.kind == "not_found_or_not_authorized"
+                    || problem.kind == "unavailable" =>
+            {
+                None
+            }
+            Err(error) => panic!("project Workflow runtime mount failed: {error}"),
         }
     });
 }

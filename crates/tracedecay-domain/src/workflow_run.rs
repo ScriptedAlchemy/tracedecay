@@ -297,7 +297,6 @@ pub struct WorkflowRunProjection {
     fan_out_plans: BTreeMap<WorkflowStepId, WorkflowFanOutPlanV1>,
     released_fan_out_attempts: BTreeSet<WorkAttemptIdentityV1>,
     settled_fan_out_attempts: BTreeSet<WorkAttemptIdentityV1>,
-    active_fan_out_attempts: BTreeMap<WorkAttemptIdentityV1, WorkAttemptIdentityV1>,
     history: Vec<WorkflowRunEvent>,
 }
 
@@ -353,7 +352,6 @@ impl WorkflowRunProjection {
             fan_out_plans,
             released_fan_out_attempts: BTreeSet::new(),
             settled_fan_out_attempts: BTreeSet::new(),
-            active_fan_out_attempts: BTreeMap::new(),
             history: vec![first.clone()],
         };
         for event in &history[1..] {
@@ -613,8 +611,6 @@ impl WorkflowRunProjection {
                     replacement_attempt,
                     retry_receipt_digest,
                 )?;
-                next.active_fan_out_attempts
-                    .insert(planned_attempt.clone(), replacement_attempt.clone());
             }
             WorkflowRunEventKind::StepStarted { step_id, placement } => {
                 next.require_running()?;
@@ -745,8 +741,17 @@ impl WorkflowRunProjection {
         &'a self,
         planned_attempt: &'a WorkAttemptIdentityV1,
     ) -> &'a WorkAttemptIdentityV1 {
-        self.active_fan_out_attempts
-            .get(planned_attempt)
+        self.history
+            .iter()
+            .rev()
+            .find_map(|event| match event.event() {
+                WorkflowRunEventKind::FanOutChildRetryRebound {
+                    planned_attempt: candidate,
+                    replacement_attempt,
+                    ..
+                } if candidate == planned_attempt => Some(replacement_attempt),
+                _ => None,
+            })
             .unwrap_or(planned_attempt)
     }
 
