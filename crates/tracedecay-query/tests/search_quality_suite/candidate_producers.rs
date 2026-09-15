@@ -2226,28 +2226,26 @@ fn fingerprint_candidate_and_posting_budgets_report_partial_coverage() {
 
 #[test]
 fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
-    let shared = (0..1_500)
-        .map(|ordinal| format!("shared_step_{ordinal}(); "))
+    let shared = (0..1_400)
+        .map(|ordinal| format!("{ordinal},"))
         .collect::<String>();
-    let fixture = real_lexical_source_fixture_from_sources(
-        (0..4)
-            .map(|ordinal| {
-                (
-                    format!("file.clone.cursor.{ordinal}"),
-                    format!("src/cursor-{ordinal}.ts"),
-                    format!(
-                        "export function cursor_{ordinal}() {{ {shared} unique_{ordinal}(); }}"
-                    )
-                    .into_bytes(),
-                )
-            })
-            .collect(),
-    );
+    let source_text = (0..12)
+        .map(|ordinal| {
+            format!(
+                "export function cursor_{ordinal}() {{ const values = [{shared}]; return values[{ordinal}]; }}\n"
+            )
+        })
+        .collect::<String>();
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.clone.cursor".to_owned(),
+        "src/cursor.ts".to_owned(),
+        source_text.into_bytes(),
+    )]);
     let (_directory, pages, reader) = build_clone_artifact(&fixture);
     let source = pages
         .iter()
         .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
-        .find(|body| body.occurrence.path == "src/cursor-0.ts")
+        .min_by_key(|body| body.occurrence.body_span.start_byte)
         .expect("cursor source body");
     let read = reader
         .clone_fingerprint_page(
@@ -2262,7 +2260,8 @@ fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
     assert!(
         read.partial_reasons
             .contains(&CloneFingerprintPartialReasonV1::VerificationWorkBudget),
-        "fixture must exhaust alignment work: {read:#?}"
+        "fixture must exhaust alignment work: {:?}",
+        read.accounting
     );
     let last_completed = read
         .page
@@ -2270,15 +2269,42 @@ fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
         .last()
         .expect("at least one completed candidate");
     let cursor = read.page.next_cursor.expect("partial read cursor");
-    let (body_digest, payload_digest) = cursor
-        .fingerprint_continuation_digests()
-        .expect("fingerprint read emitted an exact cursor");
-    assert_eq!(
-        (body_digest, payload_digest),
+    let mut ordered_candidates = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .filter(|body| {
+            body.occurrence.symbol_occurrence_id != source.occurrence.symbol_occurrence_id
+        })
+        .collect::<Vec<_>>();
+    ordered_candidates.sort_by_key(|body| {
         (
-            &last_completed.payload.body_digest,
-            &last_completed.payload.payload_digest,
-        ),
+            body.payload.body_digest.clone(),
+            body.payload.payload_digest.clone(),
+        )
+    });
+    let completed_index = ordered_candidates
+        .iter()
+        .position(|body| body.payload.payload_digest == last_completed.payload.payload_digest)
+        .expect("completed candidate is in the ordered fixture");
+    let expected_resumed = ordered_candidates
+        .get(completed_index + 1)
+        .expect("unfinished candidate remains after the completed candidate");
+    let resumed = reader
+        .clone_fingerprint_page(
+            &source.occurrence,
+            &source.payload,
+            Some(&cursor),
+            256,
+            &ArtifactControl { cancelled: false },
+        )
+        .expect("resume bounded fingerprint read");
+    let first_resumed = resumed
+        .page
+        .members
+        .first()
+        .expect("resume retries the unfinished candidate");
+    assert_eq!(
+        first_resumed.payload.payload_digest, expected_resumed.payload.payload_digest,
         "the unfinished candidate must remain behind the continuation cursor"
     );
 }
