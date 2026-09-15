@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay_contracts::{WorkAttemptListRequestV1, WorkflowRunGetRequest};
 use tracedecay_contracts::configuration::{
     ComponentConfigurationState, ConfigurationObservedStateRequestV1,
 };
+use tracedecay_contracts::{WorkAttemptListRequestV1, WorkflowRunGetRequest};
 use tracedecay_domain::RunId;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};

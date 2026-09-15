@@ -2341,7 +2341,7 @@ impl LatestCodeTextGenerationV1 {
                         &staging_path,
                         metadata.clone(),
                         builder_budget,
-                        CodeLexicalArtifactWriterRevisionV1::V16,
+                        CodeLexicalArtifactWriterRevisionV1::V14,
                     )
                 }
                 Err(error) => Err(error),
@@ -2351,7 +2351,7 @@ impl LatestCodeTextGenerationV1 {
                 &staging_path,
                 metadata.clone(),
                 builder_budget,
-                CodeLexicalArtifactWriterRevisionV1::V16,
+                CodeLexicalArtifactWriterRevisionV1::V14,
             )
         }
         .map_err(map_text_artifact_error)?;
