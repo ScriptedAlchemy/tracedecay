@@ -376,7 +376,7 @@ pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_similar",
         "Similar Symbols",
-        "Find symbols with similar names through exact and lexical identifier routes (camelCase / snake_case splits, qualified names, substring). Not embedding search. Prefer tracedecay_search when you want ranked body/phrase hits; this tool is name-first.",
+        "Find verified shared-code clones for a resolved symbol: exact and rename-normalized body groups plus verified near-duplicate pairs from source-bound clone facts. Not embedding search. Prefer tracedecay_search for ranked body/phrase hits; use this when you need clone families and near-pair evidence.",
         input_schema,
     )
 }

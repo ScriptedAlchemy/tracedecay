@@ -387,6 +387,44 @@ pub type CodeIndexSearchFuture =
 pub type CodeIndexSearchExecutor =
     Arc<dyn Fn(CodeIndexSearchRequestV1) -> CodeIndexSearchFuture + Send + Sync + 'static>;
 
+#[derive(Clone, Debug)]
+pub struct CodeIndexSimilarRequestV1 {
+    pub project_root: PathBuf,
+    pub code_generation: String,
+    pub symbol_occurrence_id: tracedecay_domain::SymbolOccurrenceId,
+    pub limit: usize,
+    pub authority: Option<CodeIndexSearchAuthorityV1>,
+    pub deadline: Option<tracedecay_contracts::Deadline>,
+    pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexSimilarExactGroupV1 {
+    pub key: tracedecay_code_index::clones::CloneExactKeyV1,
+    pub members: Vec<crate::retrieval::lexical::CloneExactArtifactMemberV1>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexSimilarCompletedV1 {
+    pub source: tracedecay_code_index::clones::CodeIndexCloneBodyV1,
+    pub exact_groups: Vec<CodeIndexSimilarExactGroupV1>,
+    pub near: crate::retrieval::lexical::CloneFingerprintArtifactReadV1,
+}
+
+#[derive(Clone, Debug)]
+pub enum CodeIndexSimilarOutcomeV1 {
+    Complete(CodeIndexSimilarCompletedV1),
+    NotFound,
+    Unavailable(CodeIndexSearchUnavailableReasonV1),
+}
+
+pub type CodeIndexSimilarFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = CodeIndexSimilarOutcomeV1> + Send + 'static>,
+>;
+
+pub type CodeIndexSimilarExecutor =
+    Arc<dyn Fn(CodeIndexSimilarRequestV1) -> CodeIndexSimilarFuture + Send + Sync + 'static>;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct CodeIndexBranchSymbolV1 {
     pub symbol_identity: tracedecay_domain::SymbolIdentityDigest,

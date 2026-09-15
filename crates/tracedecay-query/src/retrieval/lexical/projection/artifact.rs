@@ -28,10 +28,11 @@ pub use builder::{
 pub use clone_successor::CodeLexicalCloneSuccessorV1;
 pub use fingerprints::{
     CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-    CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CloneFingerprintArtifactAnchorV1,
-    CloneFingerprintArtifactCandidateV1, CloneFingerprintArtifactReadV1,
-    CloneFingerprintCancellationPointV1, CloneFingerprintPartialReasonV1,
-    CloneFingerprintReadAccountingV1, CloneFingerprintStreamDescriptorV1,
+    CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
+    CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1, CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
+    CloneFingerprintArtifactReadV1, CloneFingerprintCancellationPointV1,
+    CloneFingerprintPartialReasonV1, CloneFingerprintReadAccountingV1,
+    CloneFingerprintStreamDescriptorV1, CloneNearMatchArtifactV1, CloneNearMatchExtentV1,
     CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
     CloneSelectedBlockContainmentClassV1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
 };

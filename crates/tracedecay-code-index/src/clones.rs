@@ -31,6 +31,49 @@ pub struct CloneFingerprintPositionV1 {
     pub token_position: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CloneTokenAnchorV1 {
+    pub fingerprint: u64,
+    pub left_token_position: u32,
+    pub right_token_position: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloneTokenSpanV1 {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneAlignedDifferenceV1 {
+    pub left_span: CloneTokenSpanV1,
+    pub right_span: CloneTokenSpanV1,
+    pub left_tokens: Vec<ConservativeCloneTokenV1>,
+    pub right_tokens: Vec<ConservativeCloneTokenV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneWholeBodyAlignmentV1 {
+    pub ordered_anchors: Vec<CloneTokenAnchorV1>,
+    pub shared_token_count: u32,
+    pub left_coverage_millionths: u32,
+    pub right_coverage_millionths: u32,
+    pub differences: Vec<CloneAlignedDifferenceV1>,
+    pub work: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloneAlignmentStopReasonV1 {
+    WorkBudgetExhausted,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloneAlignmentStoppedV1 {
+    pub reason: CloneAlignmentStopReasonV1,
+    pub work: u64,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
@@ -632,6 +675,456 @@ pub fn verify_clone_token_anchor(
     left == right
 }
 
+pub fn align_clone_tokens(
+    left: &[ConservativeCloneTokenV1],
+    right: &[ConservativeCloneTokenV1],
+    anchors: &[CloneTokenAnchorV1],
+    maximum_work: u64,
+    should_stop: impl FnMut() -> bool,
+) -> Result<CloneWholeBodyAlignmentV1, CloneAlignmentStoppedV1> {
+    let mut meter = CloneAlignmentWorkMeterV1 {
+        maximum: maximum_work,
+        work: 0,
+        should_stop,
+    };
+    let ordered_anchors = chain_clone_anchors(left, right, anchors, &mut meter)?;
+    let mut differences = Vec::new();
+    let mut shared_token_count = 0usize;
+    let mut left_start = 0usize;
+    let mut right_start = 0usize;
+    for anchor in &ordered_anchors {
+        let left_anchor =
+            usize::try_from(anchor.left_token_position).map_err(|_| meter.exhausted())?;
+        let right_anchor =
+            usize::try_from(anchor.right_token_position).map_err(|_| meter.exhausted())?;
+        let (mut segment_differences, segment_shared) = diff_clone_token_segment(
+            &left[left_start..left_anchor],
+            &right[right_start..right_anchor],
+            left_start,
+            right_start,
+            &mut meter,
+        )?;
+        differences.append(&mut segment_differences);
+        shared_token_count = shared_token_count
+            .saturating_add(segment_shared)
+            .saturating_add(CLONE_FINGERPRINT_K_V1);
+        left_start = left_anchor.saturating_add(CLONE_FINGERPRINT_K_V1);
+        right_start = right_anchor.saturating_add(CLONE_FINGERPRINT_K_V1);
+    }
+    let (mut tail_differences, tail_shared) = diff_clone_token_segment(
+        &left[left_start..],
+        &right[right_start..],
+        left_start,
+        right_start,
+        &mut meter,
+    )?;
+    differences.append(&mut tail_differences);
+    shared_token_count = shared_token_count.saturating_add(tail_shared);
+    let shared_token_count = u32::try_from(shared_token_count).map_err(|_| meter.exhausted())?;
+    let left_coverage_millionths =
+        directional_coverage(shared_token_count, left.len()).ok_or_else(|| meter.exhausted())?;
+    let right_coverage_millionths =
+        directional_coverage(shared_token_count, right.len()).ok_or_else(|| meter.exhausted())?;
+    Ok(CloneWholeBodyAlignmentV1 {
+        ordered_anchors,
+        shared_token_count,
+        left_coverage_millionths,
+        right_coverage_millionths,
+        differences,
+        work: meter.work,
+    })
+}
+
+struct CloneAlignmentWorkMeterV1<F> {
+    maximum: u64,
+    work: u64,
+    should_stop: F,
+}
+
+impl<F: FnMut() -> bool> CloneAlignmentWorkMeterV1<F> {
+    fn tick(&mut self) -> Result<(), CloneAlignmentStoppedV1> {
+        if self.work == self.maximum {
+            return Err(self.exhausted());
+        }
+        self.work = self.work.saturating_add(1);
+        if (self.work == 1 || self.work.is_multiple_of(1_024)) && (self.should_stop)() {
+            return Err(CloneAlignmentStoppedV1 {
+                reason: CloneAlignmentStopReasonV1::Interrupted,
+                work: self.work,
+            });
+        }
+        Ok(())
+    }
+
+    fn exhausted(&self) -> CloneAlignmentStoppedV1 {
+        CloneAlignmentStoppedV1 {
+            reason: CloneAlignmentStopReasonV1::WorkBudgetExhausted,
+            work: self.work,
+        }
+    }
+
+    fn remaining(&self) -> u64 {
+        self.maximum.saturating_sub(self.work)
+    }
+}
+
+fn chain_clone_anchors<F: FnMut() -> bool>(
+    left: &[ConservativeCloneTokenV1],
+    right: &[ConservativeCloneTokenV1],
+    anchors: &[CloneTokenAnchorV1],
+    meter: &mut CloneAlignmentWorkMeterV1<F>,
+) -> Result<Vec<CloneTokenAnchorV1>, CloneAlignmentStoppedV1> {
+    let mut verified_anchors = Vec::with_capacity(anchors.len());
+    for anchor in anchors {
+        if verify_clone_token_anchor_with_meter(left, right, anchor, meter)? {
+            verified_anchors.push(*anchor);
+        }
+    }
+    let mut anchors = verified_anchors;
+    anchors.sort_unstable_by_key(|anchor| {
+        (
+            anchor.left_token_position,
+            anchor.right_token_position,
+            anchor.fingerprint,
+        )
+    });
+    anchors.dedup();
+    if anchors.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lengths = vec![1usize; anchors.len()];
+    let mut previous = vec![None; anchors.len()];
+    for current in 0..anchors.len() {
+        meter.tick()?;
+        for candidate in 0..current {
+            meter.tick()?;
+            if anchors[candidate]
+                .left_token_position
+                .saturating_add(CLONE_FINGERPRINT_K_V1 as u32)
+                <= anchors[current].left_token_position
+                && anchors[candidate]
+                    .right_token_position
+                    .saturating_add(CLONE_FINGERPRINT_K_V1 as u32)
+                    <= anchors[current].right_token_position
+                && lengths[candidate].saturating_add(1) > lengths[current]
+            {
+                lengths[current] = lengths[candidate].saturating_add(1);
+                previous[current] = Some(candidate);
+            }
+        }
+    }
+    let mut cursor = lengths
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, length)| (**length, std::cmp::Reverse(*index)))
+        .map(|(index, _)| index)
+        .ok_or_else(|| meter.exhausted())?;
+    let mut chain = Vec::with_capacity(lengths[cursor]);
+    loop {
+        chain.push(anchors[cursor]);
+        let Some(parent) = previous[cursor] else {
+            break;
+        };
+        cursor = parent;
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+fn verify_clone_token_anchor_with_meter<F: FnMut() -> bool>(
+    left: &[ConservativeCloneTokenV1],
+    right: &[ConservativeCloneTokenV1],
+    anchor: &CloneTokenAnchorV1,
+    meter: &mut CloneAlignmentWorkMeterV1<F>,
+) -> Result<bool, CloneAlignmentStoppedV1> {
+    meter.tick()?;
+    let Some(left) = usize::try_from(anchor.left_token_position)
+        .ok()
+        .and_then(|position| left.get(position..position.saturating_add(CLONE_FINGERPRINT_K_V1)))
+    else {
+        return Ok(false);
+    };
+    let Some(right) = usize::try_from(anchor.right_token_position)
+        .ok()
+        .and_then(|position| right.get(position..position.saturating_add(CLONE_FINGERPRINT_K_V1)))
+    else {
+        return Ok(false);
+    };
+    for (left, right) in left.iter().zip(right) {
+        meter.tick()?;
+        if left != right {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn diff_clone_token_segment<F: FnMut() -> bool>(
+    left: &[ConservativeCloneTokenV1],
+    right: &[ConservativeCloneTokenV1],
+    left_offset: usize,
+    right_offset: usize,
+    meter: &mut CloneAlignmentWorkMeterV1<F>,
+) -> Result<(Vec<CloneAlignedDifferenceV1>, usize), CloneAlignmentStoppedV1> {
+    let mut prefix = 0usize;
+    while prefix < left.len() && prefix < right.len() {
+        meter.tick()?;
+        if left[prefix] != right[prefix] {
+            break;
+        }
+        prefix = prefix.saturating_add(1);
+    }
+    let mut suffix = 0usize;
+    while suffix < left.len().saturating_sub(prefix) && suffix < right.len().saturating_sub(prefix)
+    {
+        meter.tick()?;
+        if left[left.len() - suffix - 1] != right[right.len() - suffix - 1] {
+            break;
+        }
+        suffix = suffix.saturating_add(1);
+    }
+    let left_middle = &left[prefix..left.len() - suffix];
+    let right_middle = &right[prefix..right.len() - suffix];
+    if left_middle.is_empty() && right_middle.is_empty() {
+        return Ok((Vec::new(), left.len()));
+    }
+    if left_middle.is_empty() || right_middle.is_empty() {
+        for _ in 0..left_middle.len().saturating_add(right_middle.len()) {
+            meter.tick()?;
+        }
+        return Ok((
+            vec![clone_difference(
+                left_middle,
+                right_middle,
+                left_offset.saturating_add(prefix),
+                right_offset.saturating_add(prefix),
+            )?],
+            prefix.saturating_add(suffix),
+        ));
+    }
+    let maximum = left_middle.len().saturating_add(right_middle.len());
+    if u64::try_from(maximum).map_or(true, |maximum| maximum > meter.remaining()) {
+        return Err(meter.exhausted());
+    }
+    let (removed, added) = myers_clone_diff(left_middle, right_middle, meter)?;
+    let removed_count = removed.iter().filter(|removed| **removed).count();
+    let mut differences = Vec::new();
+    let mut left_position = 0usize;
+    let mut right_position = 0usize;
+    while left_position < left_middle.len() || right_position < right_middle.len() {
+        if left_position < left_middle.len()
+            && right_position < right_middle.len()
+            && !removed[left_position]
+            && !added[right_position]
+        {
+            left_position = left_position.saturating_add(1);
+            right_position = right_position.saturating_add(1);
+            continue;
+        }
+        let left_start = left_position;
+        let right_start = right_position;
+        while left_position < left_middle.len() && removed[left_position] {
+            left_position = left_position.saturating_add(1);
+        }
+        while right_position < right_middle.len() && added[right_position] {
+            right_position = right_position.saturating_add(1);
+        }
+        differences.push(clone_difference(
+            &left_middle[left_start..left_position],
+            &right_middle[right_start..right_position],
+            left_offset
+                .saturating_add(prefix)
+                .saturating_add(left_start),
+            right_offset
+                .saturating_add(prefix)
+                .saturating_add(right_start),
+        )?);
+    }
+    Ok((
+        differences,
+        prefix
+            .saturating_add(suffix)
+            .saturating_add(left_middle.len().saturating_sub(removed_count)),
+    ))
+}
+
+fn myers_clone_diff<F: FnMut() -> bool>(
+    left: &[ConservativeCloneTokenV1],
+    right: &[ConservativeCloneTokenV1],
+    meter: &mut CloneAlignmentWorkMeterV1<F>,
+) -> Result<(Vec<bool>, Vec<bool>), CloneAlignmentStoppedV1> {
+    let maximum = left.len().saturating_add(right.len());
+    let offset = isize::try_from(maximum.saturating_add(1)).map_err(|_| meter.exhausted())?;
+    let frontier_len = maximum
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(3))
+        .ok_or_else(|| meter.exhausted())?;
+    let mut frontier = vec![-1isize; frontier_len];
+    frontier[usize::try_from(offset.saturating_add(1)).map_err(|_| meter.exhausted())?] = 0;
+    let left_limit = isize::try_from(left.len()).map_err(|_| meter.exhausted())?;
+    let right_limit = isize::try_from(right.len()).map_err(|_| meter.exhausted())?;
+    let mut trace = Vec::new();
+    for distance in 0..=maximum {
+        let distance_isize = isize::try_from(distance).map_err(|_| meter.exhausted())?;
+        let mut diagonal = -distance_isize;
+        while diagonal <= distance_isize {
+            meter.tick()?;
+            let index =
+                usize::try_from(offset.saturating_add(diagonal)).map_err(|_| meter.exhausted())?;
+            let mut left_position = if diagonal == -distance_isize
+                || (diagonal != distance_isize && frontier[index - 1] < frontier[index + 1])
+            {
+                frontier[index + 1]
+            } else {
+                frontier[index - 1].saturating_add(1)
+            };
+            let mut right_position = left_position.saturating_sub(diagonal);
+            while left_position < left_limit
+                && right_position < right_limit
+                && left[usize::try_from(left_position).map_err(|_| meter.exhausted())?]
+                    == right[usize::try_from(right_position).map_err(|_| meter.exhausted())?]
+            {
+                meter.tick()?;
+                left_position = left_position.saturating_add(1);
+                right_position = right_position.saturating_add(1);
+            }
+            frontier[index] = left_position;
+            if left_position >= left_limit && right_position >= right_limit {
+                trace.push(compact_clone_frontier(
+                    &frontier,
+                    offset,
+                    distance_isize,
+                    meter,
+                )?);
+                return backtrack_myers_clone_diff(
+                    &trace,
+                    distance,
+                    left.len(),
+                    right.len(),
+                    meter,
+                );
+            }
+            diagonal = diagonal.saturating_add(2);
+        }
+        trace.push(compact_clone_frontier(
+            &frontier,
+            offset,
+            distance_isize,
+            meter,
+        )?);
+    }
+    Err(meter.exhausted())
+}
+
+fn compact_clone_frontier<F: FnMut() -> bool>(
+    frontier: &[isize],
+    offset: isize,
+    distance: isize,
+    meter: &CloneAlignmentWorkMeterV1<F>,
+) -> Result<Vec<isize>, CloneAlignmentStoppedV1> {
+    let start = usize::try_from(offset.saturating_sub(distance)).map_err(|_| meter.exhausted())?;
+    let end = usize::try_from(offset.saturating_add(distance).saturating_add(1))
+        .map_err(|_| meter.exhausted())?;
+    frontier
+        .get(start..end)
+        .map(<[isize]>::to_vec)
+        .ok_or_else(|| meter.exhausted())
+}
+
+fn backtrack_myers_clone_diff<F: FnMut() -> bool>(
+    trace: &[Vec<isize>],
+    distance: usize,
+    left_len: usize,
+    right_len: usize,
+    meter: &CloneAlignmentWorkMeterV1<F>,
+) -> Result<(Vec<bool>, Vec<bool>), CloneAlignmentStoppedV1> {
+    let mut removed = vec![false; left_len];
+    let mut added = vec![false; right_len];
+    let mut left_position = isize::try_from(left_len).map_err(|_| meter.exhausted())?;
+    let mut right_position = isize::try_from(right_len).map_err(|_| meter.exhausted())?;
+    for current_distance in (1..=distance).rev() {
+        let frontier = &trace[current_distance - 1];
+        let current_distance_isize =
+            isize::try_from(current_distance).map_err(|_| meter.exhausted())?;
+        let previous_distance = current_distance_isize.saturating_sub(1);
+        let diagonal = left_position.saturating_sub(right_position);
+        let previous_diagonal = if diagonal == -current_distance_isize
+            || (diagonal != current_distance_isize
+                && compact_frontier_value(frontier, previous_distance, diagonal - 1, meter)?
+                    < compact_frontier_value(frontier, previous_distance, diagonal + 1, meter)?)
+        {
+            diagonal.saturating_add(1)
+        } else {
+            diagonal.saturating_sub(1)
+        };
+        let previous_left =
+            compact_frontier_value(frontier, previous_distance, previous_diagonal, meter)?;
+        let previous_right = previous_left.saturating_sub(previous_diagonal);
+        while left_position > previous_left && right_position > previous_right {
+            left_position = left_position.saturating_sub(1);
+            right_position = right_position.saturating_sub(1);
+        }
+        if left_position == previous_left {
+            right_position = right_position.saturating_sub(1);
+            added[usize::try_from(right_position).map_err(|_| meter.exhausted())?] = true;
+        } else {
+            left_position = left_position.saturating_sub(1);
+            removed[usize::try_from(left_position).map_err(|_| meter.exhausted())?] = true;
+        }
+    }
+    Ok((removed, added))
+}
+
+fn compact_frontier_value<F: FnMut() -> bool>(
+    frontier: &[isize],
+    distance: isize,
+    diagonal: isize,
+    meter: &CloneAlignmentWorkMeterV1<F>,
+) -> Result<isize, CloneAlignmentStoppedV1> {
+    let index =
+        usize::try_from(diagonal.saturating_add(distance)).map_err(|_| meter.exhausted())?;
+    frontier
+        .get(index)
+        .copied()
+        .ok_or_else(|| meter.exhausted())
+}
+
+fn clone_difference(
+    left: &[ConservativeCloneTokenV1],
+    right: &[ConservativeCloneTokenV1],
+    left_start: usize,
+    right_start: usize,
+) -> Result<CloneAlignedDifferenceV1, CloneAlignmentStoppedV1> {
+    let span = |start: usize, length: usize| {
+        Ok(CloneTokenSpanV1 {
+            start: u32::try_from(start).map_err(|_| CloneAlignmentStoppedV1 {
+                reason: CloneAlignmentStopReasonV1::WorkBudgetExhausted,
+                work: 0,
+            })?,
+            end: u32::try_from(start.saturating_add(length)).map_err(|_| {
+                CloneAlignmentStoppedV1 {
+                    reason: CloneAlignmentStopReasonV1::WorkBudgetExhausted,
+                    work: 0,
+                }
+            })?,
+        })
+    };
+    Ok(CloneAlignedDifferenceV1 {
+        left_span: span(left_start, left.len())?,
+        right_span: span(right_start, right.len())?,
+        left_tokens: left.to_vec(),
+        right_tokens: right.to_vec(),
+    })
+}
+
+fn directional_coverage(shared: u32, total: usize) -> Option<u32> {
+    let total = u64::try_from(total).ok()?;
+    if total == 0 {
+        return Some(0);
+    }
+    u32::try_from(u64::from(shared).saturating_mul(1_000_000) / total).ok()
+}
+
 #[cfg(test)]
 mod fingerprint_tests {
     use tracedecay_code_extraction::{
@@ -639,9 +1132,9 @@ mod fingerprint_tests {
     };
 
     use super::{
-        CLONE_FINGERPRINT_K_V1, CLONE_FINGERPRINT_WINDOW_V1, CloneBodyPayloadV1,
-        CloneNormalizationClassV1, select_rightmost_minima, verify_clone_token_anchor,
-        winnow_clone_tokens,
+        CLONE_FINGERPRINT_K_V1, CLONE_FINGERPRINT_WINDOW_V1, CloneAlignmentStopReasonV1,
+        CloneBodyPayloadV1, CloneNormalizationClassV1, CloneTokenAnchorV1, align_clone_tokens,
+        select_rightmost_minima, verify_clone_token_anchor, winnow_clone_tokens,
     };
 
     fn tokens(prefix: &str, count: usize) -> Vec<ConservativeCloneTokenV1> {
@@ -774,5 +1267,103 @@ mod fingerprint_tests {
             text: "colliding-but-different".to_owned(),
         };
         assert!(payload.validate().is_err());
+    }
+
+    #[test]
+    fn anchored_alignment_reports_insertions_and_literal_changes_directionally() {
+        let left = tokens("token", 30);
+        let mut right = left[..10].to_vec();
+        right.extend(tokens("added-branch", 2));
+        right.extend(left[10..20].iter().cloned());
+        right.push(ConservativeCloneTokenV1::Syntax {
+            syntax_kind: "string".to_owned(),
+            text: "\"changed\"".to_owned(),
+        });
+        right.extend(left[21..].iter().cloned());
+        let anchors = [
+            CloneTokenAnchorV1 {
+                fingerprint: 1,
+                left_token_position: 0,
+                right_token_position: 0,
+            },
+            CloneTokenAnchorV1 {
+                fingerprint: 2,
+                left_token_position: 12,
+                right_token_position: 14,
+            },
+            CloneTokenAnchorV1 {
+                fingerprint: 3,
+                left_token_position: 22,
+                right_token_position: 24,
+            },
+        ];
+
+        let alignment = align_clone_tokens(&left, &right, &anchors, 2_000_000, || false)
+            .expect("bounded alignment");
+
+        assert_eq!(alignment.shared_token_count, 29);
+        assert_eq!(alignment.left_coverage_millionths, 966_666);
+        assert_eq!(alignment.right_coverage_millionths, 906_250);
+        assert_eq!(alignment.ordered_anchors, anchors);
+        assert_eq!(alignment.differences.len(), 2);
+        assert!(alignment.differences[0].left_tokens.is_empty());
+        assert_eq!(
+            alignment.differences[0].right_tokens,
+            tokens("added-branch", 2)
+        );
+        assert_eq!(alignment.differences[1].left_tokens, vec![left[20].clone()]);
+        assert_eq!(
+            alignment.differences[1].right_tokens,
+            vec![ConservativeCloneTokenV1::Syntax {
+                syntax_kind: "string".to_owned(),
+                text: "\"changed\"".to_owned(),
+            }]
+        );
+        assert!(alignment.work > 0);
+        assert!(alignment.work <= 2_000_000);
+    }
+
+    #[test]
+    fn alignment_stops_at_work_and_cancellation_boundaries() {
+        let left = tokens("left", 30);
+        let right = tokens("right", 30);
+
+        let exhausted = align_clone_tokens(&left, &right, &[], 1, || false)
+            .expect_err("one step cannot align unrelated bodies");
+        assert_eq!(
+            exhausted.reason,
+            CloneAlignmentStopReasonV1::WorkBudgetExhausted
+        );
+        assert_eq!(exhausted.work, 1);
+
+        let interrupted = align_clone_tokens(&left, &right, &[], 2_000_000, || true)
+            .expect_err("alignment observes caller cancellation");
+        assert_eq!(interrupted.reason, CloneAlignmentStopReasonV1::Interrupted);
+        assert_eq!(interrupted.work, 1);
+    }
+
+    #[test]
+    fn anchor_validation_consumes_alignment_work_budget() {
+        let body = tokens("shared", CLONE_FINGERPRINT_K_V1);
+        let anchors = [CloneTokenAnchorV1 {
+            fingerprint: 1,
+            left_token_position: 0,
+            right_token_position: 0,
+        }];
+
+        let stopped = align_clone_tokens(
+            &body,
+            &body,
+            &anchors,
+            (CLONE_FINGERPRINT_K_V1 - 1) as u64,
+            || false,
+        )
+        .expect_err("anchor token comparisons must consume the work budget");
+
+        assert_eq!(
+            stopped.reason,
+            CloneAlignmentStopReasonV1::WorkBudgetExhausted
+        );
+        assert_eq!(stopped.work, (CLONE_FINGERPRINT_K_V1 - 1) as u64);
     }
 }

@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::clones::{
     CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
+    CodeIndexCloneBodyV1,
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
@@ -130,6 +131,20 @@ pub struct CloneArtifactCursorV1 {
     pub(super) generation: CodeGenerationId,
     pub(super) request_digest: ManifestDigest,
     pub(super) after: CloneArtifactCursorPositionV1,
+}
+
+impl CloneArtifactCursorV1 {
+    /// Digests identifying the last completed fingerprint candidate when this
+    /// cursor continues a near-clone page; `None` for exact-posting cursors.
+    pub fn fingerprint_continuation_digests(&self) -> Option<(&ManifestDigest, &ManifestDigest)> {
+        match &self.after {
+            CloneArtifactCursorPositionV1::Fingerprint {
+                body_digest,
+                payload_digest,
+            } => Some((body_digest, payload_digest)),
+            CloneArtifactCursorPositionV1::Exact(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -642,13 +657,7 @@ impl CodeLexicalArtifactReaderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CloneArtifactPageV1<CloneExactArtifactMemberV1>, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
-        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
-            || self.metadata.generation != authority.source_generation
-        {
-            return Err(CodeLexicalArtifactErrorV1::Missing(
-                "clone lookup authority is unavailable".to_owned(),
-            ));
-        }
+        self.validate_clone_lookup_authority(authority)?;
         if !self.layout.has_clone_index() {
             return Err(CodeLexicalArtifactErrorV1::Incompatible(
                 "clone lookup requires lexical artifact revision 15".to_owned(),
@@ -725,13 +734,7 @@ impl CodeLexicalArtifactReaderV1 {
         limit: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CloneFingerprintArtifactReadV1, CodeLexicalArtifactErrorV1> {
-        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
-            || self.metadata.generation != authority.source_generation
-        {
-            return Err(CodeLexicalArtifactErrorV1::Missing(
-                "clone lookup authority is unavailable".to_owned(),
-            ));
-        }
+        self.validate_clone_lookup_authority(authority)?;
         let authority_digest = clone_authority_digest(authority)?;
         let connection = self.lock_connection()?;
         read_clone_fingerprint_page(
@@ -750,6 +753,81 @@ impl CodeLexicalArtifactReaderV1 {
         )
     }
 
+    pub fn clone_body(
+        &self,
+        symbol: &SymbolOccurrenceId,
+    ) -> Result<Option<CodeIndexCloneBodyV1>, CodeLexicalArtifactErrorV1> {
+        if !self.layout.has_clone_index() {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "clone lookup requires lexical artifact revision 15".to_owned(),
+            ));
+        }
+        let connection = self.lock_connection()?;
+        let row = connection
+            .query_row(
+                "SELECT occurrence.occurrence, payload.payload \
+                 FROM clone_occurrences AS occurrence \
+                 LEFT JOIN clone_body_payloads AS payload \
+                 ON payload.payload_digest = occurrence.payload_digest \
+                 WHERE occurrence.symbol_occurrence_id = ?1",
+                [symbol.as_str()],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        let Some((occurrence, payload)) = row else {
+            return Ok(None);
+        };
+        let payload = payload.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "clone occurrence is missing its payload".to_owned(),
+            )
+        })?;
+        let occurrence: CloneBodyOccurrenceV1 =
+            serde_json::from_slice(&occurrence).map_err(|error| {
+                CodeLexicalArtifactErrorV1::Corrupt(format!(
+                    "clone occurrence is not canonical JSON: {error}"
+                ))
+            })?;
+        let payload: CloneBodyPayloadV1 = serde_json::from_slice(&payload).map_err(|error| {
+            CodeLexicalArtifactErrorV1::Corrupt(format!(
+                "clone body payload is not canonical JSON: {error}"
+            ))
+        })?;
+        self.validate_clone_lookup_authority(&occurrence)?;
+        if occurrence.symbol_occurrence_id != *symbol
+            || occurrence.payload_digest != payload.payload_digest
+            || payload.validate().is_err()
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone body lookup failed canonical validation".to_owned(),
+            ));
+        }
+        Ok(Some(CodeIndexCloneBodyV1 {
+            payload,
+            occurrence,
+        }))
+    }
+
+    fn validate_clone_lookup_authority(
+        &self,
+        authority: &CloneBodyOccurrenceV1,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id) {
+            return Err(CodeLexicalArtifactErrorV1::Missing(
+                "clone lookup repository authority is unavailable".to_owned(),
+            ));
+        }
+        if self.metadata.generation != authority.source_generation {
+            return Err(CodeLexicalArtifactErrorV1::Missing(format!(
+                "clone lookup generation {} is stale; the artifact serves {}",
+                authority.source_generation.as_str(),
+                self.metadata.generation.as_str()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn clone_selected_block_page(
         &self,
         authority: &CloneBodyOccurrenceV1,
@@ -759,13 +837,7 @@ impl CodeLexicalArtifactReaderV1 {
         limit: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CloneSelectedBlockArtifactReadV1, CodeLexicalArtifactErrorV1> {
-        if self.metadata.repository_id.as_ref() != Some(&authority.repository_id)
-            || self.metadata.generation != authority.source_generation
-        {
-            return Err(CodeLexicalArtifactErrorV1::Missing(
-                "clone lookup authority is unavailable".to_owned(),
-            ));
-        }
+        self.validate_clone_lookup_authority(authority)?;
         let authority_digest = clone_authority_digest(authority)?;
         let connection = self.lock_connection()?;
         let read = read_clone_fingerprint_page(
@@ -800,7 +872,7 @@ impl CodeLexicalArtifactReaderV1 {
                 Ok(CloneSelectedBlockArtifactCandidateV1 {
                     payload: candidate.payload,
                     occurrences: candidate.occurrences,
-                    anchors: candidate.anchors,
+                    anchors: candidate.ordered_anchors,
                     containment,
                 })
             })

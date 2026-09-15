@@ -53,6 +53,20 @@ impl<A> McpRetrievalExecutionControlV1<A> {
     }
 }
 
+impl<A: Sync> tracedecay_code_index::production::CodeIndexExecutionControlV1
+    for McpRetrievalExecutionControlV1<A>
+{
+    fn is_cancelled(&self) -> bool {
+        self.request_termination()
+            == Some(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled)
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        self.request_termination()
+            == Some(code_search::CodeIndexSearchUnavailableReasonV1::TimedOut)
+    }
+}
+
 /// Resolves with the request's terminal reason when its cancellation fires or
 /// its dispatch deadline elapses, and never for a request that carries
 /// neither.
@@ -1298,6 +1312,148 @@ where
             },
             label = "daemon.code_index.search"
         ))
+    })
+}
+
+pub fn code_index_similar_executor<A, S>(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    project_id: tracedecay_domain::ProjectId,
+    admission_provider: A,
+    scope_resolver: S,
+) -> code_search::CodeIndexSimilarExecutor
+where
+    A: CodeIndexMcpReadAdmissionV1,
+    S: CodeIndexScopeResolverV1,
+{
+    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
+        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
+    ));
+    Arc::new(move |request| {
+        let schedulers = schedulers.clone();
+        let project_id = project_id.clone();
+        let admission_provider = admission_provider.clone();
+        let scope_resolver = scope_resolver.clone();
+        let execution_admission = Arc::clone(&execution_admission);
+        Box::pin(async move {
+            let unavailable = |reason| code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason);
+            if request.limit == 0
+                || request.limit
+                    > tracedecay_query::retrieval::lexical::MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1
+            {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                );
+            }
+            let scope = match scope_resolver
+                .resolved_scope_for_project(&request.project_root, &project_id)
+            {
+                Ok(scope) => scope,
+                Err(crate::mcp_admission::CodeIndexScopeUnavailableV1) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    );
+                }
+            };
+            if schedulers.automatic_admission_for_scope(&scope)
+                == Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
+            {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled,
+                );
+            }
+            let admission = match admission_provider.admit_current(&scope) {
+                Ok(admission) => admission,
+                Err(_) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    );
+                }
+            };
+            if admission
+                .authorize(&scope, request.authority.as_ref())
+                .is_err()
+            {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                );
+            }
+            let control = Arc::new(McpRetrievalExecutionControlV1 {
+                started: std::time::Instant::now(),
+                admission_provider,
+                deadline: request.deadline,
+                cancellation: request.cancellation,
+            });
+            if let Some(reason) = control.request_termination() {
+                return unavailable(reason);
+            }
+            let permit = match execution_admission.try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                    );
+                }
+            };
+            let Some((generation, _)) = schedulers
+                .latest_text_serving_freshness_for_scope(&scope)
+                .await
+            else {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                );
+            };
+            if generation.metadata().manifest().generation_id.as_str() != request.code_generation {
+                return unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                );
+            }
+            match generation.finish_query_owner_warmup_for_request(control.as_ref()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                    );
+                }
+                Err(_) => {
+                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
+                }
+            }
+            match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                    );
+                }
+                Err(_) => {
+                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
+                }
+            }
+            let owners = match generation.production_query_owners_with_budget(
+                &code_index_scheduler::queries::maximum_retrieval_budget(),
+            ) {
+                Ok(owners) => owners,
+                Err(_) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                    );
+                }
+            };
+            let symbol = request.symbol_occurrence_id;
+            let limit = request.limit;
+            let read = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                owners.similar(&symbol, limit, control.as_ref())
+            })
+            .await;
+            match read {
+                Ok(Ok(Some(result))) => code_search::CodeIndexSimilarOutcomeV1::Complete(result),
+                Ok(Ok(None)) => code_search::CodeIndexSimilarOutcomeV1::NotFound,
+                Ok(Err(_)) | Err(_) => {
+                    unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
+                }
+            }
+        })
     })
 }
 

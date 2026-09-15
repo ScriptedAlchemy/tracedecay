@@ -107,7 +107,8 @@ pub use primitive_surface::{
     PrimitiveSymbolLocationV1, PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
     RedundancySurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1,
     RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
-    RenamePreviewTextOnlyMatchV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarSymbolV1,
+    RenamePreviewTextOnlyMatchV1, SimilarAlignedDifferenceV1, SimilarExactGroupV1,
+    SimilarNearPairV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarSymbolV1,
     TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1,
 };
 pub use requests::{

@@ -523,6 +523,54 @@ impl ProductionCodeIndexQueryOwnersV1 {
         self.lexical.retrieve_lexical(request)
     }
 
+    pub(crate) fn similar(
+        &self,
+        symbol_occurrence_id: &tracedecay_domain::SymbolOccurrenceId,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<
+        Option<tracedecay_query::code_search::CodeIndexSimilarCompletedV1>,
+        RetrievalPortError,
+    > {
+        let Some(source) = self
+            .hydration
+            .clone_body(symbol_occurrence_id)
+            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let mut exact_groups = Vec::new();
+        for key in source.payload.exact_keys(source.occurrence.eligibility) {
+            let page = self
+                .hydration
+                .clone_exact_page(&source.occurrence, &key, None, limit, control)
+                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+            let members = page
+                .members
+                .into_iter()
+                .filter(|member| {
+                    member.occurrence.symbol_occurrence_id != source.occurrence.symbol_occurrence_id
+                })
+                .collect::<Vec<_>>();
+            if !members.is_empty() {
+                exact_groups.push(
+                    tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 { key, members },
+                );
+            }
+        }
+        let near = self
+            .hydration
+            .clone_fingerprint_page(&source.occurrence, &source.payload, None, limit, control)
+            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+        Ok(Some(
+            tracedecay_query::code_search::CodeIndexSimilarCompletedV1 {
+                source,
+                exact_groups,
+                near,
+            },
+        ))
+    }
+
     #[cfg(test)]
     pub fn is_artifact_backed(&self) -> bool {
         true
@@ -1412,7 +1460,7 @@ impl LatestCodeTextGenerationV1 {
         self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
     }
 
-    pub(super) fn finish_query_owner_warmup_for_request(
+    pub(crate) fn finish_query_owner_warmup_for_request(
         &self,
         request_control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
@@ -1430,7 +1478,30 @@ impl LatestCodeTextGenerationV1 {
         Ok(true)
     }
 
-    pub(super) fn production_query_owners_with_budget(
+    /// Advance text projection until clone successor fingerprints are sealed.
+    ///
+    /// Lexical owners can be Ready while clone backfill is still background
+    /// work. `tracedecay_similar` needs those postings; ordinary search does not
+    /// wait here.
+    pub(crate) fn finish_clone_similarity_warmup_for_request(
+        &self,
+        request_control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let mut advances = 0_usize;
+        while self.text_projection_needs_work() {
+            self.advance_text_serving_for_request(
+                TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1,
+                request_control,
+            )?;
+            advances += 1;
+            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn production_query_owners_with_budget(
         &self,
         _build_budget: &RetrievalBudget,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {

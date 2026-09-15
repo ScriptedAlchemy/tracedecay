@@ -1201,50 +1201,129 @@ async fn test_module_api() {
 }
 
 #[tokio::test]
-async fn name_similarity_is_preserved_by_lexical_search_before_similar_cutover() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let legacy = call_production_tool(
+async fn similar_serves_exact_groups_and_verified_near_pair_edges() {
+    // Clone bodies below the 30-token eligibility floor never post exact/near
+    // peers; pad with identical keep_* calls so rename/near verification can run.
+    let pad = (0..24)
+        .map(|ordinal| format!("keep_step_{ordinal}();\n"))
+        .collect::<String>();
+    let (cg, _dir) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            format!(
+                r#"
+pub fn sum_alpha(values: &[i32]) -> i32 {{
+    {pad}let mut total = 0;
+    for value in values {{
+        total += value;
+    }}
+    total
+}}
+
+pub fn sum_beta(items: &[i32]) -> i32 {{
+    {pad}let mut result = 0;
+    for item in items {{
+        result += item;
+    }}
+    result
+}}
+
+pub fn sum_positive(values: &[i32]) -> i32 {{
+    {pad}let mut total = 0;
+    for value in values {{
+        if *value > 0 {{
+            total += value;
+        }}
+    }}
+    total
+}}
+"#
+            ),
+        )
+        .unwrap();
+    })
+    .await;
+
+    let response = call_production_tool(
         &cg,
         "tracedecay_similar",
-        json!({"symbol": "helper", "limit": 1}),
+        json!({"symbol": "sum_alpha", "limit": 10, "format": "json"}),
         None,
         None,
     )
     .await
-    .unwrap();
-    let legacy: Value = serde_json::from_str(extract_text(&legacy.value)).unwrap();
-    let search = call_production_tool(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "helper", "prefer_symbol": true, "limit": 1, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
-    let legacy_names = legacy
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["name"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    let search_names = search["results"]
-        .as_array()
-        .unwrap_or_else(|| panic!("lexical search results: {search}"))
-        .iter()
-        .filter_map(|item| item["display"]["name"].as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(legacy_names, ["helper"]);
-    assert_eq!(search_names, legacy_names);
+    .expect("production similar invocation");
+    let payload: Value = serde_json::from_str(extract_text(&response.value)).unwrap();
+
+    assert_eq!(payload["source"]["name"], "sum_alpha", "{payload}");
     assert!(
-        search["lexical_routes"]
-            .as_array()
-            .is_some_and(|routes| routes.iter().any(|route| {
-                route["route"] == "preferred_symbol" && route["label"] == "symbol:helper"
-            })),
-        "name-first results must disclose the lexical symbol route: {search}"
+        payload["exact_groups"].as_array().is_some_and(|groups| {
+            groups.iter().any(|group| {
+                group["class"] == "rename"
+                    && group["members"].as_array().is_some_and(|members| {
+                        members.iter().any(|member| member["name"] == "sum_beta")
+                    })
+            })
+        }),
+        "rename-normalized exact copies must stay grouped: {payload}"
     );
+    assert!(
+        payload["near_pairs"].as_array().is_some_and(|pairs| {
+            pairs.iter().any(|pair| {
+                pair["source"]["name"] == "sum_alpha"
+                    && pair["candidate"]["name"] == "sum_positive"
+                    && pair["source_coverage_millionths"].as_u64().unwrap_or_default() >= 700_000
+                    && pair["candidate_coverage_millionths"].as_u64().unwrap_or_default() >= 700_000
+                    && pair["differences"].as_array().is_some_and(|value| !value.is_empty())
+            })
+        }),
+        "near clones must be explicit non-transitive pair edges: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn similar_returns_verified_near_clone_with_a_different_name() {
+    let shared = (0..24)
+        .map(|ordinal| format!("shared_step_{ordinal}();\n"))
+        .collect::<String>();
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/source.rs"),
+            format!("pub fn collect_payments() {{\n{shared}source_only();\n}}\n"),
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/candidate.rs"),
+            format!("pub fn archive_records() {{\n{shared}candidate_only();\n}}\n"),
+        )
+        .unwrap();
+    })
+    .await;
+
+    let result = call_production_tool(
+        &fixture,
+        "tracedecay_similar",
+        json!({"symbol": "collect_payments", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert!(
+        payload
+            .get("near_pairs")
+            .and_then(Value::as_array)
+            .is_some_and(|pairs| pairs.iter().any(|pair| {
+                pair["candidate"]["name"] == "archive_records"
+                    && pair["candidate"]["file"] == "src/candidate.rs"
+            })),
+        "tracedecay_similar must expose the verified body clone despite its unrelated name: {payload}"
+    );
+    shutdown_graph_fixture(fixture).await;
 }
 
 #[tokio::test]

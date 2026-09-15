@@ -54,10 +54,10 @@ use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneFingerprintCancellationPointV1,
-    CloneFingerprintPartialReasonV1, CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1,
-    CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
-    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
+    CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
+    CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1, LexicalSpellingVariantV1,
@@ -1620,7 +1620,7 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
     assert_eq!(fingerprints.page.members.len(), 1);
     assert_eq!(fingerprints.accounting.candidates_admitted, 1);
     assert_eq!(fingerprints.accounting.pairs_verified, 1);
-    assert!(!fingerprints.page.members[0].anchors.is_empty());
+    assert!(!fingerprints.page.members[0].ordered_anchors.is_empty());
     assert_eq!(fingerprints.page.members[0].occurrences.len(), 1);
     let cancelled = reader
         .clone_fingerprint_page(
@@ -1799,31 +1799,39 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
 #[test]
 fn fingerprint_candidates_reject_incompatible_bodies_and_page_byte_identically() {
     let shared = "shared01(); shared02(); shared03(); shared04(); shared05(); shared06(); shared07(); shared08(); shared09(); shared10(); shared11(); shared12(); shared13(); shared14();";
-    let function = |name: &str, edge: &str| {
+    let function = |name: &str, difference: &str| {
         format!(
-            "export function {name}() {{ before_{edge}(); before2_{edge}(); {shared} after_{edge}(); after2_{edge}(); }}\n"
+            "export function {name}() {{ before(); before2(); {shared} {difference} after(); after2(); }}\n"
         )
     };
     let fixture = real_lexical_source_fixture_from_sources(vec![
         (
             "file.clone.page.alpha".to_owned(),
             "src/alpha.ts".to_owned(),
-            function("alpha", "alpha").into_bytes(),
+            function("alpha", "execute(\"original\");").into_bytes(),
         ),
         (
             "file.clone.page.beta".to_owned(),
             "src/beta.ts".to_owned(),
-            function("beta", "beta").into_bytes(),
+            function("beta", "execute(\"changed\");").into_bytes(),
         ),
         (
             "file.clone.page.delta".to_owned(),
             "src/delta.ts".to_owned(),
-            function("delta", "delta").into_bytes(),
+            function(
+                "delta",
+                "if (enabled()) { added_branch(); } execute(\"original\");",
+            )
+            .into_bytes(),
         ),
         (
             "file.clone.page.gamma".to_owned(),
             "src/gamma.ts".to_owned(),
-            function("gamma", "gamma").into_bytes(),
+            function(
+                "gamma",
+                "try { execute(\"original\"); } catch (error) { report(error); }",
+            )
+            .into_bytes(),
         ),
         (
             "file.clone.page.method".to_owned(),
@@ -1843,6 +1851,7 @@ fn fingerprint_candidates_reject_incompatible_bodies_and_page_byte_identically()
         .expect("all fingerprint candidates");
     assert_eq!(all.coverage.capped, 0);
     assert_eq!(all.coverage.unknown, 0);
+    assert_eq!(all.minimum_directional_coverage_millionths, 700_000);
     assert!(all.page.members.len() >= 3);
     let stream = all.stream.as_ref().expect("fingerprint stream");
     assert!(all.page.members.iter().all(|candidate| {
@@ -1854,8 +1863,43 @@ fn fingerprint_candidates_reject_incompatible_bodies_and_page_byte_identically()
             && candidate.payload.symbol_kind == source.payload.symbol_kind
             && candidate_stream.class == stream.class
             && candidate_stream.normalization_revision == stream.normalization_revision
-            && !candidate.anchors.is_empty()
+            && !candidate.ordered_anchors.is_empty()
+            && candidate.source == source.occurrence
+            && candidate.extent == CloneNearMatchExtentV1::WholeBody
+            && candidate.source_coverage_millionths >= 700_000
+            && candidate.candidate_coverage_millionths >= 700_000
+            && candidate.shared_ordered_token_count > 0
+            && !candidate.differences.is_empty()
     }));
+    for (path, expected_token) in [
+        ("src/beta.ts", "changed"),
+        ("src/delta.ts", "if"),
+        ("src/gamma.ts", "try"),
+    ] {
+        let candidate = all
+            .page
+            .members
+            .iter()
+            .find(|candidate| candidate.occurrences[0].path == path)
+            .expect("named near-clone candidate");
+        assert!(
+            candidate.differences.iter().any(|difference| {
+                difference.right_tokens.iter().any(|token| match token {
+                    tracedecay_code_extraction::ConservativeCloneTokenV1::StructureStart {
+                        syntax_kind,
+                    }
+                    | tracedecay_code_extraction::ConservativeCloneTokenV1::StructureEnd {
+                        syntax_kind,
+                    } => syntax_kind.contains(expected_token),
+                    tracedecay_code_extraction::ConservativeCloneTokenV1::Syntax {
+                        syntax_kind,
+                        text,
+                    } => syntax_kind.contains(expected_token) || text.contains(expected_token),
+                })
+            }),
+            "{path} differences did not expose {expected_token}: {candidate:#?}"
+        );
+    }
 
     let first = reader
         .clone_fingerprint_page(&source.occurrence, &source.payload, None, 1, &control)
@@ -1877,6 +1921,19 @@ fn fingerprint_candidates_reject_incompatible_bodies_and_page_byte_identically()
         reader.clone_fingerprint_page(&altered_scope, &source.payload, Some(cursor), 1, &control,),
         Err(CodeLexicalArtifactErrorV1::Contract(_))
     ));
+    let mut stale = source.occurrence.clone();
+    stale.source_generation = id::<CodeGenerationId>("generation.stale");
+    let stale_error = reader
+        .clone_fingerprint_page(&stale, &source.payload, None, 1, &control)
+        .expect_err("stale source generation");
+    assert_eq!(
+        stale_error.to_string(),
+        format!(
+            "lexical artifact authority is missing: clone lookup generation {} is stale; the artifact serves {}",
+            stale.source_generation.as_str(),
+            source.occurrence.source_generation.as_str()
+        )
+    );
 
     let mut paged = Vec::new();
     let mut cursor = None;
@@ -2116,7 +2173,13 @@ fn fingerprint_candidate_and_posting_budgets_report_partial_coverage() {
             .partial_reasons
             .contains(&CloneFingerprintPartialReasonV1::CandidateBodyBudget)
     );
+    assert!(
+        candidate_page
+            .partial_reasons
+            .contains(&CloneFingerprintPartialReasonV1::VerificationBodyBudget)
+    );
     assert_eq!(candidate_page.accounting.candidates_admitted, 256);
+    assert_eq!(candidate_page.accounting.candidate_bodies_compared, 64);
 
     let long_body = (0..50)
         .map(|ordinal| format!("shared_long_{ordinal}(); "))
@@ -2158,6 +2221,91 @@ fn fingerprint_candidate_and_posting_budgets_report_partial_coverage() {
     );
     assert_eq!(posting_page.accounting.posting_rows_examined, 16_384);
     assert_eq!(posting_page.accounting.hot_postings_skipped, 0);
+}
+
+#[test]
+fn fingerprint_work_budget_cursor_stays_after_the_last_completed_candidate() {
+    let shared = (0..1_400)
+        .map(|ordinal| format!("{ordinal},"))
+        .collect::<String>();
+    let source_text = (0..12)
+        .map(|ordinal| {
+            format!(
+                "export function cursor_{ordinal}() {{ const values = [{shared}]; return values[{ordinal}]; }}\n"
+            )
+        })
+        .collect::<String>();
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.clone.cursor".to_owned(),
+        "src/cursor.ts".to_owned(),
+        source_text.into_bytes(),
+    )]);
+    let (_directory, pages, reader) = build_clone_artifact(&fixture);
+    let source = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .min_by_key(|body| body.occurrence.body_span.start_byte)
+        .expect("cursor source body");
+    let read = reader
+        .clone_fingerprint_page(
+            &source.occurrence,
+            &source.payload,
+            None,
+            256,
+            &ArtifactControl { cancelled: false },
+        )
+        .expect("bounded fingerprint read");
+
+    assert!(
+        read.partial_reasons
+            .contains(&CloneFingerprintPartialReasonV1::VerificationWorkBudget),
+        "fixture must exhaust alignment work: {:?}",
+        read.accounting
+    );
+    let last_completed = read
+        .page
+        .members
+        .last()
+        .expect("at least one completed candidate");
+    let cursor = read.page.next_cursor.expect("partial read cursor");
+    let mut ordered_candidates = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .filter(|body| {
+            body.occurrence.symbol_occurrence_id != source.occurrence.symbol_occurrence_id
+        })
+        .collect::<Vec<_>>();
+    ordered_candidates.sort_by_key(|body| {
+        (
+            body.payload.body_digest.clone(),
+            body.payload.payload_digest.clone(),
+        )
+    });
+    let completed_index = ordered_candidates
+        .iter()
+        .position(|body| body.payload.payload_digest == last_completed.payload.payload_digest)
+        .expect("completed candidate is in the ordered fixture");
+    let expected_resumed = ordered_candidates
+        .get(completed_index + 1)
+        .expect("unfinished candidate remains after the completed candidate");
+    let resumed = reader
+        .clone_fingerprint_page(
+            &source.occurrence,
+            &source.payload,
+            Some(&cursor),
+            256,
+            &ArtifactControl { cancelled: false },
+        )
+        .expect("resume bounded fingerprint read");
+    let first_resumed = resumed
+        .page
+        .members
+        .first()
+        .expect("resume retries the unfinished candidate");
+    assert_eq!(
+        first_resumed.payload.payload_digest, expected_resumed.payload.payload_digest,
+        "the unfinished candidate must remain behind the continuation cursor"
+    );
 }
 
 #[test]
