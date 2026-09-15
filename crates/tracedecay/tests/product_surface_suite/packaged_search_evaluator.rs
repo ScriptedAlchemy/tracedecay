@@ -58,6 +58,6 @@ fn packaged_evaluator_binary_validates_without_a_source_checkout() {
         serde_json::from_slice(&output.stdout).expect("typed evaluator JSON");
     assert_eq!(response["command"], "validate");
     assert_eq!(response["status"], "pass");
-    assert_eq!(response["query_count"], 65);
+    assert_eq!(response["query_count"], 67);
     assert_eq!(response["profile_count"], 1);
 }

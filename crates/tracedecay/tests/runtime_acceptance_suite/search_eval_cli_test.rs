@@ -33,9 +33,9 @@ fn validate_reports_the_direct_checked_in_workload() {
     let payload = stdout_json(&output);
     assert_eq!(payload["command"], "validate");
     assert_eq!(payload["status"], "pass");
-    assert_eq!(payload["query_count"], 65);
-    assert_eq!(payload["partition_counts"]["train"], 33);
-    assert_eq!(payload["partition_counts"]["validation"], 32);
+    assert_eq!(payload["query_count"], 67);
+    assert_eq!(payload["partition_counts"]["train"], 34);
+    assert_eq!(payload["partition_counts"]["validation"], 33);
     assert_eq!(payload["profile_count"], 1);
     assert!(
         payload["workload_digest"]
@@ -69,8 +69,8 @@ fn compare_reports_the_lexical_baselines_conceptual_misses() {
         })
         .sum();
     assert_eq!(
-        failed_queries, 19,
-        "the lexical baseline misses the nineteen conceptual needs the evaluator pins: {payload}"
+        failed_queries, 17,
+        "the lexical baseline misses the seventeen natural-language needs the evaluator pins: {payload}"
     );
     for profile in profiles {
         assert_eq!(profile["status"], "fail");
