@@ -183,11 +183,9 @@ async fn sqlite_objects(
     objects
 }
 
-/// Every release from beta.25 through beta.37 published one configuration
-/// shape: the final one plus the inert `configuration_credential_references`
-/// table. Its verbatim DDL is the fixture; a store carrying it must be
-/// admitted read-only, converged by the writer with every row intact, and
-/// refused only when the retired table holds data no shipped binary wrote.
+/// Every release from beta.25 through beta.37 published the fixture's exact
+/// shape. The writer removes its retired tables, retains supported rows, and
+/// refuses credential rows that no shipped binary wrote.
 const RELEASED_BETA37_CONFIGURATION_SQL: &str =
     include_str!("../../tests/fixtures/configuration-released-beta37.sql");
 
@@ -246,11 +244,13 @@ async fn released_configuration_shape_is_admitted_and_converged_with_rows_intact
     assert_eq!(
         count(
             &*connection,
-            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'configuration_credential_references%'"
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE name LIKE 'configuration_credential_references%'
+                OR name LIKE 'configuration_semantic_retrieval_%'"
         )
         .await,
         0,
-        "retired table and its triggers are gone"
+        "retired schema objects are gone"
     );
     let mut rows = connection
         .query(
