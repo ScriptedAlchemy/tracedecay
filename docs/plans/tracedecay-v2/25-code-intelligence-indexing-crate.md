@@ -16,9 +16,9 @@ Generation-bound diagnostics compose with the daemon gateway defined by
 [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 [Plan 15](15-search-quality-evaluation-and-retrieval-research.md) exclusively
 owns retrieval-research design, corpus/label policy, quality metrics, candidate
-profile comparison, thresholds, and activation recommendations. Plan 25 implements the
+profile comparison, thresholds, and profile recommendations. Plan 25 implements the
 versioned lexical/chunk contracts and emits measurements; it does not tune or
-activate retrieval policy.
+select retrieval policy.
 
 **Incremental-runtime correction (2026-07-27).** Foreground code queries no
 longer wait behind an in-flight scheduler refresh: each mounted worktree retains
@@ -73,11 +73,9 @@ existing operator-journey item (H1). Reopen only if that re-observation
 regresses.)
 
 Plan 25 owns code-generation, chunking, graph, and generation-bound evidence
-semantics. Plan 15 owns quality evaluation. Plan 31 consumes the tested
-consumer of tested chunks and lexical/graph fallback behavior; application,
-transport, and dashboard plans consume the tested operations later. None of
-those consumers must reproduce an old module path, Rust type spelling, suite
-spine, fixture filename, or benchmark script.
+semantics, including source-bound shared-code facts sealed into each
+generation. Plan 15 owns quality evaluation. Application, transport, and
+dashboard plans consume the tested operations later. Plan 31 is archival.
 
 ## Outcome
 
@@ -87,8 +85,12 @@ preserve symbol lineage, and attach Git, diagnostics, and tests to the exact
 source generation they describe. The retrieval service then serves those generations through the
 Plan 15 exact/lexical/graph contracts with a non-demotable exact tier,
 deterministic compact-candidate fusion, late hydration, and a versioned
-lexical profile whose named fallback subpayload semantic retrieval preserves byte-for-byte
-when semantics are unavailable.
+lexical profile. Source-bound shared-code operations pin a frozen generation
+vector for the selected scope (one generation for single-tip reads; one
+generation per selected snapshot or authorized project for revision-pair,
+branch-diff, PR change-set, and cross-project families) without becoming a
+fourth retrieval lane. Each returned occurrence stays bound to its owning
+generation.
 
 ## Owns
 
@@ -97,15 +99,21 @@ when semantics are unavailable.
   structural search, outline, rewrite, analyzer routing, and host LSP
   projection.
 - Canonical symbol, occurrence, relationship, diagnostic, and test-attribution records.
+- Content-addressed clone payloads, exact occurrence bindings, conservative
+  and rename-normalized digest postings, positional fingerprint postings, and
+  their normalization revisions. These facts are sealed with the code
+  generation.
+- Shared-code work, posting, candidate, verification, result, and deadline
+  budgets. Every read reports eligible, examined, matched, excluded-too-small,
+  omitted, and unknown counts plus complete or partial coverage.
 - Storage-neutral `CodeSearchDocumentV1`, `CodeSearchChunkV1`,
   `CodeSearchChunkId`, `CodeSearchChunkGrainV1`,
   `ChangedCodeChunkSetV1`, `CodeChunkProjectionReceiptV1`, and
   `CodeIndexCapabilityManifestV1` values. They are immutable logical records,
-  not rows coupled to a lexical table, vector table, or vendor index.
+  not rows coupled to a lexical table or vendor index.
 - Deterministic symbol-signature, symbol-body, symbol-member, file-preamble,
   and bounded file-window chunks tied to one code generation. These chunks are
-  the replayable source for lexical and later model/version-specific
-  projections; embeddings never become source or symbol authority.
+  the replayable source for lexical projection and shared-code facts.
 - Ordered changed/reused/deleted chunk manifests and projection receipts that
   let downstream projectors prove exactly which generation-bound chunks they
   consumed, skipped, replaced, or removed.
@@ -119,7 +127,7 @@ when semantics are unavailable.
 - Code-specific adapters that emit Plan 15 `CompactCandidate` values for the
   independent `ExactLiteral`, `Lexical`, and `Graph` lanes from one frozen code
   generation. Plan 15 owns the common candidate, contribution, fusion,
-  diversity, rerank, hydration, cursor, and evaluation types; this plan owns
+  diversity, hydration, cursor, and evaluation types; this plan owns
   only the code-generation evidence carried by those adapters.
 - Task/work composition may select exact code-generation, occurrence,
   relationship, diagnostic, and test-attribution evidence from an authorized
@@ -137,7 +145,7 @@ when semantics are unavailable.
 - Filesystem watching, repository reads, snapshot coalescing, or redaction; capture owns those.
 - Database connections, generation files, transactions, manifests, pointers, or publication; store owns those.
 - Projector scheduling, retries, or checkpoints.
-- Query ranking, semantic embedding inference, UI, or public transport bindings.
+- Query ranking, UI, or public transport bindings.
 - A second code-specific retrieval kernel, code-only fusion profile, or
   code-only application service. This plan implements code adapters and the shared
   query stages under Plans 05/15; the application delivery later composes application use cases.
@@ -145,8 +153,9 @@ when semantics are unavailable.
   budgets, corpus labels, metric interpretation, or profile promotion; Plan 15
   owns those decisions and Plan 05 owns retrieval/fusion implementation.
 - A required physical table layout. Canonical chunks, lexical postings, graph
-  evidence, vectors, and receipts may use separate store-owned representations
-  and join only through stable typed identities and generation manifests.
+  evidence, shared-code facts, and receipts may use separate store-owned
+  representations and join only through stable typed identities and generation
+  manifests.
 - Analyzer executable commands or settings, which remain configuration-owned
   by Plan 20.
 - A host-facing analyzer broker; the Plan 35 daemon gateway is the sole broker
@@ -196,6 +205,39 @@ when semantics are unavailable.
   unsupported regions, and bounded errors. Pagination cursors bind query,
   descriptor, generation, and ordering; cancellation cannot publish partial
   extraction or mutation state.
+
+### Source-bound shared-code facts
+
+- Extract conservative and rename-normalized body tokens during the existing
+  parse for functions, methods, and stably identified closures. Do not reopen
+  or reparse source during a query.
+- Store one content-addressed payload for equal canonical token bytes and bind
+  each exact project, repository, worktree, generation, symbol occurrence,
+  path, and source span to that payload.
+- Index conservative and rename-normalized digests for exact groups. A digest
+  admits a candidate. Token-byte verification proves the match and rejects a
+  collision.
+- Index positional winnowed fingerprints for bounded near-duplicate and
+  selected-block discovery. Retain token positions so verification can chain
+  anchors and report explicit differences.
+- Keep exact families as groups with paginated occurrences. Do not materialize
+  every pair in a large family. Near-duplicate facts remain verified,
+  directional, and non-transitive.
+- Classify results as shared implementations, exact normalized copies, renamed
+  copies, verified near-duplicates, contained shared blocks, or review
+  candidates. Never infer dead code, equivalent behavior, safe deletion, or a
+  safe merge from shared source.
+- Report complete or partial coverage with eligible, examined, matched,
+  excluded-too-small, omitted, and unknown counts. A too-small body, generated
+  source, unsupported normalization, exhausted budget, or stale generation is
+  not a complete empty result.
+- Update clone payloads, occurrences, and postings at changed-symbol
+  granularity. A no-op generation reuses them. Clone backfill never blocks
+  exact, lexical, graph, Git, diagnostic, or test retrieval.
+- Repository, revision-pair, branch-diff, PR change-set, and
+  authorized-project-set families select a frozen generation per included
+  snapshot or project. Comparisons never collapse those selections into a
+  single tip generation.
 
 ### Code-search chunk and projection contract
 
@@ -313,9 +355,8 @@ pub struct ProjectionBatchReceiptV1 {
   or structural-boundary change classifies delete-plus-add. Extractor
   enumeration order and mutable line numbers cannot affect identity.
 - `ProjectionKeyV1` contains projection kind, projection schema revision, and a
-  canonical profile digest. Plan 31's `EmbeddingProjectionKeyV1` is the typed
-  semantic profile whose canonical digest occupies that field; adapters cannot
-  define a second projection-key identity.
+  canonical profile digest. Adapters cannot define a second projection-key
+  identity.
 - Symbol signatures and bodies are separate grains. Members become child
   chunks only when the language descriptor identifies stable member spans.
   Oversized bodies split on deterministic structural boundaries; if none are
@@ -340,9 +381,12 @@ pub struct ProjectionBatchReceiptV1 {
   supported languages, graph edge-authority classes, privacy domain/key epoch,
   source coverage, exclusions, partial states, and manifest digest. Consumers
   must reject a missing, incompatible, mixed-generation, or unauthorized
-  base manifest before candidate production. Plan 31's optional semantic
-  manifest augments this base; its absence cannot block authorized
-  lexical/graph retrieval.
+  base manifest before candidate production. Generation-time clone extraction
+  coverage (payloads and occurrence bindings sealed with the generation)
+  belongs to this base manifest. Asynchronous clone-posting backfill coverage
+  lives in a separately sealed projection or artifact manifest so posting can
+  complete after publication without rewriting the immutable base seal or
+  delaying lexical/graph readiness.
 - A no-op generation emits empty `added_or_changed` and `deleted` sets plus
   explicit `reused` counts and causes zero projection calls. An edit reprojects
   only changed symbol chunks, affected ancestors/file windows, and explicit
@@ -357,7 +401,7 @@ pub struct ProjectionBatchReceiptV1 {
 - Invalidation is field-specific: source content, language descriptor,
   extractor, sanitizer, sensitivity, or chunker changes rebuild canonical
   documents/chunks; projection-profile changes replay retained eligible chunks
-  without parsing; query/fusion/diversity/rerank/hydration profile changes
+  without parsing; query/fusion/diversity/hydration profile changes
   invalidate only query/session caches. Privacy-domain or key-epoch changes
   rebuild canonical eligibility when policy output changes and always create a
   new projection plus zero cross-epoch cache reuse.
@@ -433,8 +477,8 @@ pub struct ProjectionBatchReceiptV1 {
   and source-evidence tuple is unchanged.
 - Record rename, move, split, merge, and structural-continuity candidates with
   method, evidence, confidence kind, alternatives, and abstention.
-  Tree-sitter object reuse, path, line, qualified-name similarity, or embedding
-  similarity never proves lineage.
+  Tree-sitter object reuse, path, line, qualified-name similarity, or shared
+  implementation never proves lineage.
 - Keep ambiguous lineage explicit; do not silently merge unrelated symbols.
 
 ### Git evidence joins
@@ -490,8 +534,8 @@ pub struct ProjectionBatchReceiptV1 {
   ordered path evidence without copying graph rows into a search corpus.
 - Exact identifiers, qualified names, paths, quoted phrases, compiler/runtime
   errors, CLI flags, tool names, configuration keys, and commit identifiers
-  form the non-demotable exact tier. An approximate, graph-only, or later
-  semantic candidate cannot precede an eligible exact result.
+  form the non-demotable exact tier. An approximate or graph-only candidate
+  cannot precede an eligible exact result.
 - This indexing boundary is explicitly single-root. "Federation" in Plan 15 means composing
   independent evidence lanes within one authorized root; Plan 16's multi-root
   scope-set resolution, per-shard continuations, and cross-root rank fallback
@@ -502,11 +546,8 @@ pub struct ProjectionBatchReceiptV1 {
   late hydration. RRF may be evaluated, but no constant or weight is production
   authority before Plan 15 accepts it.
 - The canonical exact/lexical/graph fallback is the complete accepted result,
-  result, including IDs, order, contributions, explanations, coverage, and
-  cursor bytes. Those fields form Plan 15's named fallback subpayload.
-  Semantic retrieval must preserve that subpayload byte-for-byte whenever the
-  rerank stage is disabled, unavailable, rejected, or cancelled; a typed
-  semantic/rerank outcome may exist only outside its digest and cursor identity.
+  including IDs, order, contributions, explanations, coverage, and cursor
+  bytes. Shared-code operation availability cannot change those bytes.
 - Plan 36 owns native read-only status, working/staged/range diff, history,
   blame, rename, binary, merge, and `HunkRef` semantics. Code adapters join those
   typed results to exact code-generation symbols, callers, hazards,
@@ -573,7 +614,7 @@ normal CI.
    diagnostics, and every declared attribution evidence class.
 6. **Projection boundary and final-shape admission:** prove receipt conformance with
    reordered, duplicate, missing, extra, wrong-generation, and wrong-digest
-   fixtures without a model runtime or concrete store adapter. Prove native
+   fixtures without a concrete store adapter. Prove native
    acquisition counts, digests, duplicates, unsupported rows, cancellation,
    final-shape rejection, and the no-database-open boundary.
 7. **Exact, lexical, and graph retrieval:** implement independently disableable
@@ -583,14 +624,13 @@ normal CI.
    terms, field filters, shuffled producer order, fixed-point fusion,
    source/file caps, pagination, denial non-interference, partial coverage, and
    rank-before-hydrate behavior.
-8. **Lexical evaluation and activation:** run Plan 15's direct comparisons on
+8. **Lexical evaluation:** run Plan 15's direct comparisons on
    the sanitized Linux workload and report `pass`, `fail`, or `pending`.
-   Preserve the versioned exact-tier rules, profile digest, and named
-   fallback-subpayload bytes as semantic-retrieval inputs; do not create a holdout, run
-   manifest, owner receipt, or promotion packet.
+   Preserve the versioned exact-tier rules and profile digest. Do not create a
+   holdout, run manifest, owner receipt, or promotion packet.
 9. **Measurement and verification:** use a reproducible checked-in Linux
    workload and retained raw samples to record clean, warm one-file, deletion,
-   no-op, chunker/model-key replay, and
+   no-op, chunker/projection-key replay, and
    incompatible full-rebuild cases at current and 10x corpus sizes. Report
    files parsed, chunks added/changed/deleted/reused, projection calls, bytes,
    wall time, CPU, and peak RSS separately; end-to-end performance work owns
@@ -622,7 +662,7 @@ normal CI.
 - No-op fixtures make zero projection calls. A one-symbol edit reports only
   that symbol's changed signature/body/member chunks, affected parent/file
   chunks, and deletions; every unrelated chunk remains in `reused` with the
-  same ID and digest. A model-only projection-key change replays all eligible
+  same ID and digest. A projection-only key change replays all eligible
   chunks without invoking parser or extractor fixtures.
 - Receipt conformance rejects missing, duplicate, extra, reordered-without-
   canonicalization, wrong-request, wrong-prior/current-generation,
@@ -630,7 +670,7 @@ normal CI.
   projection generation.
 - Split-adapter tests keep canonical chunks, lexical postings, graph evidence,
   and projection receipts in separate in-memory stores and return the same
-  identities and manifests, proving no table or embedding runtime is authority.
+  identities and manifests, proving no table or vendor index is authority.
 - One-file edits reparse only changed sanitized content/descriptor inputs and
   recompute only evidence-invalidated relation/attribution closures; reports
   separate parse work, resolution work, invalidation fan-out, reuse, and any

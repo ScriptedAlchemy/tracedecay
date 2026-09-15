@@ -1,53 +1,17 @@
-# Native FastEmbed semantic code search
+# Native FastEmbed semantic code search (archival)
 
-**Status:** active semantic-retrieval implementation and product-test authority. The current
-checkout contains callable FastEmbed, exact-flat, vector-generation,
-calibration, fallback, and runtime-routing artifacts, but delivery remains
-unfinished until the Plan 15 Linux comparison, direct tests, and normal CI
-pass. Exact/lexical/graph retrieval must ship and test its fallback and
-exact-tier behavior before semantics can activate. Those versioned lexical
-results become immutable runtime prerequisites for semantic composition.
+**Status:** superseded on 2026-09-13 by
+[rejected decision 11](00-plan-set-index.md#rejected-approaches). This file
+records the retired dense-retrieval design. It is not current implementation,
+product, storage, or test authority.
 
-Lexical baseline/profile and generation versions are reproducibility identities,
-not evidence that a predecessor wire contract shipped. Pure source-only/internal
-lexical/semantic request helpers, wire-visible request revisions, index/profile
-manifests, generations, model bindings, and activation receipts change in
-place. Only their exact final persisted shape is accepted; any other database,
-store, spool, file, or projection returns typed `ResetRequired` and requires
-explicit reset or recreation. No storage reader, migration, backfill, dual
-write, or census path exists. Public protocol compatibility is separate and
-requires actual independent release evidence.
+TraceDecay no longer downloads code-search models, loads an inference runtime,
+builds vector generations, exposes vector search, or runs semantic activation,
+qualification, calibration, reranking, or rollback. Plans 05, 15, and 25 own
+the retained exact, lexical, graph, and source-bound shared-code behavior.
 
-**Operational qualification (2026-07-27).** The callable semantic machinery
-does not mean the live profile is currently serving semantic results. Semantic
-search is disabled because the admitted configuration snapshot is invalid.
-Plan 20 owns repairing and validating that snapshot; this plan owns mounting a
-compatible complete semantic generation and proving successful activation.
-Until both occur, fallback-allowed requests preserve exact/lexical/graph
-results and strict-semantic requests return typed unavailable. This is truthful
-degraded behavior, not semantic-retrieval acceptance.
-
-(Update 2026-08-07: the "admitted configuration snapshot is invalid" cause is
-repaired at tip and is no longer the reason semantic search is off. The
-semantic retrieval state, pending-transition, accepted-profile, and
-receipt-key tables are now owned by the canonical configuration schema and the
-shadow `ensure_schema` provisioning that forced `ResetRequired` on admission is
-deleted — `fix(config): own semantic retrieval tables in configuration schema`
-(863e6a0a87). Event-driven activation recovery is mounted per project through
-`src/daemon/semantic_activation_reconciler.rs`
-(36cd35b19c, `feat(daemon): mount graph publication and staged evaluation
-lanes`), which rereads the canonical committed configuration tuple on every
-verified-ready wake rather than trusting the event. What remains is the
-*designed* gate, not a defect: activation stays false until the Plan 15 Linux
-evaluation admits it. This note does not assert that a live profile is serving
-semantic results.)
-
-Plan 31 owns the semantic adapter, projection/runtime, and direct
-testing. Plan 15 owns quality evaluation, while Plan 25 owns the code
-generation and lexical/graph prerequisite. Plans 09/10/11/12/14 are later
-application and surface consumers. Consumers audit tested callable behavior,
-quality fixtures, and direct regressions; they do not rebuild retrieval by old
-module, type, fixture, benchmark, or suite-spine names.
+The content below is historical. It must not be used to restore a fourth
+semantic code-intelligence authority.
 
 ## Outcome
 
