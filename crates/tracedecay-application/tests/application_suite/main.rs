@@ -18,5 +18,4 @@ mod observability_rollup_convergence;
 pub mod observability_runtime_contract;
 mod registered_scope_route;
 mod work_service_composition;
-mod work_topology_contract;
 mod workflow_topology_contract;

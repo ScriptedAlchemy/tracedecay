@@ -7,7 +7,6 @@
 
 mod registered;
 pub mod work_evidence_retrieval;
-pub mod work_topology;
 pub mod workflow_topology;
 
 pub use registered::{
