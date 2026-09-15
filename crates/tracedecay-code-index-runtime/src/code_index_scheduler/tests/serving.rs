@@ -51,10 +51,10 @@ use super::{
     install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
     mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit,
     moved_reference_scope, progress_snapshot_for_generation, published, query_authority,
-    query_authority_with_candidate_cap, query_meta, ranked_symbol_names, ranks_symbol,
-    rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
-    test_project_id, wait_for_live_complete_generation, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change,
+    query_authority_with_candidate_cap, query_meta, quiesced_background_reconcile_admission,
+    ranked_symbol_names, ranks_symbol, rewrite_active_text_artifact_format_revision,
+    routed_core_search_request, scheduler, test_project_id, wait_for_live_complete_generation,
+    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
 };
 use crate::{
     code_index::production::{
@@ -124,7 +124,7 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
         .advance_text_serving(1)
         .expect("bounded background text projection")
     {}
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     assert!(
         matches!(
             &*latest.text_projection_build.lock_slot(),
@@ -461,7 +461,7 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
         .advance_text_serving(64)
         .expect("advance retained text generation")
     {}
-    assert!(text.query_owners_are_warm());
+    assert!(text.query_owners_are_ready());
     assert_eq!(
         reopened.sealed_decode_count(),
         0,
@@ -659,11 +659,11 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     published(scheduler.reconcile_now().expect("publish generation"));
     let latest = scheduler.latest_complete().expect("latest generation");
 
-    while !latest.query_owners_are_warm() {
+    while !latest.query_owners_are_ready() {
         latest.advance_text_serving(1).expect("advance V14 build");
     }
     assert!(
-        latest.text_serving_needs_work(),
+        latest.text_projection_needs_work(),
         "clone successor must continue after lexical owners are seated"
     );
     latest
@@ -680,12 +680,12 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
         .expect("read V14 revision");
     assert_eq!(v14_revision, 14);
 
-    while latest.text_serving_needs_work() {
+    while latest.text_projection_needs_work() {
         latest
             .advance_text_serving(16)
             .expect("advance clone successor");
     }
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     let v15_path = active_text_artifact_path(store.path());
     assert_ne!(v15_path, v14_path);
     let v15_revision: i64 = rusqlite::Connection::open(v15_path)
@@ -699,6 +699,65 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     assert_eq!(v15_revision, 15);
 }
 
+#[tokio::test]
+async fn query_admission_serves_v14_while_clone_successor_is_pending() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let retained_store = TempDir::new().expect("retained store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        retained_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    assert!(
+        latest.text_projection_needs_work(),
+        "the query must enter admission while clone successor work remains"
+    );
+
+    let registry_store = TempDir::new().expect("registry store root");
+    let (registry, scope) =
+        mounted_core_query_worktree_with_one_permit(&fixture, &registry_store).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+    {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .expect("mounted worktree");
+        *worktree
+            .text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(latest.text_generation_handle());
+    }
+
+    let executed = registry
+        .execute_query_search(&scope, core_search_request("alpha"))
+        .await
+        .expect("V14 exact and lexical owners remain admissible");
+    assert!(
+        ranks_symbol(&ranked_symbol_names(&executed, &latest), "alpha"),
+        "the query must return the V14 alpha symbol"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "pending clone work must request a background reconcile"
+    );
+
+    drop(admission);
+    registry.shutdown().await;
+}
+
 fn start_partial_clone_successor(
     fixture: &GitFixture,
     store: &TempDir,
@@ -710,11 +769,11 @@ fn start_partial_clone_successor(
     );
     published(scheduler.reconcile_now().expect("publish generation"));
     let latest = scheduler.latest_complete().expect("latest generation");
-    while !latest.query_owners_are_warm() {
+    while !latest.query_owners_are_ready() {
         latest.advance_text_serving(1).expect("advance V14 build");
     }
     let v14_path = active_text_artifact_path(store.path());
-    assert!(latest.text_serving_needs_work());
+    assert!(latest.text_projection_needs_work());
     assert!(
         !latest
             .advance_text_serving(1)
@@ -795,7 +854,7 @@ fn clone_successor_restart_resumes_its_source_cursor_and_keeps_v14_readable() {
             "restart must advance from the durable cursor instead of replaying page zero"
         );
     }
-    while latest.text_serving_needs_work() {
+    while latest.text_projection_needs_work() {
         latest
             .advance_text_serving(16)
             .expect("finish resumed clone successor");
@@ -831,7 +890,7 @@ fn corrupt_clone_successor_staging_is_rebuilt_without_cooling_v14_owners() {
     latest
         .production_query_owners()
         .expect("V14 owners serve while successor rebuilds");
-    while latest.text_serving_needs_work() {
+    while latest.text_projection_needs_work() {
         latest
             .advance_text_serving(16)
             .expect("finish rebuilt clone successor");
@@ -1004,7 +1063,7 @@ fn missing_durable_text_artifact_is_withdrawn_and_rebuilt() {
         .expect("withdraw and rebuild missing artifact")
     {}
 
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     assert!(
         !latest
             .text_projection_failed
@@ -1013,14 +1072,8 @@ fn missing_durable_text_artifact_is_withdrawn_and_rebuilt() {
     assert!(active_text_artifact_path(store.path()).is_file());
 }
 
-/// A cold generation must finish text-serving owner warmup in one call.
-///
-/// One bounded advance never finalizes even a small generation, so
-/// [`LatestCodeTextGenerationV1::production_query_owners`] keeps driving the
-/// resumable build. Activation itself stays one bounded advance.
-/// Assert owner readiness -- never elapsed time.
 #[test]
-fn cold_activation_completes_text_serving_in_one_call() {
+fn cold_owner_warmup_seats_query_owners_before_clone_backfill() {
     let fixture = GitFixture::new(&[
         ("src/lib.rs", "pub fn cold_activation() {}\n"),
         ("src/second.rs", "pub fn second_unit() -> usize { 2 }\n"),
@@ -1036,21 +1089,21 @@ fn cold_activation_completes_text_serving_in_one_call() {
     let latest = scheduler.latest_complete().expect("latest generation");
 
     assert!(
-        !latest.text_serving_is_ready(),
+        !latest.query_owners_are_ready(),
         "a freshly published generation must start cold"
     );
     latest
         .production_query_owners()
         .expect("cold owner warmup must drive the artifact build to completion");
     assert!(
-        latest.text_serving_is_ready(),
+        latest.query_owners_are_ready(),
         "owner warmup must leave the text serving owners installed"
     );
     assert!(
-        latest.text_serving_needs_work(),
+        latest.text_projection_needs_work(),
         "lexical warmup must leave clone backfill as background work"
     );
-    while latest.text_serving_needs_work() {
+    while latest.text_projection_needs_work() {
         latest
             .advance_text_serving(64)
             .expect("finish clone successor");
@@ -1095,7 +1148,7 @@ fn corrupt_durable_text_artifact_is_quarantined_and_rebuilt() {
         .expect("withdraw and rebuild corrupt artifact")
     {}
 
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     let repaired =
         std::fs::read(active_text_artifact_path(store.path())).expect("repaired artifact bytes");
     assert_ne!(repaired, vec![0xa5; artifact_len]);
@@ -1138,7 +1191,7 @@ fn incompatible_published_text_artifact_is_withdrawn_and_rebuilt() {
         );
     }
 
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     assert_ne!(active_text_artifact_path(store.path()), incompatible_path);
     assert!(
         incompatible_path.is_file(),
@@ -1235,7 +1288,7 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
         passes += 1;
         assert!(passes < 10_000, "search-revision rebuild did not converge");
     }
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     assert_ne!(active_text_artifact_path(store.path()), previous_path);
     assert!(
         previous_path.is_file(),
@@ -1288,7 +1341,7 @@ fn page_aligned_final_source_page_converges_the_text_projection() {
             "page-aligned text projection did not converge"
         );
     }
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     let progress = build_progress_snapshot(&scheduler);
     // Every committed page must be chunk-full: an early commit from the page
     // byte bound or an import record would leave the final page partial, which
@@ -1370,7 +1423,7 @@ fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
         );
     }
 
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     assert!(active_text_artifact_path(store.path()).is_file());
 }
 
@@ -1508,7 +1561,7 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
         assert!(passes < 10_000, "invalid cursor rebuild did not converge");
     }
 
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     assert!(active_text_artifact_path(store.path()).is_file());
     assert!(
         !staging_path.exists(),
@@ -1554,7 +1607,7 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
         !artifact_path.exists(),
         "reservation refusal must not touch or recreate the missing path"
     );
-    assert!(latest.text_serving_needs_work());
+    assert!(latest.text_projection_needs_work());
 }
 
 #[test]
@@ -1726,7 +1779,7 @@ fn oversized_activation_hint_is_clamped_to_bounded_text_work() {
     let latest = scheduler.latest_complete().expect("latest generation");
 
     assert!(
-        latest.text_serving_needs_work(),
+        latest.text_projection_needs_work(),
         "typed warming must preserve the resumable artifact build"
     );
     let mut passes = 0_usize;
@@ -1740,7 +1793,7 @@ fn oversized_activation_hint_is_clamped_to_bounded_text_work() {
             "bounded artifact activation did not converge"
         );
     }
-    assert!(latest.text_serving_is_ready());
+    assert!(latest.query_owners_are_ready());
 }
 
 #[test]
@@ -2014,7 +2067,7 @@ fn failed_background_text_task_is_terminal_typed_unavailable() {
     latest.mark_text_serving_failed();
 
     assert!(
-        !latest.text_serving_needs_work(),
+        !latest.text_projection_needs_work(),
         "a failed task must not arm an unbounded self-wake loop"
     );
     match latest.production_query_owners_with_budget(&RetrievalBudget {
@@ -2071,7 +2124,7 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
     // windows; until it does, both wakes must have fed one shared partial
     // build rather than each starting their own.
     assert!(
-        latest.query_owners_are_warm()
+        latest.query_owners_are_ready()
             || matches!(
                 &*latest.text_projection_build.lock_slot(),
                 super::super::CodeTextProjectionSlotV1::Building(_)
@@ -2082,7 +2135,7 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
         .advance_text_serving(1)
         .expect("finish shared text projection")
     {}
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
 }
 
 #[test]
@@ -2269,13 +2322,13 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         dashboard_after.completed_lexical_units, dashboard_before.completed_lexical_units,
         "a cancelled batch must retain the prior exact sealed-source boundary"
     );
-    assert!(latest.text_serving_needs_work());
+    assert!(latest.text_projection_needs_work());
 
     while !latest
         .advance_text_serving(8)
         .expect("resume durable text build")
     {}
-    assert!(latest.query_owners_are_warm());
+    assert!(latest.query_owners_are_ready());
     let dashboard_ready = build_progress_snapshot(&scheduler);
     assert_eq!(
         dashboard_ready.phase,
@@ -4310,7 +4363,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     };
     install_verified_graph_store_on_text(&warming_text, &latest);
     assert!(
-        !warming_text.text_serving_is_ready(),
+        !warming_text.query_owners_are_ready(),
         "the callable graph check must use an owner whose lexical projection is still warming"
     );
 

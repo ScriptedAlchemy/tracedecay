@@ -500,7 +500,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
-                        .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready)
+                        .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready)
                     && match scheduler.try_lock() {
                         Ok(scheduler) => scheduler.pending_hint_count() == Some(0),
                         Err(std::sync::TryLockError::Poisoned(error)) => {
@@ -525,13 +525,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 // violation it named.
                 if text_generation
                     .as_ref()
-                    .is_some_and(super::super::LatestCodeTextGenerationV1::text_serving_is_ready)
+                    .is_some_and(super::super::LatestCodeTextGenerationV1::query_owners_are_ready)
                 {
                     clear_convergence_park(&worker_convergence_park);
                 } else if convergence_park_retries_on_wake(&worker_convergence_park)
                     && text_generation
                         .as_ref()
-                        .is_some_and(|latest| !latest.text_serving_needs_work())
+                        .is_some_and(|latest| !latest.text_projection_needs_work())
                 {
                     // A deterministic contract violation latched this text
                     // handle failed, and a latched handle never advances
@@ -560,7 +560,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // joined before the pass ends.
                 if retained_text_projection.is_none()
                     && let Some(latest) = text_generation.clone()
-                    && latest.text_serving_needs_work()
+                    && latest.text_projection_needs_work()
                     && graph_activation_enabled
                 {
                     // The retained owner projects on its own task, exactly as
@@ -603,7 +603,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         outcome
                     }));
                 } else if let Some(latest) = text_generation
-                    && latest.text_serving_needs_work()
+                    && latest.text_projection_needs_work()
                 {
                     // Graph activation is off for this worktree: there is no
                     // seat to unblock, so the slice stays inline and the pass
@@ -764,7 +764,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .as_ref()
-                    .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
+                    .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready);
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
                 let (arrival, trigger) = Self::take_pending_arrival(
@@ -1062,7 +1062,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         });
                     } else if graph_text
                         .as_ref()
-                        .is_none_or(LatestCodeTextGenerationV1::text_serving_needs_work)
+                        .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work)
                     {
                         Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                     }
@@ -1097,7 +1097,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     if published_pass {
                         graph_text
                             .as_ref()
-                            .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready)
+                            .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready)
                     } else {
                         graph_text.is_some()
                     },
@@ -1362,7 +1362,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     && !graph_already_serves
                     && graph_text
                         .as_ref()
-                        .is_none_or(|text| !text.text_serving_is_ready())
+                        .is_none_or(|text| !text.query_owners_are_ready())
                 {
                     prepare_graph = false;
                     tracing::debug!(
@@ -1858,7 +1858,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ),
                                 ServingSwapOutcomeV1::Offered => {}
                             }
-                            if text_latest.text_serving_needs_work() {
+                            if text_latest.text_projection_needs_work() {
                                 Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                             }
                         }

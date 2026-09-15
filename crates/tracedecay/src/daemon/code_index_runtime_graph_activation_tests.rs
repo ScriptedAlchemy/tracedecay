@@ -255,7 +255,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let text = loop {
         if let Some(text) = registry.latest_text_serving_for_scope(&scope).await
-            && text.query_owners_are_warm()
+            && text.query_owners_are_ready()
         {
             break text;
         }

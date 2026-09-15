@@ -21,7 +21,7 @@ use tracedecay_domain::{
     ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
-use super::CodeIndexSchedulerRegistryV1;
+use super::{CodeIndexSchedulerRegistryV1, serving::CodeTextQueryOwnerReadinessV1};
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
 };
@@ -583,7 +583,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let request_control = HistoricalTextRequestControlV1 {
             request: graph_control.as_ref(),
         };
-        if !text.finish_text_serving_for_request(&request_control)? {
+        if !text.finish_query_owner_warmup_for_request(&request_control)? {
             return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
         }
         execute_query_search_on_latest(self, scope, input, latest, false, graph_control).await
@@ -662,11 +662,15 @@ where
     let (sanitized, owners) = hotpath::measure_block!("daemon.code_index.query.admission", {
         let sanitized = RawRetrievalRequestV1::new(input.query, request)
             .sanitize(input.sanitizer_revision, input.normalization_revision)?;
-        if text.text_serving_needs_work() {
+        let readiness = text.query_owner_readiness();
+        if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_))
+            || text.text_projection_needs_work()
+        {
             schedulers.request_query_background_reconcile(scope).await;
-            return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
         }
-        let owners = text.production_query_owners_with_budget(&sanitized.request().budget)?;
+        let CodeTextQueryOwnerReadinessV1::Ready(owners) = readiness else {
+            return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
+        };
         (sanitized, owners)
     });
     let request = sanitized.request();

@@ -107,27 +107,13 @@ pub(super) fn text_artifact_source_batch_limits(
 /// as `Cancelled` even while the owning open is inside one long read or
 /// digest call that has not yet reached its own checkpoint.
 const TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1: Duration = Duration::from_millis(100);
-/// Anti-livelock ceiling on the advances owner-warmup will drive.
-///
-/// A single `TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1` advance never
-/// finalizes even a one-file generation, so [`LatestCodeTextGenerationV1::production_query_owners`]
-/// keeps advancing until the build reports completion. Each advance is
-/// guaranteed to make progress -- it either finalizes or consumes its full
-/// page/finalization budget -- so this is a bound against a source that never
-/// reports completion, not a work budget or a tunable. Exceeding it still
-/// yields the same retryable warming error the caller already handles.
-/// Activation itself stays one bounded advance so graph warm and oversized
-/// hints never wait on the text projection.
-const TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
+/// Bounds synchronous query-owner warmup if a source never reports progress.
+const TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1: usize = 10_000;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
-/// The lazily built serving caches shared by every handle bound to one sealed
-/// generation: the exact/lexical/graph lane owners, the record lookup index,
-/// and the retained interactive graph store. All are rebuilt only when a new
-/// generation is loaded.
 pub(super) type GenerationServingCachesV1 = (
     CodeGenerationId,
     Arc<RwLock<Option<Arc<ProductionCodeIndexQueryOwnersV1>>>>,
@@ -406,10 +392,9 @@ pub struct LatestCodeTextGenerationV1 {
     /// graph-serving slot, so old Ready state cannot mask current Pending or
     /// terminal Unavailable state.
     pub(super) graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
-    /// Generation-owned singleflight state for the durable text projection:
-    /// the resumable partial build plus the head-open claim. Only the
-    /// background scheduler advances it; foreground queries observe typed
-    /// warming until the immutable owners are installed.
+    /// Generation-owned singleflight state for the durable text projection.
+    /// The scheduler advances current owners. A selected historical query may
+    /// advance its own owner until exact and lexical reads become available.
     pub(super) text_projection_build: Arc<CodeTextProjectionStateV1>,
     pub(super) text_projection_failed: Arc<AtomicBool>,
     pub(super) text_control: GenerationTextControlV1,
@@ -547,6 +532,12 @@ impl ProductionCodeIndexQueryOwnersV1 {
     }
 }
 
+pub(super) enum CodeTextQueryOwnerReadinessV1 {
+    Ready(Arc<ProductionCodeIndexQueryOwnersV1>),
+    Pending,
+    Invalid,
+}
+
 /// Partial durable-artifact build: the staging `SQLite` builder plus the
 /// verified page source over this generation's durable sealed file.
 pub(super) struct CodeTextArtifactBuildV1 {
@@ -625,6 +616,11 @@ struct TextHeadOpenClaimV1<'a> {
     armed: bool,
 }
 
+enum TextHeadOpenBuildV1 {
+    Artifact(Box<CodeTextArtifactBuildV1>),
+    CloneSuccessor(Box<CodeTextCloneSuccessorBuildV1>),
+}
+
 impl<'a> TextHeadOpenClaimV1<'a> {
     /// The caller must already have transitioned the slot to `HeadOpening`
     /// and released the lock; this guard owns restoring it.
@@ -632,16 +628,15 @@ impl<'a> TextHeadOpenClaimV1<'a> {
         Self { state, armed: true }
     }
 
-    /// Install the initialized staging build and hand the locked slot back
-    /// to the claiming wake so it advances the first bounded slice
-    /// immediately.
-    fn install(
-        &mut self,
-        build: CodeTextProjectionSlotV1,
-    ) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
+    fn install(&mut self, build: TextHeadOpenBuildV1) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
         self.armed = false;
         let mut slot = self.state.lock_slot();
-        *slot = build;
+        *slot = match build {
+            TextHeadOpenBuildV1::Artifact(build) => CodeTextProjectionSlotV1::Building(build),
+            TextHeadOpenBuildV1::CloneSuccessor(build) => {
+                CodeTextProjectionSlotV1::BuildingCloneSuccessor(build)
+            }
+        };
         self.state.ready.notify_all();
         slot
     }
@@ -1214,8 +1209,7 @@ impl LatestCompleteCodeIndexV1 {
         self.text.clone()
     }
 
-    /// Drive the retained text lane to completion so tests can assert exact
-    /// and lexical owners without depending on a request-path warm.
+    /// Install exact and lexical owners without waiting for clone backfill.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn production_query_owners(
@@ -1248,33 +1242,11 @@ impl LatestCompleteCodeIndexV1 {
             .get_or_init(|| queries::GenerationRecordIndexV1::build(self.generation.as_ref()))
     }
 
-    /// Build every per-generation serving derivation now, off the request path.
-    ///
-    /// A sealed generation is immutable, so its exact-admission sweep, record
-    /// lookup indices, lane owners, and test-attribution join are pure functions
-    /// of it. Each is memoized behind a `OnceLock` that would otherwise be
-    /// initialized by whichever request arrives first — charging one query an
-    /// O(store) canonical sweep over every chunk. Warming them where the
-    /// generation is activated makes the FIRST query O(result), like every later
-    /// one.
-    ///
-    /// Failures are deliberately discarded: this is a pre-warm, not a gate. Only
-    /// success is memoized, so every serving path still runs — and still fails
-    /// closed on — the exact same checks.
+    /// Best-effort prewarm of the generation's query and graph derivations.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn warm_serving_caches(&self) {
-        // Completion, not one bounded advance: the exact/lexical lane owners
-        // install only when the resumable text build finishes, so activation
-        // must drive the loop or the first request inherits a warming
-        // abstention instead of warm owners. Each advance inside stays
-        // bounded and cancellation-checkpointed.
+    pub fn prewarm_serving_derivations(&self) {
         let _ = self.production_query_owners();
-        // Mirror the persistent-graph activation warm set: the record lookup
-        // indices and the test-attribution join are pure functions of the
-        // sealed generation and must exist before the first request, not be
-        // charged to it. Neither touches exact-admission staging, so the
-        // released staging corpus stays released.
         let _ = self.record_index();
         let _ = self.generation.test_attribution_authority();
         let generation_id = self.generation.manifest().generation_id.clone();
@@ -1328,27 +1300,31 @@ impl LatestCompleteCodeIndexV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
-    /// Whether the exact/lexical lane owners are already built.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn query_owners_are_warm(&self) -> bool {
-        self.text_serving_is_ready()
+    pub fn query_owners_are_ready(&self) -> bool {
+        matches!(
+            self.query_owner_readiness(),
+            CodeTextQueryOwnerReadinessV1::Ready(_)
+        )
     }
 
-    pub(super) fn text_serving_is_ready(&self) -> bool {
-        self.current_query_owners().is_some()
-    }
-
-    fn current_query_owners(&self) -> Option<Arc<ProductionCodeIndexQueryOwnersV1>> {
+    pub(super) fn query_owner_readiness(&self) -> CodeTextQueryOwnerReadinessV1 {
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return CodeTextQueryOwnerReadinessV1::Invalid;
+        }
         self.query_owners
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(Arc::clone)
+            .map_or(
+                CodeTextQueryOwnerReadinessV1::Pending,
+                CodeTextQueryOwnerReadinessV1::Ready,
+            )
     }
 
-    pub(super) fn text_serving_needs_work(&self) -> bool {
+    pub(super) fn text_projection_needs_work(&self) -> bool {
         !self.text_projection_failed.load(Ordering::Acquire)
-            && (!self.text_serving_is_ready()
+            && (!self.query_owners_are_ready()
                 || !matches!(
                     &*self.text_projection_build.lock_slot(),
                     CodeTextProjectionSlotV1::Idle
@@ -1401,19 +1377,17 @@ impl LatestCompleteCodeIndexV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
-    /// Return exact and lexical query owners bound to the latest complete
-    /// published generation. Clone-section backfill remains background work
-    /// after the lexical predecessor is seated.
+    /// Return exact and lexical owners without waiting for clone backfill.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
         let mut advances = 0_usize;
-        while !self.text_serving_is_ready() {
+        while !self.query_owners_are_ready() {
             self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)?;
             advances += 1;
-            if advances >= TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
                 return Err(RetrievalPortError::AuthorityUnavailable(
                     "code-index text serving owners are warming".to_owned(),
                 ));
@@ -1422,22 +1396,18 @@ impl LatestCodeTextGenerationV1 {
         self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
     }
 
-    /// Finish the durable text projection for an explicitly selected sealed
-    /// generation while retaining both generation and request cancellation.
-    /// Historical branch generations have no scheduler-owned background wake,
-    /// so their first query owns this resumable completion.
-    pub(super) fn finish_text_serving_for_request(
+    pub(super) fn finish_query_owner_warmup_for_request(
         &self,
         request_control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
         let mut advances = 0_usize;
-        while !self.text_serving_is_ready() {
+        while !self.query_owners_are_ready() {
             self.advance_text_serving_for_request(
                 TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1,
                 request_control,
             )?;
             advances += 1;
-            if advances >= TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
                 return Ok(false);
             }
         }
@@ -1448,16 +1418,19 @@ impl LatestCodeTextGenerationV1 {
         &self,
         _build_budget: &RetrievalBudget,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
-        if self.text_projection_failed.load(Ordering::Acquire) {
-            return Err(RetrievalPortError::AuthorityUnavailable(
-                "code-index text serving projection failed".to_owned(),
-            ));
+        match self.query_owner_readiness() {
+            CodeTextQueryOwnerReadinessV1::Ready(owners) => Ok(owners),
+            CodeTextQueryOwnerReadinessV1::Pending => {
+                Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving owners are warming".to_owned(),
+                ))
+            }
+            CodeTextQueryOwnerReadinessV1::Invalid => {
+                Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving projection failed".to_owned(),
+                ))
+            }
         }
-        self.current_query_owners().ok_or_else(|| {
-            RetrievalPortError::AuthorityUnavailable(
-                "code-index text serving owners are warming".to_owned(),
-            )
-        })
     }
 }
 
@@ -2267,10 +2240,6 @@ impl LatestCodeTextGenerationV1 {
         Ok(TextHeadOpenOutcomeV1::Build(Box::new(initialized)))
     }
 
-    /// The durable-artifact journey: reopen a published head when one exists,
-    /// otherwise stream the sealed generation through the staging builder one
-    /// bounded page window at a time, finalize, publish, and reopen.
-    ///
     /// Corpus-sized verified opens (the published-head reopen and the
     /// publication tail's reopen) run under a `HeadOpening` claim with the
     /// slot lock released, so a concurrent wake parks with typed cancellation
@@ -2316,10 +2285,7 @@ impl LatestCodeTextGenerationV1 {
             }
         };
         if matches!(&*slot, CodeTextProjectionSlotV1::Idle) {
-            // Owners are installed only under a `HeadOpening` claim, so an
-            // `Idle` slot with owners already set means a prior claim
-            // finished between this wake's owners check and its lock.
-            if self.text_serving_is_ready() {
+            if self.query_owners_are_ready() {
                 return Ok(true);
             }
             *slot = CodeTextProjectionSlotV1::HeadOpening;
@@ -2332,12 +2298,10 @@ impl LatestCodeTextGenerationV1 {
             match outcome {
                 TextHeadOpenOutcomeV1::Served => return Ok(true),
                 TextHeadOpenOutcomeV1::Build(initialized) => {
-                    slot = claim.install(CodeTextProjectionSlotV1::Building(initialized));
+                    slot = claim.install(TextHeadOpenBuildV1::Artifact(initialized));
                 }
                 TextHeadOpenOutcomeV1::BuildCloneSuccessor(initialized) => {
-                    slot = claim.install(CodeTextProjectionSlotV1::BuildingCloneSuccessor(
-                        initialized,
-                    ));
+                    slot = claim.install(TextHeadOpenBuildV1::CloneSuccessor(initialized));
                 }
             }
         }
@@ -2681,7 +2645,7 @@ impl LatestCodeTextGenerationV1 {
             let source = store.open_sealed_source(&sealed_identity, control)?;
             let build =
                 self.begin_clone_successor(descriptor, prior, sealed_identity, source, control)?;
-            drop(publish_claim.install(CodeTextProjectionSlotV1::BuildingCloneSuccessor(build)));
+            drop(publish_claim.install(TextHeadOpenBuildV1::CloneSuccessor(build)));
             self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
             return Ok(false);
         }

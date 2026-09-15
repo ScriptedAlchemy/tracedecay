@@ -3213,7 +3213,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     #[cfg(test)]
     pub(super) fn prime_serving_caches(&self) {
         if let Some(latest) = self.latest_complete() {
-            latest.warm_serving_caches();
+            latest.prewarm_serving_derivations();
         }
     }
 

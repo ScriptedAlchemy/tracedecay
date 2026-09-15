@@ -330,7 +330,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .clone();
                     let text_ready = text
                         .as_ref()
-                        .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
+                        .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready);
                     let identity = if text.is_some() {
                         dashboard_text_freshness_identity(text.as_ref())
                     } else {
@@ -416,7 +416,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .clone();
             let text_ready = text
                 .as_ref()
-                .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
+                .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready);
             let hook_hint_count = scheduler.pending_hint_count();
             let code_graph_serving = dashboard_code_graph_serving(
                 latest.as_ref(),
@@ -1087,7 +1087,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
-        (text_matches_scope_identity(&latest, scope) && latest.text_serving_is_ready())
+        (text_matches_scope_identity(&latest, scope) && latest.query_owners_are_ready())
             .then_some(latest)
     }
 
@@ -1185,7 +1185,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-            .filter(|latest| !require_serving_ready || latest.text_serving_is_ready())
+            .filter(|latest| !require_serving_ready || latest.query_owners_are_ready())
     }
 
     /// Resolve graph-independent exact/lexical serving through the same cheap
@@ -1260,7 +1260,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .filter(|latest| {
-                (!require_serving_ready || latest.text_serving_is_ready())
+                (!require_serving_ready || latest.query_owners_are_ready())
                     && text_matches_scope_identity(latest, &scope)
             })?;
         let current = source_freshness.serves_recently_verified_source(
@@ -1497,7 +1497,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .is_some_and(LatestCodeTextGenerationV1::text_serving_needs_work);
+            .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work);
         let proof_expired = !source_freshness.ready_without_stat(&root, &shutting_down);
         if !nothing_servable && !text_owners_are_warming && !proof_expired {
             return false;
