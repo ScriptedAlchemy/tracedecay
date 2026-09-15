@@ -577,8 +577,17 @@ impl CodeIndexSchedulerRegistryV1 {
                     let installed = Arc::clone(&worker_text_generation);
                     #[cfg(any(test, feature = "test-helpers"))]
                     let gated_root = worker_project_root.clone();
-                    let projection_pass =
-                        super::super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
+                    // The pass guard is what `rebuild_in_flight` and the
+                    // `verifying` freshness state read. It belongs to a
+                    // projection that is still producing exact or lexical
+                    // serving. An owner whose query owners already serve has
+                    // only the clone-fingerprint backfill left; holding the
+                    // guard for that reported a complete current generation
+                    // as `verifying` / `partial_source_verification` for the
+                    // whole backfill (#1103).
+                    let projection_pass = (!latest.query_owners_are_ready()).then(|| {
+                        super::super::ReconcilePassGuard::enter(&worker_reconcile_in_progress)
+                    });
                     let projection_pending_wake = Arc::clone(&worker_pending_wake);
                     let projection_wake = Arc::clone(&worker_wake);
                     retained_text_projection = Some(tokio::spawn(async move {
