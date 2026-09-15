@@ -42,7 +42,6 @@ mod stream_contract;
 mod surface_binding_parity;
 mod work_artifact_hydration_service;
 mod work_attempt_service;
-mod work_authority;
 mod work_placement_service;
 mod work_product_application;
 mod work_proposal_planner;
