@@ -23,8 +23,8 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1,
     FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, SourceSpan,
-    SymbolOccurrenceId, canonical_sha256,
+    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, SymbolOccurrenceId,
+    canonical_sha256,
 };
 use tracedecay_private_fs::open_private_file;
 
@@ -160,27 +160,6 @@ pub(super) enum CloneArtifactCursorPositionV1 {
 pub struct CloneArtifactPageV1<T> {
     pub members: Vec<T>,
     pub next_cursor: Option<CloneArtifactCursorV1>,
-}
-
-fn decode_clone_body(
-    row: Option<(Vec<u8>, Option<Vec<u8>>)>,
-) -> Result<Option<CodeIndexCloneBodyV1>, CodeLexicalArtifactErrorV1> {
-    let Some((occurrence, Some(payload))) = row else {
-        return Ok(None);
-    };
-    let occurrence = serde_json::from_slice::<CloneBodyOccurrenceV1>(&occurrence)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    let payload = serde_json::from_slice::<CloneBodyPayloadV1>(&payload)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    if occurrence.payload_digest != payload.payload_digest || payload.validate().is_err() {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "clone body occurrence does not match its canonical payload".to_owned(),
-        ));
-    }
-    Ok(Some(CodeIndexCloneBodyV1 {
-        payload,
-        occurrence,
-    }))
 }
 
 fn clone_authority_digest(
@@ -745,78 +724,6 @@ impl CodeLexicalArtifactReaderV1 {
             members,
             next_cursor,
         })
-    }
-
-    pub fn clone_body(
-        &self,
-        symbol_occurrence_id: &SymbolOccurrenceId,
-    ) -> Result<Option<CodeIndexCloneBodyV1>, CodeLexicalArtifactErrorV1> {
-        let connection = self.lock_connection()?;
-        let row = connection
-            .query_row(
-                "SELECT occurrence.occurrence, payload.payload \
-                 FROM clone_occurrences AS occurrence \
-                 LEFT JOIN clone_body_payloads AS payload \
-                 ON payload.payload_digest = occurrence.payload_digest \
-                 WHERE occurrence.symbol_occurrence_id = ?1",
-                [symbol_occurrence_id.as_str()],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
-            )
-            .optional()
-            .map_err(sqlite_error)?;
-        let Some(body) = decode_clone_body(row)? else {
-            return Ok(None);
-        };
-        if body.occurrence.symbol_occurrence_id != *symbol_occurrence_id {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "clone body lookup returned another symbol occurrence".to_owned(),
-            ));
-        }
-        Ok(Some(body))
-    }
-
-    pub fn clone_body_by_source_range(
-        &self,
-        path: &str,
-        span: SourceSpan,
-    ) -> Result<Option<CodeIndexCloneBodyV1>, CodeLexicalArtifactErrorV1> {
-        span.validate()
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        let connection = self.lock_connection()?;
-        let row = connection
-            .query_row(
-                "SELECT occurrence.occurrence, payload.payload \
-                 FROM clone_occurrences AS occurrence \
-                 LEFT JOIN clone_body_payloads AS payload \
-                 ON payload.payload_digest = occurrence.payload_digest \
-                 WHERE occurrence.path = ?1 AND occurrence.body_start <= ?2 \
-                 AND occurrence.body_end >= ?3 \
-                 ORDER BY occurrence.body_end - occurrence.body_start, occurrence.symbol_occurrence_id \
-                 LIMIT 1",
-                rusqlite::params![
-                    path,
-                    i64::try_from(span.start_byte).map_err(|error| {
-                        CodeLexicalArtifactErrorV1::Contract(error.to_string())
-                    })?,
-                    i64::try_from(span.end_byte).map_err(|error| {
-                        CodeLexicalArtifactErrorV1::Contract(error.to_string())
-                    })?,
-                ],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
-            )
-            .optional()
-            .map_err(sqlite_error)?;
-        let body = decode_clone_body(row)?;
-        if body.as_ref().is_some_and(|body| {
-            body.occurrence.path != path
-                || body.occurrence.body_span.start_byte > span.start_byte
-                || body.occurrence.body_span.end_byte < span.end_byte
-        }) {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "source range lookup disagrees with its clone occurrence".to_owned(),
-            ));
-        }
-        Ok(body)
     }
 
     pub fn clone_fingerprint_page(
