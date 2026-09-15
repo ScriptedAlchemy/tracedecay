@@ -401,21 +401,27 @@ pub struct SimilarSymbolV1 {
     pub file: String,
     pub line: u32,
     pub signature: Option<String>,
-    pub utility_micros: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimilarCloneClassV1 {
+    Conservative,
+    Rename,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimilarExactGroupV1 {
-    pub class: String,
+    pub class: SimilarCloneClassV1,
     pub members: Vec<SimilarSymbolV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimilarAlignedDifferenceV1 {
-    pub left_token_count: usize,
-    pub right_token_count: usize,
+    pub source_token_count: usize,
+    pub candidate_token_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

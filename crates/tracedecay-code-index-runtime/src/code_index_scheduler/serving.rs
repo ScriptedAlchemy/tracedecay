@@ -1488,7 +1488,11 @@ impl LatestCodeTextGenerationV1 {
         request_control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
         let mut advances = 0_usize;
-        while self.text_projection_needs_work() {
+        while !matches!(
+            self.query_owner_readiness(),
+            CodeTextQueryOwnerReadinessV1::Ready(owners)
+                if owners.hydration.has_clone_fingerprints()
+        ) {
             self.advance_text_serving_for_request(
                 TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1,
                 request_control,

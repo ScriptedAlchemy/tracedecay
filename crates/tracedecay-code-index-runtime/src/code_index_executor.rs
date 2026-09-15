@@ -1407,17 +1407,6 @@ where
                     code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                 );
             }
-            match generation.finish_query_owner_warmup_for_request(control.as_ref()) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
-                    );
-                }
-                Err(_) => {
-                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
-                }
-            }
             match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
                 Ok(true) => {}
                 Ok(false) => {

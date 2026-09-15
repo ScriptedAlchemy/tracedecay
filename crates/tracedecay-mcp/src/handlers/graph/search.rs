@@ -13,8 +13,8 @@ use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
     ContextSurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveRequestV1,
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
-    SimilarAlignedDifferenceV1, SimilarExactGroupV1, SimilarNearPairV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, SimilarSymbolV1,
+    SimilarAlignedDifferenceV1, SimilarCloneClassV1, SimilarExactGroupV1, SimilarNearPairV1,
+    SimilarResultV1, SimilarSurfaceRequestV1, SimilarSymbolV1,
 };
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -1145,8 +1145,10 @@ pub async fn handle_similar(
         }
     };
     let (payload, touched_files) = similar_surface_from_clone_index(graph, source, similar)?;
-    let value =
-        hotpath::measure_block!("mcp.graph.similar.serialize", serde_json::to_value(payload)?);
+    let value = hotpath::measure_block!(
+        "mcp.graph.similar.serialize",
+        serde_json::to_value(payload)?
+    );
     Ok(generic_tool_result(ctx, &args, &value, touched_files))
 }
 
@@ -1159,15 +1161,7 @@ fn similar_symbol_from_graph_node(node: &CodeGraphSymbolSummaryV1) -> Result<Sim
         file: required_graph_file_path(node)?.to_owned(),
         line: user_line(metadata.start_line),
         signature: metadata.signature.clone(),
-        utility_micros: 0,
     })
-}
-
-fn clone_normalization_class_label(class: CloneNormalizationClassV1) -> &'static str {
-    match class {
-        CloneNormalizationClassV1::Conservative => "conservative",
-        CloneNormalizationClassV1::Rename => "rename",
-    }
 }
 
 fn similar_surface_from_clone_index(
@@ -1189,7 +1183,10 @@ fn similar_surface_from_clone_index(
         }
         if !members.is_empty() {
             exact_groups.push(SimilarExactGroupV1 {
-                class: clone_normalization_class_label(group.key.class).to_owned(),
+                class: match group.key.class {
+                    CloneNormalizationClassV1::Conservative => SimilarCloneClassV1::Conservative,
+                    CloneNormalizationClassV1::Rename => SimilarCloneClassV1::Rename,
+                },
                 members,
             });
         }
@@ -1209,8 +1206,8 @@ fn similar_surface_from_clone_index(
                     .differences
                     .iter()
                     .map(|difference| SimilarAlignedDifferenceV1 {
-                        left_token_count: difference.left_tokens.len(),
-                        right_token_count: difference.right_tokens.len(),
+                        source_token_count: difference.left_tokens.len(),
+                        candidate_token_count: difference.right_tokens.len(),
                     })
                     .collect(),
             });
