@@ -27,7 +27,7 @@ use crate::recovery::{
 };
 use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
-use crate::sealed_store::SealedStoreInstall;
+use crate::sealed_store::{SealedReleaseEvidence, SealedStoreInstall};
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation, load_relation_by_edge_cached,
     projection_entity_deletion_page_checked, projection_node_counts,
@@ -100,6 +100,17 @@ enum SealedStagingReleaseAuthorityV1 {
     /// The installed, digest-verified sealed artifact for this locator, with
     /// the recovered digest the caller resolved from the relational head.
     SealedArtifact(String),
+}
+
+/// Whether an on-disk sealed receipt may authorize staging-row release.
+///
+/// [`Self::Denied`] is for callers that have not proved a sealed-code-generation
+/// replay. Inline journaled heads can still carry a verify-once receipt from
+/// publication, and that receipt is not serving authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SealedReleaseReceiptAuthority {
+    Denied,
+    Permitted,
 }
 
 impl SealedStagingReleaseAuthorityV1 {
@@ -1641,30 +1652,23 @@ impl GraphDb {
         &self,
         locator: &GenerationLocator,
         relational_recovered_digest: Option<&str>,
+        receipt_authority: SealedReleaseReceiptAuthority,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<SealedStagingRelease, GraphDbError> {
         check()?;
-        let Some(sealed) = self.sealed_generation_reader(locator) else {
-            return Ok(Self::retained(
-                locator,
-                SealedStagingRetentionReason::NoSealedStore,
-            ));
+        let evidence = match self.sealed_release_evidence(
+            locator,
+            relational_recovered_digest,
+            receipt_authority,
+        )? {
+            Ok(evidence) => evidence,
+            Err(reason) => return Ok(Self::retained(locator, reason)),
         };
-        // A caller-supplied head digest is the authority; it must agree with
-        // the artifact this process installed before anything is deleted.
-        if let Some(expected) = relational_recovered_digest
-            && sealed.recovered_digest() != expected
-        {
-            return Ok(Self::retained(
-                locator,
-                SealedStagingRetentionReason::SealedDigestMismatch,
-            ));
-        }
         let state = self.inner.verified_generations.read().map_err(|_| {
             GraphDbError::unavailable("verified graph generation state lock is poisoned")
         })?;
         let (authority, was_sealed_only) =
-            match Self::sealed_staging_release_lease(&state, locator, sealed.recovered_digest()) {
+            match Self::sealed_staging_release_lease(&state, locator, &evidence.recovered_digest) {
                 Ok(eligible) => eligible,
                 Err(reason) => return Ok(Self::retained(locator, reason)),
             };
@@ -1685,7 +1689,7 @@ impl GraphDb {
             locator,
             authority,
             was_sealed_only,
-            &sealed,
+            &evidence,
             check,
         );
         if hibernated_on_entry && let Err(error) = self.hibernate_if_lazy() {
@@ -1699,12 +1703,43 @@ impl GraphDb {
         release
     }
 
+    fn sealed_release_evidence(
+        &self,
+        locator: &GenerationLocator,
+        relational_recovered_digest: Option<&str>,
+        receipt_authority: SealedReleaseReceiptAuthority,
+    ) -> Result<Result<SealedReleaseEvidence, SealedStagingRetentionReason>, GraphDbError> {
+        if let Some(sealed) = self.sealed_generation_reader(locator) {
+            if let Some(expected) = relational_recovered_digest
+                && sealed.recovered_digest() != expected
+            {
+                return Ok(Err(SealedStagingRetentionReason::SealedDigestMismatch));
+            }
+            let (entities, relations) = sealed.row_counts();
+            return Ok(Ok(SealedReleaseEvidence {
+                recovered_digest: sealed.recovered_digest().to_owned(),
+                entities,
+                relations,
+            }));
+        }
+        if receipt_authority != SealedReleaseReceiptAuthority::Permitted {
+            return Ok(Err(SealedStagingRetentionReason::NoSealedStore));
+        }
+        let Some(expected) = relational_recovered_digest else {
+            return Ok(Err(SealedStagingRetentionReason::NoSealedStore));
+        };
+        match self.matching_sealed_release_receipt(locator, expected)? {
+            Some(evidence) => Ok(Ok(evidence)),
+            None => Ok(Err(SealedStagingRetentionReason::NoSealedStore)),
+        }
+    }
+
     fn release_sealed_generation_staging_rows_locked(
         &self,
         locator: &GenerationLocator,
         authority: SealedStagingReleaseAuthorityV1,
         was_sealed_only: bool,
-        sealed: &Arc<crate::sealed_store::SealedGenerationStore>,
+        evidence: &SealedReleaseEvidence,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<SealedStagingRelease, GraphDbError> {
         let removed_rows = match self.delete_staged_generation_rows(locator, check)? {
@@ -1718,7 +1753,7 @@ impl GraphDb {
         };
         let mut state = self.wait_verified_generations_write()?;
         let (current, now_sealed_only) =
-            match Self::sealed_staging_release_lease(&state, locator, sealed.recovered_digest()) {
+            match Self::sealed_staging_release_lease(&state, locator, &evidence.recovered_digest) {
                 Ok(eligible) => eligible,
                 Err(reason) => return Ok(Self::retained(locator, reason)),
             };
@@ -1737,19 +1772,18 @@ impl GraphDb {
         if !removed_rows {
             Ok(SealedStagingRelease::AlreadyReleased)
         } else {
-            let (entities, relations) = sealed.row_counts();
             tracing::info!(
                 event = "graph_staging_rows_released",
                 namespace = locator.projection.namespace.as_str(),
                 projection = locator.projection.projection.as_str(),
                 generation = locator.generation.as_str(),
-                entities,
-                relations,
+                entities = evidence.entities,
+                relations = evidence.relations,
                 "verified sealed generation released duplicate staging rows"
             );
             Ok(SealedStagingRelease::Released {
-                entities,
-                relations,
+                entities: evidence.entities,
+                relations: evidence.relations,
             })
         }
     }
@@ -1778,16 +1812,16 @@ impl GraphDb {
     /// quarantined, depended-on, dependency-bearing or digest-mismatched
     /// generation keeps its rows regardless of which authority applies.
     ///
-    /// The lease arm is preferred. When no lease is resident, the installed
-    /// sealed artifact stands in — see
+    /// The lease arm is preferred. When no lease is resident, the sealed
+    /// artifact stands in — see
     /// [`SealedStagingReleaseAuthorityV1::SealedArtifact`]. The caller
-    /// resolved this locator from the relational verified head and installed
-    /// the artifact for it, and the artifact only installs after its reopened
-    /// rows reproduce the digest that head names, so "the head names this
-    /// generation and the sealed store reproduces its digest" already holds
-    /// here. Without this arm the sweep answered `NoVerifiedLease` for every
-    /// code scope a freshly opened daemon had not recovered a lease for,
-    /// which is every scope but the serving one.
+    /// resolved this locator from the relational verified head and supplied
+    /// a digest that either a seated reader or the on-disk receipt already
+    /// binds, so "the head names this generation and the sealed store
+    /// reproduces its digest" already holds here. Without this arm the sweep
+    /// answered `NoVerifiedLease` for every code scope a freshly opened
+    /// daemon had not recovered a lease for, which is every scope but the
+    /// serving one.
     fn sealed_staging_release_lease(
         state: &VerifiedGenerationState,
         locator: &GenerationLocator,
@@ -1887,6 +1921,7 @@ impl GraphDb {
         self.release_sealed_generation_staging_rows_with(
             &GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
             Some(relational_recovered_digest),
+            SealedReleaseReceiptAuthority::Denied,
             &|| Ok(()),
         )
     }
