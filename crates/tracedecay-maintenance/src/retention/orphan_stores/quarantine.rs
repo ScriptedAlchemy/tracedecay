@@ -813,6 +813,7 @@ fn clear_journal_in_order(
 pub(super) fn recover_existing_store_quarantine(
     profile_root: &Path,
     data_root: &Path,
+    control: CollectionControl<'_>,
 ) -> Result<Vec<QuarantineRecoveryOutcome>, CollectionFailureKind> {
     let capability = open_store_parent_nofollow(profile_root, data_root)?;
     let original = capability
@@ -829,6 +830,9 @@ pub(super) fn recover_existing_store_quarantine(
         .read_dir(".")
         .map_err(|_| CollectionFailureKind::InspectFailed)?
     {
+        if control.completion().is_some() {
+            break;
+        }
         let entry = entry.map_err(|_| CollectionFailureKind::InspectFailed)?;
         let file_name = entry.file_name();
         let Some(name) = file_name.to_str() else {
@@ -845,6 +849,7 @@ pub(super) fn recover_existing_store_quarantine(
             data_root,
             OsStr::new(quarantine_name),
             parent_path,
+            control,
         )? {
             outcomes.push(outcome);
         }
@@ -976,6 +981,7 @@ pub(super) fn recover_named_store_quarantine(
     data_root: &Path,
     quarantine_name: &OsStr,
     parent_path: &Path,
+    control: CollectionControl<'_>,
 ) -> Result<Option<QuarantineRecoveryOutcome>, CollectionFailureKind> {
     recover_named_store_quarantine_inner(
         profile_root,
@@ -983,7 +989,7 @@ pub(super) fn recover_named_store_quarantine(
         quarantine_name,
         parent_path,
         None,
-        super::unbounded_collection_control(),
+        control,
         || {},
     )
 }
@@ -1364,31 +1370,29 @@ fn recover_named_store_quarantine_inner(
         journal_name,
         expected_root_identity: Some(expected_root_identity),
     };
-    Ok(Some(
-        match quarantine.finalize(super::unbounded_collection_control()) {
-            QuarantineFinalizeOutcome::Removed { journal_failure } => {
-                QuarantineRecoveryOutcome::Removed {
-                    quarantine_path,
-                    journal_failure,
-                }
-            }
-            QuarantineFinalizeOutcome::Interrupted { quarantine_path } => {
-                QuarantineRecoveryOutcome::Retained {
-                    actual_path: quarantine_path.clone(),
-                    quarantine_path,
-                    failure: None,
-                }
-            }
-            QuarantineFinalizeOutcome::DeleteUnconfirmed {
+    Ok(Some(match quarantine.finalize(control) {
+        QuarantineFinalizeOutcome::Removed { journal_failure } => {
+            QuarantineRecoveryOutcome::Removed {
                 quarantine_path,
-                failure,
-            } => QuarantineRecoveryOutcome::Retained {
+                journal_failure,
+            }
+        }
+        QuarantineFinalizeOutcome::Interrupted { quarantine_path } => {
+            QuarantineRecoveryOutcome::Retained {
                 actual_path: quarantine_path.clone(),
                 quarantine_path,
-                failure: Some(failure),
-            },
+                failure: None,
+            }
+        }
+        QuarantineFinalizeOutcome::DeleteUnconfirmed {
+            quarantine_path,
+            failure,
+        } => QuarantineRecoveryOutcome::Retained {
+            actual_path: quarantine_path.clone(),
+            quarantine_path,
+            failure: Some(failure),
         },
-    ))
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]

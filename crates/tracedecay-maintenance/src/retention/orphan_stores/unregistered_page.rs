@@ -318,6 +318,7 @@ async fn census_unregistered_project_dirs_page(
                 &data_root,
                 std::ffi::OsStr::new(&quarantine_name),
                 &projects_dir,
+                CollectionControl::new(cancellation, deadline),
             ) {
                 Ok(Some(QuarantineRecoveryOutcome::Removed {
                     journal_failure, ..
@@ -392,6 +393,10 @@ async fn census_unregistered_project_dirs_page(
             }
         }
     }
+    // Directory inventories preserve discovery order. A live leaf can precede
+    // its quarantine; recovery invalidates that earlier census just as it
+    // prevents a later one, so neither may reach collection in this admission.
+    findings.retain(|finding| !recovered_project_ids.contains(&finding.project_dir_name));
     Ok(Some((findings, next_cursor)))
 }
 

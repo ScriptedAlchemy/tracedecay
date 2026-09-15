@@ -787,8 +787,9 @@ fn reconcile_existing_quarantine(
     data_root: &Path,
     store_id: &str,
     outcome: &mut CollectionOutcome,
+    control: CollectionControl<'_>,
 ) -> bool {
-    match recover_existing_store_quarantine(profile_root, data_root) {
+    let can_continue = match recover_existing_store_quarantine(profile_root, data_root, control) {
         Ok(recoveries) if recoveries.is_empty() => true,
         Ok(recoveries) => {
             let mut retained_or_restored = false;
@@ -863,6 +864,12 @@ fn reconcile_existing_quarantine(
             });
             false
         }
+    };
+    if let Some(completion) = control.completion() {
+        outcome.completion = completion;
+        false
+    } else {
+        can_continue
     }
 }
 
@@ -1239,6 +1246,7 @@ pub(crate) async fn execute_registered_collection_controlled(
             &finding.data_root,
             &finding.store_id,
             &mut outcome,
+            control,
         ) {
             continue;
         }
@@ -2693,6 +2701,7 @@ pub(crate) async fn execute_unregistered_collection_controlled(
             &finding.data_root,
             &finding.project_dir_name,
             &mut outcome,
+            control,
         ) {
             continue;
         }
