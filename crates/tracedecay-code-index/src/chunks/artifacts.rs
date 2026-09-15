@@ -379,16 +379,39 @@ impl CodeFileIndexArtifactsV1 {
             .collect::<std::collections::BTreeSet<_>>();
         if self.clone_bodies.windows(2).any(|pair| {
             pair[0].occurrence.symbol_occurrence_id >= pair[1].occurrence.symbol_occurrence_id
-        }) || self.clone_bodies.iter().any(|body| {
-            body.occurrence.path.is_empty()
-                || body.occurrence.body_span.is_empty()
-                || body.occurrence.payload_digest != body.payload.payload_digest
-                || (validate_payloads && body.payload.validate().is_err())
-                || !occurrences.contains(&body.occurrence.symbol_occurrence_id)
         }) {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "clone body evidence is not canonically bound to file symbols".to_owned(),
+                "clone body evidence is not in strict symbol-occurrence order".to_owned(),
             ));
+        }
+        for body in &self.clone_bodies {
+            if body.occurrence.path.is_empty() {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body evidence has an empty path".to_owned(),
+                ));
+            }
+            if body.occurrence.body_span.is_empty() {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body evidence has an empty body span".to_owned(),
+                ));
+            }
+            if body.occurrence.payload_digest != body.payload.payload_digest {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body evidence payload digest does not match its payload".to_owned(),
+                ));
+            }
+            if validate_payloads {
+                if let Err(detail) = body.payload.validate() {
+                    return Err(ChunkingFailureV1::NonCanonicalIdentity(format!(
+                        "clone body evidence payload is not canonical: {detail}"
+                    )));
+                }
+            }
+            if !occurrences.contains(&body.occurrence.symbol_occurrence_id) {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body evidence is not bound to a file symbol".to_owned(),
+                ));
+            }
         }
         Ok(())
     }

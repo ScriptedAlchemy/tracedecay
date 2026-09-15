@@ -1412,6 +1412,11 @@ fn decode_verified_file_segment(
         file.artifacts.edges.sort_by(|left, right| {
             crate::chunks::canonical_edge_key(left).cmp(&crate::chunks::canonical_edge_key(right))
         });
+        file.artifacts.clone_bodies.sort_by(|left, right| {
+            left.occurrence
+                .symbol_occurrence_id
+                .cmp(&right.occurrence.symbol_occurrence_id)
+        });
         file.artifacts.unresolved_references.sort();
     });
     Ok(file)

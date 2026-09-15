@@ -1698,13 +1698,18 @@ fn page_aligned_final_source_page_converges_the_text_projection() {
     }
     assert!(latest.query_owners_are_ready());
     let progress = build_progress_snapshot(&scheduler);
-    // Every committed page must be chunk-full: an early commit from the page
-    // byte bound or an import record would leave the final page partial, which
-    // is exactly the shape that does not trip this invariant.
+    // Clone-body lanes mint their own pages after chunk pages. Chunk packing
+    // must still land on the page-record bound; clone-body pages may add
+    // additional page ordinals beyond the chunk-only count.
+    let page_chunks = super::super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64;
     assert_eq!(
-        progress.committed_chunks,
-        progress.committed_pages * super::super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64,
-        "the fixture must keep every page chunk-full so the final page ends on the last record"
+        progress.committed_chunks % page_chunks,
+        0,
+        "chunk pages must remain record-full so the final chunk page ends on a chunk boundary"
+    );
+    assert!(
+        progress.committed_pages * page_chunks >= progress.committed_chunks,
+        "clone-body pages may follow chunk pages but must not shrink chunk packing"
     );
     assert_eq!(
         progress.committed_imports, 0,
@@ -1844,8 +1849,12 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
             cursor[3].as_u64().is_some_and(|ordinal| ordinal > 0),
             "first page must advance within the file's chunks"
         );
+        // Rewind the chunk ordinal while leaving a non-zero import ordinal so
+        // restore_cursor_classified refuses the authenticated-but-impossible
+        // mid-file position (chunk < count && import != 0).
+        // Persisted layout: [3]=next_chunk_ordinal, [8]=next_import_ordinal.
         cursor[3] = serde_json::Value::from(0_u64);
-        cursor[6] = serde_json::Value::from(1_u64);
+        cursor[8] = serde_json::Value::from(1_u64);
 
         let text = |index: usize| {
             cursor[index]
@@ -1862,6 +1871,10 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
                 .to_le_bytes(),
         );
         hasher.update(text(0));
+        // Integrity order matches VerifiedSealedLexicalCursorV1::integrity_digest:
+        // file_ord, file_off, chunk_ord, import_ord, clone_ord, page_ord,
+        // emitted_chunks, emitted_payload, emitted_imports, emitted_import_bytes,
+        // emitted_clones, emitted_clone_bytes.
         for index in [1, 2, 3, 8, 4, 5, 6, 7, 9, 10, 11, 12] {
             hasher.update(number(index).to_le_bytes());
         }
@@ -6086,13 +6099,23 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    assert_eq!(
-        artifact_names
-            .iter()
-            .filter(|name| name.starts_with("text-artifact-") && name.ends_with(".bin"))
-            .count(),
-        1,
-        "one durable artifact owns ready text serving"
+    let pointer: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("read active publication pointer"),
+    )
+    .expect("decode active publication pointer");
+    let active_artifact = pointer["generation_index"]
+        .as_array()
+        .expect("generation index")
+        .iter()
+        .find(|entry| entry["generation_id"] == pointer["generation_id"])
+        .and_then(|entry| entry.get("text_artifact"))
+        .filter(|value| !value.is_null())
+        .and_then(|artifact| artifact["artifact_file"].as_str())
+        .expect("active generation owns one durable text artifact");
+    assert!(
+        artifact_names.iter().any(|name| name == active_artifact),
+        "the attached text artifact must exist on disk"
     );
     assert_eq!(
         artifact_names

@@ -8547,28 +8547,41 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         let scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let active = scheduler
+        // Seal releases the decoded active generation so text projection does
+        // not keep a whole-generation owner. Inspect the durable pointer — do
+        // not call load_active_shared here or the probe itself would decode.
+        assert_eq!(
+            scheduler.sealed_decode_count(),
+            0,
+            "graph-off A-to-C publication must not decode a sealed generation"
+        );
+        let pointer = scheduler
             .publication
-            .load_active_shared()
-            .expect("load generation C from the in-memory publication authority")
-            .expect("generation C is active");
+            .read_publication_pointer()
+            .expect("read generation C pointer")
+            .expect("generation C is durable");
         let current = scheduler
             .capture_authoritative_snapshot_without_active_generation_reuse(None)
             .expect("capture current generation C revision");
         assert_ne!(
-            active.manifest().generation_id,
-            unpublished_b_generation,
+            pointer.generation_id,
+            unpublished_b_generation.as_str(),
             "generation B must never become active after generation C is observed"
         );
         assert_eq!(
-            active.snapshot().source_revision,
-            current.snapshot.source_revision,
+            pointer.generation_id,
+            generation_c.as_str(),
+            "the durable pointer must name generation C"
+        );
+        assert_eq!(
+            pointer.snapshot_content_identity,
+            current.snapshot.content_identity.as_str(),
             "the successor must record the allow-empty generation C revision"
         );
         assert_eq!(
             scheduler.sealed_decode_count(),
             0,
-            "graph-off A-to-C publication must not decode a sealed generation"
+            "pointer and snapshot inspection must not decode a sealed generation"
         );
     }
     registry.shutdown().await;
