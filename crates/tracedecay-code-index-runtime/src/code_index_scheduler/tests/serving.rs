@@ -1256,6 +1256,7 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn text_artifact_builder_creates_an_owner_private_artifacts_root() {
     use std::os::unix::fs::PermissionsExt;
