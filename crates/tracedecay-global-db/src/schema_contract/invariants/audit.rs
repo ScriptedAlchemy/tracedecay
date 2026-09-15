@@ -2625,22 +2625,6 @@ mod tests {
         observation
     }
 
-    fn legacy_lcm_receipt(content: &str) -> SanitizationReceiptV1 {
-        let payload = serde_json::Value::String(content.to_owned());
-        SanitizationReceiptV1::new(
-            SanitizationReceiptRefV1::new(
-                SanitizationReceiptId::new("privacy.lcm-payload.v1.fixture-collision").unwrap(),
-                ComponentVersion::new(tracedecay_privacy::LCM_PAYLOAD_SANITIZER_VERSION_V1)
-                    .unwrap(),
-            )
-            .unwrap(),
-            SanitizerDispositionV1::Accepted,
-            SensitivityV1::NonSensitive,
-            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
-        )
-        .unwrap()
-    }
-
     #[tokio::test]
     async fn projection_audit_preserves_receipt_bound_cursor_collision() {
         let directory = TempDir::new().unwrap();
@@ -2668,7 +2652,8 @@ mod tests {
             .expect("registered profile database");
         let legacy_metadata = serde_json::json!({
             "ingest_protection": {
-                "sanitization_receipt": legacy_lcm_receipt(&original)
+                "sanitization_receipt":
+                    crate::tests::lcm_privacy_rescan::legacy_receipt(&original)
             }
         })
         .to_string();

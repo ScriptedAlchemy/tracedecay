@@ -25,7 +25,7 @@ fn secret() -> String {
 /// A receipt exactly as an older binary bound it: the stored bytes are the
 /// receipt's payload, accepted as non-sensitive, under the pinned sanitizer
 /// contract — but the current detector rules never evaluated them.
-fn legacy_receipt(content: &str) -> SanitizationReceiptV1 {
+pub(crate) fn legacy_receipt(content: &str) -> SanitizationReceiptV1 {
     let payload_reference = PayloadReferenceV1::for_payload(&Value::String(content.to_owned()))
         .expect("legacy payload reference");
     let sanitizer_version =
