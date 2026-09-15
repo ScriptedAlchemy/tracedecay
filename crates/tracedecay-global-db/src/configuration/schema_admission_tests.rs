@@ -235,6 +235,18 @@ async fn prior_final_connection() -> (
     (directory, connection)
 }
 
+async fn pre_residue_final_connection() -> (
+    tempfile::TempDir,
+    tracedecay_runtime_core::db::engine::TestConnection,
+) {
+    let (directory, connection) = released_connection().await;
+    connection
+        .execute_batch("DROP TABLE configuration_credential_references;")
+        .await
+        .unwrap();
+    (directory, connection)
+}
+
 async fn count(connection: &impl QueryExecutor, sql: &str) -> i64 {
     let mut rows = connection.query(sql, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
@@ -303,6 +315,36 @@ async fn prior_final_configuration_shape_drops_accepted_profiles_and_preserves_c
     ensure_configuration_schema(&*connection, None)
         .await
         .expect("the prior tip shape converges");
+
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'configuration_semantic_%'"
+        )
+        .await,
+        0,
+        "retired semantic schema objects are gone"
+    );
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM configuration_entries WHERE revision_id = 'revision.1'"
+        )
+        .await,
+        1,
+        "supported configuration rows remain"
+    );
+}
+
+#[tokio::test]
+async fn pre_residue_final_configuration_shape_drops_all_semantic_tables() {
+    let (_directory, connection) = pre_residue_final_connection().await;
+    super::admit_configuration_schema(&*connection, None)
+        .await
+        .expect("the pre-residue tip shape is admissible read-only");
+    ensure_configuration_schema(&*connection, None)
+        .await
+        .expect("the pre-residue tip shape converges");
 
     assert_eq!(
         count(
