@@ -86,7 +86,7 @@ pub use diagnostics::{
     utf16_position_to_byte_offset,
 };
 pub use gateway::{
-    AdmittedRoot, AnalyzerCancellationAdapter, CallHierarchyItem, DaemonLspGateway,
+    AdmittedRoot, CallHierarchyItem, DaemonLspGateway,
     DaemonLspProviderBundle, DaemonLspProviderFactory, DaemonLspRuntimeSession, DiagnosticTrigger,
     DocumentSymbol, FeedbackCycleAdapter, FeedbackCyclePort, FeedbackCycleRequest,
     FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayMethod, GatewayResponse, Hover,
@@ -118,7 +118,7 @@ pub use protocol::{
     ProtocolDispatch,
 };
 pub use provider::{
-    AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,
+    AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,
     AnalyzerSupervisor, AnalyzerTransitionError, DiagnosticRefreshAdmission,
     DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort,
     GenerationDiagnostics, MAX_ANALYZER_RESTARTS, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,

@@ -343,22 +343,6 @@ impl AnalyzerSupervisor {
     }
 }
 
-/// Best-effort cancellation boundary owned by the actual analyzer runtime.
-/// The session actor always suppresses a cancelled downstream response even if
-/// this port cannot interrupt the upstream request.
-pub trait AnalyzerCancellationPort {
-    fn cancel_upstream(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool;
-}
-
-impl<T> AnalyzerCancellationPort for Arc<T>
-where
-    T: AnalyzerCancellationPort + ?Sized,
-{
-    fn cancel_upstream(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        (**self).cancel_upstream(root, request_id)
-    }
-}
-
 /// A generation-bound diagnostic read supplied by the daemon's canonical
 /// diagnostic/application owners. Overlay content is explicitly marked
 /// ephemeral by the input snapshot and cannot be persisted by this adapter.

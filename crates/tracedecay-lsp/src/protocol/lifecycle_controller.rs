@@ -1,5 +1,5 @@
 use super::{
-    AdmittedRoot, AnalyzerCancellationPort, Arc, AuthorizedLspWorkspace, BTreeMap, BTreeSet,
+    AdmittedRoot, Arc, AuthorizedLspWorkspace, BTreeMap, BTreeSet,
     BindingId, CancellationOutcome, CapabilityAvailability, CapabilityParseError,
     ClientCapabilities, ContextController, ContextProjectionPort, DEFAULT_LSP_REQUEST_DEADLINE_MS,
     DaemonLspGateway, DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController,

@@ -29,7 +29,7 @@ use crate::gateway::operation_table::{
     BoundedOperationCapacity, BoundedOperationTable, OperationAdmission, OperationPoll,
 };
 use crate::protocol::DaemonLspProtocolSession;
-use crate::provider::{AnalyzerCancellationPort, DiagnosticSnapshotPort};
+use crate::provider::DiagnosticSnapshotPort;
 use crate::session::{
     AuthorizedLspWorkspace, LspRequestFailure, LspRequestId, LspWorkspaceRouteError,
     MAX_PENDING_REQUESTS,
@@ -974,6 +974,9 @@ impl SemanticProviderPort for SemanticProviderAdapter {
     }
 }
 
+/// Best-effort cancellation boundary owned by the actual analyzer runtime.
+/// The session actor always suppresses a cancelled downstream response even if
+/// this authority cannot interrupt the upstream request.
 pub trait LspAnalyzerCancellationAuthority: Send + Sync {
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool;
 }
@@ -984,22 +987,6 @@ where
 {
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
         (**self).cancel_request(root, request_id)
-    }
-}
-
-pub struct AnalyzerCancellationAdapter {
-    authority: Arc<dyn LspAnalyzerCancellationAuthority>,
-}
-
-impl AnalyzerCancellationAdapter {
-    pub fn new(authority: Arc<dyn LspAnalyzerCancellationAuthority>) -> Self {
-        Self { authority }
-    }
-}
-
-impl AnalyzerCancellationPort for AnalyzerCancellationAdapter {
-    fn cancel_upstream(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        self.authority.cancel_request(root, request_id)
     }
 }
 
@@ -2083,7 +2070,7 @@ pub type DaemonLspProviderBundle = DaemonLspProviderFactory<
     Arc<dyn FeedbackCyclePort + Send + Sync>,
     Arc<dyn SemanticProviderPort + Send + Sync>,
     Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
-    Arc<dyn AnalyzerCancellationPort + Send + Sync>,
+    Arc<dyn LspAnalyzerCancellationAuthority>,
     Arc<dyn ContextProjectionPort + Send + Sync>,
 >;
 
@@ -2109,7 +2096,7 @@ impl
         Arc<dyn FeedbackCyclePort + Send + Sync>,
         Arc<dyn SemanticProviderPort + Send + Sync>,
         Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
-        Arc<dyn AnalyzerCancellationPort + Send + Sync>,
+        Arc<dyn LspAnalyzerCancellationAuthority>,
         Arc<dyn ContextProjectionPort + Send + Sync>,
     >
 {
@@ -2117,7 +2104,7 @@ impl
         feedback: Arc<dyn FeedbackCyclePort + Send + Sync>,
         semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
         diagnostics: Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
-        cancellation: Arc<dyn AnalyzerCancellationPort + Send + Sync>,
+        cancellation: Arc<dyn LspAnalyzerCancellationAuthority>,
         context: Arc<dyn ContextProjectionPort + Send + Sync>,
         gateway_capabilities: GatewayCapabilities,
         upstream_capabilities: UpstreamCapabilities,
@@ -2139,7 +2126,7 @@ where
     F: FeedbackCyclePort,
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
-    C: AnalyzerCancellationPort + Send + Sync + 'static,
+    C: LspAnalyzerCancellationAuthority + 'static,
     X: ContextProjectionPort + Send + Sync + 'static,
 {
     pub fn new(
@@ -3086,8 +3073,8 @@ mod tests {
 
     struct Cancellation;
 
-    impl AnalyzerCancellationPort for Cancellation {
-        fn cancel_upstream(&self, _root: &AdmittedRoot, _request_id: &LspRequestId) -> bool {
+    impl LspAnalyzerCancellationAuthority for Cancellation {
+        fn cancel_request(&self, _root: &AdmittedRoot, _request_id: &LspRequestId) -> bool {
             false
         }
     }

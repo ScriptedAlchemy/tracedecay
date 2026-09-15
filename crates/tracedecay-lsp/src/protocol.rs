@@ -42,14 +42,15 @@ use crate::diagnostics::{
 use crate::dispatch::{dispatch_incoming, parse_incoming};
 use crate::gateway::{
     AdmittedRoot, DaemonLspGateway, FeedbackCyclePort, FeedbackCycleResponse, GatewayMethod,
-    GatewayResponse, MethodUnavailableReason, SemanticProviderPort, SemanticRequest,
+    GatewayResponse, LspAnalyzerCancellationAuthority, MethodUnavailableReason,
+    SemanticProviderPort, SemanticRequest,
 };
 use crate::overlay::{
     DebouncedDiagnosticKind, OverlayDiagnosticDebouncer, OverlayError, OverlayStore,
 };
 use crate::provider::{
-    AnalyzerCancellationPort, DiagnosticRefreshAdmission, DiagnosticRefreshIdentity,
-    DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
+    DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
+    DiagnosticSnapshotPort, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
     UnavailableDiagnosticSnapshotProvider,
 };
 use crate::rpc::{

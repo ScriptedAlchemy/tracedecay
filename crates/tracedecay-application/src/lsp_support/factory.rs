@@ -653,6 +653,52 @@ mod tests {
         }
     }
 
+    struct RecordingCancellation {
+        root: &'static str,
+        cancels: bool,
+        invoked: std::sync::Mutex<Vec<(String, LspRequestId)>>,
+    }
+
+    impl RecordingCancellation {
+        fn new(root: &'static str, cancels: bool) -> Arc<Self> {
+            Arc::new(Self {
+                root,
+                cancels,
+                invoked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn invoked(&self) -> Vec<(String, LspRequestId)> {
+            self.invoked
+                .lock()
+                .expect("recording cancellation lock")
+                .clone()
+        }
+    }
+
+    impl LspAnalyzerCancellationAuthority for RecordingCancellation {
+        fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
+            self.invoked
+                .lock()
+                .expect("recording cancellation lock")
+                .push((root.uri().to_owned(), request_id.clone()));
+            root.uri() == self.root && self.cancels
+        }
+    }
+
+    struct PendingHover;
+
+    impl SemanticProviderPort for PendingHover {
+        fn hover(
+            &self,
+            _root: &AdmittedRoot,
+            _document_uri: &str,
+            _position: LspPosition,
+        ) -> SemanticProviderOutcome<Option<tracedecay_lsp::Hover>> {
+            SemanticProviderOutcome::Pending
+        }
+    }
+
     struct RuntimeContext;
 
     impl CanonicalContextProjectionAuthority for RuntimeContext {
@@ -973,6 +1019,129 @@ mod tests {
         assert_eq!(
             response["result"]["capabilities"]["diagnosticProvider"]["workspaceDiagnostics"],
             true
+        );
+    }
+
+    #[test]
+    fn federated_cancellation_preserves_request_identity_and_denies_foreign_roots() {
+        let primary = AdmittedRoot::new("file:///primary");
+        let secondary = AdmittedRoot::new("file:///secondary");
+        let primary_authority = RecordingCancellation::new("file:///primary", true);
+        let secondary_authority = RecordingCancellation::new("file:///secondary", true);
+        let cancellation = FederatedCancellation {
+            roots: BTreeMap::from([
+                (
+                    primary.uri().to_owned(),
+                    Arc::clone(&primary_authority)
+                        as Arc<dyn LspAnalyzerCancellationAuthority>,
+                ),
+                (
+                    secondary.uri().to_owned(),
+                    Arc::clone(&secondary_authority)
+                        as Arc<dyn LspAnalyzerCancellationAuthority>,
+                ),
+            ]),
+        };
+        let request_id = LspRequestId::String("request.primary".to_owned());
+
+        assert!(cancellation.cancel_request(&primary, &request_id));
+        assert_eq!(
+            primary_authority.invoked(),
+            vec![(primary.uri().to_owned(), request_id.clone())]
+        );
+        assert!(secondary_authority.invoked().is_empty());
+        assert!(!cancellation.cancel_request(
+            &AdmittedRoot::new("file:///unregistered"),
+            &LspRequestId::Number(9)
+        ));
+        assert_eq!(primary_authority.invoked().len(), 1);
+        assert!(secondary_authority.invoked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn factory_session_cancel_reaches_authority_with_exact_request_identity() {
+        let root = AdmittedRoot::new("file:///workspace");
+        let authority = RecordingCancellation::new("file:///workspace", true);
+        let factory = DaemonLspSessionFactory::new(
+            Handle::current(),
+            Arc::new(RuntimeFeedback),
+            Arc::new(PendingHover),
+            Arc::new(ToggleWorkspaceDiagnostics(Arc::new(AtomicBool::new(false)))),
+            Arc::clone(&authority) as Arc<dyn LspAnalyzerCancellationAuthority>,
+            Arc::new(RuntimeContext),
+            GatewayCapabilities {
+                semantic: [tracedecay_lsp::SemanticCapability::Hover]
+                    .into_iter()
+                    .collect(),
+                ..GatewayCapabilities::default()
+            },
+            UpstreamCapabilities {
+                semantic: [tracedecay_lsp::SemanticCapability::Hover]
+                    .into_iter()
+                    .collect(),
+                ..UpstreamCapabilities::default()
+            },
+        );
+        let mut session = factory.open_session(root.clone());
+        let initialize = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": "file:///workspace",
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "textDocument": { "hover": { "dynamicRegistration": false } },
+                },
+            },
+        }))
+        .expect("serialize initialize");
+        session.handle_payload(&initialize, 0);
+        session.drain_outbound();
+
+        let hover = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": "hover.exact",
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": "file:///workspace/lib.rs" },
+                "position": { "line": 0, "character": 0 },
+            },
+        }))
+        .expect("serialize hover");
+        session.handle_payload(&hover, 1);
+        assert!(session.drain_outbound().is_empty(), "pending hover must not complete");
+        assert!(authority.invoked().is_empty(), "cancel must wait for $/cancelRequest");
+
+        let cancel = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "method": "$/cancelRequest",
+            "params": { "id": "hover.exact" },
+        }))
+        .expect("serialize cancel");
+        session.handle_payload(&cancel, 2);
+
+        assert_eq!(
+            authority.invoked(),
+            vec![(
+                root.uri().to_owned(),
+                LspRequestId::String("hover.exact".to_owned())
+            )]
+        );
+
+        session.handle_payload(
+            &serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": { "id": "unknown" },
+            }))
+            .expect("serialize unknown cancel"),
+            3,
+        );
+        assert_eq!(
+            authority.invoked().len(),
+            1,
+            "unknown request identity must not cancel the authority"
         );
     }
 }
