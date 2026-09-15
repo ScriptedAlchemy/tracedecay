@@ -15,16 +15,18 @@
 //! 3. build and seal an incremental generation over a deterministic edited
 //!    subset, which is where `code_index.build.plan_increment` and the
 //!    retained-parse reuse spans live;
-//! 4. build one more generation after a single generated function changes,
-//!    recording clone payload recomputation and reuse;
+//! 4. with `--clone-envelope`, build one more generation after a single
+//!    generated function changes, recording clone payload recomputation and
+//!    reuse;
 //! 5. drain the sealed generation through
 //!    [`VerifiedSealedLexicalPageSourceV1::next_page_batch_if`], which is
 //!    `code_index.lexical_source.batch_stage`;
 //! 6. ingest those pages into an isolated SQLite lexical artifact in bounded
 //!    batches and finalize it, which is `query.artifact.append_pages` and
 //!    `query.artifact.finalization.advance_wake`;
-//! 7. reopen the artifact, time cold and warm exact-clone reads, record
-//!    fingerprint accounting, cancel one read, and reopen again.
+//! 7. with `--clone-envelope`, reopen the artifact, time first-reader and warm
+//!    exact-clone reads, record fingerprint accounting, cancel one read, and
+//!    reopen again.
 //!
 //! Hermeticity is a hard requirement, not a nicety: a profiling run that
 //! touches a socket, the network, or the operator profile measures the
@@ -199,7 +201,7 @@ const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
 
 const USAGE: &str = "\
-usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--format-revision 14|15|16]
+usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--format-revision 14|15|16] [--clone-envelope]
 
   --corpus DIR   committed fixture corpus to index
                  (default: $TRACEDECAY_INDEX_BENCH_CORPUS, else
@@ -207,6 +209,7 @@ usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--format-revision 1
   --replicas N   index the corpus N times under distinct logical path
                  prefixes (default: $TRACEDECAY_INDEX_BENCH_REPLICAS, else 1)
   --format-revision  lexical artifact revision (default: 16)
+  --clone-envelope  measure one-body refresh and clone query behavior
   -h, --help     print this message
 
 Profiling: build with `--features hotpath` and set HOTPATH_OUTPUT_FORMAT and
@@ -218,6 +221,7 @@ struct Options {
     replicas: usize,
     writer_revision: CodeLexicalArtifactWriterRevisionV1,
     format_revision: u32,
+    clone_envelope: bool,
 }
 
 impl Options {
@@ -226,6 +230,7 @@ impl Options {
         let mut replicas: Option<usize> = None;
         let mut writer_revision = CodeLexicalArtifactWriterRevisionV1::default();
         let mut format_revision = 16;
+        let mut clone_envelope = false;
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -256,6 +261,7 @@ impl Options {
                         .parse()
                         .map_err(|error| format!("invalid artifact revision: {error}"))?;
                 }
+                "--clone-envelope" => clone_envelope = true,
                 other => return Err(format!("unrecognized argument {other:?}")),
             }
         }
@@ -274,6 +280,7 @@ impl Options {
             replicas,
             writer_revision,
             format_revision,
+            clone_envelope,
         }))
     }
 }
@@ -673,6 +680,7 @@ fn build_generations(
     repository: &RepositoryId,
     sanitizer_revision: &SanitizerRevision,
     files: &[AdmittedFile],
+    clone_envelope: bool,
     control: &ActiveControl,
 ) -> Result<GenerationRun, String> {
     let mut owner = CodeIndexProductionOwnerV1::new(
@@ -715,14 +723,28 @@ fn build_generations(
         .map_err(|error| format!("build incremental generation: {error}"))?;
     let increment_wall = increment_started.elapsed();
     let increment_pool_stats = owner.physical_artifact_pool_stats();
-    let (generation, body_refresh) = build_body_refresh(
-        &mut owner,
-        repository,
-        sanitizer_revision,
-        &edited,
-        &increment,
-        &increment_pool_stats,
-    )?;
+    let (generation, body_refresh) = if clone_envelope {
+        build_body_refresh(
+            &mut owner,
+            repository,
+            sanitizer_revision,
+            &edited,
+            &increment,
+            &increment_pool_stats,
+        )?
+    } else {
+        (
+            increment,
+            BodyRefreshMetrics {
+                state: "disabled",
+                changed_path: None,
+                changed_files: None,
+                payloads_computed: None,
+                payloads_reused: None,
+                wall: None,
+            },
+        )
+    };
     Ok(GenerationRun {
         generation,
         edited_files,
@@ -764,8 +786,15 @@ fn run(options: &Options) -> Result<String, String> {
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let generations = build_generations(config, &repository, &sanitizer_revision, &files, &control)
-        .map_err(|error| format!("build benchmark generations: {error}"))?;
+    let generations = build_generations(
+        config,
+        &repository,
+        &sanitizer_revision,
+        &files,
+        options.clone_envelope,
+        &control,
+    )
+    .map_err(|error| format!("build benchmark generations: {error}"))?;
     let generation_statistics = generations
         .generation
         .generation_statistics()
@@ -799,14 +828,21 @@ fn run(options: &Options) -> Result<String, String> {
         &control,
     )?;
     let ingest_wall = ingest_started.elapsed();
-    let clone_queries = measure_clone_queries(
-        &artifact_path,
-        &artifact.receipt,
-        options.format_revision,
-        &pages,
-        generations.body_refresh.changed_path.as_deref(),
-        &control,
-    )?;
+    let clone_queries = if options.clone_envelope {
+        measure_clone_queries(
+            &artifact_path,
+            &artifact.receipt,
+            options.format_revision,
+            &pages,
+            generations.body_refresh.changed_path.as_deref(),
+            &control,
+        )?
+    } else {
+        serde_json::json!({
+            "state": "disabled",
+            "reason": "clone_envelope_not_requested",
+        })
+    };
     let clone_census = clone_census(&pages);
     scratch.remove()?;
 
@@ -1099,7 +1135,7 @@ fn measure_clone_queries(
             "reason": "artifact_has_no_clone_index",
         }));
     }
-    let source = pages
+    let Some(source) = pages
         .iter()
         .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
         .find(|body| {
@@ -1110,7 +1146,12 @@ fn measure_clone_queries(
                     .iter()
                     .any(|key| key.class == CloneNormalizationClassV1::Conservative)
         })
-        .ok_or_else(|| "clone envelope has no eligible source body".to_owned())?;
+    else {
+        return Ok(serde_json::json!({
+            "state": "unavailable",
+            "reason": "no_eligible_clone_body",
+        }));
+    };
     let open_started = Instant::now();
     let reader = CodeLexicalArtifactReaderV1::open_with_control(
         artifact_path,
@@ -1119,11 +1160,12 @@ fn measure_clone_queries(
         control,
     )
     .map_err(|error| format!("open clone artifact reader: {error}"))?;
-    let cold_open_micros = elapsed_micros(open_started.elapsed());
+    let first_reader_open_micros = elapsed_micros(open_started.elapsed());
 
-    let cold_started = Instant::now();
-    let cold = exact_clone_lookup(&reader, &source.occurrence.symbol_occurrence_id, 1, control)?;
-    let cold_lookup_micros = elapsed_micros(cold_started.elapsed());
+    let first_reader_started = Instant::now();
+    let first_reader =
+        exact_clone_lookup(&reader, &source.occurrence.symbol_occurrence_id, 1, control)?;
+    let first_reader_lookup_micros = elapsed_micros(first_reader_started.elapsed());
     let mut warm_lookup_micros = Vec::with_capacity(100);
     for _ in 0..100 {
         let warm_started = Instant::now();
@@ -1236,9 +1278,10 @@ fn measure_clone_queries(
             "token_count": source.payload.token_count,
         },
         "exact": {
-            "cold_open_micros": cold_open_micros,
-            "cold_lookup_micros": cold_lookup_micros,
-            "cold_members": cold.members.len(),
+            "first_reader_open_micros": first_reader_open_micros,
+            "first_reader_lookup_micros": first_reader_lookup_micros,
+            "first_reader_members": first_reader.members.len(),
+            "first_reader_cache_state": "same_process_after_artifact_write",
             "warm_lookup_micros": warm_lookup_micros,
             "warm_lookup_p95_micros": warm_lookup_p95_micros,
             "family_members": family.members.len(),
