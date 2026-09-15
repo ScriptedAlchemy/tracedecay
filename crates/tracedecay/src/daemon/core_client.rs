@@ -75,6 +75,18 @@ fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain:
     )
 }
 
+#[hotpath::measure(label = "daemon.core.response.decode")]
+fn decode_matching_daemon_response(
+    line: &str,
+    request_id: &serde_json::Value,
+) -> Result<Option<JsonRpcResponse>> {
+    let response: JsonRpcResponse =
+        serde_json::from_str(line).map_err(|error| TraceDecayError::Config {
+            message: format!("daemon tool response JSON decode failed: {error}"),
+        })?;
+    Ok((response.id == *request_id).then_some(response))
+}
+
 /// How long daemon clients keep retrying a failed connect before giving up.
 ///
 /// `tracedecay update` restarts the daemon service (`systemctl --user restart`);
@@ -365,36 +377,11 @@ pub(crate) async fn call_tool_with_liveness_poll(
         let response = if let Some(deadline) = client_deadline {
             deadline
                 .run("decode", tool_name, async {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
-                            message: format!("daemon tool response JSON decode failed: {error}"),
-                        })?;
-                    if value.get("id") != Some(&id) {
-                        return Ok(None);
-                    }
-                    let response: JsonRpcResponse =
-                        serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
-                            message: format!(
-                                "daemon tool response JSON-RPC decode failed: {error}"
-                            ),
-                        })?;
-                    Ok(Some(response))
+                    decode_matching_daemon_response(&line, &id)
                 })
                 .await?
         } else {
-            let value: serde_json::Value =
-                serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
-                    message: format!("daemon tool response JSON decode failed: {error}"),
-                })?;
-            if value.get("id") == Some(&id) {
-                Some(
-                    serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
-                        message: format!("daemon tool response JSON-RPC decode failed: {error}"),
-                    })?,
-                )
-            } else {
-                None
-            }
+            decode_matching_daemon_response(&line, &id)?
         };
         let Some(response) = response else {
             continue;
@@ -593,4 +580,38 @@ pub fn tool_json_payload(
         });
     }
     Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::decode_matching_daemon_response;
+
+    #[test]
+    fn daemon_response_decode_matches_identity_without_value_round_trip() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#;
+        let response = decode_matching_daemon_response(line, &json!(7))
+            .expect("valid response")
+            .expect("matching response");
+
+        assert_eq!(response.result, Some(json!({"ok": true})));
+        assert!(
+            decode_matching_daemon_response(line, &json!(8))
+                .expect("valid non-matching response")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn daemon_response_decode_rejects_malformed_json() {
+        let error = decode_matching_daemon_response("{", &json!(1))
+            .expect_err("malformed response must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("daemon tool response JSON decode failed")
+        );
+    }
 }

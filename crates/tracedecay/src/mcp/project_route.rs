@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -383,6 +384,7 @@ struct SharedHookProjectRouteCacheState {
 #[derive(Clone, Default)]
 pub(crate) struct SharedHookProjectRouteCache {
     inner: Arc<Mutex<SharedHookProjectRouteCacheState>>,
+    published_generation: Arc<AtomicU64>,
 }
 
 impl SharedHookProjectRouteCache {
@@ -412,6 +414,8 @@ impl SharedHookProjectRouteCache {
         state.cache.clone_from(cache);
         state.cache.connection_route = None;
         state.generation += 1;
+        self.published_generation
+            .store(state.generation, Ordering::Release);
         Ok(())
     }
 
@@ -422,18 +426,23 @@ impl SharedHookProjectRouteCache {
         &self,
         target: &mut HookProjectRouteCache,
     ) -> tracedecay_domain::errors::Result<()> {
-        let state = self
-            .inner
-            .lock()
-            .map_err(|_| Self::unavailable("snapshot"))?;
-        if target.shared_generation == Some(state.generation) {
+        let published_generation = self.published_generation.load(Ordering::Acquire);
+        if target.shared_generation == Some(published_generation) {
+            hotpath::gauge!("mcp.project.route.cache_hit_total").inc(1_u64);
             return Ok(());
         }
-        let connection_route = target.connection_route.take();
-        target.clone_from(&state.cache);
-        target.connection_route = connection_route;
-        target.shared_generation = Some(state.generation);
-        Ok(())
+        hotpath::measure_block!("mcp.project.route.cache_refresh", {
+            let state = self
+                .inner
+                .lock()
+                .map_err(|_| Self::unavailable("snapshot"))?;
+            let connection_route = target.connection_route.take();
+            target.clone_from(&state.cache);
+            target.connection_route = connection_route;
+            target.shared_generation = Some(state.generation);
+            hotpath::gauge!("mcp.project.route.cache_miss_total").inc(1_u64);
+            Ok(())
+        })
     }
 
     pub(crate) fn forget_project(
@@ -447,6 +456,8 @@ impl SharedHookProjectRouteCache {
             .map_err(|_| Self::unavailable("project retirement"))?;
         state.cache.forget_project(profile_id, project_id);
         state.generation += 1;
+        self.published_generation
+            .store(state.generation, Ordering::Release);
         Ok(())
     }
 }
@@ -923,6 +934,22 @@ mod tests {
         let newest_routed = newest.clone();
         assert_eq!(newest_routed, newest);
         assert!(newest_route.is_some(), "newest route must remain cached");
+    }
+
+    #[test]
+    fn unchanged_shared_route_refresh_does_not_take_the_cache_mutex() {
+        let shared = SharedHookProjectRouteCache::default();
+        let mut connection = shared.snapshot().expect("initial route snapshot");
+
+        let poison_target = shared.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_target.inner.lock().expect("route cache lock");
+            panic!("poison the cache mutex after the connection snapshot");
+        });
+
+        shared
+            .refresh_into(&mut connection)
+            .expect("an unchanged generation must bypass the poisoned cache mutex");
     }
 
     fn route_root(route: &super::WorkspaceProjectRoute) -> std::borrow::Cow<'_, str> {
