@@ -33,7 +33,11 @@ pub(super) const MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION: u32 = 9;
 ///
 /// Revisions through eight predate required clone-body source rows and are
 /// rebuilt rather than interpreted as successful empty clone evidence.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 10;
+/// Revision 10 stored generation-bound `symbol_occurrences` on each file
+/// segment descriptor; revision 11 stores generation-independent
+/// `symbol_identities` and rebinds occurrences at restore so one-file seal
+/// reuse no longer SHA-256-rebounds every unchanged file's symbols.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 11;
 
 /// The oldest sealed envelope revision this build decodes. Anything below it,
 /// and any retired revision between it and
@@ -1276,15 +1280,16 @@ mod tests {
 
     #[test]
     fn format_gate_accepts_only_the_monolithic_and_partitioned_revisions() {
-        assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 10);
+        assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 11);
         assert_eq!(MINIMUM_SEALED_GENERATION_FORMAT_REVISION, 9);
         assert!(sealed_generation_format_revision_is_compatible(9));
-        assert!(sealed_generation_format_revision_is_compatible(10));
+        assert!(sealed_generation_format_revision_is_compatible(11));
         assert!(!sealed_generation_format_revision_is_compatible(8));
-        // Retired between the floor and the current revision: revision seven
-        // named a manifest both with and without its census, so neither
-        // shape decodes.
-        assert!(!sealed_generation_format_revision_is_compatible(11));
+        // Revision 10 stored generation-bound symbol occurrence lists on each
+        // file-segment descriptor; revision 11 stores generation-independent
+        // symbol identities and rebinds occurrences at restore.
+        assert!(!sealed_generation_format_revision_is_compatible(10));
+        assert!(!sealed_generation_format_revision_is_compatible(12));
     }
 
     struct LargestAllocationRecorderV1;

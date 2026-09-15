@@ -3242,7 +3242,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:f2343b8510eb81cdf97197089aa88b5045dc9dfe694d32c647bbe70a121a8e15";
+    "sha256:3f27d7456d0656b3da2c4e30da6d816525135bde26748fcc7b66a2281505ab6c";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:0a8f5f5c66ac3bc2bf830d1316f1bcdf2568344c0dffb8e408f89dc36e7d66d9",
@@ -3897,6 +3897,39 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
             "a revision-seven manifest with census={census} reached the wrong rejection: {error}"
         );
     }
+}
+
+/// Revision 10 stored generation-bound symbol occurrence lists on each file
+/// segment descriptor. The current writer emits generation-independent
+/// symbol identities (revision 11), so a revision-10 carrier must be refused
+/// before its payload is parsed — never migrated in place.
+#[test]
+fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
+    let (_, manifest, _) = partitioned_codec_fixture();
+    let mut retired: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    let payload = retired["generation"]
+        .as_object_mut()
+        .expect("generation payload");
+    payload.insert("format_revision".to_owned(), serde_json::json!(10));
+    retired["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&retired["generation"]).expect("retired payload bytes")
+        ))
+    ));
+    let retired = serde_json::to_vec(&retired).expect("retired manifest bytes");
+
+    let Err(error) = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&retired) else {
+        panic!("a prior partitioned revision must be refused, never migrated")
+    };
+    assert!(
+        matches!(
+            error,
+            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(10)
+        ),
+        "revision-10 reached the wrong rejection: {error}"
+    );
 }
 
 /// Both public descriptor readers share one layout validator, so every
