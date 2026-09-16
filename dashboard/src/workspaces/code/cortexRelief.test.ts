@@ -24,6 +24,7 @@ import {
   cortexLegendPanels,
   maxRegionsWithoutOverlap,
   reliefBodyRx,
+  reliefCaptionHalfWidth,
   reliefLabelHalfWidth,
 } from './cortexRelief.ts';
 
@@ -82,7 +83,8 @@ function assertBandClear(
     readonly y: number | null;
     readonly radius: number | null;
     readonly label: string;
-    readonly directory: string;
+    readonly fileCount: number;
+    readonly density: number;
   }>,
 ): void {
   expect(new Set(regions.map((region) => region.y)).size).toBe(1);
@@ -92,7 +94,12 @@ function assertBandClear(
     const current = ordered[index]!;
     const bodyGap = reliefBodyRx(previous.radius!) + reliefBodyRx(current.radius!);
     const labelGap = reliefLabelHalfWidth(previous.label) + reliefLabelHalfWidth(current.label);
-    expect(current.x! - previous.x!).toBeGreaterThanOrEqual(Math.max(bodyGap, labelGap) - 1e-6);
+    const captionGap =
+      reliefCaptionHalfWidth(previous.fileCount, previous.density) +
+      reliefCaptionHalfWidth(current.fileCount, current.density);
+    expect(current.x! - previous.x!).toBeGreaterThanOrEqual(
+      Math.max(bodyGap, labelGap, captionGap) - 1e-6,
+    );
   }
 }
 
@@ -178,6 +185,7 @@ describe('elevation', () => {
     const sameDepth = model.drawnRegions.filter((region) => region.depth === 1);
     expect(sameDepth).toHaveLength(count);
     expect(new Set(sameDepth.map((region) => region.y))).toEqual(new Set([band.y]));
+    assertBandClear(sameDepth);
   });
 
   it('keeps a single crowded stratum on its measured depth line, not spread across the field', () => {
@@ -194,6 +202,7 @@ describe('elevation', () => {
     const spread = Math.max(...sameDepth.map((region) => region.y!)) -
       Math.min(...sameDepth.map((region) => region.y!));
     expect(spread).toBe(0);
+    assertBandClear(sameDepth);
   });
 
   it('folds crowded same-depth bodies instead of overlapping them', () => {
@@ -206,7 +215,11 @@ describe('elevation', () => {
     const labels = clusters.map(
       (item) => `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`,
     );
-    const capacity = maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels);
+    const captions = clusters.map((item) => ({
+      fileCount: item.file_count,
+      density: item.internal_edges / item.file_count,
+    }));
+    const capacity = maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels, captions);
     expect(model.drawnRegions.length).toBe(capacity);
     expect(model.foldedRegions).toBe(count - capacity);
     expect(model.foldedRegions).toBeGreaterThan(0);
@@ -229,11 +242,14 @@ describe('elevation', () => {
     const labels = clusters
       .slice(0, bedrockCount)
       .map((item) => `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`);
+    const captions = clusters.slice(0, bedrockCount).map((item) => ({
+      fileCount: item.file_count,
+      density: item.internal_edges / item.file_count,
+    }));
+    const capacity = maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels, captions);
     expect(bedrock.length).toBeGreaterThanOrEqual(1);
-    expect(bedrock.length).toBeLessThanOrEqual(
-      maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels),
-    );
-    if (bedrockCount > maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels)) {
+    expect(bedrock.length).toBeLessThanOrEqual(capacity);
+    if (bedrockCount > capacity) {
       expect(model.foldedRegions).toBeGreaterThan(0);
     }
     assertBandClear(bedrock);
@@ -308,7 +324,37 @@ describe('elevation', () => {
     const scale = cortexLegendPanels(model).find((panel) => panel.label === 'scale')!;
     expect(scale.teach).toMatch(/readable/);
     expect(cortexDescription(model)).toMatch(/readability/);
+    const bedrockBand = model.strata.find((band) => band.depth === 0)!;
+    expect(bedrockBand.regions).toBe(bedrockCount);
+    expect(bedrockBand.drawn).toBe(model.drawnRegions.filter((region) => region.depth === 0).length);
+    expect(bedrockBand.drawn).toBeLessThan(bedrockCount);
+    expect(cortexDescription(model)).toMatch(/stratum 0 holds \d+ of 28/);
     assertBandClear(model.drawnRegions.filter((region) => region.depth === 0));
+  });
+
+  it('folds a short-label band to file-count caption width instead of overlapping it', () => {
+    const count = 24;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(`src/a${index}`, { order: index, file_count: 12345, internal_edges: 20000 }),
+    );
+    const files = Array.from({ length: count }, (_, index) => file(`src/a${index}/a.rs`, 0));
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 1 }));
+    const labels = clusters.map(
+      (item) => `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`,
+    );
+    const captions = clusters.map((item) => ({
+      fileCount: item.file_count,
+      density: item.internal_edges / item.file_count,
+    }));
+    const usable = model.world.width - 104 - 44;
+    const labelOnly = maxRegionsWithoutOverlap(usable, labels);
+    const withCaptions = maxRegionsWithoutOverlap(usable, labels, captions);
+    expect(withCaptions).toBeLessThan(labelOnly);
+    const band = model.strata.find((stratum) => stratum.depth === 0)!;
+    expect(band.regions).toBe(count);
+    expect(band.drawn).toBe(withCaptions);
+    expect(model.drawnRegions).toHaveLength(withCaptions);
+    assertBandClear(model.drawnRegions);
   });
 
 });
