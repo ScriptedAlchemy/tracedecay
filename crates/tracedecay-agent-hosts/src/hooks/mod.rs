@@ -1020,11 +1020,15 @@ fn deduped_project_hint_with_id(
 }
 
 fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
-    if let Some(root) = tracedecay_runtime_core::worktree::git_worktree_root(start) {
-        return Some(root);
-    }
     let temp_root =
         tracedecay_runtime_core::path_safety::canonical_root_identity(&std::env::temp_dir());
+    // The temp bound applies to the git answer too: a `git init` at the system
+    // temp root would otherwise bind every ephemeral agent workspace under it
+    // as one project.
+    if let Some(root) = tracedecay_runtime_core::worktree::git_worktree_root(start) {
+        return (tracedecay_runtime_core::path_safety::canonical_root_identity(&root) != temp_root)
+            .then_some(root);
+    }
     let mut dir = start.to_path_buf();
     loop {
         if tracedecay_runtime_core::path_safety::canonical_root_identity(&dir) == temp_root {
