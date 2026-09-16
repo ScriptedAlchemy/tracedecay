@@ -113,11 +113,11 @@ def validate_kimi(path: Path) -> None:
             or not isinstance(hook.get("timeout"), int)
         ):
             fail(f"{path} requires a callable {event} hook with an integer timeout")
-    server = manifest.get("mcpServers", {}).get("tracedecay")
-    if not isinstance(server, dict):
-        fail(f"{path} requires mcpServers.tracedecay")
-    require_equal(server, "command", "tracedecay", path)
-    require_equal(server, "args", ["serve"], path)
+    # Kimi registers MCP in session/user mcp.json (not the plugin manifest).
+    # Keep this omit-check aligned with the installer contract.
+    # Inline mcpServers here would disagree with the installer and host launch.
+    if "mcpServers" in manifest:
+        fail(f"{path} must omit mcpServers (MCP is registered outside the plugin manifest)")
 
 
 def shared_skill_slugs(root: Path) -> list[str]:

@@ -42,10 +42,11 @@ never replaced wholesale.
   only. Roo Code and Kilo are not inferred compatible from Cline branding or
   transcript shape; native edit/stop delivery remains typed unavailable until
   checked-in host fixtures exist.
-- **Kimi Code:** the managed plugin manifest keeps MCP, skills, and commands
-  together and registers native `PostToolUse` and `Stop` hooks. Hook commands
-  submit bounded native events to the daemon. Capture, sync, and session work
-  happen after daemon admission, never in the host adapter.
+- **Kimi Code:** the managed plugin manifest keeps skills, commands, and
+  native `PostToolUse`/`Stop` hooks together; MCP is registered in Kimi
+  session/user `mcp.json` so the host launches from the workspace. Hook
+  commands submit bounded native events to the daemon. Capture, sync, and
+  session work happen after daemon admission, never in the host adapter.
 - **OpenCode:** a typed `@opencode-ai/plugin` module under
   `~/.config/opencode/plugins/` (or `.opencode/plugins/` locally) consumes
   `file.edited`, `tool.execute.after`, and `session.idle`, schedules a bounded
@@ -77,7 +78,7 @@ Codex commands/agents or Kimi LSP/agents as omitted copies.
 | **Commands** | yes (`plugin/commands/`) | overlay twins (`overlays/cursor/commands/`), independently authored | **no** (intentional: plugin deploy is manifest + skills + hooks + MCP) | yes (verbatim Claude command Markdown) | yes (Agent; shared command templates) |
 | **Agents** (`plugin/agents/`) | yes (verbatim) | yes (derived Markdown) | generated TOML exists for automation export, **not** in the plugin deploy set (intentional) | **no** (intentional) | yes (schema-adapted, Agent) |
 | **Hooks** | `SessionStart`, `Stop`, `PostToolUse`, `PostCompact`, `SubagentStart` | `sessionStart`, `sessionEnd`, `stop`, `postToolUse`, `preCompact`, `afterFileEdit`, `afterShellExecution`, `workspaceOpen` | install-time table (`hooks-codex.json` seed is empty on purpose): `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PostToolUse`, `PostCompact`, `Stop` | inline `PostToolUse` + `Stop` in `.kimi-plugin/plugin.json` | `file.edited`, `lsp.updated`, `session.idle` / idle `session.status`, `tool.execute.after` |
-| **MCP** | `.mcp.json` key `graph` | `mcp-cursor.json` key `tracedecay` | same `graph` key | inline `mcpServers.tracedecay` | key `tracedecay` via `tracedecay-mcp.ts` + `opencode.registration.json` |
+| **MCP** | `.mcp.json` key `graph` | `mcp-cursor.json` key `tracedecay` | same `graph` key | session/user `mcp.json` key `tracedecay` (not in plugin manifest) | key `tracedecay` via `tracedecay-mcp.ts` + `opencode.registration.json` |
 | **LSP** | `.lsp.json` | native VS Code extension (not `.lsp.json`) | **no** (typed unavailable; intentional) | **no** (intentional) | custom LSP in `opencode.registration.json` |
 | **Rules** | **no** (intentional) | yes (`rules/tracedecay.mdc`) | **no** (intentional) | **no** (intentional) | `AGENTS.md` is Core instruction content, not a rules product |
 
