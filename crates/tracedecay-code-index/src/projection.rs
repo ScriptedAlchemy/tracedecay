@@ -181,11 +181,7 @@ pub fn project_for_publication<S: CodeChunkProjectionSink>(
     let (request, request_digest) = expand_projection_key_replay(request)?;
     let evidence = ProjectionRequestEvidenceV1::recorded(request_digest, &request.changes);
     let sink_receipt = if request_is_true_noop(&request) {
-        ProjectionSinkReceiptV1::sealed(build_batch_receipt_verified(
-            &request,
-            &evidence,
-            &decisions_for_noop(&request.changes),
-        )?)
+        ProjectionSinkReceiptV1::sealed(build_batch_receipt_verified(&request, &evidence, &[])?)
     } else {
         sink.project_changed_chunks(
             &request,
