@@ -20,6 +20,7 @@ use std::process::Stdio;
 use serde::Deserialize;
 
 use super::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
+use crate::analyzer::launch::{RUSTUP_AUTO_INSTALL_DISABLED, RUSTUP_AUTO_INSTALL_ENV};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Driver for Rust projects. Probes for `Cargo.toml` at the project root.
@@ -49,6 +50,7 @@ impl Driver for CargoDriver {
                     .arg("--target-dir")
                     .arg(&target_dir)
                     .current_dir(project_root)
+                    .env(RUSTUP_AUTO_INSTALL_ENV, RUSTUP_AUTO_INSTALL_DISABLED)
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
