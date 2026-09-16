@@ -843,6 +843,9 @@ pub fn code_reused_partition_digest(
 #[serde(deny_unknown_fields)]
 pub struct CodeGenerationSourceCommitmentsV1 {
     pub incremental_manifest_digest: ManifestDigest,
+    /// Parent-delta source seal (`CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN` /
+    /// `tracedecay.code-source-parent-delta.v1`). Field name is historical; it
+    /// is not a generation-independent full-corpus replay hash.
     pub full_replay_digest: ManifestDigest,
     /// Parent generation's `full_replay_digest` when this commitment was sealed
     /// as a successor. `None` for genesis.
