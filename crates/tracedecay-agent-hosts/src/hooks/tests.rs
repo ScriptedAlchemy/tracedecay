@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use super::{hook_output_owner_event_id, run_with_test_env_lock, schedule_user_session_review};
+use super::{
+    hook_output_owner_event_id, run_with_test_env_lock, schedule_user_session_review, EnvGuard,
+};
 
 fn canonical(path: &Path) -> PathBuf {
     tracedecay_runtime_core::path_safety::canonical_root_identity(path)
@@ -15,8 +17,28 @@ fn init_minimal_git_root(dir: &Path) {
     gix::init(dir).expect("minimal git root");
 }
 
+fn pin_process_temp(path: &Path) -> (EnvGuard, EnvGuard, EnvGuard) {
+    (
+        EnvGuard::set_path("TMPDIR", path),
+        EnvGuard::set_path("TEMP", path),
+        EnvGuard::set_path("TMP", path),
+    )
+}
+
+fn assert_is_project_like(start: &Path) {
+    assert!(
+        super::is_project_like_workspace(start),
+        "workspace must stay project-like"
+    );
+    assert!(
+        super::nearest_project_like_root(start).is_some(),
+        "workspace must stay project-like"
+    );
+}
+
 #[test]
 fn temp_git_root_is_refused_as_project_like() {
+    let _lock = super::lock_test_env();
     let temp = tempfile::tempdir().expect("temporary root");
     let repo = temp.path().join("ephemeral-agent");
     init_minimal_git_root(&repo);
@@ -37,33 +59,57 @@ fn temp_git_root_is_refused_as_project_like() {
 }
 
 #[test]
-fn git_root_outside_temp_is_project_like_when_environment_permits() {
-    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let start_id = canonical(&start);
-    let temp_root = system_temp_root();
-    if start_id.starts_with(&temp_root) {
-        return;
-    }
+fn git_root_outside_configured_temp_is_project_like() {
+    let _lock = super::lock_test_env();
+    let configured_temp = tempfile::tempdir().expect("configured temp root");
+    let sibling = tempfile::tempdir().expect("sibling root");
+    let _pinned = pin_process_temp(configured_temp.path());
 
+    let repo = sibling.path().join("workspace");
+    init_minimal_git_root(&repo);
+    let nested = repo.join("src");
+    std::fs::create_dir(&nested).expect("nested workspace");
+
+    let temp_root = system_temp_root();
+    let repo_id = canonical(&repo);
     assert!(
-        super::is_project_like_workspace(&start),
-        "a git checkout outside the system temp root must stay project-like"
+        temp_root.is_absolute() && !temp_root.as_os_str().is_empty(),
+        "configured temp root must be a usable absolute bound"
     );
-    let root = super::nearest_project_like_root(&start)
-        .expect("checkout outside the system temp root must stay project-like");
     assert!(
-        !canonical(&root).starts_with(&temp_root),
-        "accepted git root must not be bound to the system temp root"
+        !repo_id.starts_with(&temp_root),
+        "sibling git root must sit outside the configured temp root"
     );
+    let discovered = tracedecay_runtime_core::worktree::git_worktree_root(&nested)
+        .expect("fixture must be a real git worktree root");
+    assert_eq!(
+        super::nearest_project_like_root(&nested),
+        Some(discovered)
+    );
+    assert!(super::is_project_like_workspace(&nested));
+}
+
+#[test]
+fn empty_temp_dir_does_not_reject_a_git_repo() {
+    let _lock = super::lock_test_env();
+    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let _pinned = pin_process_temp(Path::new(""));
+    assert_is_project_like(&start);
+}
+
+#[test]
+fn relative_temp_dir_does_not_reject_a_git_repo() {
+    let _lock = super::lock_test_env();
+    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let _pinned = pin_process_temp(Path::new("."));
+    assert_is_project_like(&start);
 }
 
 #[test]
 fn marker_at_temp_root_does_not_make_descendant_project_like() {
     let _lock = super::lock_test_env();
     let temp = tempfile::tempdir().expect("temporary root");
-    let _tmpdir = super::EnvGuard::set_path("TMPDIR", temp.path());
-    let _temp = super::EnvGuard::set_path("TEMP", temp.path());
-    let _tmp = super::EnvGuard::set_path("TMP", temp.path());
+    let _pinned = pin_process_temp(temp.path());
     std::fs::write(temp.path().join("package.json"), "{}").expect("temp-root marker");
 
     let generic = temp.path().join("generic");
