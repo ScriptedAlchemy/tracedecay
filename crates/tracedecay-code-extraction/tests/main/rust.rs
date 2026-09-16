@@ -22,7 +22,7 @@ fn destructure(context: Context) {
     let mut parser = Parser::new();
     parser
         .set_language(
-            &tracedecay_code_extraction::ts_provider::language("rust")
+            &tracedecay_code_extraction::ts_provider::try_language("rust")
                 .expect("bundled Rust grammar"),
         )
         .expect("configure Rust parser");

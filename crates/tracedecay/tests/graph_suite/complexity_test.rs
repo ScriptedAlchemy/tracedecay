@@ -5,7 +5,7 @@ fn rust_fn_complexity(source: &str) -> tracedecay_code_extraction::complexity::C
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(
-            &tracedecay_code_extraction::ts_provider::language("rust")
+            &tracedecay_code_extraction::ts_provider::try_language("rust")
                 .expect("failed to load Rust grammar"),
         )
         .expect("failed to load Rust grammar");
