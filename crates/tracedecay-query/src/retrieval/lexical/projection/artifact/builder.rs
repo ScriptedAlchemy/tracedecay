@@ -3812,17 +3812,21 @@ fn verify_clone_payload_digests<'body>(
         }
     }
     let digests: Vec<&str> = staged.keys().copied().collect();
+    let placeholders = std::iter::repeat_n("?", PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT payload_digest, payload FROM clone_body_payloads WHERE payload_digest IN ({placeholders})"
+    );
+    let mut statement = transaction.prepare_cached(&sql).map_err(sqlite_error)?;
     for chunk in digests.chunks(PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK) {
         checkpoint(control)?;
-        let placeholders = std::iter::repeat_n("?", chunk.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT payload_digest, payload FROM clone_body_payloads WHERE payload_digest IN ({placeholders})"
-        );
-        let mut statement = transaction.prepare_cached(&sql).map_err(sqlite_error)?;
+        let parameters = chunk.iter().copied().map(Some).chain(std::iter::repeat_n(
+            None,
+            PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK - chunk.len(),
+        ));
         let mut rows = statement
-            .query(rusqlite::params_from_iter(chunk.iter()))
+            .query(rusqlite::params_from_iter(parameters))
             .map_err(sqlite_error)?;
         while let Some(row) = rows.next().map_err(sqlite_error)? {
             let digest: String = row.get(0).map_err(sqlite_error)?;
@@ -6852,6 +6856,48 @@ mod tests {
 
         fn is_deadline_exceeded(&self) -> bool {
             false
+        }
+    }
+
+    #[test]
+    fn clone_payload_conflict_checks_cover_full_and_partial_batches() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE clone_body_payloads(payload_digest TEXT PRIMARY KEY, payload BLOB NOT NULL)",
+        ).unwrap();
+        let transaction = connection.transaction().unwrap();
+        let bodies: Vec<_> = (0..=PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK)
+            .map(|index| PreparedCloneBodyV1 {
+                payload_digest: format!("payload.{index}"),
+                payload: vec![1],
+                occurrence: Vec::new(),
+                symbol_occurrence_id: format!("symbol.{index}"),
+                path: "src/lib.rs".to_owned(),
+                body_start: 0,
+                body_end: 1,
+                exact_keys: Vec::new(),
+                fingerprint_stream: None,
+            })
+            .collect();
+        for body in &bodies {
+            transaction
+                .execute(
+                    "INSERT INTO clone_body_payloads VALUES (?1, ?2)",
+                    params![body.payload_digest, body.payload],
+                )
+                .unwrap();
+        }
+        let references: Vec<_> = bodies.iter().collect();
+        verify_clone_payload_digests(&transaction, &references, &ActiveControl).unwrap();
+        verify_clone_payload_digests(&transaction, &references[..1], &ActiveControl).unwrap();
+        transaction
+            .execute("UPDATE clone_body_payloads SET payload = X'02'", [])
+            .unwrap();
+        for batch in [&references[..], &references[..1]] {
+            assert!(matches!(
+                verify_clone_payload_digests(&transaction, batch, &ActiveControl),
+                Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+            ));
         }
     }
 

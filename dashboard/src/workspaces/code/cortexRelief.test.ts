@@ -230,6 +230,18 @@ describe('elevation', () => {
     assertBandClear(model.drawnRegions.filter((region) => region.depth === 0));
   });
 
+  it('does not let a folded long label shrink the retained prefix', () => {
+    const directories = ['src/a', 'src/b', 'src/c', `src/${'long'.repeat(100)}`];
+    const model = buildCortexModel(measurement(
+      directories.map((directory, order) => cluster(directory, { order, file_count: 4 })),
+      directories.map((directory) => file(`${directory}/a.rs`, 0)),
+      { max_depth: 1 },
+    ));
+    expect(model.drawnRegions.map((region) => region.directory)).toEqual(directories.slice(0, 3));
+    expect(model.readabilityFoldedRegions).toBe(1);
+    assertBandClear(model.drawnRegions);
+  });
+
   it('keeps multi-depth bedrock bands free of body and label collisions', () => {
     const bedrockCount = 16;
     const ridgeCount = 6;

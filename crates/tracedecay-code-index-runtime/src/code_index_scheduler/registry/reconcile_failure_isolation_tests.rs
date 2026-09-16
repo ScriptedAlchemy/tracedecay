@@ -633,6 +633,26 @@ async fn cold_terminal_park_makes_the_freshness_probe_terminal() {
             .await,
         CodeIndexDemandAdmissionV1::Terminal(_)
     ));
+    let scope = {
+        let mounted = fixture.registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&fixture.project.canonicalize().unwrap())
+            .unwrap();
+        ResolvedScope::new(
+            worktree.project_id.clone(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .unwrap()
+    };
+    assert!(matches!(
+        fixture
+            .registry
+            .request_query_background_reconcile(&scope)
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+    ));
     fixture.registry.shutdown().await;
 }
 

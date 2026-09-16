@@ -434,6 +434,33 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps polling each second when a moving worktree shares a query with a quiet one', async () => {
+    vi.useFakeTimers();
+    const result = {
+      ...envelope('loading', {
+        worktrees: [
+          { ...worktree(), rebuild_in_flight: true, progress: progress() },
+          {
+            ...worktree(),
+            worktree_root: '/workspace/moving',
+            rebuild_in_flight: true,
+            progress: { ...progress(), last_progress_micros: NOW_MICROS + 600_000_000 },
+          },
+        ],
+        note: 'live daemon scheduler state',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify(result), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_000);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('returns to the 1s cadence when a quiet build publishes a new progress stamp', async () => {
     vi.useFakeTimers();
     const quiet = {
