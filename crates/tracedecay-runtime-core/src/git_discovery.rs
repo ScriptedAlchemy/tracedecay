@@ -295,6 +295,13 @@ async fn published_identity(
 
 /// Synchronous bounded discovery for legacy parser seams that cannot await.
 ///
+/// Daemon, MCP, and other composition edges must mint one parent
+/// [`MonotonicDeadline`] per request and pass it through
+/// [`discover_repository_identity`] / [`discover_repository_identity_with_control`]
+/// instead of calling this helper in a multi-root loop (which would stack
+/// N×[`DEFAULT_DISCOVERY_TIMEOUT`] budgets). Prefer an explicit deadline at
+/// every composition edge.
+///
 /// Daemon and other async callers should use [`discover_repository_identity`].
 pub fn discover_repository_identity_bounded(directory: &Path) -> GitRepositoryIdentityOutcome {
     discover_repository_identity_with_control(
