@@ -69,7 +69,7 @@ struct YieldedBackgroundCpuV1<'a> {
 
 impl Drop for YieldedBackgroundCpuV1<'_> {
     fn drop(&mut self) {
-        self.authority.admit_units(self.units);
+        self.authority.admit_units(self.units, || {});
         BACKGROUND_CPU_UNITS.with(|units| units.set(self.units));
         BACKGROUND_CPU_DEPTH.with(|depth| depth.set(self.depth));
     }
@@ -127,7 +127,7 @@ impl ProcessBackgroundCpuV1 {
     /// Acquire one CPU unit, waiting in FIFO order when the process budget is
     /// full. The returned guard must remain alive for the active work unit.
     pub fn acquire(self: &Arc<Self>) -> BackgroundCpuPermitV1 {
-        self.acquire_units(1)
+        self.acquire_units(1, || {})
     }
 
     /// Acquire one CPU unit only when no earlier waiter exists and capacity is
@@ -179,9 +179,24 @@ impl ProcessBackgroundCpuV1 {
         requested_units: usize,
         operation: impl FnOnce() -> R,
     ) -> R {
+        self.with_permits_placed(requested_units, || {}, operation)
+    }
+
+    /// [`Self::with_permits`] that calls `placed` once this request holds its
+    /// FIFO position, or ran on a sufficient admission the calling thread
+    /// already held. Callers that must order other work strictly after this
+    /// request's queue position (a request that cannot fit until the current
+    /// holders release) get that guarantee without reading shared counters.
+    pub fn with_permits_placed<R>(
+        self: &Arc<Self>,
+        requested_units: usize,
+        placed: impl FnOnce(),
+        operation: impl FnOnce() -> R,
+    ) -> R {
         let units = requested_units.max(1).min(self.width.get());
         let active_units = BACKGROUND_CPU_UNITS.with(Cell::get);
         if active_units >= units {
+            placed();
             return operation();
         }
         if active_units > 0 {
@@ -194,12 +209,12 @@ impl ProcessBackgroundCpuV1 {
                 units: active_units,
                 depth,
             };
-            let _permit = self.acquire_units(units);
+            let _permit = self.acquire_units(units, placed);
             let _scope = BackgroundCpuScopeV1::enter();
             BACKGROUND_CPU_UNITS.with(|active| active.set(units));
             return operation();
         }
-        let _permit = self.acquire_units(units);
+        let _permit = self.acquire_units(units, placed);
         let _scope = BackgroundCpuScopeV1::enter();
         BACKGROUND_CPU_UNITS.with(|active| active.set(units));
         operation()
@@ -227,15 +242,19 @@ impl ProcessBackgroundCpuV1 {
         operation()
     }
 
-    fn acquire_units(self: &Arc<Self>, units: usize) -> BackgroundCpuPermitV1 {
-        self.admit_units(units);
+    fn acquire_units(
+        self: &Arc<Self>,
+        units: usize,
+        placed: impl FnOnce(),
+    ) -> BackgroundCpuPermitV1 {
+        self.admit_units(units, placed);
         BackgroundCpuPermitV1 {
             authority: Arc::clone(self),
             units,
         }
     }
 
-    fn admit_units(&self, units: usize) {
+    fn admit_units(&self, units: usize, placed: impl FnOnce()) {
         let waiter = Arc::new(BackgroundCpuWaiterV1 { units });
         let mut state = self
             .state
@@ -243,6 +262,7 @@ impl ProcessBackgroundCpuV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.waiters.push_back(Arc::clone(&waiter));
         record_state(&state, self.width);
+        placed();
         loop {
             let is_front = state
                 .waiters
@@ -429,6 +449,44 @@ mod tests {
             assert_eq!(authority.active_units(), 1);
         });
         assert_eq!(authority.active_units(), 0);
+    }
+
+    #[test]
+    fn placed_fires_once_a_blocked_request_holds_its_queue_position() {
+        let authority = Arc::new(ProcessBackgroundCpuV1::new(
+            NonZeroUsize::new(2).expect("nonzero width"),
+        ));
+        let held = authority.acquire();
+        let placed = Arc::new(AtomicBool::new(false));
+        let admitted = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let authority = Arc::clone(&authority);
+            let placed = Arc::clone(&placed);
+            let admitted = Arc::clone(&admitted);
+            std::thread::spawn(move || {
+                authority.with_permits_placed(
+                    2,
+                    || placed.store(true, Ordering::SeqCst),
+                    || admitted.store(true, Ordering::SeqCst),
+                );
+            })
+        };
+        while !placed.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!admitted.load(Ordering::SeqCst));
+        assert_eq!(authority.waiting_work_units(), 2);
+        assert_eq!(authority.active_units(), 1);
+        drop(held);
+        waiter.join().expect("full-width waiter");
+        assert!(admitted.load(Ordering::SeqCst));
+        assert_eq!(authority.active_units(), 0);
+
+        let nested = AtomicBool::new(false);
+        authority.with_permits(2, || {
+            authority.with_permits_placed(1, || nested.store(true, Ordering::SeqCst), || {});
+        });
+        assert!(nested.load(Ordering::SeqCst));
     }
 
     #[test]

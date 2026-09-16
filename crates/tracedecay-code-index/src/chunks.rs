@@ -2583,9 +2583,9 @@ fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChun
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -2743,6 +2743,11 @@ mod tests {
     /// out across the pool while a full-width request (the lexical sorter's
     /// admission) is already queued at the FIFO head. Stolen leaves must not
     /// wait behind that head on a unit their own parent holds.
+    ///
+    /// The installed authority is process-global, so every ordering signal
+    /// comes from inside the request that takes the queue position
+    /// (`with_permits_placed`), never from shared counters that sibling
+    /// tests also move.
     #[test]
     fn nested_chunk_fan_out_does_not_wedge_behind_a_full_width_head_waiter() {
         let installed = crate::parallelism::install_worker_plan(
@@ -2752,9 +2757,11 @@ mod tests {
         .expect("install the automatic worker plan");
         let authority = installed.background_cpu;
         let width = authority.width().get();
-        // Single-CPU hosts and TRACEDECAY_INDEX_WORKERS=1 yield width 1; the
-        // steal-behind-FIFO scenario needs a second worker.
         if width < 2 {
+            eprintln!(
+                "skipping nested admission wedge: needs a second pool worker to steal onto, \
+                 installed width is {width}"
+            );
             return;
         }
         let chunks = std::iter::repeat_n(
@@ -2765,34 +2772,46 @@ mod tests {
         let chunks_len = chunks.len();
 
         let holder_admitted = Arc::new(AtomicBool::new(false));
-        let head_queued = Arc::new(AtomicBool::new(false));
+        let head_placed = Arc::new(AtomicBool::new(false));
+        let leaves_placed = Arc::new(AtomicUsize::new(0));
         let leaves_entered = Arc::new(AtomicUsize::new(0));
         let (finished, finishes) = mpsc::channel::<&'static str>();
 
         let holder = {
             let authority = Arc::clone(&authority);
             let holder_admitted = Arc::clone(&holder_admitted);
-            let head_queued = Arc::clone(&head_queued);
+            let head_placed = Arc::clone(&head_placed);
+            let leaves_placed = Arc::clone(&leaves_placed);
             let leaves_entered = Arc::clone(&leaves_entered);
             let finished = finished.clone();
             std::thread::spawn(move || {
                 let outcome = crate::parallelism::install(|| {
                     crate::parallelism::with_background_cpu_permit(|| {
                         holder_admitted.store(true, Ordering::SeqCst);
-                        wait_until("full-width head request queued", || {
-                            head_queued.load(Ordering::SeqCst)
+                        wait_until("full-width head request placed in the queue", || {
+                            head_placed.load(Ordering::SeqCst)
                         });
                         try_for_each_chunk_ordered(
-                            |unit| crate::parallelism::with_background_cpu_permit(unit),
+                            // Production admits each leaf through
+                            // `with_background_cpu_permit` on this same
+                            // authority; the placed hook only adds the signal.
+                            |unit| {
+                                authority.with_permits_placed(
+                                    1,
+                                    || {
+                                        leaves_placed.fetch_add(1, Ordering::SeqCst);
+                                    },
+                                    unit,
+                                )
+                            },
                             &chunks,
                             |_| {
                                 if leaves_entered.fetch_add(1, Ordering::SeqCst) == 0 {
                                     // Keep the first leaf busy until a sibling
-                                    // either ran (admission progressed) or is
-                                    // queued behind the head (the wedge).
-                                    wait_until("a sibling leaf ran or queued", || {
-                                        leaves_entered.load(Ordering::SeqCst) >= 2
-                                            || authority.waiting_work_units() > width
+                                    // leaf has taken its own queue position,
+                                    // which is behind the head.
+                                    wait_until("a sibling leaf placed its request", || {
+                                        leaves_placed.load(Ordering::SeqCst) >= 2
                                     });
                                 }
                                 Ok(())
@@ -2805,42 +2824,30 @@ mod tests {
             })
         };
         wait_until("holder admitted", || holder_admitted.load(Ordering::SeqCst));
-        // The authority is shared with every other test in this binary, so
-        // counters are lower bounds here; run alone they are exact.
-        assert!(authority.active_units() >= 1);
 
-        // Gate the head thread so the waiting baseline is taken before this
-        // request can enqueue; under parallel libtest a foreign backlog can
-        // already be >= width and would otherwise release the holder early.
-        let head_enter = Arc::new(Barrier::new(2));
         let head = {
+            let authority = Arc::clone(&authority);
+            let head_placed = Arc::clone(&head_placed);
             let finished = finished.clone();
-            let head_enter = Arc::clone(&head_enter);
             std::thread::spawn(move || {
-                head_enter.wait();
-                crate::parallelism::with_background_cpu_permits(width, || {});
+                authority.with_permits_placed(
+                    width,
+                    || head_placed.store(true, Ordering::SeqCst),
+                    || {},
+                );
                 finished.send("head").expect("test thread is waiting");
             })
         };
-        let waiting_before = authority.waiting_work_units();
-        head_enter.wait();
-        wait_until("head request waiting for the full width", || {
-            authority.waiting_work_units() >= waiting_before.saturating_add(width)
-        });
-        assert!(
-            !head.is_finished(),
-            "head must still be blocked in full-width admission before fan-out"
-        );
-        head_queued.store(true, Ordering::SeqCst);
 
         for _ in 0..2 {
             assert!(
                 finishes.recv_timeout(ADMISSION_STEP_DEADLINE).is_ok(),
                 "nested chunk fan-out wedged behind the full-width head waiter for \
                  {ADMISSION_STEP_DEADLINE:?}: active_units={} waiting_work_units={} \
-                 leaves_entered={}",
+                 leaves_placed={} leaves_entered={}",
                 authority.active_units(),
                 authority.waiting_work_units(),
+                leaves_placed.load(Ordering::SeqCst),
                 leaves_entered.load(Ordering::SeqCst),
             );
         }
