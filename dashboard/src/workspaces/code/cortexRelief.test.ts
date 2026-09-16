@@ -158,6 +158,10 @@ describe('elevation', () => {
     expect(model.unplacedRegions).toBe(1);
     // …and it is still a region in the model, so the table can print it.
     expect(model.regions).toHaveLength(2);
+    const scale = cortexLegendPanels(model).find((panel) => panel.label === 'scale')!;
+    expect(scale.teach).not.toMatch(/whole clustering is drawn/i);
+    expect(scale.teach).toMatch(/no file carried measured depth/);
+    expect(cortexDescription(model)).toMatch(/not placed because no file carried measured depth/);
   });
 
   it('puts bedrock at the bottom of the world and the ridge at the top', () => {
