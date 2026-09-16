@@ -812,6 +812,7 @@ owner-private mode) is picked up on the next wake without a restart. The
 state exists so `status`, doctor, and the dashboard report the violation
 typed instead of an indefinite "warming". */
 export const CodeIndexConvergenceParkedV1Schema = z.object({
+  blocked_reason: z.union([z.lazy(() => CodeIndexBuildBlockedReasonV1Schema), z.null()]).optional(),
   observed_passes: z.number().int().safe().min(0),
   parked_at_micros: z.number().int().safe(),
   reason: z.string(),

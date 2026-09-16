@@ -15,7 +15,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::super::{
-    CodeIndexCadenceTriggerV1,
+    CodeIndexCadenceTriggerV1, CodeIndexReconcileAdmissionV1,
     reconcile_panic_guard::{
         MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
         ReconcileFaultInjectionV1, ReconcileFaultKindV1,
@@ -159,6 +159,39 @@ impl Fixture {
         pending.micros
     }
 
+    async fn clear_build_progress(&self) {
+        let canonical = self.project.canonicalize().expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        *worktree
+            .build_progress
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
+    }
+
+    async fn plant_terminal_publication_park(&self, reason: &str) {
+        use tracedecay_contracts::code_index_freshness::{
+            CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
+        };
+        let canonical = self.project.canonicalize().expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        *worktree
+            .convergence_park
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(CodeIndexConvergenceParkedV1 {
+                reason: reason.to_owned(),
+                blocked_reason: Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt),
+                remediation:
+                    "retire this project route, replace or rebuild that store, then remount"
+                        .to_owned(),
+                parked_at_micros: 1,
+                observed_passes: 1,
+                retries_on_wake: false,
+            });
+    }
+
     /// Drive `EXTERNAL_WAKE_ROUNDS` spaced wakes over unchanged input.
     async fn drive_external_wakes(&self) {
         for _ in 0..EXTERNAL_WAKE_ROUNDS {
@@ -249,10 +282,13 @@ async fn changed_input_lifts_a_quarantined_reconcile() {
     // A real hook hint advances the control epoch: these are not the bytes
     // that panicked.
     assert!(
-        fixture
-            .registry
-            .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
-            .await,
+        matches!(
+            fixture
+                .registry
+                .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+                .await,
+            CodeIndexReconcileAdmissionV1::Accepted
+        ),
         "the hint must reach the mounted scheduler"
     );
     let after_hint = wait_for_attempts(&fault, quarantined_at + 1).await;
@@ -478,11 +514,140 @@ async fn corrupt_publication_authority_stops_after_one_attempt_and_reports_termi
             .contains("injected corrupt publication authority"),
         "terminal state must retain the exact cause: {parked:?}"
     );
+    assert_eq!(
+        parked.blocked_reason,
+        Some(
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt
+        )
+    );
     assert!(
         !parked.retries_on_wake,
         "an index reset requirement cannot clear on another wake"
     );
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_overflow(&fixture.project)
+                .await,
+            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+        ),
+        "the mounted scheduler must return the terminal state until reset"
+    );
 
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupt_publication_without_build_progress_returns_terminal_admission() {
+    let fixture = Fixture::mount("project.reconcile-cold-publication-corruption").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    // Observational progress can lag or be cleared while the park remains the
+    // sole terminal authority.
+    fixture.clear_build_progress().await;
+
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_overflow(&fixture.project)
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+    ));
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+    ));
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn park_visible_before_progress_reason_returns_terminal_admission() {
+    let fixture = Fixture::mount("project.reconcile-park-before-progress").await;
+    fixture
+        .plant_terminal_publication_park("parked before progress snapshot")
+        .await;
+    fixture.clear_build_progress().await;
+
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_overflow(&fixture.project)
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+    ));
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+    ));
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retire_and_remount_clears_terminal_publication_park_for_new_admission() {
+    let fixture = Fixture::mount("project.reconcile-publication-remount").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_overflow(&fixture.project)
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+    ));
+
+    let mut roots = std::collections::BTreeSet::new();
+    roots.insert(fixture.project.canonicalize().expect("canonical project"));
+    assert!(
+        fixture.registry.retire_project_roots(&roots).await,
+        "retire must drain the terminal owner"
+    );
+    fixture
+        .registry
+        .mount_worktree(
+            tracedecay_domain::ProjectId::new("project.reconcile-publication-remount")
+                .expect("project identity"),
+            &fixture.project,
+            fixture._root.path().join("store"),
+        )
+        .await
+        .expect("remount over a fresh owner without the injected fault");
+
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_overflow(&fixture.project)
+                .await,
+            CodeIndexReconcileAdmissionV1::Accepted
+        ),
+        "retire/remount must admit work again on a repaired mount"
+    );
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+                .await,
+            CodeIndexReconcileAdmissionV1::Accepted
+        ),
+        "exact-path hooks must recover with the remounted owner"
+    );
     fixture.registry.shutdown().await;
 }
 

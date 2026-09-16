@@ -12,6 +12,7 @@ pub(crate) async fn handle_admin_sync(
     reconcile_sink: Option<&crate::mcp::server::CodeIndexReconcileSink>,
 ) -> Result<ToolResult> {
     let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+    let project_root = cg.project_root().to_path_buf();
     let reconcile_sink = reconcile_sink.ok_or_else(|| {
         TraceDecayError::project_route(
             "code_index_scheduler_unavailable",
@@ -21,21 +22,29 @@ pub(crate) async fn handle_admin_sync(
     })?;
     // The operator named this route (`tracedecay init` / `tracedecay sync`):
     // the one demand that may index a route the watcher policy keeps quiet.
-    if hotpath::future!(
+    let admission = hotpath::future!(
         reconcile_sink(
-            cg.project_root().to_path_buf(),
+            project_root.clone(),
             crate::mcp::server::CodeIndexReconcileDemandV1::Explicit,
         ),
         label = "mcp.info.admin_sync.reconcile"
     )
-    .await
-        != crate::mcp::server::CodeIndexAdmission::Accepted
-    {
-        return Err(TraceDecayError::project_route(
-            "code_index_scheduler_unavailable",
-            true,
-            "admin sync was not accepted by the code-index scheduler",
-        ));
+    .await;
+    match admission {
+        crate::mcp::server::CodeIndexAdmission::Accepted => {}
+        crate::mcp::server::CodeIndexAdmission::PublicationAuthorityCorrupt(parked) => {
+            return Err(crate::mcp::server::code_index_publication_corrupt(parked));
+        }
+        crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled => {
+            return Err(crate::mcp::server::code_index_linked_worktree_disabled());
+        }
+        crate::mcp::server::CodeIndexAdmission::Unavailable => {
+            return Err(TraceDecayError::project_route(
+                crate::mcp::server::CODE_INDEX_SCHEDULER_UNAVAILABLE,
+                true,
+                "admin sync was not accepted by the code-index scheduler",
+            ));
+        }
     }
     let output = json!({
         "requested_mode": if force { "force" } else { "refresh" },

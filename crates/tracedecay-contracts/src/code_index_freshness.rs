@@ -121,6 +121,9 @@ pub struct CodeIndexBuildProgressV1 {
 pub struct CodeIndexConvergenceParkedV1 {
     /// Exact typed failure that parked convergence.
     pub reason: String,
+    /// Stable class for callers that must decide whether new work is admissible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
     /// Operator action that clears the violation.
     pub remediation: String,
     /// When the violation was first observed (microseconds since the Unix epoch).
