@@ -25,9 +25,10 @@
  * the payload fields.
  */
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   CodeIndexFreshnessPayloadV1Schema,
+  type CodeIndexConvergenceParkedV1,
   type CodeIndexFreshnessPayloadV1,
   type CodeIndexWorktreeFreshnessV1,
 } from '../../contracts/generated.ts';
@@ -39,17 +40,57 @@ import { elideStart, formatCount, formatMicrosUtc, splitBytes } from '../../ui/f
 
 type CodeIndexBuildProgress = NonNullable<CodeIndexWorktreeFreshnessV1['progress']>;
 
+/** Poll cadence: fast while a build is moving, backing off while it is not.
+ * A build that reports the same progress identity on consecutive reads is
+ * either finishing a long phase or stuck; either way a 1 Hz read learns
+ * nothing, and a stuck scheduler (measured: `source_scan 0/151` for ten
+ * minutes) would otherwise be polled once a second for as long as the page is
+ * open. The count is keyed on the progress identity the daemon already
+ * publishes — `progress_epoch` and `last_progress_micros` — so there is no
+ * second, UI-only notion of "moving" to disagree with the server's. */
 const ACTIVE_POLL_MS = 1_000;
 const IDLE_POLL_MS = 30_000;
 const STALLED_AFTER_SECONDS = 30;
+const MAX_BACKOFF_DOUBLINGS = 5;
+
+function progressSignature(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined): string {
+  if (result?.outcome !== 'envelope') return '';
+  return result.envelope.payload.worktrees
+    .map((worktree) =>
+      worktree.progress == null
+        ? `${worktree.worktree_id}:-`
+        : `${worktree.worktree_id}:${worktree.progress.progress_epoch}:${worktree.progress.last_progress_micros}`,
+    )
+    .join('|');
+}
+
+export function activeBuildPollInterval(unchangedReads: number): number {
+  return Math.min(IDLE_POLL_MS, ACTIVE_POLL_MS * 2 ** Math.min(unchangedReads, MAX_BACKOFF_DOUBLINGS));
+}
 
 export function IndexFreshness() {
   const scope = useScope((s) => s.scope);
+  const cadence = useRef({ signature: '', unchangedReads: 0, dataUpdateCount: -1 });
   const freshness = useQuery({
     queryKey: ['code-index', 'freshness', scopeKey(scope)],
     queryFn: () =>
       fetchEnvelope(scopedUrl(scope, '/api/code-index/freshness'), CodeIndexFreshnessPayloadV1Schema),
-    refetchInterval: (query) => (hasActiveBuild(query.state.data) ? ACTIVE_POLL_MS : IDLE_POLL_MS),
+    refetchInterval: (query) => {
+      if (!hasActiveBuild(query.state.data)) return IDLE_POLL_MS;
+      // The interval is re-evaluated on every query state change, so the
+      // unchanged-read count advances once per delivered response, not per
+      // evaluation.
+      if (query.state.dataUpdateCount !== cadence.current.dataUpdateCount) {
+        const signature = progressSignature(query.state.data);
+        cadence.current = {
+          signature,
+          unchangedReads:
+            signature === cadence.current.signature ? cadence.current.unchangedReads + 1 : 0,
+          dataUpdateCount: query.state.dataUpdateCount,
+        };
+      }
+      return activeBuildPollInterval(cadence.current.unchangedReads);
+    },
   });
 
   return (
@@ -140,6 +181,7 @@ function WorktreeReading({
       {progress ? (
         <BuildProgressReading progress={progress} observedAtMicros={observedAtMicros} />
       ) : null}
+      {worktree.parked ? <ConvergenceParkReading parked={worktree.parked} /> : null}
       <dl className="flex flex-col gap-1 text-3xs leading-snug">
         <Row label="staleness">{worktree.staleness_state ?? 'not reported'}</Row>
         <Row label="coverage">{worktree.coverage}</Row>
@@ -247,20 +289,93 @@ function BuildProgressReading({
         </Row>
       </dl>
       {progress.blocked_reason ? (
-        <p className="text-state-warning">blocked: {blockedReasonLabel(progress.blocked_reason)}</p>
+        <p className="text-state-warning">
+          {`blocked: ${blockedReasonLabel(progress.blocked_reason)}`}
+          {isTerminalBlockedReason(progress.blocked_reason)
+            ? ' · no worker wake clears this; reads hold the idle cadence until it is repaired'
+            : null}
+        </p>
       ) : null}
     </div>
   );
 }
 
-function hasActiveBuild(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined): boolean {
+/**
+ * A parked convergence pass.
+ *
+ * The park is the scheduler's own sentence for why nothing is converging, and
+ * whether its next wake will try again. A park it will not retry is the one
+ * the reader has to act on, so it says so and prints the remediation instead
+ * of leaving a mount that reads as indefinitely warming.
+ */
+function ConvergenceParkReading({ parked }: { parked: CodeIndexConvergenceParkedV1 }) {
   return (
-    result?.outcome === 'envelope' &&
-    (result.envelope.domain_state !== 'ready' ||
-      result.envelope.payload.worktrees.some(
-        (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
-      ))
+    <div
+      className="flex flex-col gap-1 border-b border-edge-subtle pb-1.5 text-3xs leading-snug"
+      data-convergence-park={parked.retries_on_wake ? 'retrying' : 'terminal'}
+    >
+      <p className="text-state-warning">parked: {parked.reason}</p>
+      <dl className="flex flex-col gap-1">
+        <Row label="parked at">{formatMicros(parked.parked_at_micros)}</Row>
+        <Row label="observed passes">{parked.observed_passes.toLocaleString()}</Row>
+        <Row label="retries">
+          {parked.retries_on_wake
+            ? 'on the next worker wake'
+            : 'not until the violation is remediated'}
+        </Row>
+      </dl>
+      <p className="text-text-secondary">{parked.remediation}</p>
+    </div>
   );
+}
+
+/**
+ * Whether any mount on this read is still something the scheduler can move.
+ *
+ * `phase !== 'ready'` alone is not that question: a mount parked on a
+ * violation it will not retry, or blocked on a reason no wake clears, sits at
+ * a non-ready phase forever. Polling those at 1 Hz is load with no reading
+ * behind it, so they count as idle here — the same admission the scheduler
+ * makes when it declines to re-run them.
+ */
+function hasActiveBuild(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined): boolean {
+  if (result?.outcome !== 'envelope') return false;
+  const admissible = result.envelope.payload.worktrees.filter(
+    (worktree) => !isTerminallyIdle(worktree),
+  );
+  if (admissible.length === 0) return false;
+  return (
+    result.envelope.domain_state !== 'ready' ||
+    admissible.some(
+      (worktree) =>
+        worktree.rebuild_in_flight ||
+        (worktree.progress != null && worktree.progress.phase !== 'ready'),
+    )
+  );
+}
+
+/** A park the worker will not retry on its next wake, and a block no wake can
+ * clear, both need an operator before anything moves again. Derived from the
+ * park and block the daemon already reports, so this surface does not carry a
+ * terminal flag of its own. */
+function isTerminallyIdle(worktree: CodeIndexWorktreeFreshnessV1): boolean {
+  if (worktree.parked != null && !worktree.parked.retries_on_wake) return true;
+  const blocked = worktree.progress?.blocked_reason;
+  return blocked != null && isTerminalBlockedReason(blocked);
+}
+
+function isTerminalBlockedReason(
+  reason: NonNullable<CodeIndexBuildProgress['blocked_reason']>,
+): boolean {
+  switch (reason) {
+    case 'publication_authority_corrupt':
+      return true;
+    case 'resident_memory':
+    case 'source_unavailable':
+    case 'artifact_store_unavailable':
+    case 'retry_backoff':
+      return false;
+  }
 }
 
 function useLatestBuildProgress(

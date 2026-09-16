@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { IndexFreshness } from './IndexFreshness.tsx';
+import { activeBuildPollInterval, IndexFreshness } from './IndexFreshness.tsx';
 
 /**
  * `/api/code-index/freshness` distinguishes four kinds of "not fresh" that a
@@ -353,7 +353,7 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it('keeps polling an unchanged active build each second and reports how long it has been quiet', async () => {
+  it('backs off while an active build reports the same progress, and says how long it has been quiet', async () => {
     vi.useFakeTimers();
     // A stuck scheduler: same epoch and last-progress stamp on every read, and
     // the daemon's observation clock ten minutes past the last progress.
@@ -382,26 +382,160 @@ describe('Code index freshness', () => {
     expect(screen.getByText('no progress for')).toBeTruthy();
     expect(screen.getByText('10m')).toBeTruthy();
     expect(fetch).toHaveBeenCalledTimes(1);
+    // First unchanged read arrives after 1 s; the next waits 2 s, then 4 s.
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(2);
     await advanceTimers(1_001);
     await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await advanceTimers(1_000);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await advanceTimers(3_000);
+    await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(3);
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(4);
-    await advanceTimers(1_001);
-    await advanceTimers(0);
-    expect(fetch).toHaveBeenCalledTimes(5);
-    await advanceTimers(1_001);
-    await advanceTimers(0);
-    expect(fetch).toHaveBeenCalledTimes(6);
-    await advanceTimers(1_001);
-    await advanceTimers(0);
-    expect(fetch).toHaveBeenCalledTimes(7);
     expect(screen.getByText('no progress for')).toBeTruthy();
     expect(screen.getByText('10m')).toBeTruthy();
+  });
+
+  it('caps the backoff for a wedged build at the idle cadence', () => {
+    expect(activeBuildPollInterval(0)).toBe(1_000);
+    expect(activeBuildPollInterval(1)).toBe(2_000);
+    expect(activeBuildPollInterval(5)).toBe(30_000);
+    expect(activeBuildPollInterval(50)).toBe(30_000);
+  });
+
+  it('holds the idle cadence for a build blocked on corrupt publication authority', async () => {
+    vi.useFakeTimers();
+    const corrupt = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: {
+            ...progress(),
+            phase: 'source_scan',
+            completed_files: 0,
+            blocked_reason: 'publication_authority_corrupt',
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify(corrupt), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText(/blocked: publication authority corrupt/)).toBeTruthy();
+    expect(screen.getByText(/no worker wake clears this/)).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(29_999);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a park the worker will not retry as idle and prints its remediation', async () => {
+    vi.useFakeTimers();
+    const parked = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: { ...progress(), phase: 'source_scan', completed_files: 0 },
+          parked: {
+            reason: 'publication authority is corrupt',
+            remediation: 'run `tracedecay doctor --repair code-index-publication-authority`',
+            parked_at_micros: NOW_MICROS - 60_000_000,
+            observed_passes: 3,
+            retries_on_wake: false,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify(parked), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('parked: publication authority is corrupt')).toBeTruthy();
+    expect(screen.getByText('not until the violation is remediated')).toBeTruthy();
+    expect(
+      screen.getByText('run `tracedecay doctor --repair code-index-publication-authority`'),
+    ).toBeTruthy();
+    expect(document.querySelector('[data-convergence-park="terminal"]')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(29_999);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a park the worker retries on the active cadence', async () => {
+    vi.useFakeTimers();
+    const parked = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: { ...progress(), phase: 'source_scan', completed_files: 0 },
+          parked: {
+            reason: 'owner-private mode was withdrawn',
+            remediation: 'restore the owner-private production mode',
+            parked_at_micros: NOW_MICROS - 60_000_000,
+            observed_passes: 1,
+            retries_on_wake: true,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify(parked), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('on the next worker wake')).toBeTruthy();
+    expect(document.querySelector('[data-convergence-park="retrying"]')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('holds the idle cadence when no mount is attached at all', async () => {
+    vi.useFakeTimers();
+    const unknown = envelope('unknown', {
+      worktrees: [],
+      note: 'the daemon scheduler registry has no mounted scheduler for this project',
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify(unknown), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(29_999);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('keeps polling ready progress until the freshness envelope is ready', async () => {
