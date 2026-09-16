@@ -479,15 +479,14 @@ impl From<&FeedbackProximityRelationV1> for ProjectDeliveryProximityRelationV1 {
 
 impl ProjectDeliveryProximityRelationV1 {
     /// The Delivery attention source this relation can settle, if any.
-    /// Neighborhood candidates have no Delivery counterpart.
+    /// Neighborhood and shared-code candidates carry clone/neighborhood
+    /// evidence only — they do not prove divergence — so they leave
+    /// `DivergentSharedImplementation` unsettled.
     pub fn attention_source(self) -> Option<ProjectDeliveryAttentionSourceV1> {
         match self {
             Self::OverlappingEdit => Some(ProjectDeliveryAttentionSourceV1::OverlappingEdit),
             Self::ConfirmedConflict => Some(ProjectDeliveryAttentionSourceV1::ConfirmedConflict),
-            Self::SharedCodeCandidate => {
-                Some(ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation)
-            }
-            Self::CodeNeighborhoodCandidate => None,
+            Self::SharedCodeCandidate | Self::CodeNeighborhoodCandidate => None,
         }
     }
 }
@@ -511,11 +510,14 @@ pub struct ProjectDeliveryProximityEncounterV1 {
 /// `Unsupported` is the default when no proximity authority is mounted;
 /// Overlapping edit/Confirmed conflict/Divergent shared implementation stay
 /// explicitly unsupported rather than silently reading as clear.
+/// `Denied` stays distinct from `Unavailable` so clients can tell policy
+/// refusal apart from a transient authority failure.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ProjectDeliveryProximityAttentionSourceV1 {
     #[default]
     Unsupported,
     Unavailable,
+    Denied,
     Ready {
         encounters: Vec<ProjectDeliveryProximityEncounterV1>,
         /// Coverage of the mounted proximity read (`complete` /
@@ -524,15 +526,17 @@ pub enum ProjectDeliveryProximityAttentionSourceV1 {
     },
 }
 
-/// Fold the canonical proximity read into Delivery's join input. Denied and
-/// unavailable reads become `Unavailable`; ready pages keep their typed
-/// coverage so partial/stale never upgrade to complete.
+/// Fold the canonical proximity read into Delivery's join input. Denied
+/// stays `Denied`; unavailable stays `Unavailable`; ready pages keep their
+/// typed coverage so partial/stale never upgrade to complete.
 pub fn project_delivery_proximity_attention_source_from_read_v1(
     result: &FeedbackProximityReadResultV1,
 ) -> ProjectDeliveryProximityAttentionSourceV1 {
     match result {
-        FeedbackProximityReadResultV1::Denied { .. }
-        | FeedbackProximityReadResultV1::Unavailable { .. } => {
+        FeedbackProximityReadResultV1::Denied { .. } => {
+            ProjectDeliveryProximityAttentionSourceV1::Denied
+        }
+        FeedbackProximityReadResultV1::Unavailable { .. } => {
             ProjectDeliveryProximityAttentionSourceV1::Unavailable
         }
         FeedbackProximityReadResultV1::Complete { page }
@@ -1189,10 +1193,11 @@ fn delivery_attention(
 /// Joins one proximity read into the three head-bound Delivery attention
 /// sources it can populate. `Unsupported` leaves those sources at their
 /// default unsupported+unavailable state; `Unavailable` marks them
-/// unavailable without discarding the rest of the attention set; `Ready`
-/// admits only encounters naming the pull request's indexed head as a
-/// participant revision, and clears sources with zero matches instead of
-/// leaving them unsupported (proximity is mounted and measured zero).
+/// unavailable without discarding the rest of the attention set; `Denied`
+/// preserves policy denial distinctly from outage; `Ready` admits only
+/// encounters naming the pull request's indexed head as a participant
+/// revision, and clears sources with zero matches instead of leaving them
+/// unsupported (proximity is mounted and measured zero).
 /// Ready coverage (`complete` / `partial` / `stale`) is preserved on every
 /// settled source so an incomplete proximity read never upgrades to complete.
 fn apply_proximity_attention(
@@ -1212,6 +1217,14 @@ fn apply_proximity_attention(
                 if let Some(item) = items.iter_mut().find(|item| item.source == source) {
                     item.state = ProjectDeliveryAttentionStateV1::Unavailable;
                     item.coverage = ProjectDeliveryInboxCoverageV1::Unavailable;
+                }
+            }
+        }
+        ProjectDeliveryProximityAttentionSourceV1::Denied => {
+            for source in PROXIMITY_SOURCES {
+                if let Some(item) = items.iter_mut().find(|item| item.source == source) {
+                    item.state = ProjectDeliveryAttentionStateV1::Denied;
+                    item.coverage = ProjectDeliveryInboxCoverageV1::Denied;
                 }
             }
         }
@@ -2845,13 +2858,16 @@ mod tests {
             ProjectDeliveryProximityRelationV1::ConfirmedConflict,
             "commit.delivery.proximity",
         );
-        let unrelated = proximity_encounter(
+        // Shared-code candidates name the indexed head but must not promote
+        // to DivergentSharedImplementation — clone evidence alone is not
+        // divergence proof.
+        let shared_candidate = proximity_encounter(
             "c",
             ProjectDeliveryProximityRelationV1::SharedCodeCandidate,
-            "commit.delivery.proximity-unmatched-head",
+            "commit.delivery.proximity",
         );
         source.proximity = ProjectDeliveryProximityAttentionSourceV1::Ready {
-            encounters: vec![overlap.clone(), conflict.clone(), unrelated],
+            encounters: vec![overlap.clone(), conflict.clone(), shared_candidate],
             coverage: ProjectDeliveryInboxCoverageV1::Complete,
         };
 
@@ -2886,18 +2902,77 @@ mod tests {
             }]
         );
 
-        // The one `shared_code_candidate` encounter names a head that is not
-        // this pull request's indexed head, so the source measures zero
-        // findings: Clear, not Unsupported.
         let divergent = attention
             .iter()
             .find(|item| {
                 item.source == ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation
             })
             .unwrap();
-        assert_eq!(divergent.state, ProjectDeliveryAttentionStateV1::Clear);
+        assert_eq!(
+            divergent.state,
+            ProjectDeliveryAttentionStateV1::Clear,
+            "SharedCodeCandidate must not activate DivergentSharedImplementation"
+        );
         assert_eq!(divergent.coverage, ProjectDeliveryInboxCoverageV1::Complete);
         assert!(divergent.evidence.is_empty());
+    }
+
+    #[test]
+    fn inbox_marks_denied_proximity_as_denied_attention() {
+        let timeline = ProjectDeliveryGitHubTimelineV1 {
+            pull_requests: vec![inbox_pull_request(
+                "42",
+                "commit.delivery.proximity-denied",
+                None,
+            )],
+            review_items: Vec::new(),
+            pull_requests_total: 1,
+            review_items_total: 0,
+            pull_requests_truncated: false,
+            review_items_truncated: false,
+        };
+        let mut source = inbox_source(
+            "project.delivery-proximity-denied",
+            "commit.delivery.proximity-denied",
+            ProjectDeliveryGitHubSourceV1::Ready { timeline },
+        );
+        source.proximity = ProjectDeliveryProximityAttentionSourceV1::Denied;
+
+        let inbox = aggregate_project_delivery_inbox_v1(vec![source], 16);
+        let attention = &inbox.pull_requests[0].attention;
+
+        for proximity_source in [
+            ProjectDeliveryAttentionSourceV1::OverlappingEdit,
+            ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
+            ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
+        ] {
+            let item = attention
+                .iter()
+                .find(|item| item.source == proximity_source)
+                .unwrap();
+            assert_eq!(item.state, ProjectDeliveryAttentionStateV1::Denied);
+            assert_eq!(item.coverage, ProjectDeliveryInboxCoverageV1::Denied);
+        }
+    }
+
+    #[test]
+    fn proximity_fold_preserves_denied_distinct_from_unavailable() {
+        assert_eq!(
+            project_delivery_proximity_attention_source_from_read_v1(
+                &FeedbackProximityReadResultV1::Denied {
+                    observed_at: UtcMicros(1),
+                }
+            ),
+            ProjectDeliveryProximityAttentionSourceV1::Denied
+        );
+        assert_eq!(
+            project_delivery_proximity_attention_source_from_read_v1(
+                &FeedbackProximityReadResultV1::Unavailable {
+                    observed_at: UtcMicros(1),
+                }
+            ),
+            ProjectDeliveryProximityAttentionSourceV1::Unavailable
+        );
     }
 
     #[test]
