@@ -1020,11 +1020,16 @@ fn deduped_project_hint_with_id(
 }
 
 fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
-    if let Some(root) = tracedecay_runtime_core::worktree::git_worktree_root(start) {
-        return Some(root);
-    }
     let temp_root =
         tracedecay_runtime_core::path_safety::canonical_root_identity(&std::env::temp_dir());
+    let start_id = tracedecay_runtime_core::path_safety::canonical_root_identity(start);
+    if let Some(root) = tracedecay_runtime_core::worktree::git_worktree_root(start) {
+        let root_id = tracedecay_runtime_core::path_safety::canonical_root_identity(&root);
+        if root_id.starts_with(&temp_root) || start_id.starts_with(&temp_root) {
+            return None;
+        }
+        return Some(root);
+    }
     let mut dir = start.to_path_buf();
     loop {
         if tracedecay_runtime_core::path_safety::canonical_root_identity(&dir) == temp_root {
