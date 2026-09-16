@@ -1,15 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use super::{
-    hook_output_owner_event_id, run_with_test_env_lock, schedule_user_session_review, EnvGuard,
-};
+use super::{hook_output_owner_event_id, run_with_test_env_lock, schedule_user_session_review};
 
 fn canonical(path: &Path) -> PathBuf {
     tracedecay_runtime_core::path_safety::canonical_root_identity(path)
-}
-
-fn system_temp_root() -> PathBuf {
-    canonical(&std::env::temp_dir())
 }
 
 fn init_minimal_git_root(dir: &Path) {
@@ -17,112 +11,108 @@ fn init_minimal_git_root(dir: &Path) {
     gix::init(dir).expect("minimal git root");
 }
 
-fn pin_process_temp(path: &Path) -> (EnvGuard, EnvGuard, EnvGuard) {
-    (
-        EnvGuard::set_path("TMPDIR", path),
-        EnvGuard::set_path("TEMP", path),
-        EnvGuard::set_path("TMP", path),
-    )
+fn project_like_root(start: &Path, temp_root: Option<&Path>) -> Option<PathBuf> {
+    super::nearest_project_like_root_with_temp_root(start, temp_root)
 }
 
-fn assert_is_project_like(start: &Path) {
-    assert!(
-        super::is_project_like_workspace(start),
-        "workspace must stay project-like"
-    );
-    assert!(
-        super::nearest_project_like_root(start).is_some(),
-        "workspace must stay project-like"
-    );
+fn init_nested_git_workspace(root: &Path) -> PathBuf {
+    let repo = root.join("workspace");
+    init_minimal_git_root(&repo);
+    let nested = repo.join("src");
+    std::fs::create_dir(&nested).expect("nested workspace");
+    nested
 }
 
 #[test]
 fn temp_git_root_is_refused_as_project_like() {
-    let _lock = super::lock_test_env();
-    let temp = tempfile::tempdir().expect("temporary root");
-    let repo = temp.path().join("ephemeral-agent");
-    init_minimal_git_root(&repo);
-    let nested = repo.join("src");
-    std::fs::create_dir(&nested).expect("nested workspace");
+    let configured_temp = tempfile::tempdir().expect("configured temp root");
+    let nested = init_nested_git_workspace(configured_temp.path());
+    let repo = nested.parent().expect("repo");
 
-    let repo_id = canonical(&repo);
     assert!(
-        repo_id.starts_with(system_temp_root()),
-        "fixture git root must be a descendant of the system temp root"
+        canonical(repo).starts_with(canonical(configured_temp.path())),
+        "fixture git root must be a descendant of the injected temp root"
     );
     assert!(
         tracedecay_runtime_core::worktree::git_worktree_root(&nested).is_some(),
         "fixture must be a real git worktree root"
     );
-    assert_eq!(super::nearest_project_like_root(&nested), None);
-    assert!(!super::is_project_like_workspace(&nested));
+    assert_eq!(
+        project_like_root(&nested, Some(configured_temp.path())),
+        None
+    );
 }
 
 #[test]
 fn git_root_outside_configured_temp_is_project_like() {
-    let _lock = super::lock_test_env();
     let configured_temp = tempfile::tempdir().expect("configured temp root");
     let sibling = tempfile::tempdir().expect("sibling root");
-    let _pinned = pin_process_temp(configured_temp.path());
+    let nested = init_nested_git_workspace(sibling.path());
+    let repo = nested.parent().expect("repo");
 
-    let repo = sibling.path().join("workspace");
-    init_minimal_git_root(&repo);
-    let nested = repo.join("src");
-    std::fs::create_dir(&nested).expect("nested workspace");
-
-    let temp_root = system_temp_root();
-    let repo_id = canonical(&repo);
+    let temp_root = canonical(configured_temp.path());
     assert!(
-        temp_root.is_absolute() && !temp_root.as_os_str().is_empty(),
-        "configured temp root must be a usable absolute bound"
-    );
-    assert!(
-        !repo_id.starts_with(&temp_root),
-        "sibling git root must sit outside the configured temp root"
+        !canonical(repo).starts_with(&temp_root),
+        "sibling git root must sit outside the injected temp root"
     );
     let discovered = tracedecay_runtime_core::worktree::git_worktree_root(&nested)
         .expect("fixture must be a real git worktree root");
     assert_eq!(
-        super::nearest_project_like_root(&nested),
+        project_like_root(&nested, Some(configured_temp.path())),
         Some(discovered)
     );
-    assert!(super::is_project_like_workspace(&nested));
 }
 
 #[test]
-fn empty_temp_dir_does_not_reject_a_git_repo() {
-    let _lock = super::lock_test_env();
-    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let _pinned = pin_process_temp(Path::new(""));
-    assert_is_project_like(&start);
+fn empty_temp_root_does_not_reject_a_git_repo() {
+    let home = tempfile::tempdir().expect("workspace root");
+    let nested = init_nested_git_workspace(home.path());
+    let discovered = tracedecay_runtime_core::worktree::git_worktree_root(&nested)
+        .expect("fixture must be a real git worktree root");
+    assert_eq!(super::usable_absolute_temp_root_from(Path::new("")), None);
+    assert_eq!(
+        project_like_root(&nested, Some(Path::new(""))),
+        Some(discovered)
+    );
 }
 
 #[test]
-fn relative_temp_dir_does_not_reject_a_git_repo() {
-    let _lock = super::lock_test_env();
-    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let _pinned = pin_process_temp(Path::new("."));
-    assert_is_project_like(&start);
+fn relative_temp_root_does_not_reject_a_git_repo() {
+    let home = tempfile::tempdir().expect("workspace root");
+    let nested = init_nested_git_workspace(home.path());
+    let discovered = tracedecay_runtime_core::worktree::git_worktree_root(&nested)
+        .expect("fixture must be a real git worktree root");
+    assert_eq!(super::usable_absolute_temp_root_from(Path::new(".")), None);
+    assert_eq!(
+        project_like_root(&nested, Some(Path::new("."))),
+        Some(discovered)
+    );
+}
+
+#[test]
+fn absent_temp_root_does_not_reject_a_git_repo() {
+    let home = tempfile::tempdir().expect("workspace root");
+    let nested = init_nested_git_workspace(home.path());
+    let discovered = tracedecay_runtime_core::worktree::git_worktree_root(&nested)
+        .expect("fixture must be a real git worktree root");
+    assert_eq!(project_like_root(&nested, None), Some(discovered));
 }
 
 #[test]
 fn marker_at_temp_root_does_not_make_descendant_project_like() {
-    let _lock = super::lock_test_env();
     let temp = tempfile::tempdir().expect("temporary root");
-    let _pinned = pin_process_temp(temp.path());
     std::fs::write(temp.path().join("package.json"), "{}").expect("temp-root marker");
 
     let generic = temp.path().join("generic");
     std::fs::create_dir(&generic).expect("generic directory");
-    assert_eq!(super::nearest_project_like_root(&generic), None);
-    assert!(!super::is_project_like_workspace(&generic));
+    assert_eq!(project_like_root(&generic, Some(temp.path())), None);
 
     let project = temp.path().join("project");
     let nested = project.join("src");
     std::fs::create_dir_all(&nested).expect("nested project directory");
     std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"x\"\n")
         .expect("project marker");
-    assert_eq!(super::nearest_project_like_root(&nested), Some(project));
+    assert_eq!(project_like_root(&nested, Some(temp.path())), Some(project));
 }
 
 #[test]

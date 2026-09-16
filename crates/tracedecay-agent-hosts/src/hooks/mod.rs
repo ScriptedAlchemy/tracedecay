@@ -1019,17 +1019,27 @@ fn deduped_project_hint_with_id(
     .then_some(reported)
 }
 
-fn usable_absolute_temp_root() -> Option<PathBuf> {
-    let raw = std::env::temp_dir();
+fn usable_absolute_temp_root_from(raw: &Path) -> Option<PathBuf> {
     if raw.as_os_str().is_empty() || !raw.is_absolute() {
         return None;
     }
-    let temp_root = tracedecay_runtime_core::path_safety::canonical_root_identity(&raw);
+    let temp_root = tracedecay_runtime_core::path_safety::canonical_root_identity(raw);
     (temp_root.is_absolute() && !temp_root.as_os_str().is_empty()).then_some(temp_root)
 }
 
+fn usable_absolute_temp_root() -> Option<PathBuf> {
+    usable_absolute_temp_root_from(&std::env::temp_dir())
+}
+
 fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
-    let temp_root = usable_absolute_temp_root();
+    nearest_project_like_root_with_temp_root(start, usable_absolute_temp_root().as_deref())
+}
+
+fn nearest_project_like_root_with_temp_root(
+    start: &Path,
+    temp_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let temp_root = temp_root.and_then(usable_absolute_temp_root_from);
     let start_id = tracedecay_runtime_core::path_safety::canonical_root_identity(start);
     if let Some(root) = tracedecay_runtime_core::worktree::git_worktree_root(start) {
         let root_id = tracedecay_runtime_core::path_safety::canonical_root_identity(&root);
