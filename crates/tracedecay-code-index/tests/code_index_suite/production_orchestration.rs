@@ -12,6 +12,7 @@ use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
     capabilities::expected_seal_digest,
     chunks::{CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1, content_digest},
+    clones::{CloneBodyEligibilityV1, CloneBodyOccurrenceV1},
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError,
         build_published_code_graph_manifest_checked, code_graph_projection_identity,
@@ -3087,33 +3088,19 @@ fn cross_file_resolution_is_width_invariant() {
     parallel_equivalence::assert_cross_file_resolution_is_width_invariant();
 }
 
-fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
-    let sources = [
-        (
-            "file.partitioned.alpha",
-            "src/alpha.rs",
-            "pub struct Alpha;\nimpl Alpha { pub fn call(&self) -> u64 { crate::beta::beta() } }\n",
-        ),
-        (
-            "file.partitioned.beta",
-            "src/beta.rs",
-            if beta_value == 1 {
-                "pub fn beta() -> u64 { 1 }\n"
-            } else {
-                "pub fn beta() -> u64 { 2 }\n"
-            },
-        ),
-        (
-            "file.partitioned.unresolved",
-            "src/unresolved.rs",
-            "pub fn unresolved() { missing_external(); }\n",
-        ),
-    ];
+/// A build request over `(file_occurrence, logical_path, source)` Rust files
+/// for the partitioned-codec fixtures; `changed_files` names the paths the
+/// increment re-extracts.
+fn partitioned_request(
+    sources: &[(&str, &str, &str)],
+    changed_files: BTreeSet<String>,
+    sealed_at: i64,
+) -> CodeIndexBuildRequestV1 {
     let mut identity = Sha256::new();
     let mut files = Vec::new();
     let mut captured_files = Vec::new();
     let mut receipts = Vec::new();
-    for (index, (occurrence, logical_path, source)) in sources.into_iter().enumerate() {
+    for (index, &(occurrence, logical_path, source)) in sources.iter().enumerate() {
         identity.update(logical_path.as_bytes());
         identity.update([0]);
         identity.update(source.as_bytes());
@@ -3147,11 +3134,7 @@ fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildR
             files,
         },
         captured_files,
-        changed_files: if beta_value == 1 {
-            BTreeSet::new()
-        } else {
-            BTreeSet::from(["src/beta.rs".to_owned()])
-        },
+        changed_files,
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
@@ -3160,6 +3143,68 @@ fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildR
         },
         sealed_at: UtcMicros(sealed_at),
         target_projection_key: projection_key(),
+    }
+}
+
+fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
+    let sources = [
+        (
+            "file.partitioned.alpha",
+            "src/alpha.rs",
+            "pub struct Alpha;\nimpl Alpha { pub fn call(&self) -> u64 { crate::beta::beta() } }\n",
+        ),
+        (
+            "file.partitioned.beta",
+            "src/beta.rs",
+            if beta_value == 1 {
+                "pub fn beta() -> u64 { 1 }\n"
+            } else {
+                "pub fn beta() -> u64 { 2 }\n"
+            },
+        ),
+        (
+            "file.partitioned.unresolved",
+            "src/unresolved.rs",
+            "pub fn unresolved() { missing_external(); }\n",
+        ),
+    ];
+    let changed_files = if beta_value == 1 {
+        BTreeSet::new()
+    } else {
+        BTreeSet::from(["src/beta.rs".to_owned()])
+    };
+    partitioned_request(&sources, changed_files, sealed_at)
+}
+
+/// A segment publisher that stores every published segment under its digest
+/// (evidence pages assembled into one pack under the commit digest) and counts
+/// the file segments the encoder actually published, as opposed to reused.
+fn collect_published_segments<'a>(
+    segments: &'a mut BTreeMap<String, Vec<u8>>,
+    published_files: &'a mut usize,
+) -> impl FnMut(SealedGenerationSegmentPublicationV1<'_>) -> Result<(), CodeIndexProductionErrorV1> + 'a
+{
+    let mut evidence_pack = Vec::new();
+    move |publication| {
+        match publication {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                *published_files += 1;
+                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                evidence_pack.extend_from_slice(bytes);
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                segment_digest,
+                ..
+            } => {
+                segments.insert(
+                    segment_digest.as_str().to_owned(),
+                    std::mem::take(&mut evidence_pack),
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3175,56 +3220,22 @@ fn partitioned_codec_fixture() -> (
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("partitioned parent generation");
     let mut segments = BTreeMap::new();
-    let mut parent_evidence_pack = Vec::new();
+    let mut parent_file_segments = 0;
     let parent_manifest = first
-        .encode_partitioned_sealed(|publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    parent_evidence_pack.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut parent_evidence_pack),
-                    );
-                }
-            }
-            Ok(())
-        })
+        .encode_partitioned_sealed(collect_published_segments(
+            &mut segments,
+            &mut parent_file_segments,
+        ))
         .expect("partitioned parent encoding");
     let second = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("partitioned child generation");
     let mut child_file_segments = 0;
-    let mut child_evidence_pack = Vec::new();
     let manifest = second
-        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), |publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                    child_file_segments += 1;
-                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    child_evidence_pack.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut child_evidence_pack),
-                    );
-                }
-            }
-            Ok(())
-        })
+        .encode_partitioned_sealed_with_parent(
+            Some(&parent_manifest),
+            collect_published_segments(&mut segments, &mut child_file_segments),
+        )
         .expect("partitioned child encoding");
     assert!(
         child_file_segments < second.snapshot().files.len(),
@@ -4230,84 +4241,53 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
     assert_reused_segment_descriptors_stable(&parent_manifest, &child_manifest);
 }
 
+/// The carried-forward file of the increment wedge: several clone bodies whose
+/// sorted-by-id order differs from source order, with `walk_one` above
+/// `MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1` (eligible) and the rest below it
+/// (excluded as too small), so both eligibility classes ride the reused segment.
+const INCREMENT_WEDGE_CARRIED_SOURCE: &str = concat!(
+    "pub fn walk_one(items: &[u32]) -> u32 {\n",
+    "    let mut total = 0;\n",
+    "    for item in items.iter().copied() {\n",
+    "        if item % 2 == 0 { total += item; } else { total += item * 3 + 1; }\n",
+    "    }\n",
+    "    total.wrapping_mul(7).wrapping_add(11)\n",
+    "}\n",
+    "pub fn walk_two(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 3 == 0).sum() }\n",
+    "pub fn walk_three(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 5 == 0).sum() }\n",
+    "pub fn walk_four(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 7 == 0).sum() }\n",
+    "pub fn walk_five(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 11 == 0).sum() }\n",
+);
+
 /// The one-edit increment the daemon publishes: one re-extracted file beside
-/// carried-forward files whose segments the child reuses from the parent.
+/// a carried-forward file whose segment the child reuses from the parent.
 fn increment_wedge_request(edited_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
-    let carried = concat!(
-        "pub fn walk_one(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 2 == 0).sum() }\n",
-        "pub fn walk_two(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 3 == 0).sum() }\n",
-        "pub fn walk_three(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 5 == 0).sum() }\n",
-        "pub fn walk_four(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 7 == 0).sum() }\n",
-        "pub fn walk_five(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 11 == 0).sum() }\n",
-    );
     let edited = if edited_value == 1 {
         "pub fn edited() -> u64 { 1 }\n"
     } else {
         "pub fn edited() -> u64 { 2 }\npub fn appended_marker() -> u64 { 1103 }\n"
     };
     let sources = [
-        ("file.wedge.carried", "src/carried.rs", carried),
+        (
+            "file.wedge.carried",
+            "src/carried.rs",
+            INCREMENT_WEDGE_CARRIED_SOURCE,
+        ),
         ("file.wedge.edited", "src/edited.rs", edited),
     ];
-    let mut identity = Sha256::new();
-    let mut files = Vec::new();
-    let mut captured_files = Vec::new();
-    let mut receipts = Vec::new();
-    for (index, (occurrence, logical_path, source)) in sources.into_iter().enumerate() {
-        identity.update(logical_path.as_bytes());
-        identity.update([0]);
-        identity.update(source.as_bytes());
-        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
-        files.push(SanitizedCodeFileV1 {
-            file_occurrence_id: file_occurrence_id.clone(),
-            logical_path: logical_path.to_owned(),
-            language: Some(id::<LanguageId>("rust")),
-            content_digest: content_digest(source.as_bytes()),
-            disposition: SnapshotFileDispositionV1::Present,
-        });
-        captured_files.push(CodeIndexCapturedFileV1 {
-            file_occurrence_id,
-            sanitized_bytes: Arc::from(source.as_bytes()),
-            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
-        });
-        receipts.push(id::<SanitizationReceiptId>(&format!(
-            "receipt.wedge.{index}"
-        )));
-    }
-    CodeIndexBuildRequestV1 {
-        snapshot: SanitizedCodeSnapshotV1 {
-            repository: id::<RepositoryId>("repository.production"),
-            worktree: None,
-            reference: None,
-            source_revision: None,
-            sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
-            sanitization_receipts: receipts,
-            content_identity: content_digest(&identity.finalize()),
-            captured_at: UtcMicros(1_000_000),
-            files,
-        },
-        captured_files,
-        changed_files: if edited_value == 1 {
-            BTreeSet::new()
-        } else {
-            BTreeSet::from(["src/edited.rs".to_owned()])
-        },
-        invalidations: BTreeSet::new(),
-        ignored_source_admissions: Vec::new(),
-        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
-            tree: None,
-            dirty: RepositoryDirtyStateV1::Dirty,
-        },
-        sealed_at: UtcMicros(sealed_at),
-        target_projection_key: projection_key(),
-    }
+    let changed_files = if edited_value == 1 {
+        BTreeSet::new()
+    } else {
+        BTreeSet::from(["src/edited.rs".to_owned()])
+    };
+    partitioned_request(&sources, changed_files, sealed_at)
 }
 
-/// `(path, symbol_occurrence_id, payload_digest)` per clone body, in the
-/// order the file carries them, read from the generation's sealed JSON.
+/// Every clone body occurrence per file path, in the order the file carries
+/// them, read from the generation's sealed JSON.
 fn sealed_clone_bindings(
     generation: &CodeIndexPublishedGenerationV1,
-) -> BTreeMap<String, Vec<(String, String)>> {
+) -> BTreeMap<String, Vec<CloneBodyOccurrenceV1>> {
     let sealed = generation.encode_sealed().expect("generation seals");
     let envelope: serde_json::Value = serde_json::from_slice(&sealed).expect("sealed JSON");
     envelope["generation"]["files"]
@@ -4320,16 +4300,8 @@ fn sealed_clone_bindings(
                 .expect("clone bodies")
                 .iter()
                 .map(|body| {
-                    (
-                        body["occurrence"]["symbol_occurrence_id"]
-                            .as_str()
-                            .expect("clone symbol occurrence")
-                            .to_owned(),
-                        body["occurrence"]["payload_digest"]
-                            .as_str()
-                            .expect("clone payload digest")
-                            .to_owned(),
-                    )
+                    serde_json::from_value(body["occurrence"].clone())
+                        .expect("sealed clone body occurrence")
                 })
                 .collect();
             (
@@ -4358,46 +4330,56 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let parent = owner
         .build_and_publish(increment_wedge_request(1, 1_100_000), &ActiveControl)
         .expect("parent generation");
-    let segments = Arc::new(Mutex::new(BTreeMap::<String, Vec<u8>>::new()));
-    let mut evidence_pack = Vec::new();
-    let mut collect = |publication: SealedGenerationSegmentPublicationV1<'_>| {
-        match publication {
-            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                segments
-                    .lock()
-                    .expect("segments lock")
-                    .insert(digest.as_str().to_owned(), bytes.to_vec());
-            }
-            SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                evidence_pack.extend_from_slice(bytes);
-            }
-            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                segment_digest,
-                ..
-            } => {
-                segments.lock().expect("segments lock").insert(
-                    segment_digest.as_str().to_owned(),
-                    std::mem::take(&mut evidence_pack),
-                );
-            }
-        }
-        Ok(())
-    };
+    let mut segments = BTreeMap::new();
+    let mut parent_file_segments = 0;
     let parent_manifest = parent
-        .encode_partitioned_sealed(&mut collect)
+        .encode_partitioned_sealed(collect_published_segments(
+            &mut segments,
+            &mut parent_file_segments,
+        ))
         .expect("parent encoding");
+    assert_eq!(
+        parent_file_segments,
+        parent.snapshot().files.len(),
+        "a parentless encoding publishes every file segment"
+    );
     let child = owner
         .build_and_publish(increment_wedge_request(2, 1_200_000), &ActiveControl)
         .expect("child generation");
-    let parent_segment_count = segments.lock().expect("segments lock").len();
+    let mut child_file_segments = 0;
     let child_manifest = child
-        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), &mut collect)
+        .encode_partitioned_sealed_with_parent(
+            Some(&parent_manifest),
+            collect_published_segments(&mut segments, &mut child_file_segments),
+        )
         .expect("child encoding");
-    let child_published_file_segments =
-        segments.lock().expect("segments lock").len() - parent_segment_count - 1;
+    // Counted at the publisher, not inferred from store growth: a re-encoded
+    // carried file hashes to its parent's digest (the encoder writes the
+    // generation as a marker), so only the publication itself proves the
+    // carried file took the `Reused(descriptor)` path this test exercises.
     assert_eq!(
-        child_published_file_segments, 1,
+        child_file_segments, 1,
         "only the edited file is re-encoded; the carried file reuses its parent segment"
+    );
+    let parent_identities =
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&parent_manifest)
+            .expect("parent identities parse")
+            .expect("current partitioned manifest");
+    let child_identities =
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&child_manifest)
+            .expect("child identities parse")
+            .expect("current partitioned manifest");
+    let carried_from_parent = child_identities
+        .iter()
+        .filter(|identity| {
+            parent_identities
+                .iter()
+                .any(|parent| parent.digest == identity.digest)
+        })
+        .count();
+    assert_eq!(
+        carried_from_parent, 1,
+        "the carried file's segment is the parent's content address"
     );
 
     let expected = sealed_clone_bindings(&child);
@@ -4406,7 +4388,20 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
         .expect("carried file is in the child generation");
     assert!(
         carried.len() >= 2,
-        "the carried file needs several clone bodies to pin their order: {carried:?}"
+        "the carried file needs several clone bodies to pin their order: {carried:#?}"
+    );
+    assert!(
+        carried
+            .iter()
+            .any(|body| body.eligibility == CloneBodyEligibilityV1::Eligible),
+        "the carried file needs an eligible clone body: {carried:#?}"
+    );
+    assert!(
+        carried.iter().any(|body| matches!(
+            body.eligibility,
+            CloneBodyEligibilityV1::ExcludedTooSmall { .. }
+        )),
+        "the carried file needs a too-small clone body: {carried:#?}"
     );
 
     let envelope: serde_json::Value =
@@ -4416,13 +4411,12 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
             .as_str()
             .expect("child state digest"),
     );
-    let read_segments = Arc::clone(&segments);
+    let segments = Arc::new(segments);
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         Cursor::new(Vec::<u8>::new()),
         &child_manifest,
         state_digest,
         move |digest, _, buffer| {
-            let segments = read_segments.lock().expect("segments lock");
             let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("published segment is missing".to_owned())
             })?;
@@ -4436,7 +4430,7 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     .expect("child manifest opens through the daemon's text projection path")
     .expect("current partitioned manifest");
 
-    let mut restored: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut restored: BTreeMap<String, Vec<CloneBodyOccurrenceV1>> = BTreeMap::new();
     let receipt = loop {
         match source
             .next_page(&ActiveControl)
@@ -4447,10 +4441,7 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
                     restored
                         .entry(body.occurrence.path.clone())
                         .or_default()
-                        .push((
-                            body.occurrence.symbol_occurrence_id.as_str().to_owned(),
-                            body.occurrence.payload_digest.as_str().to_owned(),
-                        ));
+                        .push(body.occurrence.clone());
                 }
             }
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
@@ -4464,10 +4455,20 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     );
     // Segment reuse is sound only because a carried-forward file's clone
     // binding is generation-independent: the parent's segment bytes restore
-    // under the child's manifest to exactly the child's in-memory binding.
+    // under the child's manifest to exactly the child's in-memory binding,
+    // which differs from the parent's only in the generation it now serves.
+    let rebound_from_parent = sealed_clone_bindings(&parent)
+        .remove("src/carried.rs")
+        .expect("carried file is in the parent generation")
+        .into_iter()
+        .map(|mut occurrence| {
+            occurrence.source_generation = child.manifest().generation_id.clone();
+            occurrence.snapshot_digest = child.manifest().snapshot_digest.clone();
+            occurrence
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        sealed_clone_bindings(&parent).get("src/carried.rs"),
-        Some(carried),
+        &rebound_from_parent, carried,
         "a carried-forward file keeps its parent clone binding across generations"
     );
 }
