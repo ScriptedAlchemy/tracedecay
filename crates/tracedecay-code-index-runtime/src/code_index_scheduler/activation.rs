@@ -17,6 +17,7 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::identity::IndexingIdentityV1;
+use super::registry::CodeIndexReconcileAdmissionV1;
 
 const ACTIVATION_IDLE: u8 = 0;
 const ACTIVATION_MOUNTING: u8 = 1;
@@ -27,7 +28,8 @@ pub type CodeIndexActivationMountFutureV1 =
     Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>;
 pub type CodeIndexActivationMountV1 =
     Arc<dyn Fn() -> CodeIndexActivationMountFutureV1 + Send + Sync + 'static>;
-pub type CodeIndexActivationHintFutureV1 = Pin<Box<dyn Future<Output = bool> + Send + 'static>>;
+pub type CodeIndexActivationHintFutureV1 =
+    Pin<Box<dyn Future<Output = CodeIndexReconcileAdmissionV1> + Send + 'static>>;
 pub type CodeIndexActivationHintSinkV1 =
     Arc<dyn Fn(CodeIndexActivationHookBatchV1) -> CodeIndexActivationHintFutureV1 + Send + Sync>;
 
@@ -340,15 +342,20 @@ impl CodeIndexActivationV1 {
     }
 
     /// Accept exact after-edit hints immediately, even while the background
-    /// mount is still opening. Returns `true` only when this exact live route
-    /// accepted the paths for queued or direct delivery.
+    /// mount is still opening. Returns typed admission for this exact live
+    /// route (Accepted when queued or delivered; Corrupt / Unavailable when
+    /// refused).
     #[hotpath::measure(
         label = "daemon.code_index.activation.notify_hook_paths",
         future = true
     )]
-    pub async fn notify_hook_paths(&self, project_root: &Path, rel_paths: Vec<String>) -> bool {
+    pub async fn notify_hook_paths(
+        &self,
+        project_root: &Path,
+        rel_paths: Vec<String>,
+    ) -> CodeIndexReconcileAdmissionV1 {
         if rel_paths.is_empty() || !self.route_is_live() || !self.accepts_root(project_root) {
-            return false;
+            return CodeIndexReconcileAdmissionV1::Unavailable;
         }
         let direct = {
             let mut pending = self
@@ -367,8 +374,14 @@ impl CodeIndexActivationV1 {
         };
         match direct {
             Some(batch) if self.route_is_live() => (self.hint_sink)(batch).await,
-            Some(_) => false,
-            None => self.activate(),
+            Some(_) => CodeIndexReconcileAdmissionV1::Unavailable,
+            None => {
+                if self.activate() {
+                    CodeIndexReconcileAdmissionV1::Accepted
+                } else {
+                    CodeIndexReconcileAdmissionV1::Unavailable
+                }
+            }
         }
     }
 
@@ -380,7 +393,10 @@ impl CodeIndexActivationV1 {
         label = "daemon.code_index.activation.notify_hook_overflow",
         future = true
     )]
-    pub async fn notify_hook_overflow(&self, project_root: &Path) -> bool {
+    pub async fn notify_hook_overflow(
+        &self,
+        project_root: &Path,
+    ) -> CodeIndexReconcileAdmissionV1 {
         self.request_reconciliation(project_root, ActivationDemandV1::Automatic)
             .await
     }
@@ -396,7 +412,10 @@ impl CodeIndexActivationV1 {
         label = "daemon.code_index.activation.notify_explicit_reconciliation",
         future = true
     )]
-    pub async fn notify_explicit_reconciliation(&self, project_root: &Path) -> bool {
+    pub async fn notify_explicit_reconciliation(
+        &self,
+        project_root: &Path,
+    ) -> CodeIndexReconcileAdmissionV1 {
         self.request_reconciliation(project_root, ActivationDemandV1::Explicit)
             .await
     }
@@ -405,9 +424,9 @@ impl CodeIndexActivationV1 {
         &self,
         project_root: &Path,
         demand: ActivationDemandV1,
-    ) -> bool {
+    ) -> CodeIndexReconcileAdmissionV1 {
         if !self.route_is_live() || !self.accepts_root(project_root) {
-            return false;
+            return CodeIndexReconcileAdmissionV1::Unavailable;
         }
         let direct = {
             let mut pending = self
@@ -426,8 +445,14 @@ impl CodeIndexActivationV1 {
         };
         match direct {
             Some(batch) if self.route_is_live() => (self.hint_sink)(batch).await,
-            Some(_) => false,
-            None => self.activate_with_demand(demand),
+            Some(_) => CodeIndexReconcileAdmissionV1::Unavailable,
+            None => {
+                if self.activate_with_demand(demand) {
+                    CodeIndexReconcileAdmissionV1::Accepted
+                } else {
+                    CodeIndexReconcileAdmissionV1::Unavailable
+                }
+            }
         }
     }
 
@@ -514,7 +539,7 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(batch);
-                true
+                CodeIndexReconcileAdmissionV1::Accepted
             })
         });
         CodeIndexActivationV1::new(
@@ -581,7 +606,10 @@ mod tests {
         let mut paths = vec!["src/lib.rs".to_owned(), "src/lib.rs".to_owned()];
         paths.extend((0..=MAX_PENDING_HOOK_PATHS).map(|index| format!("src/{index}.rs")));
 
-        assert!(activation.notify_hook_paths(repository.path(), paths).await);
+        assert!(matches!(
+            activation.notify_hook_paths(repository.path(), paths).await,
+            CodeIndexReconcileAdmissionV1::Accepted
+        ));
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         gate.notify_waiters();
         wait_until(|| !batches.lock().expect("batches").is_empty()).await;
@@ -658,7 +686,7 @@ mod tests {
                     Ok(())
                 })
             }),
-            Arc::new(|_| Box::pin(async { true })),
+            Arc::new(|_| Box::pin(async { CodeIndexReconcileAdmissionV1::Accepted })),
         );
 
         assert_eq!(
@@ -698,7 +726,7 @@ mod tests {
             CancellationToken::new(),
             CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
             Arc::new(|| Box::pin(async { Ok(()) })),
-            Arc::new(|_| Box::pin(async { true })),
+            Arc::new(|_| Box::pin(async { CodeIndexReconcileAdmissionV1::Accepted })),
         ));
         assert!(registry.register_activation(&scope, &disabled));
         assert_eq!(
@@ -730,7 +758,7 @@ mod tests {
             CancellationToken::new(),
             CodeIndexAutomaticAdmissionV1::Admitted,
             Arc::new(|| Box::pin(async { Ok(()) })),
-            Arc::new(|_| Box::pin(async { true })),
+            Arc::new(|_| Box::pin(async { CodeIndexReconcileAdmissionV1::Accepted })),
         ));
         assert!(registry.register_activation(&scope, &enabled));
         assert_eq!(
@@ -811,7 +839,7 @@ mod tests {
             Arc::clone(&route_registered),
             CancellationToken::new(),
             mount,
-            Arc::new(|_| Box::pin(async { true })),
+            Arc::new(|_| Box::pin(async { CodeIndexReconcileAdmissionV1::Accepted })),
         );
 
         assert!(activation.activate());

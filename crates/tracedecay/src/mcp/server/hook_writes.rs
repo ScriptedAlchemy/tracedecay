@@ -97,6 +97,9 @@ pub(crate) async fn execute_background_refresh_direct(
         super::CodeIndexAdmission::LinkedWorktreeDisabled => {
             Ok(BackgroundRefreshOutcome::LinkedWorktreeDisabled)
         }
+        super::CodeIndexAdmission::PublicationAuthorityCorrupt(parked) => {
+            Err(super::code_index_publication_corrupt(parked))
+        }
         super::CodeIndexAdmission::Unavailable => Err(TraceDecayError::project_route(
             "code_index_scheduler_unavailable",
             true,

@@ -13,6 +13,7 @@ use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
 use crate::project::TraceDecay;
+use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -118,33 +119,83 @@ impl ServerStats {
 }
 
 /// Admission preserves policy refusal separately from scheduler availability.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CodeIndexAdmission {
     Accepted,
     LinkedWorktreeDisabled,
+    PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
     Unavailable,
 }
 
+pub(crate) const CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT: &str =
+    "code_index_publication_authority_corrupt";
+
+pub(crate) const CODE_INDEX_LINKED_WORKTREE_DISABLED: &str = "linked_worktree_disabled";
+
+pub(crate) const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
+
+pub(crate) fn code_index_publication_corrupt(
+    parked: CodeIndexConvergenceParkedV1,
+) -> TraceDecayError {
+    TraceDecayError::project_route(
+        CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
+        false,
+        format!("{}; {}", parked.reason, parked.remediation),
+    )
+}
+
+pub(crate) fn code_index_linked_worktree_disabled() -> TraceDecayError {
+    TraceDecayError::project_route(
+        CODE_INDEX_LINKED_WORKTREE_DISABLED,
+        false,
+        "linked worktree indexing is disabled by sync.watch_linked_worktrees",
+    )
+}
+
 impl CodeIndexAdmission {
+    /// Map one scheduler reconcile admission into the MCP/host admission enum.
+    pub(crate) fn from_reconcile(
+        admission: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1,
+    ) -> Self {
+        use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1 as R;
+        match admission {
+            R::Accepted => Self::Accepted,
+            R::PublicationAuthorityCorrupt(parked) => Self::PublicationAuthorityCorrupt(parked),
+            R::Unavailable => Self::Unavailable,
+        }
+    }
+
+    /// Exhaustive precedence when combining path and overflow (or host) admissions.
+    ///
+    /// Terminal corruption wins, then linked-worktree policy refusal, then
+    /// transient unavailability, then acceptance. Never collapses a typed
+    /// refusal through a bool AND.
+    pub(crate) fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::PublicationAuthorityCorrupt(parked), _)
+            | (_, Self::PublicationAuthorityCorrupt(parked)) => {
+                Self::PublicationAuthorityCorrupt(parked)
+            }
+            (Self::LinkedWorktreeDisabled, _) | (_, Self::LinkedWorktreeDisabled) => {
+                Self::LinkedWorktreeDisabled
+            }
+            (Self::Unavailable, _) | (_, Self::Unavailable) => Self::Unavailable,
+            (Self::Accepted, Self::Accepted) => Self::Accepted,
+        }
+    }
+
     pub(crate) fn host_outcome(self) -> HostAdmissionOutcome {
         match self {
             Self::Accepted => HostAdmissionOutcome::replay_completed(true, false),
             Self::LinkedWorktreeDisabled => {
-                HostAdmissionOutcome::degraded("linked_worktree_disabled")
+                HostAdmissionOutcome::degraded(CODE_INDEX_LINKED_WORKTREE_DISABLED)
+            }
+            Self::PublicationAuthorityCorrupt(_) => {
+                HostAdmissionOutcome::terminal_unavailable(CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT)
             }
             Self::Unavailable => {
-                HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable")
+                HostAdmissionOutcome::retained_unavailable(CODE_INDEX_SCHEDULER_UNAVAILABLE)
             }
-        }
-    }
-}
-
-impl From<bool> for CodeIndexAdmission {
-    fn from(accepted: bool) -> Self {
-        if accepted {
-            Self::Accepted
-        } else {
-            Self::Unavailable
         }
     }
 }
