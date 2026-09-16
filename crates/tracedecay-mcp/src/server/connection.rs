@@ -60,8 +60,12 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     fn max_concurrent_reads(&self) -> usize;
     fn tool_is_read_only(&self, tool_name: &str) -> bool;
     fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool;
-    /// The token is sticky across asynchronous route resolution and must be
-    /// sampled immediately before dispatch admission.
+    /// The token is sticky: once cancelled it stays cancelled, so a late
+    /// sample never misses a cancel. Sticky is not the same as interruptible —
+    /// an implementation that only samples after resolving its route leaves
+    /// the whole route window uncancellable, so the token must be raced
+    /// *around* asynchronous route resolution as well as sampled before
+    /// dispatch admission.
     fn dispatch<'a>(
         &'a self,
         request: McpDispatchRequest<'a>,
@@ -128,6 +132,27 @@ where
         if enabled {
             Arc::clone(&self.context).shutdown().await;
         }
+    }
+}
+
+/// Races asynchronous route resolution against the request's own cancellation.
+///
+/// Returns `None` when the cancel wins, in which case the route future is
+/// dropped: no request authority, deadline, or settlement state exists yet, so
+/// abandoning it is the complete unwind. The route arm is polled first so a
+/// route that is already resolved still reports its outcome instead of losing
+/// it to a cancel that arrived in the same poll.
+pub async fn await_route_with_cancellation<F, N>(routing: F, cancellation: N) -> Option<F::Output>
+where
+    F: Future,
+    N: Future<Output = ()>,
+{
+    tokio::pin!(routing);
+    tokio::pin!(cancellation);
+    tokio::select! {
+        biased;
+        routed = &mut routing => Some(routed),
+        () = &mut cancellation => None,
     }
 }
 
@@ -1194,7 +1219,37 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicIsize, Ordering};
 
-    use super::QueuedRequestLine;
+    use super::{QueuedRequestLine, await_route_with_cancellation};
+
+    #[tokio::test]
+    async fn route_resolution_is_abandoned_when_the_request_is_cancelled() {
+        let routing_polls = Arc::new(AtomicIsize::new(0));
+        let polls = Arc::clone(&routing_polls);
+        let routing = async move {
+            polls.fetch_add(1, Ordering::AcqRel);
+            std::future::pending::<&str>().await
+        };
+
+        let routed = await_route_with_cancellation(routing, std::future::ready(())).await;
+
+        assert_eq!(routed, None, "a cancel during routing abandons the route");
+        assert_eq!(
+            routing_polls.load(Ordering::Acquire),
+            1,
+            "the route arm is polled first so a ready route is never lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resolved_route_wins_over_a_simultaneous_cancel() {
+        let routed = await_route_with_cancellation(
+            std::future::ready("selected-server"),
+            std::future::ready(()),
+        )
+        .await;
+
+        assert_eq!(routed, Some("selected-server"));
+    }
 
     #[test]
     fn queued_request_depth_is_released_on_dequeue_and_connection_drop() {
