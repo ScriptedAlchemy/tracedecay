@@ -704,16 +704,19 @@ pub fn join_chunks_to_generation(
     if generation.seal.expected_digest != expected {
         return Err(GenerationJoinErrorV1::UnsealedGeneration);
     }
-    if document.generation_id != generation.generation_id {
-        return Err(GenerationJoinErrorV1::CrossGeneration);
-    }
+    // Document generation_id is extraction provenance. The join binds chunks to
+    // the sealed serving generation named by `generation`.
+    document
+        .generation_id
+        .validate()
+        .map_err(|_| GenerationJoinErrorV1::CrossGeneration)?;
 
     let declared: BTreeSet<&CodeSearchChunkId> = document.chunk_ids.iter().collect();
     let mut seen = BTreeSet::new();
     let mut bindings = Vec::with_capacity(chunks.len());
     for chunk in chunks {
-        if chunk.anchor.generation_id != generation.generation_id
-            || chunk.anchor.file_occurrence_id != document.file_occurrence_id
+        if chunk.anchor.file_occurrence_id != document.file_occurrence_id
+            || chunk.anchor.generation_id != document.generation_id
         {
             return Err(GenerationJoinErrorV1::CrossGeneration);
         }

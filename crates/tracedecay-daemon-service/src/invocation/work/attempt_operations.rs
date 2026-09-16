@@ -10,7 +10,7 @@ use tracedecay_contracts::{
     RetryWorkAttemptCommandV1, SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1,
     WorkSynthesisAttemptV1, WorkflowArtifactStorePort,
 };
-use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1};
+use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1, WorkAttemptV1};
 use tracedecay_tool_catalog::UseCaseId;
 
 use tracedecay_application::work::{
@@ -39,9 +39,8 @@ fn consume_synthesis_bytes(remaining: &mut u64, bytes: u64) -> Result<(), Applic
 
 fn synthesis_source_context(
     registered: &RegisteredWorkRuntime,
-    services: &RegisteredWorkApplicationServicesV1,
-    context: &RequestContext,
-    command: &AdmitWorkSynthesisCommand,
+    start: &StartWorkAttemptCommand,
+    attempts: &[WorkAttemptV1],
 ) -> Result<String, ApplicationProblem> {
     let artifacts = registered.database.workflow_storage().map_err(|_| {
         ApplicationProblem::unavailable(SafeDiagnostic {
@@ -49,23 +48,12 @@ fn synthesis_source_context(
             message: "The admitted synthesis source payload authority is unavailable.".to_owned(),
         })
     })?;
-    let mut remaining = command
-        .start
-        .execution_snapshot
-        .limits()
-        .max_protocol_bytes();
-    consume_synthesis_bytes(&mut remaining, command.start.instructions.len() as u64)?;
+    let mut remaining = start.execution_snapshot.limits().max_protocol_bytes();
+    consume_synthesis_bytes(&mut remaining, start.instructions.len() as u64)?;
     consume_synthesis_bytes(&mut remaining, 2)?;
-    let mut sources = Vec::with_capacity(command.sources.len());
-    for source in &command.sources {
-        let attempt = services.attempts().status(
-            context,
-            &WorkAttemptStatusRequestV1 {
-                task_id: source.task_id().clone(),
-                run_id: source.run_id().clone(),
-                attempt_id: source.attempt_id().clone(),
-            },
-        )?;
+    let mut sources = Vec::with_capacity(attempts.len());
+    for attempt in attempts {
+        let source = attempt.identity();
         let mut payloads = Vec::with_capacity(attempt.artifacts().len());
         for artifact in attempt.artifacts() {
             consume_synthesis_bytes(&mut remaining, artifact.byte_length())?;
@@ -100,12 +88,25 @@ fn synthesis_source_context(
             "artifacts": payloads,
         }));
     }
-    serde_json::to_string(&serde_json::json!({"work_synthesis_sources": sources})).map_err(|_| {
+    let source_context = serde_json::to_string(
+        &serde_json::json!({"work_synthesis_sources": sources}),
+    )
+    .map_err(|_| {
         ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.work-synthesis.source-context-invalid".to_owned(),
             message: "The admitted synthesis source context could not be encoded.".to_owned(),
         })
-    })
+    })?;
+    let prompt_bytes = start
+        .instructions
+        .len()
+        .saturating_add(2)
+        .saturating_add(source_context.len());
+    consume_synthesis_bytes(
+        &mut start.execution_snapshot.limits().max_protocol_bytes(),
+        prompt_bytes as u64,
+    )?;
+    Ok(format!("{}\n\n{source_context}", start.instructions))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,45 +195,32 @@ pub(super) fn synthesize(
     input_digest: ManifestDigest,
     observed_at: UtcMicros,
     deadline: Deadline,
-    mut command: AdmitWorkSynthesisCommand,
+    command: AdmitWorkSynthesisCommand,
 ) -> DaemonInvocationResponse {
-    let admitted = services
-        .run_control()
-        .admit_reservation(context, &command.start.task_id, &command.start.run_id)
-        .and_then(|()| {
-            let source_context = synthesis_source_context(registered, services, context, &command)?;
-            let prompt_bytes = command
-                .start
-                .instructions
-                .len()
-                .saturating_add(2)
-                .saturating_add(source_context.len());
-            consume_synthesis_bytes(
-                &mut command.start.execution_snapshot.limits().max_protocol_bytes(),
-                prompt_bytes as u64,
-            )?;
-            command.start.instructions.push_str("\n\n");
-            command.start.instructions.push_str(&source_context);
-            RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
-                .map_err(|_| {
-                    work_product_problem(
-                        tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-                    )
-                })
-                .and_then(|product| {
-                    preparation::current_work_product_revision_pins(registered).and_then(
-                        |revisions| {
-                            tracedecay_contracts::admit_work_synthesis_against_registered_topology(
-                                product.synthesis(),
-                                context,
-                                &binding,
-                                &revisions,
-                                &registered.work_topology_policy,
-                                command,
-                            )
-                        },
-                    )
-                })
+    let admitted = RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
+        .map_err(|_| {
+            work_product_problem(
+                tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+            )
+        })
+        .and_then(|product| {
+            let revisions = preparation::current_work_product_revision_pins(registered)?;
+            tracedecay_contracts::admit_work_synthesis_against_registered_topology(
+                product.synthesis(),
+                context,
+                &binding,
+                &revisions,
+                &registered.work_topology_policy,
+                command,
+                |start, sources| {
+                    services.run_control().admit_reservation(
+                        context,
+                        &start.task_id,
+                        &start.run_id,
+                    )?;
+                    synthesis_source_context(registered, start, sources)
+                },
+            )
         });
     if let (Ok(WorkSynthesisAttemptV1::Admitted(admission)), Some(project_root)) =
         (&admitted, project_root)

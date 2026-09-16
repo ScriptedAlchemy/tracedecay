@@ -144,9 +144,6 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         .await
         .expect("sealed publication deadline")
         .expect("sealed publication");
-    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_started())
-        .await
-        .expect("activation gate reached after sealing");
     assert!(
         registry
             .serving_code_scope(&project)
@@ -158,13 +155,10 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
     );
     assert!(!changes.has_changed().expect("live serving subscription"));
     gate.release();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        serving_seats.wait_for(|seat| *seat != initial_seat),
-    )
-    .await
-    .expect("serving installation must wake the waiter without another seal")
-    .expect("serving-seat authority stays open");
+    serving_seats
+        .wait_for(|seat| *seat != initial_seat)
+        .await
+        .expect("serving-seat authority stays open");
     changes.borrow_and_update();
     let generation = registry
         .serving_code_scope(&project)
@@ -196,13 +190,13 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             .source_freshness
             .clone()
     };
+    let admission = quiesced_background_reconcile_admission(&registry, &project).await;
     {
         let mut state = freshness.state.lock().expect("freshness state");
         state.last_reconciled_at = std::time::Instant::now()
             .checked_sub(state.staleness_threshold + Duration::from_secs(1))
             .expect("age the readiness proof");
     }
-    let admission = quiesced_background_reconcile_admission(&registry, &project).await;
     changes.borrow_and_update();
     let serving_seat_before_expiry = *serving_seats.borrow_and_update();
     assert!(

@@ -2,15 +2,17 @@ use std::collections::BTreeSet;
 use std::fmt::Debug;
 
 use tracedecay_code_index::capabilities::expected_seal_digest;
-use tracedecay_code_index::generations::{GenerationPlanner, RebuildTriggerV1};
+use tracedecay_code_index::generations::{
+    GenerationPlanner, GenerationPlanningErrorV1, RebuildTriggerV1,
+};
 use tracedecay_code_index::intake::INTAKE_DIGEST_SEPARATOR;
 use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
 use tracedecay_code_index::languages::StaticLanguageRegistry;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationManifestV1, ContentDigest, FileOccurrenceId, LanguageId,
-    ManifestDigest, PrivacyDomainId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
-    canonical_sha256,
+    ChunkerRevision, CodeGenerationManifestV1, ContentDigest, DomainError, FileOccurrenceId,
+    LanguageId, ManifestDigest, PrivacyDomainId, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    UtcMicros, canonical_sha256,
 };
 
 fn id<T>(value: &str) -> T
@@ -235,11 +237,12 @@ fn resealing_cannot_hide_a_generation_fingerprint_mismatch() {
     tampered.seal.expected_digest =
         expected_seal_digest(&tampered).expect("tampered manifest can be resealed");
 
-    assert!(tampered.validate().is_err());
-    assert!(
-        planner
-            .plan_generation(&snapshot, Some(&tampered), UtcMicros(4_000))
-            .is_err()
+    assert_eq!(tampered.validate(), Err(DomainError::DigestMismatch));
+    assert_eq!(
+        planner.plan_generation(&snapshot, Some(&tampered), UtcMicros(4_000)),
+        Err(GenerationPlanningErrorV1::Contract(
+            "manifest digest does not match its canonical domain-separated payload".to_owned(),
+        ))
     );
 }
 

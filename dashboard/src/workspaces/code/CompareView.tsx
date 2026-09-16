@@ -56,7 +56,7 @@ export function CompareView({
 }) {
   const complete = isCompareSelectionComplete(selection);
   const freshness = useEnvelope(
-    ['code-index', 'freshness'],
+    ['code-index', 'freshness', 'all'],
     '/api/code-index/freshness',
     CodeIndexFreshnessPayloadV1Schema,
   );

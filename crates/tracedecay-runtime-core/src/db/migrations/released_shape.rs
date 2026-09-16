@@ -10,10 +10,9 @@
 //! diagnostics tables that gained a `publication_revision` column and a wider
 //! primary key. Those differences are convergeable and are converged here.
 //!
-//! Every released store also carries the `semantic_vector_*` staging family
-//! that v36 retired with dense code retrieval. That family has no forward
-//! path, so a store carrying it is refused before this module writes anything,
-//! the same way [`super::final_shape`] refuses shapes no release ever wrote.
+//! Released dense-staging objects remain untouched under exact inventory
+//! admission. Removing dense retrieval must not discard unrelated durable
+//! project data or the historical publication receipts sharing its store.
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -93,6 +92,11 @@ fn failure(message: String) -> TraceDecayError {
 /// with.
 pub(super) async fn converge_released_project_schema(conn: &(impl Executor + Sync)) -> Result<()> {
     super::require_no_retired_sqlite_projection_object(conn).await?;
+    if super::get_version(conn).await? == 35 {
+        // This live stamp already has the final relational schema; only the
+        // known alias guard may differ. Do not repair arbitrary v35 drift.
+        super::final_shape::require_exact_final_shape_or_shipped_v35_alias_trigger(conn).await?;
+    }
     for group in RELEASED_V34_REBUILDS {
         rebuild_released_group(conn, group).await?;
     }
@@ -101,7 +105,13 @@ pub(super) async fn converge_released_project_schema(conn: &(impl Executor + Syn
     crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(conn, OPERATION).await?;
     crate::db::external_source::install_external_source_schema(conn, OPERATION).await?;
     crate::db::external_source::retire_mutation_copies_in_transaction(conn).await?;
-    super::install_runtime_writer_ledger(conn, OPERATION).await
+    super::install_runtime_writer_ledger(conn, OPERATION).await?;
+    if super::get_version(conn).await? == super::PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        super::final_shape::require_final_shape_except_payload_digests(conn).await
+    } else {
+        super::final_shape::require_exact_final_shape(conn).await?;
+        super::set_version(conn, super::SCHEMA_VERSION).await
+    }
 }
 
 /// Rebuilds every table in one group whose stored DDL is not the one the
@@ -128,7 +138,8 @@ async fn rebuild_released_group(
         }
     }
     if pending.is_empty() {
-        return Ok(());
+        // Released stores installed diagnostics lazily; both tables may be absent.
+        return batch(conn, group.canonical).await;
     }
     let mut triggers = Vec::new();
     for rebuild in &pending {

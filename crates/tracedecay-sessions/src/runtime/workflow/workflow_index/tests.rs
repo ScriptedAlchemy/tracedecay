@@ -81,11 +81,22 @@ async fn queries_are_empty_before_schema_exists() {
 async fn schema_read_failures_are_not_reported_as_empty_or_absent() {
     let conn = FailingQueryExecutor;
 
-    assert!(runs_for_session(&conn, "sess", 10).await.is_err());
-    assert!(run_for_id(&conn, "wf_x").await.is_err());
-    assert!(agents_for_run(&conn, "wf_x", 10).await.is_err());
+    let injected =
+        WorkflowIndexError::Db("SQLite runtime failed: injected workflow read failure".to_owned());
+    assert_eq!(
+        runs_for_session(&conn, "sess", 10).await,
+        Err(injected.clone())
+    );
+    assert_eq!(run_for_id(&conn, "wf_x").await, Err(injected.clone()));
+    assert_eq!(
+        agents_for_run(&conn, "wf_x", 10).await,
+        Err(injected.clone())
+    );
     let scope = vec![("claude".to_owned(), "sess".to_owned())];
-    assert!(runs_for_git_scope(&conn, Some(&scope), 10).await.is_err());
+    assert_eq!(
+        runs_for_git_scope(&conn, Some(&scope), 10).await,
+        Err(injected)
+    );
 }
 
 #[tokio::test]

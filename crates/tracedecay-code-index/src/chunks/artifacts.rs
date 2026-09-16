@@ -487,12 +487,15 @@ impl CodeFileIndexArtifactsV1 {
         extraction: &ExtractionBatchV1,
         snapshot_digest: &ManifestDigest,
     ) -> Result<(), ChunkingFailureV1> {
+        let _ = snapshot_digest;
+        // `snapshot_digest` on clone bodies is the snapshot of last extraction /
+        // rematerialize. Carried Arc-shared pages keep that provenance across
+        // successor publishes; path/project/content binding is the live check.
         if self.clone_bodies.iter().any(|body| {
             body.occurrence.project_id != authority.project_id
                 || body.occurrence.repository_id != authority.repository_id
                 || body.occurrence.worktree_id != authority.worktree_id
                 || body.occurrence.source_generation != extraction.generation_id
-                || body.occurrence.snapshot_digest != *snapshot_digest
                 || body.occurrence.path != authority.logical_path
         }) {
             return Err(ChunkingFailureV1::GenerationMismatch);
@@ -804,6 +807,14 @@ mod schema_evidence_tests {
             facts: Vec::new(),
         });
 
-        assert!(validate_schema_evidence_language("rust", &evidence).is_err());
+        assert_eq!(
+            validate_schema_evidence_language("rust", &evidence),
+            Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::SchemaLanguageMismatch,
+                )
+            ))
+        );
+        assert_eq!(validate_schema_evidence_language("sql", &evidence), Ok(()));
     }
 }

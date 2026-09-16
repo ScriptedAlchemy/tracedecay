@@ -22,6 +22,14 @@ stays plannable. Nothing here may be re-sealed at the current revision — the
 export predates the required generation census, so a current-revision wrapper
 around it could only fabricate one.
 
+Revision 7 was a development format, not the format in the release tags
+`v0.1.0-beta.25` through `v0.1.0-beta.37`: every existing tag in that range
+sets `SEALED_GENERATION_FORMAT_REVISION_V1` to 6 in
+`crates/tracedecay-code-index/src/production/sealed_codec.rs`.
+There is no `v0.1.0-beta.28` tag. This fixture records development-writer
+provenance, not evidence that revision 7 shipped. Its retirement therefore
+does not remove a decoder for a format shipped in those releases.
+
 The segments it addresses also predate the required per-symbol evidence fields
 (`docstring`, `is_async`, `derives`), and its manifest predates sealed
 semantic source commitments. Those older shapes are exercised at the segment

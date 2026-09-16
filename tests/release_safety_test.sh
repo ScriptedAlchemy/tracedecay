@@ -79,6 +79,16 @@ if config.get("draft-pull-request") is not True:
     raise SystemExit(
         "beta release PRs must remain draft while the generated lockfile is updated"
     )
+sdk_paths = [
+    item.get("path", "")
+    for item in config["packages"]["."]["extra-files"]
+    if str(item.get("path", "")).startswith("sdks/")
+]
+if sdk_paths:
+    raise SystemExit(
+        "beta release-please must not bump the independently versioned SDK: "
+        + ", ".join(sdk_paths)
+    )
 PY
 
 # GitHub suppresses `on: release` workflows for releases created by

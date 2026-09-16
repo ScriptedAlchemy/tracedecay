@@ -88,7 +88,7 @@ pub enum CodeIndexCadenceOutcomeV1 {
         generation_id: CodeGenerationId,
         reextracted_files: usize,
         changed_chunks: usize,
-        reused_chunks: usize,
+        reused_chunks: u64,
         clone_payloads_reused: Option<u64>,
         clone_stale_invalidations: Option<u64>,
         clone_body_changes_observed: Option<bool>,

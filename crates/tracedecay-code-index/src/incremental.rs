@@ -76,6 +76,76 @@ pub struct GenerationChunkManifestV1 {
 }
 
 impl GenerationChunkManifestV1 {
+    /// Construct a canonical generation chunk manifest from file pages that
+    /// have already been validated at extract/rematerialize/share time.
+    ///
+    /// Skips the corpus-wide `file.validate()` fan-out. File-page
+    /// `generation_id` is extraction provenance and may predate this publish.
+    pub(crate) fn from_validated_files(
+        generation_id: CodeGenerationId,
+        files: Vec<CodeFileChunksV1>,
+    ) -> Result<Self, ChunkIncrementErrorV1> {
+        generation_id.validate().map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
+
+        let capacity = files.iter().map(|file| file.chunks.len()).sum();
+        let mut chunks = Vec::with_capacity(capacity);
+        let mut file_occurrences = BTreeSet::new();
+        for file in files {
+            file.document.generation_id.validate().map_err(|error| {
+                ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                    error,
+                ))
+            })?;
+            if !file_occurrences.insert(file.document.file_occurrence_id.clone()) {
+                return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
+                    file.document.file_occurrence_id,
+                ));
+            }
+            chunks.extend(file.chunks);
+        }
+        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))?;
+        if let Some(duplicate) = chunks
+            .windows(2)
+            .find(|pair| pair[0].id == pair[1].id)
+            .map(|pair| pair[0].id.clone())
+        {
+            return Err(ChunkIncrementErrorV1::DuplicateChunk(duplicate));
+        }
+
+        Ok(Self {
+            generation_id,
+            chunks,
+        })
+    }
+
+    /// Wrap an already-sorted, duplicate-free Arc chunk list under a serving
+    /// generation id. Callers must keep extraction provenance on the rows.
+    pub(crate) fn from_sorted_arcs(
+        generation_id: CodeGenerationId,
+        chunks: Vec<Arc<CodeSearchChunkV1>>,
+    ) -> Result<Self, ChunkIncrementErrorV1> {
+        generation_id.validate().map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
+        if let Some(duplicate) = chunks
+            .windows(2)
+            .find(|pair| pair[0].id >= pair[1].id)
+            .map(|pair| pair[0].id.clone())
+        {
+            return Err(ChunkIncrementErrorV1::DuplicateChunk(duplicate));
+        }
+        Ok(Self {
+            generation_id,
+            chunks,
+        })
+    }
+
     /// Construct a canonical generation chunk manifest.
     pub fn new(
         generation_id: CodeGenerationId,
@@ -106,35 +176,7 @@ impl GenerationChunkManifestV1 {
         })?;
         validated.into_iter().collect::<Result<(), _>>()?;
 
-        let capacity = files.iter().map(|file| file.chunks.len()).sum();
-        let mut chunks = Vec::with_capacity(capacity);
-        let mut file_occurrences = BTreeSet::new();
-        for file in files {
-            if file.document.generation_id != generation_id {
-                return Err(ChunkIncrementErrorV1::MixedGeneration);
-            }
-            if !file_occurrences.insert(file.document.file_occurrence_id.clone()) {
-                return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
-                    file.document.file_occurrence_id,
-                ));
-            }
-            chunks.extend(file.chunks);
-        }
-        // Typed identities are unique (checked below), so the parallel sort
-        // yields exactly the order the serial sort did.
-        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))?;
-        if let Some(duplicate) = chunks
-            .windows(2)
-            .find(|pair| pair[0].id == pair[1].id)
-            .map(|pair| pair[0].id.clone())
-        {
-            return Err(ChunkIncrementErrorV1::DuplicateChunk(duplicate));
-        }
-
-        Ok(Self {
-            generation_id,
-            chunks,
-        })
+        Self::from_validated_files(generation_id, files)
     }
 
     /// The generation all chunks are anchored to.
@@ -362,7 +404,7 @@ pub fn plan_chunk_increment(
         .flat_map(|manifest| &manifest.chunks)
         .peekable();
     let mut added_or_changed = Vec::new();
-    let mut reused = Vec::new();
+    let mut reused_pairs = Vec::new();
     let mut deleted = Vec::new();
     for chunk in &current.chunks {
         while let Some(removed) = previous.next_if(|prior| prior.id < chunk.id) {
@@ -375,15 +417,14 @@ pub fn plan_chunk_increment(
         let prior_digest = previous
             .next_if(|prior| prior.id == chunk.id)
             .map(|prior| prior.content_digest.clone());
-        let change = ChangedCodeChunkV1 {
-            chunk_id: chunk.id.clone(),
-            prior_digest,
-            current_digest: Some(chunk.content_digest.clone()),
-        };
-        if change.prior_digest == change.current_digest {
-            reused.push(change);
+        if prior_digest.as_ref() == Some(&chunk.content_digest) {
+            reused_pairs.push((chunk.id.clone(), chunk.content_digest.clone()));
         } else {
-            added_or_changed.push(change);
+            added_or_changed.push(ChangedCodeChunkV1 {
+                chunk_id: chunk.id.clone(),
+                prior_digest,
+                current_digest: Some(chunk.content_digest.clone()),
+            });
         }
     }
     deleted.extend(previous.map(|removed| ChangedCodeChunkV1 {
@@ -392,13 +433,126 @@ pub fn plan_chunk_increment(
         current_digest: None,
     }));
 
+    let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_reused_partition(&reused_pairs)
+        .map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: prior.map(|manifest| manifest.generation_id.clone()),
         to_generation: current.generation_id.clone(),
         manifest_digest: placeholder_digest(),
         added_or_changed,
         deleted,
-        reused,
+        reused_count,
+        reused_digest,
+    };
+    changes.manifest_digest = changes.compute_digest().map_err(|error| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
+    })?;
+    changes.validate().map_err(|error| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
+    })?;
+    Ok(changes)
+}
+
+/// Plan an increment when unchanged file pages are Arc-shared from `prior`.
+///
+/// Shared occurrences reuse by pointer identity (no digest clone on the match
+/// path). The reused seal is the parent full-replay attestation plus reused
+/// cardinality — parent publish already authenticated those bytes.
+#[hotpath::measure(label = "code_index.build.plan_chunk_increment_arc_shared")]
+pub(crate) fn plan_chunk_increment_arc_shared(
+    prior: &GenerationChunkManifestV1,
+    current: &GenerationChunkManifestV1,
+    shared_occurrences: &BTreeSet<FileOccurrenceId>,
+    parent_full_replay_digest: &ManifestDigest,
+) -> Result<ChangedCodeChunkSetV1, ChunkIncrementErrorV1> {
+    if prior.generation_id == current.generation_id {
+        return Err(ChunkIncrementErrorV1::SameGeneration);
+    }
+    if shared_occurrences.is_empty() {
+        return Err(ChunkIncrementErrorV1::NonCanonical(
+            crate::noncanonical::noncanonical_detail(
+                crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+                "arc-share increment requires shared file pages",
+            ),
+        ));
+    }
+
+    let shared_files = shared_occurrences
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut previous = prior.chunks.iter().peekable();
+    let mut added_or_changed = Vec::new();
+    let mut reused_count = 0_u64;
+    let mut deleted = Vec::new();
+    for chunk in &current.chunks {
+        while let Some(removed) = previous.next_if(|prior| prior.id < chunk.id) {
+            deleted.push(ChangedCodeChunkV1 {
+                chunk_id: removed.id.clone(),
+                prior_digest: Some(removed.content_digest.clone()),
+                current_digest: None,
+            });
+        }
+        let matched = previous.next_if(|prior| prior.id == chunk.id);
+        let shared = shared_files.contains(&chunk.anchor.file_occurrence_id);
+        match matched {
+            Some(prior_chunk)
+                if shared
+                    || Arc::ptr_eq(prior_chunk, chunk)
+                    || prior_chunk.content_digest == chunk.content_digest =>
+            {
+                reused_count = reused_count.saturating_add(1);
+            }
+            Some(prior_chunk) => {
+                added_or_changed.push(ChangedCodeChunkV1 {
+                    chunk_id: chunk.id.clone(),
+                    prior_digest: Some(prior_chunk.content_digest.clone()),
+                    current_digest: Some(chunk.content_digest.clone()),
+                });
+            }
+            None => {
+                added_or_changed.push(ChangedCodeChunkV1 {
+                    chunk_id: chunk.id.clone(),
+                    prior_digest: None,
+                    current_digest: Some(chunk.content_digest.clone()),
+                });
+            }
+        }
+    }
+    deleted.extend(previous.map(|removed| ChangedCodeChunkV1 {
+        chunk_id: removed.id.clone(),
+        prior_digest: Some(removed.content_digest.clone()),
+        current_digest: None,
+    }));
+
+    let shared_file_count = u64::try_from(shared_occurrences.len()).map_err(|_| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_detail(
+            crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+            "shared file count exceeds u64",
+        ))
+    })?;
+    let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+        parent_full_replay_digest,
+        &prior.generation_id,
+        &current.generation_id,
+        reused_count,
+        shared_file_count,
+    )
+    .map_err(|error| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
+    })?;
+    let mut changes = ChangedCodeChunkSetV1 {
+        from_generation: Some(prior.generation_id.clone()),
+        to_generation: current.generation_id.clone(),
+        manifest_digest: placeholder_digest(),
+        added_or_changed,
+        deleted,
+        reused_count,
+        reused_digest,
     };
     changes.manifest_digest = changes.compute_digest().map_err(|error| {
         ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
@@ -442,4 +596,30 @@ fn map_lineage_error(error: LineageResolutionErrorV1) -> ChunkIncrementErrorV1 {
 fn placeholder_digest() -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
         .expect("a zeroed sha256 digest is canonical")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChunkIncrementErrorV1, GenerationChunkManifestV1};
+    use crate::parallelism::{CodeIndexParallelismErrorV1, force_install_failure_for_test};
+    use tracedecay_domain::CodeGenerationId;
+
+    #[test]
+    fn pool_failure_remains_a_typed_parallelism_error() {
+        struct ClearForce;
+        impl Drop for ClearForce {
+            fn drop(&mut self) {
+                force_install_failure_for_test(false);
+            }
+        }
+        let _clear = ClearForce;
+        force_install_failure_for_test(true);
+        let generation = CodeGenerationId::new("generation.pool-failure").expect("generation");
+        assert!(matches!(
+            GenerationChunkManifestV1::new(generation, vec![]),
+            Err(ChunkIncrementErrorV1::Parallelism(
+                CodeIndexParallelismErrorV1::PoolBuild { .. }
+            ))
+        ));
+    }
 }

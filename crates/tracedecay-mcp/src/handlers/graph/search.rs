@@ -1081,13 +1081,12 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
         .map_err(|error| TraceDecayError::Config {
             message: format!("invalid tracedecay_similar cursor: {error}"),
         })?;
-    let executor =
-        ctx.code_index_similar_executor()
-            .ok_or_else(|| TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-similarity-unavailable".to_owned(),
-                retryable: false,
-                detail: "the maintained clone similarity lane is unavailable".to_owned(),
-            })?;
+    let executor = ctx.code_index_similar_executor().ok_or_else(|| {
+        clone_lane_unavailable_error(
+            "similarity",
+            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+        )
+    })?;
     let similar = match executor(tracedecay_query::code_search::CodeIndexSimilarRequestV1 {
         project_root: ctx.project_root().to_path_buf(),
         target,
@@ -1202,6 +1201,11 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
 /// `tracedecay_redundancy` read the same executor vocabulary, so they report
 /// the same `reason_code` and the same retry verdict; only the human lane name
 /// in `detail` differs.
+///
+/// Deliberately does **not** re-emit retired opaque tokens
+/// (`verified-code-similarity-unavailable` /
+/// `verified-code-redundancy-unavailable`). Those never shipped on master; the
+/// shared `reason.as_str()` vocabulary is the sole consumer-visible code.
 fn clone_lane_unavailable_error(
     lane: &str,
     reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
@@ -1280,13 +1284,12 @@ pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<
             }
         }
     };
-    let executor =
-        ctx.code_index_redundancy_executor()
-            .ok_or_else(|| TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-redundancy-unavailable".to_owned(),
-                retryable: false,
-                detail: "the maintained clone family lane is unavailable".to_owned(),
-            })?;
+    let executor = ctx.code_index_redundancy_executor().ok_or_else(|| {
+        clone_lane_unavailable_error(
+            "family",
+            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+        )
+    })?;
     let outcome = executor(tracedecay_query::code_search::CodeIndexRedundancyQueryV1 {
         project_root: ctx.project_root().to_path_buf(),
         project_id: request.project_id,
@@ -1606,6 +1609,15 @@ mod tests {
     fn clone_lanes_report_one_unavailable_wire_protocol() {
         use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
 
+        // Retired branch-local opaque tokens — never shipped on master; must
+        // stay absent from the shared mapper wire (migrate-then-delete, not
+        // one-release alias). Request-schema / catalog `alias_of` for these
+        // tools lives on #1433 and is separable.
+        const RETIRED_OPAQUE_REASON_CODES: &[&str] = &[
+            "verified-code-redundancy-unavailable",
+            "verified-code-similarity-unavailable",
+        ];
+
         for reason in [
             Reason::CapabilityUnavailable,
             Reason::AuthorityUnavailable,
@@ -1621,16 +1633,34 @@ mod tests {
         ] {
             let similarity = clone_lane_unavailable_error("similarity", reason);
             let family = clone_lane_unavailable_error("family", reason);
-            let (similarity_code, similarity_retryable, _) = similarity
+            let (similarity_code, similarity_retryable, similarity_detail) = similarity
                 .project_route_context()
                 .expect("clone lane failures are typed project-route errors");
-            let (family_code, family_retryable, _) = family
+            let (family_code, family_retryable, family_detail) = family
                 .project_route_context()
                 .expect("clone lane failures are typed project-route errors");
             assert_eq!(similarity_code, reason.as_str());
             assert_eq!(family_code, reason.as_str());
             assert_eq!(similarity_retryable, reason.is_retryable());
             assert_eq!(family_retryable, reason.is_retryable());
+            for retired in RETIRED_OPAQUE_REASON_CODES {
+                assert_ne!(
+                    similarity_code, *retired,
+                    "similarity lane must not re-emit retired opaque reason"
+                );
+                assert_ne!(
+                    family_code, *retired,
+                    "family lane must not re-emit retired opaque reason"
+                );
+                assert!(
+                    !similarity_detail.contains(retired),
+                    "similarity detail must not mention retired opaque reason"
+                );
+                assert!(
+                    !family_detail.contains(retired),
+                    "family detail must not mention retired opaque reason"
+                );
+            }
         }
     }
 
@@ -1641,7 +1671,10 @@ mod tests {
             true,
             "new generation published",
         );
-        assert!(preserve_complete_search_after_lazy_admission(Err(advanced)).is_ok());
+        assert!(matches!(
+            preserve_complete_search_after_lazy_admission(Err(advanced)),
+            Ok(())
+        ));
 
         let stale = TraceDecayError::project_route(
             "application.symbol-graph.ignored-dependency-generation-stale",
@@ -1741,6 +1774,184 @@ mod tests {
             assert_eq!(wire["error"]["data"]["reason_code"], reason_code);
             assert_eq!(wire["error"]["data"]["retryable"], retryable);
         }
+    }
+
+    #[tokio::test]
+    async fn redundancy_unavailable_wire_preserves_reason_and_retryability() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = crate::tool_context::tests::scope("redundancy-unavailable");
+        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
+        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
+            principal: tracedecay_domain::PrincipalId::new("principal.redundancy-unavailable")
+                .expect("principal"),
+            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                "revision.redundancy-unavailable",
+            )
+            .expect("revision"),
+        };
+
+        for (reason, reason_code, retryable) in [
+            (
+                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                "generation_unavailable",
+                true,
+            ),
+            (
+                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                "index_corruption_reset_required",
+                false,
+            ),
+        ] {
+            let executor: tracedecay_query::code_search::CodeIndexRedundancyExecutor =
+                std::sync::Arc::new(move |_| {
+                    Box::pin(async move { Err(reason) })
+                });
+            let code_index =
+                crate::AdmittedCodeIndex::new(&authority, None, None, Some(&executor), None)
+                    .expect("redundancy executor admits");
+            let ctx = crate::McpToolContext::bind(crate::McpToolBinding {
+                project: &project,
+                request: crate::McpRequestAuthoritiesV1 {
+                    code_index: Some(code_index),
+                    ..crate::McpRequestAuthoritiesV1::default()
+                },
+            })
+            .expect("admitted redundancy binding");
+            let result = handle_redundancy(
+                &ctx,
+                json!({
+                    "project_id": admitted.project_id,
+                    "repository_id": admitted.repository_id,
+                    "match_classes": ["conservative_exact"],
+                    "scope": {"kind": "repository"},
+                    "include_generated_paths": false,
+                    "family_limit": 10,
+                    "member_limit": 10,
+                    "work_limit": 20,
+                }),
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("unavailable redundancy executor must remain a transport failure");
+            };
+            let response =
+                crate::tool_error_response(json!(1), "tracedecay_redundancy", &error);
+            let wire: Value = serde_json::from_str(&crate::serialize_response_line(&response))
+                .expect("JSON-RPC response");
+
+            assert_eq!(wire["error"]["data"]["reason_code"], reason_code);
+            assert_eq!(wire["error"]["data"]["retryable"], retryable);
+            assert_ne!(
+                wire["error"]["data"]["reason_code"],
+                "verified-code-redundancy-unavailable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_clone_lane_executors_emit_shared_capability_unavailable() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = crate::tool_context::tests::scope("clone-missing-executor");
+        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
+        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
+            principal: tracedecay_domain::PrincipalId::new("principal.clone-missing-executor")
+                .expect("principal"),
+            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                "revision.clone-missing-executor",
+            )
+            .expect("revision"),
+        };
+        let shared_code = tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable
+            .as_str();
+
+        // Admit the sibling lane so the request is authorized, then omit the
+        // lane under test — the Codex P2 gap (opaque missing-executor tokens).
+        let similar_stub: tracedecay_query::code_search::CodeIndexSimilarExecutor =
+            std::sync::Arc::new(|_| {
+                Box::pin(async {
+                    tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::NotFound
+                })
+            });
+        let redundancy_only =
+            crate::AdmittedCodeIndex::new(&authority, None, Some(&similar_stub), None, None)
+                .expect("similar executor admits without redundancy");
+        let redundancy_ctx = crate::McpToolContext::bind(crate::McpToolBinding {
+            project: &project,
+            request: crate::McpRequestAuthoritiesV1 {
+                code_index: Some(redundancy_only),
+                ..crate::McpRequestAuthoritiesV1::default()
+            },
+        })
+        .expect("admitted similar-only binding");
+        let redundancy_err = handle_redundancy(
+            &redundancy_ctx,
+            json!({
+                "project_id": admitted.project_id,
+                "repository_id": admitted.repository_id,
+                "match_classes": ["conservative_exact"],
+                "scope": {"kind": "repository"},
+                "include_generated_paths": false,
+                "family_limit": 10,
+                "member_limit": 10,
+                "work_limit": 20,
+            }),
+        )
+        .await
+        .expect_err("missing redundancy executor must be typed unavailable");
+        let redundancy_wire: Value = serde_json::from_str(&crate::serialize_response_line(
+            &crate::tool_error_response(json!(1), "tracedecay_redundancy", &redundancy_err),
+        ))
+        .expect("JSON-RPC response");
+        assert_eq!(redundancy_wire["error"]["data"]["reason_code"], shared_code);
+        assert_eq!(redundancy_wire["error"]["data"]["retryable"], false);
+        assert_ne!(
+            redundancy_wire["error"]["data"]["reason_code"],
+            "verified-code-redundancy-unavailable"
+        );
+
+        let redundancy_stub: tracedecay_query::code_search::CodeIndexRedundancyExecutor =
+            std::sync::Arc::new(|_| {
+                Box::pin(async {
+                    Err(tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Internal)
+                })
+            });
+        let similar_only =
+            crate::AdmittedCodeIndex::new(&authority, None, None, Some(&redundancy_stub), None)
+                .expect("redundancy executor admits without similar");
+        let similar_ctx = crate::McpToolContext::bind(crate::McpToolBinding {
+            project: &project,
+            request: crate::McpRequestAuthoritiesV1 {
+                code_index: Some(similar_only),
+                ..crate::McpRequestAuthoritiesV1::default()
+            },
+        })
+        .expect("admitted redundancy-only binding");
+        let similar_err = handle_similar(
+            &similar_ctx,
+            json!({
+                "project_id": admitted.project_id,
+                "repository_id": admitted.repository_id,
+                "target": {
+                    "kind": "symbol_occurrence",
+                    "symbol_occurrence_id": "symbol.clone-missing-executor",
+                },
+                "match_classes": ["conservative_exact"],
+                "result_limit": 10,
+                "work_limit": 20,
+            }),
+        )
+        .await
+        .expect_err("missing similar executor must be typed unavailable");
+        let similar_wire: Value = serde_json::from_str(&crate::serialize_response_line(
+            &crate::tool_error_response(json!(1), "tracedecay_similar", &similar_err),
+        ))
+        .expect("JSON-RPC response");
+        assert_eq!(similar_wire["error"]["data"]["reason_code"], shared_code);
+        assert_eq!(similar_wire["error"]["data"]["retryable"], false);
+        assert_ne!(
+            similar_wire["error"]["data"]["reason_code"],
+            "verified-code-similarity-unavailable"
+        );
     }
 
     fn context_memory_hit(content: &str) -> FactSearchHitV1 {

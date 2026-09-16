@@ -841,7 +841,7 @@ fn park_convergence(
         if same_park_identity(parked, blocked_reason.as_ref(), &reason) {
             parked.observed_passes = parked.observed_passes.saturating_add(1);
             parked.reason = reason;
-            remediation.clone_into(&mut parked.remediation);
+            parked.remediation = remediation.to_owned();
         }
         return;
     }
@@ -850,7 +850,7 @@ fn park_convergence(
             parked.observed_passes = parked.observed_passes.saturating_add(1);
             parked.reason = reason;
             parked.blocked_reason = blocked_reason;
-            remediation.clone_into(&mut parked.remediation);
+            parked.remediation = remediation.to_owned();
             parked.retries_on_wake = retries_on_wake;
         }
         _ => {

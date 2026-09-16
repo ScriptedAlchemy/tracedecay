@@ -436,7 +436,7 @@ pub(super) async fn hook_v2_status(cg: &TraceDecay, args: &Value) -> Result<Valu
         .map_err(|error| config_error(format!("Context Scout status encoding failed: {error}")))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ContextScoutReadSurfaceV1 {
     Recent,
     Explain,

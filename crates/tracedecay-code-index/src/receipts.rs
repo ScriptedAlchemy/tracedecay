@@ -109,7 +109,8 @@ pub fn expected_publication_digest(
 
 /// Whether the changed-chunk set requests no projection work: empty
 /// added/changed and deleted partitions (Plan 25: a no-op generation emits
-/// empty `added_or_changed` and `deleted` sets plus explicit `reused`).
+/// empty `added_or_changed` and `deleted` sets plus an authenticated reused
+/// complement).
 pub fn changeset_is_noop(changes: &ChangedCodeChunkSetV1) -> bool {
     changes.added_or_changed.is_empty() && changes.deleted.is_empty()
 }
@@ -118,8 +119,8 @@ pub fn changeset_is_noop(changes: &ChangedCodeChunkSetV1) -> bool {
 ///
 /// Work-free reused chunks are authenticated by the request digest and
 /// represented by `reused_count`; only chunks that required projector work
-/// carry rows. Profile replay that re-embeds the reused partition records
-/// those chunks as Applied rows with `reused_count == 0`.
+/// carry rows. Profile replay arrives pre-expanded (every current chunk in
+/// `added_or_changed`, `reused_count == 0`) and records Applied rows.
 pub fn batch_proves_zero_work(batch: &ProjectionBatchReceiptV1) -> bool {
     batch.reused_count > 0 && batch.receipts.is_empty()
 }
@@ -135,21 +136,10 @@ pub fn batch_can_activate(batch: &ProjectionBatchReceiptV1) -> bool {
     })
 }
 
-/// The decisions for a no-op replay: every reused chunk maps to a `Reused`
-/// operation with a `Reused` outcome and no output digest.
-pub fn decisions_for_noop(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionDecisionV1> {
-    changes
-        .reused
-        .iter()
-        .map(|change| ChunkProjectionDecisionV1 {
-            chunk_id: change.chunk_id.clone(),
-            prior_chunk_digest: change.prior_digest.clone(),
-            current_chunk_digest: change.current_digest.clone(),
-            operation: ProjectionOperationV1::Reused,
-            outcome: ProjectionOutcomeV1::Reused,
-            output_digest: None,
-        })
-        .collect()
+/// No-op projection decisions: reused chunks are request-authenticated and do
+/// not emit per-chunk decisions after the parent-delta receipt cut.
+pub fn decisions_for_noop(_changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionDecisionV1> {
+    Vec::new()
 }
 
 /// Request digest work already done, once, for one immutable request.
@@ -256,25 +246,22 @@ fn build_batch_receipt_with(
             ));
         }
         check_decision(*partition, change, decision, reembed_reused)?;
-        if *partition != Partition::Reused || reembed_reused {
-            receipts.push(CodeChunkProjectionReceiptV1 {
-                projection_key: request.target_projection_key.clone(),
-                request_digest: request.request_digest.clone(),
-                prior_generation: request.changes.from_generation.clone(),
-                source_generation: request.changes.to_generation.clone(),
-                source_manifest_digest: request.changes.manifest_digest.clone(),
-                chunk_id: decision.chunk_id.clone(),
-                prior_chunk_digest: decision.prior_chunk_digest.clone(),
-                current_chunk_digest: decision.current_chunk_digest.clone(),
-                operation: decision.operation,
-                outcome: decision.outcome.clone(),
-                output_digest: decision.output_digest.clone(),
-            });
-        }
+        receipts.push(CodeChunkProjectionReceiptV1 {
+            projection_key: request.target_projection_key.clone(),
+            request_digest: request.request_digest.clone(),
+            prior_generation: request.changes.from_generation.clone(),
+            source_generation: request.changes.to_generation.clone(),
+            source_manifest_digest: request.changes.manifest_digest.clone(),
+            chunk_id: decision.chunk_id.clone(),
+            prior_chunk_digest: decision.prior_chunk_digest.clone(),
+            current_chunk_digest: decision.current_chunk_digest.clone(),
+            operation: decision.operation,
+            outcome: decision.outcome.clone(),
+            output_digest: decision.output_digest.clone(),
+        });
     }
-    for (chunk_id, (partition, _)) in partitions {
-        let requires_row = *partition != Partition::Reused || reembed_reused;
-        if requires_row && !seen.contains(chunk_id) {
+    for chunk_id in partitions.keys() {
+        if !seen.contains(chunk_id) {
             return Err(ProjectionReceiptErrorV1::MissingChunkReceipt(
                 chunk_id.clone(),
             ));
@@ -282,7 +269,7 @@ fn build_batch_receipt_with(
     }
     receipts.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
 
-    let reused_count = work_free_reused_count(partitions, reembed_reused);
+    let reused_count = work_free_reused_count(&request.changes, reembed_reused);
     let mut batch = ProjectionBatchReceiptV1 {
         target_projection_key: request.target_projection_key.clone(),
         request_digest: request.request_digest.clone(),
@@ -403,16 +390,15 @@ fn verify_batch_receipt_with(
         };
         check_decision(*partition, change, &decision, reembed_reused)?;
     }
-    for (chunk_id, (partition, _)) in partitions {
-        let requires_row = *partition != Partition::Reused || reembed_reused;
-        if requires_row && !seen.contains(chunk_id) {
+    for chunk_id in partitions.keys() {
+        if !seen.contains(chunk_id) {
             return Err(ProjectionReceiptErrorV1::MissingChunkReceipt(
                 chunk_id.clone(),
             ));
         }
     }
 
-    let reused_count = work_free_reused_count(partitions, reembed_reused);
+    let reused_count = work_free_reused_count(&request.changes, reembed_reused);
     if batch.reused_count != reused_count {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
@@ -432,29 +418,30 @@ fn reembeds_reused_chunks(
     let projection_changed =
         request.previous_projection_key.as_ref() != Some(&request.target_projection_key);
     if projection_changed
-        && !request.changes.reused.is_empty()
+        && request.changes.reused_count > 0
         && request.replay_reason != ProjectionReplayReasonV1::ProjectionProfileChange
     {
         return Err(ProjectionReceiptErrorV1::ProjectionKeyReplayRequiresAppliedWork);
     }
-    Ok(projection_changed
-        && !request.changes.reused.is_empty()
-        && request.replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange)
+    if projection_changed
+        && request.changes.reused_count > 0
+        && request.replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange
+    {
+        return Err(ProjectionReceiptErrorV1::Contract(
+            "projection profile change must arrive pre-expanded without a reused complement"
+                .to_owned(),
+        ));
+    }
+    Ok(false)
 }
 
-/// Count work-free reused chunks. Profile replay re-embeds that partition, so
-/// those chunks contribute Applied rows instead of `reused_count`.
-fn work_free_reused_count(
-    partitions: &BTreeMap<CodeSearchChunkId, (Partition, DigestPair)>,
-    reembed_reused: bool,
-) -> u64 {
+/// Count work-free reused chunks from the request complement. Profile replay
+/// arrives pre-expanded, so `reused_count` is already zero on that path.
+fn work_free_reused_count(changes: &ChangedCodeChunkSetV1, reembed_reused: bool) -> u64 {
     if reembed_reused {
         0
     } else {
-        partitions
-            .values()
-            .filter(|(partition, _)| *partition == Partition::Reused)
-            .count() as u64
+        changes.reused_count
     }
 }
 
@@ -472,8 +459,10 @@ fn partitions_of(
 
 /// Index an already-validated changed-chunk set by chunk identity.
 ///
-/// `ChangedCodeChunkSetV1::validate` recomputes the whole set's manifest
-/// digest, so it runs once per call chain and the index is threaded onward.
+/// Reused chunks are a digest-authenticated complement and are not indexed
+/// as per-chunk partitions. `ChangedCodeChunkSetV1::validate` recomputes the
+/// whole set's manifest digest, so it runs once per call chain and the index
+/// is threaded onward.
 fn index_partitions(
     changes: &ChangedCodeChunkSetV1,
 ) -> BTreeMap<CodeSearchChunkId, (Partition, DigestPair)> {
@@ -495,18 +484,6 @@ fn index_partitions(
             change.chunk_id.clone(),
             (
                 Partition::Deleted,
-                DigestPair {
-                    prior: change.prior_digest.clone(),
-                    current: change.current_digest.clone(),
-                },
-            ),
-        );
-    }
-    for change in &changes.reused {
-        partitions.insert(
-            change.chunk_id.clone(),
-            (
-                Partition::Reused,
                 DigestPair {
                     prior: change.prior_digest.clone(),
                     current: change.current_digest.clone(),
@@ -627,13 +604,27 @@ mod tests {
         deleted: Vec<ChangedCodeChunkV1>,
         reused: Vec<ChangedCodeChunkV1>,
     ) -> ChangedCodeChunkSetV1 {
+        let reused_pairs = reused
+            .into_iter()
+            .map(|change| {
+                (
+                    change.chunk_id,
+                    change
+                        .current_digest
+                        .expect("reused fixture carries a current digest"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let (reused_count, reused_digest) =
+            ChangedCodeChunkSetV1::seal_reused_partition(&reused_pairs).expect("reused seal");
         let mut changes = ChangedCodeChunkSetV1 {
             from_generation: Some(generation(1)),
             to_generation: generation(2),
             manifest_digest: manifest_digest('0'),
             added_or_changed,
             deleted,
-            reused,
+            reused_count,
+            reused_digest,
         };
         changes.manifest_digest = changes.compute_digest().expect("changeset digest");
         changes.validate().expect("canonical changeset");
@@ -704,14 +695,6 @@ mod tests {
                 current_chunk_digest: None,
                 operation: ProjectionOperationV1::Deleted,
                 outcome: ProjectionOutcomeV1::Applied,
-                output_digest: None,
-            },
-            ChunkProjectionDecisionV1 {
-                chunk_id: chunk("reused"),
-                prior_chunk_digest: Some(digest('f')),
-                current_chunk_digest: Some(digest('f')),
-                operation: ProjectionOperationV1::Reused,
-                outcome: ProjectionOutcomeV1::Reused,
                 output_digest: None,
             },
         ]
@@ -892,15 +875,6 @@ mod tests {
                 "updated"
             )))
         );
-        let mut wrong_reuse = mixed_decisions();
-        wrong_reuse[3].outcome = ProjectionOutcomeV1::Applied;
-        wrong_reuse[3].output_digest = Some(digest('7'));
-        assert_eq!(
-            build_batch_receipt(&request, &wrong_reuse),
-            Err(ProjectionReceiptErrorV1::InconsistentOperation(chunk(
-                "reused"
-            )))
-        );
         let mut wrong_digest = mixed_decisions();
         wrong_digest[0].current_chunk_digest = Some(digest('8'));
         assert_eq!(
@@ -998,39 +972,42 @@ mod tests {
         request
     }
 
-    fn reembed_decisions_for(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionDecisionV1> {
+    fn expanded_profile_decisions(
+        changes: &ChangedCodeChunkSetV1,
+    ) -> Vec<ChunkProjectionDecisionV1> {
         changes
-            .reused
+            .added_or_changed
             .iter()
             .map(|change| ChunkProjectionDecisionV1 {
                 chunk_id: change.chunk_id.clone(),
                 prior_chunk_digest: change.prior_digest.clone(),
                 current_chunk_digest: change.current_digest.clone(),
-                operation: ProjectionOperationV1::Updated,
+                operation: ProjectionOperationV1::Added,
                 outcome: ProjectionOutcomeV1::Applied,
-                output_digest: Some(digest('7')),
+                output_digest: change.current_digest.clone(),
             })
             .collect()
     }
 
     #[test]
-    fn profile_replay_requires_reembed_rows_and_zero_reused_count() {
+    fn profile_replay_arrives_pre_expanded_with_zero_reused_count() {
         let changes = changeset(
-            vec![],
-            vec![],
             vec![
                 ChangedCodeChunkV1 {
                     chunk_id: chunk("alpha"),
-                    prior_digest: Some(digest('a')),
+                    prior_digest: None,
                     current_digest: Some(digest('a')),
                 },
                 ChangedCodeChunkV1 {
                     chunk_id: chunk("beta"),
-                    prior_digest: Some(digest('b')),
+                    prior_digest: None,
                     current_digest: Some(digest('b')),
                 },
             ],
+            vec![],
+            vec![],
         );
+        assert_eq!(changes.reused_count, 0);
         let request = profile_replay_request(changes);
 
         assert_eq!(
@@ -1039,19 +1016,13 @@ mod tests {
                 "alpha"
             )))
         );
-        assert_eq!(
-            build_batch_receipt(&request, &decisions_for_noop(&request.changes)),
-            Err(ProjectionReceiptErrorV1::InconsistentOperation(chunk(
-                "alpha"
-            )))
-        );
 
-        let decisions = reembed_decisions_for(&request.changes);
-        let batch = build_batch_receipt(&request, &decisions).expect("reembed batch builds");
+        let decisions = expanded_profile_decisions(&request.changes);
+        let batch = build_batch_receipt(&request, &decisions).expect("expanded batch builds");
         assert_eq!(batch.reused_count, 0);
         assert_eq!(batch.receipts.len(), 2);
         assert!(batch.receipts.iter().all(|receipt| {
-            receipt.operation == ProjectionOperationV1::Updated
+            receipt.operation == ProjectionOperationV1::Added
                 && receipt.outcome == ProjectionOutcomeV1::Applied
         }));
         assert!(!batch_proves_zero_work(&batch));

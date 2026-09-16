@@ -94,18 +94,26 @@ async fn project_code_index_freshness(
             DashboardFreshnessV1::unknown(),
             payload,
         ),
-        Some(_) => DashboardEnvelopeV1::new(
-            scope_from_state(state),
-            DashboardDomainStateV1::Partial,
-            DashboardCoverageV1::partial(
-                1,
-                0,
-                "mounted_worktree",
-                vec!["scheduler freshness coverage is incomplete".to_owned()],
-            ),
-            DashboardFreshnessV1::unknown(),
-            payload,
-        ),
+        Some(worktree) => {
+            let omission = if worktree.staleness_state.as_deref() == Some("fresh") {
+                format!(
+                    "scheduler freshness is fresh but coverage is {}; complete coverage is required",
+                    worktree.coverage
+                )
+            } else {
+                format!(
+                    "scheduler freshness state is {}; only fresh serves as current",
+                    worktree.staleness_state.as_deref().unwrap_or("unreported")
+                )
+            };
+            DashboardEnvelopeV1::new(
+                scope_from_state(state),
+                DashboardDomainStateV1::Partial,
+                DashboardCoverageV1::partial(1, 0, "mounted_worktree", vec![omission]),
+                DashboardFreshnessV1::unknown(),
+                payload,
+            )
+        }
         None if authority_attached => DashboardEnvelopeV1::new(
             scope_from_state(state),
             DashboardDomainStateV1::Unknown,
@@ -199,5 +207,64 @@ mod tests {
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
         assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Absent);
+    }
+
+    #[tokio::test]
+    async fn complete_generation_reports_its_noncurrent_freshness_state() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        for staleness in ["stale", "verifying"] {
+            let (_project, mut state) = state_for_test().await;
+            state.code_index_freshness_reader = Some(Arc::new(move |root| {
+                Box::pin(async move {
+                    Some(CodeIndexWorktreeFreshnessV1 {
+                        worktree_root: root.display().to_string(),
+                        latest_generation_id: Some("generation.fixture".to_owned()),
+                        staleness_state: Some(staleness.to_owned()),
+                        coverage: "complete".to_owned(),
+                        hook_hint_count: Some(1),
+                        ..Default::default()
+                    })
+                })
+            }));
+
+            let Json(envelope) = freshness(State(state)).await;
+
+            assert_eq!(envelope.domain_state, DashboardDomainStateV1::Partial);
+            assert_eq!(envelope.payload.worktrees[0].coverage, "complete");
+            assert_eq!(
+                envelope.coverage.omission_reasons,
+                vec![format!(
+                    "scheduler freshness state is {staleness}; only fresh serves as current"
+                )]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_generation_reports_incomplete_coverage_without_noncurrent_guidance() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(|root| {
+            Box::pin(async move {
+                Some(CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: root.display().to_string(),
+                    latest_generation_id: Some("generation.fixture".to_owned()),
+                    staleness_state: Some("fresh".to_owned()),
+                    coverage: "partial_hook_hint_overflow".to_owned(),
+                    ..Default::default()
+                })
+            })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Partial);
+        assert_eq!(
+            envelope.coverage.omission_reasons,
+            vec![
+                "scheduler freshness is fresh but coverage is partial_hook_hint_overflow; complete coverage is required"
+                    .to_owned()
+            ]
+        );
     }
 }

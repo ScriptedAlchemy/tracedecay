@@ -80,6 +80,12 @@ impl CodeIndexSearchUnavailableReasonV1 {
     /// Whether the same request can succeed later without the caller changing
     /// it. The enum owns the answer so every surface that renders a lane
     /// failure reports one retry story.
+    ///
+    /// Clone-family MCP (`tracedecay_similar` / `tracedecay_redundancy`) used to
+    /// fork retryability behind opaque tokens such as
+    /// `verified-code-redundancy-unavailable`. That path is retired: both lanes
+    /// now map through these discriminants so future arms cannot re-fork the
+    /// wire.
     #[hotpath::skip]
     pub const fn is_retryable(self) -> bool {
         match self {

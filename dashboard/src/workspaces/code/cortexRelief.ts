@@ -280,21 +280,25 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
   for (const [depth, band] of byBand) {
     const inBand = [...band].sort((a, b) => a.cluster.order - b.cluster.order);
     let capacity = inBand.length;
-    let retained = 0;
-    for (const { cluster } of inBand) {
-      capacity = Math.min(capacity, maxRegionsWithoutOverlap(
+    const retained: Draft[] = [];
+    // A folded candidate must not reduce the space available to the kept prefix.
+    for (const draft of inBand) {
+      const nextCapacity = Math.min(capacity, maxRegionsWithoutOverlap(
         usableWidth,
-        [labelOf(cluster.directory)],
+        [labelOf(draft.cluster.directory)],
         [{
-          fileCount: cluster.file_count,
-          density: cluster.file_count > 0 ? cluster.internal_edges / cluster.file_count : 0,
+          fileCount: draft.cluster.file_count,
+          density: draft.cluster.file_count > 0
+            ? draft.cluster.internal_edges / draft.cluster.file_count
+            : 0,
         }],
       ));
-      if (retained + 1 > capacity) break;
-      retained += 1;
+      if (retained.length + 1 > nextCapacity) break;
+      retained.push(draft);
+      capacity = nextCapacity;
     }
-    readableByBand.set(depth, inBand.slice(0, retained));
-    readabilityFoldedRegions += inBand.length - retained;
+    readableByBand.set(depth, retained);
+    readabilityFoldedRegions += inBand.length - retained.length;
   }
   const { drawnByBand, capFoldedRegions } = applyGlobalDrawCap(readableByBand);
   const widestBand = [...drawnByBand.values()].reduce((max, band) => Math.max(max, band.length), 1);
@@ -527,13 +531,20 @@ export function foldNote(model: CortexModel): string {
   if (model.capFoldedRegions > 0) {
     bits.push(`${model.capFoldedRegions} at the ${MAX_DRAWN_REGIONS}-region cap`);
   }
+  if (model.unplacedRegions > 0) {
+    bits.push(`${model.unplacedRegions} without measured depth`);
+  }
   if (bits.length === 0) return `${model.foldedFiles.toLocaleString()} files, all in the table`;
   return `${bits.join(', ')}; all in the table`;
 }
 
 function foldTeach(model: CortexModel): string {
   const mass = `an aggregate surface: ${model.totalFiles.toLocaleString()} files cannot be drawn as bodies, so they are drawn as mass.`;
-  if (model.readabilityFoldedRegions === 0 && model.capFoldedRegions === 0) {
+  if (
+    model.readabilityFoldedRegions === 0 &&
+    model.capFoldedRegions === 0 &&
+    model.unplacedRegions === 0
+  ) {
     return `${mass} The whole clustering is drawn.`;
   }
   const bits: string[] = [];
@@ -547,6 +558,9 @@ function foldTeach(model: CortexModel): string {
       `${model.capFoldedRegions} folded by the ${MAX_DRAWN_REGIONS}-region drawing cap`,
     );
   }
+  if (model.unplacedRegions > 0) {
+    bits.push(`${model.unplacedRegions} not placed because no file carried measured depth`);
+  }
   return `${mass} ${bits.join('. ')}. Every folded region is in the table below.`;
 }
 
@@ -559,6 +573,9 @@ function foldDescription(model: CortexModel): string {
   }
   if (model.capFoldedRegions > 0) {
     bits.push(`${model.capFoldedRegions} folded by the ${MAX_DRAWN_REGIONS}-region drawing cap.`);
+  }
+  if (model.unplacedRegions > 0) {
+    bits.push(`${model.unplacedRegions} not placed because no file carried measured depth.`);
   }
   return bits.join(' ');
 }

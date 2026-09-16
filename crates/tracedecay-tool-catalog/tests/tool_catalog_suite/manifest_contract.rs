@@ -2,10 +2,10 @@ use crate::common;
 
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
-    CapabilityManifestInputV1, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy,
-    EffectClass, IdempotencyContract, LifecycleClass, PrivacyClass, ReceiptContract,
-    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1,
-    ScopeDimension, ScopeRequirement, TerminalState, TerminalStateContract,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
+    PrivacyClass, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, ScopeDimension, ScopeRequirement, TerminalState, TerminalStateContract,
 };
 
 use common::{capability_id, profile_id, read_manifest, schema, use_case_id};
@@ -125,9 +125,16 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
     assert_eq!(serialized["inverse"]["reason"], "no_shipped_inverse");
     assert_eq!(serialized["receipt"], "durable_effect");
 
+    let stage_hunks = capability_id("capability.git.stage-hunks");
     let mut falsely_cancelled = input.clone();
     falsely_cancelled.cancellation = CancellationContract::NotCancellable;
-    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(falsely_cancelled.clone()).is_err());
+    assert_eq!(
+        CapabilityManifestV1::new(falsely_cancelled.clone()),
+        Err(CatalogValidationError::InvalidCapability {
+            capability_id: stage_hunks.clone(),
+            reason: "the cancelled terminal must exactly match the cancellation contract",
+        })
+    );
     falsely_cancelled.terminal_states = TerminalStateContract::new(vec![
         TerminalState::Completed,
         TerminalState::TimedOut,
@@ -136,13 +143,40 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
         TerminalState::Partial,
     ])
     .unwrap();
-    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(falsely_cancelled).is_ok());
+    let accepted = CapabilityManifestV1::new(falsely_cancelled).unwrap();
+    assert_eq!(
+        *accepted.cancellation(),
+        CancellationContract::NotCancellable
+    );
+    assert_eq!(accepted.receipt(), ReceiptContract::DurableEffect);
+    assert!(
+        !accepted
+            .terminal_states()
+            .contains(TerminalState::Cancelled)
+    );
+    assert!(
+        accepted
+            .terminal_states()
+            .contains(TerminalState::EffectUnknown)
+    );
 
     let mut invalid = input.clone();
     invalid.receipt = ReceiptContract::Operation;
-    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(invalid).is_err());
+    assert_eq!(
+        CapabilityManifestV1::new(invalid),
+        Err(CatalogValidationError::InvalidCapability {
+            capability_id: stage_hunks.clone(),
+            reason: "effects require durable receipt, idempotency, revalidation, reconciliation, effect deadline behavior, and a valid effect cancellation contract",
+        })
+    );
 
     let mut missing_inverse_contract = input;
     missing_inverse_contract.inverse = tracedecay_tool_catalog::InverseContract::NotApplicable;
-    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(missing_inverse_contract).is_err());
+    assert_eq!(
+        CapabilityManifestV1::new(missing_inverse_contract),
+        Err(CatalogValidationError::InvalidCapability {
+            capability_id: stage_hunks,
+            reason: "effects must declare inverse availability",
+        })
+    );
 }
