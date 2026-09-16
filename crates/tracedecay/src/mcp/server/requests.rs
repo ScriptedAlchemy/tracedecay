@@ -1615,15 +1615,16 @@ impl McpServer {
         {
             Some(Ok(routed)) => routed,
             Some(Err(error)) => return tool_error_response(id, &tool_name, &error),
+            // Cancel won before route selection installed dispatch authority.
+            // That is transport abandonment, not an admitted tool cancel:
+            // emit the same -32800 / request_cancelled terminal the RMCP and
+            // broker transports use when no application request exists yet.
             None => {
-                return tool_error_response(
+                return JsonRpcResponse::error_with_data(
                     id,
-                    &tool_name,
-                    &dispatch_cancelled_error(
-                        &tool_name,
-                        DispatchSettlement::NotStarted,
-                        tool_carries_effect(&tool_name),
-                    ),
+                    ErrorCode::RequestCancelled,
+                    "MCP request cancelled".to_owned(),
+                    Some(json!({"reason_code": "request_cancelled"})),
                 );
             }
         };
