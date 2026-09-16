@@ -4408,12 +4408,6 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
         carried.len() >= 2,
         "the carried file needs several clone bodies to pin their order: {carried:?}"
     );
-    let parent_carried = sealed_clone_bindings(&parent);
-    assert_eq!(
-        parent_carried.get("src/carried.rs"),
-        Some(carried),
-        "a carried-forward file keeps its parent clone binding in memory"
-    );
 
     let envelope: serde_json::Value =
         serde_json::from_slice(&child_manifest).expect("child manifest JSON");
@@ -4467,6 +4461,14 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     assert_eq!(
         restored, expected,
         "sealed decode must yield the clone binding the in-memory generation published"
+    );
+    // Segment reuse is sound only because a carried-forward file's clone
+    // binding is generation-independent: the parent's segment bytes restore
+    // under the child's manifest to exactly the child's in-memory binding.
+    assert_eq!(
+        sealed_clone_bindings(&parent).get("src/carried.rs"),
+        Some(carried),
+        "a carried-forward file keeps its parent clone binding across generations"
     );
 }
 
