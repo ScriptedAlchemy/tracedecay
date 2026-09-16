@@ -215,10 +215,12 @@ const STORE_SIZED_ROWS: i64 = 3_000_000;
 /// The same move is driven both ways over one fixture. As one statement the
 /// limit must refuse it, which is what makes chunking a migration load
 /// bearing rather than decorative. At the chunk size a migration actually
-/// writes, the same move must commit with the limit far from reach — that
-/// headroom is what lets a migration keep the limit as its safety bound
-/// instead of asking for a longer one. Whether the chunk loop then finishes a
-/// whole table is settled where the migrations live.
+/// writes, that same statement must finish with the limit far from reach —
+/// the progress guard bounds statement work, not the later commit/fsync —
+/// and the chunk must still commit so the durable move is proven. Headroom
+/// is timed on the statement alone so an unpaid WAL from the store-sized
+/// seed cannot masquerade as chunk cost. Whether the chunk loop then
+/// finishes a whole table is settled where the migrations live.
 #[test]
 fn a_store_sized_statement_is_refused_and_a_migration_chunk_has_headroom() {
     const MOVE: &str = "INSERT OR IGNORE INTO moved (key, mutation_digest, partition_digest)
@@ -276,8 +278,8 @@ fn a_store_sized_statement_is_refused_and_a_migration_chunk_has_headroom() {
             )],
         ))
         .expect("a bounded chunk of the same move fits inside one execution");
-    chunk.commit().unwrap();
     let chunk_took = started.elapsed();
+    chunk.commit().unwrap();
     assert_eq!(
         moved_rows(&channel),
         crate::repository::RETIRED_MUTATION_COPY_CHUNK_ROWS

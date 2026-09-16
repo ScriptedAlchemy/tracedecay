@@ -1160,7 +1160,7 @@ mod cancellable_queue_tests {
     }
 
     #[tokio::test]
-    async fn cancellation_during_route_resolution_reaches_selected_live_target() {
+    async fn cancellation_during_route_resolution_abandons_before_dispatch() {
         let _fixture_guard = DELAYED_ROUTE_FIXTURE_LOCK.lock().await;
         let isolation = tempfile::TempDir::new().expect("route cancellation isolation");
         let active_root = isolation.path().join("active");
@@ -1196,18 +1196,24 @@ mod cancellable_queue_tests {
             .expect("target project identity");
 
         let route_entered = Arc::new(tokio::sync::Notify::new());
-        let release_route = Arc::new(tokio::sync::Notify::new());
+        // Held open forever: cancel must abandon routing before this Notify
+        // ever fires, proving the selected server was never installed.
+        let _stalled_route = Arc::new(tokio::sync::Notify::new());
+        let route_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resolver_target = Arc::clone(&target);
         let resolver_entered = Arc::clone(&route_entered);
-        let resolver_release = Arc::clone(&release_route);
+        let resolver_stalled = Arc::clone(&_stalled_route);
+        let resolver_completed = Arc::clone(&route_completed);
         let resolver: super::super::RetainedProjectServerResolver =
             super::super::install_retained_project_server_resolver(move |_request| {
                 let target = Arc::clone(&resolver_target);
                 let entered = Arc::clone(&resolver_entered);
-                let release = Arc::clone(&resolver_release);
+                let stalled = Arc::clone(&resolver_stalled);
+                let completed = Arc::clone(&resolver_completed);
                 Box::pin(async move {
                     entered.notify_one();
-                    release.notified().await;
+                    stalled.notified().await;
+                    completed.store(true, Ordering::Release);
                     Ok(Some(target))
                 })
             });
@@ -1267,42 +1273,50 @@ mod cancellable_queue_tests {
             .expect("cancel selected request during route resolution");
         wait_for_transport_reads(&transport_reads, 2).await;
 
-        // The connection's original server may retire while the route is
-        // unresolved. It must not reject or authorize the selected target.
-        caller.project_server_response_lifecycle().revoke();
-        release_route.notify_one();
-
+        // Cancel abandons routing before the stalled resolver finishes and
+        // before install_selected_request_server. The response must complete
+        // with the transport cancel terminal and caller-side accounting.
         let response_line =
             tokio::time::timeout(std::time::Duration::from_secs(5), responses.recv())
                 .await
-                .expect("selected cancellation response timeout")
-                .expect("selected cancellation response");
+                .expect("route-abandonment cancellation response timeout")
+                .expect("route-abandonment cancellation response");
+        assert!(
+            !route_completed.load(Ordering::Acquire),
+            "cancel must abandon routing before the stalled resolver finishes"
+        );
         let response: Value =
-            serde_json::from_str(response_line.trim()).expect("selected cancellation JSON");
+            serde_json::from_str(response_line.trim()).expect("route-abandonment cancellation JSON");
         assert_eq!(response["id"], serde_json::json!(41));
         assert_eq!(
+            response["error"]["code"],
+            serde_json::json!(-32800),
+            "pre-dispatch route abandonment must use the transport cancel terminal: {response}"
+        );
+        assert_eq!(
             response["error"]["data"]["reason_code"],
-            serde_json::json!("tool_dispatch_cancelled"),
-            "cancellation captured before registration must reach selected target: {response}"
+            serde_json::json!("request_cancelled"),
+            "pre-dispatch route abandonment must not pretend an admitted tool cancel: {response}"
         );
         assert_eq!(
             caller.stats.total_requests.load(Ordering::Relaxed),
-            0,
-            "caller must not account a request owned by the selected target"
+            1,
+            "caller owns accounting when no selected dispatch server was installed"
         );
+        assert_eq!(caller.stats.errors.load(Ordering::Relaxed), 1);
         assert_eq!(
             target.stats.total_requests.load(Ordering::Relaxed),
-            1,
-            "selected target must own request/error accounting"
+            0,
+            "target must stay untouched when routing never installed it"
         );
-        assert_eq!(target.stats.errors.load(Ordering::Relaxed), 1);
+        assert_eq!(target.stats.errors.load(Ordering::Relaxed), 0);
 
         drop(sender);
         tokio::time::timeout(std::time::Duration::from_secs(5), serving)
             .await
-            .expect("selected cancellation connection close timeout")
-            .expect("join selected cancellation connection")
-            .expect("serve selected cancellation connection");
+            .expect("route-abandonment connection close timeout")
+            .expect("join route-abandonment connection")
+            .expect("serve route-abandonment connection");
         harness.shutdown().await;
     }
 }
