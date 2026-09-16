@@ -74,6 +74,50 @@ pub struct GenerationChunkManifestV1 {
 }
 
 impl GenerationChunkManifestV1 {
+    /// Construct a canonical generation chunk manifest from file pages that
+    /// have already been validated at extract/rematerialize/share time.
+    ///
+    /// Skips the corpus-wide `file.validate()` fan-out. File-page
+    /// `generation_id` is extraction provenance and may predate this publish.
+    pub fn from_validated_files(
+        generation_id: CodeGenerationId,
+        files: Vec<CodeFileChunksV1>,
+    ) -> Result<Self, ChunkIncrementErrorV1> {
+        generation_id
+            .validate()
+            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+
+        let capacity = files.iter().map(|file| file.chunks.len()).sum();
+        let mut chunks = Vec::with_capacity(capacity);
+        let mut file_occurrences = BTreeSet::new();
+        for file in files {
+            file.document
+                .generation_id
+                .validate()
+                .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+            if !file_occurrences.insert(file.document.file_occurrence_id.clone()) {
+                return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
+                    file.document.file_occurrence_id,
+                ));
+            }
+            chunks.extend(file.chunks);
+        }
+        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))
+            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        if let Some(duplicate) = chunks
+            .windows(2)
+            .find(|pair| pair[0].id == pair[1].id)
+            .map(|pair| pair[0].id.clone())
+        {
+            return Err(ChunkIncrementErrorV1::DuplicateChunk(duplicate));
+        }
+
+        Ok(Self {
+            generation_id,
+            chunks,
+        })
+    }
+
     /// Construct a canonical generation chunk manifest.
     pub fn new(
         generation_id: CodeGenerationId,
@@ -103,36 +147,7 @@ impl GenerationChunkManifestV1 {
         .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
         validated.into_iter().collect::<Result<(), _>>()?;
 
-        let capacity = files.iter().map(|file| file.chunks.len()).sum();
-        let mut chunks = Vec::with_capacity(capacity);
-        let mut file_occurrences = BTreeSet::new();
-        for file in files {
-            if file.document.generation_id != generation_id {
-                return Err(ChunkIncrementErrorV1::MixedGeneration);
-            }
-            if !file_occurrences.insert(file.document.file_occurrence_id.clone()) {
-                return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
-                    file.document.file_occurrence_id,
-                ));
-            }
-            chunks.extend(file.chunks);
-        }
-        // Typed identities are unique (checked below), so the parallel sort
-        // yields exactly the order the serial sort did.
-        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
-        if let Some(duplicate) = chunks
-            .windows(2)
-            .find(|pair| pair[0].id == pair[1].id)
-            .map(|pair| pair[0].id.clone())
-        {
-            return Err(ChunkIncrementErrorV1::DuplicateChunk(duplicate));
-        }
-
-        Ok(Self {
-            generation_id,
-            chunks,
-        })
+        Self::from_validated_files(generation_id, files)
     }
 
     /// The generation all chunks are anchored to.
