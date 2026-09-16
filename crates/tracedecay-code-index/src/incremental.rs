@@ -79,7 +79,7 @@ impl GenerationChunkManifestV1 {
     ///
     /// Skips the corpus-wide `file.validate()` fan-out. File-page
     /// `generation_id` is extraction provenance and may predate this publish.
-    pub fn from_validated_files(
+    pub(crate) fn from_validated_files(
         generation_id: CodeGenerationId,
         files: Vec<CodeFileChunksV1>,
     ) -> Result<Self, ChunkIncrementErrorV1> {
