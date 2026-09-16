@@ -423,7 +423,51 @@ pub struct ValidatedProfileShard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileShardValidationError {
     Unavailable { path: PathBuf },
-    NonCanonical { reason: String },
+    NonCanonical {
+        reason: ProfileShardNonCanonicalReasonV1,
+    },
+}
+
+/// Closed set of profile-shard layout / manifest violations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileShardNonCanonicalReasonV1 {
+    StoreRootOutsideExpected,
+    SessionsDbNotSqlite,
+    ArtifactNotRegularDirectory,
+    ArtifactNotRegularFile,
+    ManifestInvalid,
+    ManifestSchemaMismatch,
+    ManifestProjectIdMismatch,
+    ManifestStoreKindMismatch,
+    ManifestStorageModeMismatch,
+    ManifestSessionsDbPathMismatch,
+    ManifestDataRootUnavailable,
+    ManifestDataRootMismatch,
+}
+
+impl ProfileShardNonCanonicalReasonV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StoreRootOutsideExpected => "store_root_outside_expected",
+            Self::SessionsDbNotSqlite => "sessions_db_not_sqlite",
+            Self::ArtifactNotRegularDirectory => "artifact_not_regular_directory",
+            Self::ArtifactNotRegularFile => "artifact_not_regular_file",
+            Self::ManifestInvalid => "manifest_invalid",
+            Self::ManifestSchemaMismatch => "manifest_schema_mismatch",
+            Self::ManifestProjectIdMismatch => "manifest_project_id_mismatch",
+            Self::ManifestStoreKindMismatch => "manifest_store_kind_mismatch",
+            Self::ManifestStorageModeMismatch => "manifest_storage_mode_mismatch",
+            Self::ManifestSessionsDbPathMismatch => "manifest_sessions_db_path_mismatch",
+            Self::ManifestDataRootUnavailable => "manifest_data_root_unavailable",
+            Self::ManifestDataRootMismatch => "manifest_data_root_mismatch",
+        }
+    }
+}
+
+impl std::fmt::Display for ProfileShardNonCanonicalReasonV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 pub struct PrivateStoreIo;

@@ -22,11 +22,10 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CodeSearchChunkV1, ComplexityAnalysisV1, ContentDigest, Edge, EdgeAuthorityV1, EdgeKind,
     ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest,
-    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, ManifestDigest, Node, NodeKind,
-    PolicyRevisionId, RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef,
-    ValidatedCodeFileV1, canonical_sha256, classify_technical_token, split_subtokens,
-    technical_tokens,
+    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, Node, NodeKind, PolicyRevisionId,
+    RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+    SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef, ValidatedCodeFileV1,
+    canonical_sha256, classify_technical_token, split_subtokens, technical_tokens,
 };
 
 use super::{
@@ -77,19 +76,6 @@ pub struct CodeSearchDocumentV1 {
     pub chunk_ids: Vec<CodeSearchChunkId>,
 }
 
-/// One out-of-order clone-body pair observed during artifact validation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NonCanonicalCloneBodyOrderV1 {
-    pub path: String,
-    pub file_occurrence_id: FileOccurrenceId,
-    pub left_payload_digest: ManifestDigest,
-    pub left_symbol_occurrence_id: SymbolOccurrenceId,
-    pub left_bound_to_symbol: bool,
-    pub right_payload_digest: ManifestDigest,
-    pub right_symbol_occurrence_id: SymbolOccurrenceId,
-    pub right_bound_to_symbol: bool,
-}
-
 /// Chunker failures. Partial coverage is evidence, not an error; errors are
 /// reserved for contract violations.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -101,11 +87,7 @@ pub enum ChunkingFailureV1 {
     #[error("chunking was cancelled")]
     Cancelled,
     #[error("chunk identity inputs are not canonical: {0}")]
-    NonCanonicalIdentity(String),
-    /// Boxed: the detail is several identities wide and this is the cold
-    /// contract-violation path, so it must not size every chunking `Result`.
-    #[error("clone body evidence is not in strict symbol-occurrence order")]
-    NonCanonicalCloneBodyOrder(Box<NonCanonicalCloneBodyOrderV1>),
+    NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1),
 }
 
 /// The deterministic chunker contract (Plan 25: `src/code_index/chunks.rs`
@@ -247,19 +229,15 @@ where
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().try_for_each(&operation);
     }
-    // Leaves are admitted one unit at a time on whichever worker runs them,
-    // so the caller's own unit must not be held across the join.
-    let failure = crate::parallelism::with_yielded_background_cpu_permits(|| {
-        chunks
-            .par_iter()
-            .enumerate()
-            .filter_map(|(index, chunk)| {
-                admit(&mut || operation(chunk))
-                    .err()
-                    .map(|error| (index, error))
-            })
-            .min_by_key(|(index, _)| *index)
-    });
+    let failure = chunks
+        .par_iter()
+        .enumerate()
+        .filter_map(|(index, chunk)| {
+            admit(&mut || operation(chunk))
+                .err()
+                .map(|error| (index, error))
+        })
+        .min_by_key(|(index, _)| *index);
     match failure {
         Some((_, error)) => Err(error),
         None => Ok(()),
@@ -315,11 +293,9 @@ impl ExactExtractionAuthorityV1 {
     fn validate_chunk(&self, chunk: &Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> {
         chunk
             .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
         let mismatch = || {
-            ChunkingFailureV1::NonCanonicalIdentity(
-                "chunk does not match parser-backed exact extraction authority".to_owned(),
-            )
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityMismatch))
         };
         let minted = self.chunk_digests.get(&chunk.id).ok_or_else(mismatch)?;
         if Arc::ptr_eq(&minted.minted_row, chunk) {
@@ -338,9 +314,7 @@ impl ExactExtractionAuthorityV1 {
         chunks: &[Arc<CodeSearchChunkV1>],
     ) -> Result<(), ChunkingFailureV1> {
         if chunks.len() != self.chunk_digests.len() {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "chunk set does not match parser-backed exact extraction authority".to_owned(),
-            ));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthoritySetMismatch)));
         }
         let mut seen = BTreeSet::new();
         let repeated_at = chunks
@@ -355,9 +329,7 @@ impl ExactExtractionAuthorityV1 {
             |chunk| self.validate_chunk(chunk),
         )?;
         if repeated_at < chunks.len() {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "chunk set repeats parser-backed exact extraction identity".to_owned(),
-            ));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityDuplicateIdentity)));
         }
         Ok(())
     }
@@ -377,12 +349,10 @@ impl ExactExtractionAuthorityV1 {
         if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
             return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
         }
-        let admitted = crate::parallelism::with_yielded_background_cpu_permits(|| {
-            chunks
-                .into_par_iter()
-                .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
-                .collect::<Vec<_>>()
-        });
+        let admitted = chunks
+            .into_par_iter()
+            .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
+            .collect::<Vec<_>>();
         admitted.into_iter().collect()
     }
 
@@ -406,9 +376,7 @@ impl ExactExtractionAuthorityV1 {
                     prior.id != current.id || prior.content_digest != current.content_digest
                 })
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "carried exact chunks changed logical identity or content".to_owned(),
-            ));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityCarryChanged)));
         }
         self.validate_all(&prior.chunks)?;
         Ok(Self::mint(&current.chunks))
@@ -422,15 +390,15 @@ impl CodeFileChunksV1 {
         self.document
             .generation_id
             .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
         self.document
             .file_occurrence_id
             .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
         self.document
             .content_digest
             .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
 
         if self.document.chunk_ids.len() != self.chunks.len()
             || self
@@ -440,9 +408,7 @@ impl CodeFileChunksV1 {
                 .zip(&self.chunks)
                 .any(|(document_id, chunk)| document_id != &chunk.id)
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "document chunk membership does not match canonical chunk order".to_owned(),
-            ));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::DocumentChunkMembershipMismatch)));
         }
         try_for_each_chunk_ordered(
             |unit| crate::parallelism::with_background_cpu_permit(unit),
@@ -455,7 +421,7 @@ impl CodeFileChunksV1 {
                 }
                 chunk
                     .validate()
-                    .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
+                    .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))
             },
         )
     }
@@ -489,7 +455,9 @@ impl CodeFileChunksV1 {
                 let current_occurrence =
                     occurrences.get(&prior_occurrence).cloned().ok_or_else(|| {
                         ChunkingFailureV1::NonCanonicalIdentity(
-                            "carried chunk occurrence has no logical symbol binding".to_owned(),
+                            crate::noncanonical::NonCanonicalCauseV1::new(
+                                crate::noncanonical::NonCanonicalReasonCodeV1::CarriedChunkMissingSymbol,
+                            ),
                         )
                     })?;
                 chunk.anchor.symbol_occurrence_id = Some(current_occurrence.clone());
@@ -497,7 +465,7 @@ impl CodeFileChunksV1 {
                     if term.kind() == ExactTechnicalTermKindV1::WholeSymbol {
                         term.rebind_symbol_occurrence(current_occurrence.clone())
                             .map_err(|error| {
-                                ChunkingFailureV1::NonCanonicalIdentity(error.to_string())
+                                ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error))
                             })?;
                     }
                 }
@@ -726,7 +694,7 @@ impl DeterministicCodeChunker {
         };
         let digest = canonical_digest(CHUNK_IDENTITY_SEPARATOR, &identity)?;
         CodeSearchChunkId::new(format!("chunk.v1.{digest}"))
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))
     }
 }
 
@@ -752,7 +720,7 @@ fn canonical_digest<T: serde::Serialize>(
 ) -> Result<String, ChunkingFailureV1> {
     canonical_sha256(&(separator, payload))
         .map(|digest| digest.as_str().to_owned())
-        .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
+        .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))
 }
 
 pub(crate) fn symbol_occurrence_id(
@@ -765,7 +733,7 @@ pub(crate) fn symbol_occurrence_id(
     )
     .and_then(|digest| {
         SymbolOccurrenceId::new(format!("symbol.v1.{digest}"))
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
+            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))
     })
 }
 
@@ -825,9 +793,7 @@ fn bind_clone_bodies(
             .insert(symbol.node_id.as_str(), &symbol.occurrence)
             .is_some()
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "one parser node id names multiple symbol occurrences".to_owned(),
-            ));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::DuplicateParserNodeId)));
         }
     }
     let mut bound = Vec::with_capacity(extracted.len());
@@ -835,13 +801,16 @@ fn bind_clone_bodies(
         let symbol_occurrence_id = occurrences
             .get(body.symbol_occurrence_id.as_str())
             .ok_or_else(|| {
-                ChunkingFailureV1::NonCanonicalIdentity(
-                    "clone body is not bound to an indexed symbol".to_owned(),
-                )
+                ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyNotBoundToIndexedSymbol))
             })?;
         let payload = clone_build
             .payload(body)
-            .map_err(ChunkingFailureV1::NonCanonicalIdentity)?;
+            .map_err(|error| {
+                ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_detail(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyPayloadNotCanonical,
+                    error,
+                ))
+            })?;
         bound.push(CodeIndexCloneBodyV1 {
             occurrence: CloneBodyOccurrenceV1 {
                 project_id: authority.project_id.clone(),
@@ -1258,9 +1227,15 @@ impl DeterministicCodeChunker {
         clone_build: &mut ClonePayloadBuildContextV1<'_>,
     ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
         let full_source = std::str::from_utf8(&file.sanitized_bytes).map_err(|error| {
-            ChunkingFailureV1::NonCanonicalIdentity(format!(
-                "sanitized bytes are not valid UTF-8: {error}"
-            ))
+            ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::SanitizedBytesNotUtf8,
+                )
+                .with(
+                    crate::noncanonical::NonCanonicalDetailKeyV1::Error,
+                    error.to_string(),
+                ),
+            )
         })?;
         let full_len = full_source.len() as u64;
         let mut parsed_prefix_end = 0;
@@ -1276,14 +1251,18 @@ impl DeterministicCodeChunker {
             }
         }
         let parsed_prefix_end = usize::try_from(parsed_prefix_end).map_err(|error| {
-            ChunkingFailureV1::NonCanonicalIdentity(format!(
-                "parsed prefix does not fit this host: {error}"
-            ))
+            ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ParsedPrefixHostFit,
+                )
+                .with(
+                    crate::noncanonical::NonCanonicalDetailKeyV1::Error,
+                    error.to_string(),
+                ),
+            )
         })?;
         if !full_source.is_char_boundary(parsed_prefix_end) {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "parsed prefix is not a UTF-8 boundary".to_owned(),
-            ));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ParsedPrefixNotUtf8Boundary)));
         }
         let source = &full_source[..parsed_prefix_end];
         let mut reparsed;
@@ -1566,25 +1545,40 @@ impl DeterministicCodeChunker {
         let mut symbols = Vec::with_capacity(rows.len());
         for row in rows {
             let span = published_spans.get(&row.occurrence).ok_or_else(|| {
-                ChunkingFailureV1::NonCanonicalIdentity(format!(
-                    "symbol {} has no published source span",
-                    row.qualified_name
-                ))
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::SymbolMissingPublishedSpan,
+                    )
+                    .with(
+                        crate::noncanonical::NonCanonicalDetailKeyV1::QualifiedName,
+                        row.qualified_name.clone(),
+                    ),
+                )
             })?;
             let start = usize::try_from(span.start_byte).map_err(|error| {
-                ChunkingFailureV1::NonCanonicalIdentity(format!(
-                    "symbol start offset does not fit this host: {error}"
-                ))
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::SymbolStartHostFit,
+                    )
+                    .with(
+                        crate::noncanonical::NonCanonicalDetailKeyV1::Error,
+                        error.to_string(),
+                    ),
+                )
             })?;
             let end = usize::try_from(span.end_byte).map_err(|error| {
-                ChunkingFailureV1::NonCanonicalIdentity(format!(
-                    "symbol end offset does not fit this host: {error}"
-                ))
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::SymbolEndHostFit,
+                    )
+                    .with(
+                        crate::noncanonical::NonCanonicalDetailKeyV1::Error,
+                        error.to_string(),
+                    ),
+                )
             })?;
             let text = source.get(start..end).ok_or_else(|| {
-                ChunkingFailureV1::NonCanonicalIdentity(
-                    "symbol span is not a valid UTF-8 source range".to_owned(),
-                )
+                ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::SymbolSpanNotUtf8))
             })?;
             symbols.push(LineageSymbolRecordV1 {
                 occurrence: row.occurrence.clone(),
@@ -1873,7 +1867,7 @@ impl DeterministicCodeChunker {
                     exact_terms,
                     subtokens,
                     sanitized_text: BoundedSanitizedText::new(text).map_err(|error| {
-                        ChunkingFailureV1::NonCanonicalIdentity(error.to_string())
+                        ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error))
                     })?,
                 });
             }
@@ -2591,14 +2585,13 @@ mod tests {
     use super::*;
     use crate::extract::ExtractionCoverageV1;
     use tracedecay_domain::{
-        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeIndexWorkerSelectionV1,
-        CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest,
-        FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest,
-        PolicyRevisionId, ProjectId, SanitizationReceiptId, SanitizedCodeFileV1,
-        SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-        SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
+        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest, FileOccurrenceId,
+        GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId,
+        ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
+        SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
-    use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 
     use crate::extract::{
         ExtractionCancellation, LanguageExtractor as CanonicalLanguageExtractor, NeverCancelled,
@@ -3030,8 +3023,9 @@ mod tests {
         forged.subtokens.push("forged".to_owned());
         assert!(matches!(
             authority.admit(Arc::new(forged)),
-            Err(ChunkingFailureV1::NonCanonicalIdentity(message))
-                if message.contains("does not match parser-backed exact extraction authority")
+            Err(ChunkingFailureV1::NonCanonicalIdentity(cause))
+                if cause.reason_code()
+                    == crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityMismatch
         ));
 
         let mut unknown = (*chunks.chunks[5]).clone();

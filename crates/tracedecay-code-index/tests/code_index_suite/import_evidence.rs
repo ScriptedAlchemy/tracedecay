@@ -544,9 +544,7 @@ fn sealed_import_generation_rejects_semantic_tampering_after_outer_digest_recomp
         .expect("binding-name tamper remains structurally canonical");
     let error = resealed_import_payload_error(envelope, "binding-name tamper");
     assert!(
-        error
-            .to_string()
-            .contains("import evidence does not match parser-backed extraction rows"),
+        error.to_string().contains("import_authority_mismatch"),
         "semantic tamper reached the wrong authority rejection: {error}"
     );
 }
@@ -568,9 +566,7 @@ fn sealed_import_generation_rejects_semantic_tampering_after_import_and_outer_di
         "binding-name tamper with recomputed import-row digest",
     );
     assert!(
-        error
-            .to_string()
-            .contains("import evidence does not match parser-backed extraction rows"),
+        error.to_string().contains("import_authority_mismatch"),
         "self-consistent import forgery reached the wrong authority rejection: {error}"
     );
 }
