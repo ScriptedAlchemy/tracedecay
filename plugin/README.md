@@ -20,8 +20,8 @@ key as `graph` (see `.mcp.json`) so those hosts render `plugin tracedecay graph`
 / `graph:…` instead of the redundant `tracedecay tracedecay`. Cursor uses the
 server key `tracedecay` in `mcp-cursor.json` because Cursor Settings surfaces
 that key literally (`plugin-tracedecay-graph` looked like a bare "graph"
-entry). Kimi Code also uses `tracedecay`, embedded inline in
-`.kimi-plugin/plugin.json`. The individual tool names keep their
+entry). Kimi Code also uses `tracedecay`, registered in session/user
+`mcp.json` (not the plugin manifest). The individual tool names keep their
 `tracedecay_` prefix (they are stable identifiers referenced by skills, docs,
 and analytics), and non-plugin/direct installs still register the server under
 the `tracedecay` key (the `mcp__tracedecay__*` namespace). Skills are
@@ -48,8 +48,8 @@ never a doubled `tracedecay`.
 - `.mcp.json`: shared Claude/Codex MCP config. Codex rewrites args/env by
   install scope; Claude rewrites the command to the resolved binary path.
 - `mcp-cursor.json`: Cursor MCP config, deployed as `mcp.json`.
-- `.kimi-plugin/plugin.json`: Kimi Code manifest. It embeds
-  `mcpServers.tracedecay` inline, so there is no separate Kimi MCP config file.
+- `.kimi-plugin/plugin.json`: Kimi Code manifest (skills, commands, hooks).
+  MCP is registered in Kimi session/user `mcp.json`, not the plugin manifest.
 - `opencode/`: OpenCode native plugin (`tracedecay.ts`), MCP companion
   (`tracedecay-mcp.ts`), and registration JSON (`opencode.registration.json`).
   OpenCode has no `plugin.json`; the host discovers the TypeScript module.

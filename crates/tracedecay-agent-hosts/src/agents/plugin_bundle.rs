@@ -23,9 +23,9 @@
 //! - `plugin/.claude-plugin/{plugin,marketplace}.json`,
 //!   `plugin/.cursor-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`,
 //!   `plugin/.kimi-plugin/plugin.json` — host manifests (deploy to the same
-//!   dot-dir path). Kimi's manifest also carries its MCP server and hooks
-//!   inline (`mcpServers.tracedecay`, `PostToolUse`/`Stop`), so there is no
-//!   separate Kimi MCP or hooks file.
+//!   dot-dir path). Kimi's manifest carries hooks inline (`PostToolUse`/
+//!   `Stop`) and omits MCP: the installer registers `mcpServers.tracedecay`
+//!   in Kimi's session/user `mcp.json` so the host launches from the workspace.
 //! - `plugin/opencode/{tracedecay.ts,tracedecay-mcp.ts,opencode.registration.json}`
 //!   — OpenCode native plugin, MCP companion, and MCP/LSP registration.
 //!   OpenCode has no `plugin.json`.
@@ -69,8 +69,8 @@ pub(crate) fn stamp_manifest_version_with(
 ///   rather than the redundant `tracedecay tracedecay`.
 /// - Cursor uses `tracedecay` because Settings surfaces the MCP server key
 ///   literally (`plugin-tracedecay-graph` looked like a bare "graph" entry).
-/// - Kimi uses `tracedecay` and embeds `mcpServers` inline in its manifest,
-///   so the installer rewrites the command on the manifest itself.
+/// - Kimi uses `tracedecay` in session/user `mcp.json` (not the plugin
+///   manifest), so the installer rewrites that external registration.
 pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
     let servers = mcp
@@ -302,8 +302,8 @@ pub const CODEX_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("hooks/hooks.json", "hooks/hooks-codex.json"),
 ];
 
-/// Kimi manifest + README. The manifest embeds `mcpServers.tracedecay`
-/// inline, so Kimi needs no separate MCP config file.
+/// Kimi manifest + README. Hooks live inline in the manifest; MCP is
+/// registered in Kimi session/user `mcp.json`, not the plugin package.
 pub const KIMI_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!(".kimi-plugin/plugin.json", ".kimi-plugin/plugin.json"),
     plugin_file!("README.md", "README-kimi.md"),
