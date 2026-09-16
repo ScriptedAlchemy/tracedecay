@@ -478,7 +478,6 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     /// Test-only: observes each batched `segments_root` directory fsync so a
     /// test can assert a single publish syncs the directory once regardless
     /// of how many new file segments it wrote.
-    /// CI retrigger marker (no behavior).
     #[cfg(test)]
     segments_dir_sync_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Last generation handed to `publish_atomically`. A transient store
@@ -2630,6 +2629,20 @@ impl CodeChunkProjectionSink for DaemonProjectionSinkV1 {
                     current_chunk_digest: None,
                     operation: ProjectionOperationV1::Deleted,
                     outcome: ProjectionOutcomeV1::Applied,
+                    output_digest: None,
+                }),
+        );
+        decisions.extend(
+            request
+                .changes
+                .reused
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: change.current_digest.clone(),
+                    operation: ProjectionOperationV1::Reused,
+                    outcome: ProjectionOutcomeV1::Reused,
                     output_digest: None,
                 }),
         );

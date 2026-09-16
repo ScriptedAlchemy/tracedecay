@@ -353,3 +353,37 @@ fn duplicate_file_occurrences_are_rejected_before_manifest_flattening() {
         )))
     );
 }
+
+#[test]
+fn standalone_pool_failure_is_parallelism_not_identity_validation() {
+    struct ClearForce;
+    impl Drop for ClearForce {
+        fn drop(&mut self) {
+            tracedecay_code_index::parallelism::force_install_failure_for_test(false);
+        }
+    }
+    let _clear = ClearForce;
+    tracedecay_code_index::parallelism::force_install_failure_for_test(true);
+
+    let expected_generation = generation(2);
+    let file = baseline_file(&expected_generation, "file.ok", "src/lib.rs");
+    let err = GenerationChunkManifestV1::new(expected_generation, vec![file]).unwrap_err();
+
+    match err {
+        ChunkIncrementErrorV1::Parallelism(
+            tracedecay_code_index::parallelism::CodeIndexParallelismErrorV1::PoolBuild { message },
+        ) => {
+            assert!(
+                message.contains("forced"),
+                "expected forced pool failure, got {message}"
+            );
+        }
+        ChunkIncrementErrorV1::NonCanonical(cause) => {
+            panic!(
+                "operational pool failure must not be NonCanonical ({})",
+                cause.reason_code()
+            );
+        }
+        other => panic!("unexpected increment error: {other}"),
+    }
+}

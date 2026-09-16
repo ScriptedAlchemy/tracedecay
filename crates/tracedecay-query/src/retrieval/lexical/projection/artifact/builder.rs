@@ -24,7 +24,8 @@ use tracedecay_code_index::production::{
     VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_domain::{
-    CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactTechnicalTermV1, ManifestDigest,
+    CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactTechnicalTermV1, FileOccurrenceId,
+    ManifestDigest,
 };
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_private_fs::{create_private_file_retained, open_private_file};
@@ -2455,8 +2456,7 @@ fn validated_fixed_ledger_charge(
     let serialized_bytes = metadata_serialized_upper_bound(metadata);
     let fixed = ARTIFACT_SQLITE_CACHE_BYTES
         .checked_add(
-            metadata
-                .retained_owned_bytes()
+            metadata_retained_bytes(metadata)
                 .checked_mul(2)
                 .ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Contract(
@@ -2490,11 +2490,48 @@ fn metadata_serialized_upper_bound(metadata: &CodeLexicalProjectionMetadataV1) -
                 .saturating_add(path.len())
                 .saturating_add(32)
         });
-    metadata
-        .retained_owned_bytes()
+    metadata_retained_bytes(metadata)
         .saturating_add(path_bytes)
         .saturating_mul(6)
         .saturating_add(512)
+}
+
+/// Owned bytes one projection metadata structure retains: logical paths at
+/// capacity with per-entry b-tree node overhead, and every scalar identity
+/// string charged as its `String` header plus payload length.
+fn metadata_retained_bytes(metadata: &CodeLexicalProjectionMetadataV1) -> usize {
+    let path_bytes = metadata.logical_paths.iter().fold(
+        metadata.logical_paths.len().saturating_mul(
+            std::mem::size_of::<(FileOccurrenceId, String)>()
+                .saturating_add(BTREE_MAP_ENTRY_OVERHEAD_BYTES),
+        ),
+        |bytes, (file, path)| {
+            bytes
+                .saturating_add(file.as_str().len())
+                .saturating_add(path.capacity())
+        },
+    );
+    let scalar_identities = [
+        Some(metadata.generation.as_str()),
+        metadata
+            .repository_id
+            .as_ref()
+            .map(|repository| repository.as_str()),
+        Some(metadata.freshness.source_namespace.as_str()),
+        Some(metadata.freshness.source_instance.as_str()),
+        Some(metadata.freshness.policy_revision.as_str()),
+        Some(metadata.exact_retriever_revision.as_str()),
+        Some(metadata.lexical_retriever_revision.as_str()),
+        Some(metadata.exact_score_domain.as_str()),
+    ];
+    scalar_identities
+        .into_iter()
+        .flatten()
+        .fold(path_bytes, |bytes, identity| {
+            bytes
+                .saturating_add(std::mem::size_of::<String>())
+                .saturating_add(identity.len())
+        })
 }
 
 fn page_batch_ledger_charge_bytes(
@@ -3802,7 +3839,6 @@ fn verify_clone_payload_digests<'body>(
     Ok(())
 }
 
-/// CI retrigger marker (no behavior).
 fn append_prepared_clone_bodies(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],

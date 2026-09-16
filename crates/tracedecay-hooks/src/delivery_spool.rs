@@ -120,6 +120,14 @@ pub struct HookDeliveryReceiptSpoolV1 {
     _lock: File,
 }
 
+impl Drop for HookDeliveryReceiptSpoolV1 {
+    fn drop(&mut self) {
+        if let Err(error) = self._lock.unlock() {
+            tracing::warn!(error = %error, "hook delivery receipt spool lock could not be released");
+        }
+    }
+}
+
 impl HookDeliveryReceiptSpoolV1 {
     /// Opens the spool without waiting for a held writer lock. Native callbacks
     /// use `open_within` with one synchronous budget for the lock wait.
