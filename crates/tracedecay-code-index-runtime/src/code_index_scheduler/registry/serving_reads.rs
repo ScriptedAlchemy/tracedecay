@@ -1499,8 +1499,8 @@ impl CodeIndexSchedulerRegistryV1 {
             let Some((root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
                 return CodeIndexReconcileAdmissionV1::Unavailable;
             };
-            if Self::publication_authority_requires_reset(worktree) {
-                return Self::publication_authority_corrupt_admission(worktree);
+            if let Some(parked) = Self::publication_authority_reset(worktree) {
+                return CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked);
             }
             (
                 root.clone(),
