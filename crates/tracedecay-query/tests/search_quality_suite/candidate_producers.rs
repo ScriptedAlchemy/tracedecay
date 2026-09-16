@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
@@ -2501,9 +2502,9 @@ fn extracted_qualified_names_match_in_memory_and_reopened_artifacts() {
         assert!(parts.subtokens.is_empty());
         let mut request = lexical_request(query, &[], &[], &[], 8, 32);
         request.generation = fixture.metadata.generation.clone();
-        request.whole_terms = parts.whole_terms;
-        request.subtokens = parts.subtokens;
-        request.phrases = parts.phrases;
+        request.whole_terms = Cow::Owned(parts.whole_terms);
+        request.subtokens = Cow::Owned(parts.subtokens);
+        request.phrases = Cow::Owned(parts.phrases);
         let disk = complete(
             reader
                 .read_lexical_postings(&request)
@@ -2600,11 +2601,11 @@ fn vocabulary_fields_phrase_and_proximity_match_in_memory_and_reopened_artifacts
                proximities: Vec<LexicalProximityV1>| {
         let mut request = lexical_request(query, whole_terms, &[], phrases, 0, 32);
         request.generation = fixture.metadata.generation.clone();
-        request.field_filters = vec![LexicalFieldFilterV1 {
+        request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
             field,
             include: true,
-        }];
-        request.proximities = proximities;
+        }]);
+        request.proximities = Cow::Owned(proximities);
         let disk = artifact
             .retrieve_lexical(&request)
             .expect("artifact lexical query");
@@ -2630,10 +2631,10 @@ fn vocabulary_fields_phrase_and_proximity_match_in_memory_and_reopened_artifacts
     }
     let mut typo = lexical_request("budgt", &["budgt"], &[], &[], 1, 32);
     typo.generation = fixture.metadata.generation.clone();
-    typo.field_filters = vec![LexicalFieldFilterV1 {
+    typo.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
         field: LexicalFieldV1::Signature,
         include: true,
-    }];
+    }]);
     let disk_typo = artifact
         .retrieve_lexical(&typo)
         .expect("artifact typo query");
@@ -6093,11 +6094,11 @@ pub(crate) fn lexical_request(
         base: base_request(query, max_candidates),
         query_view,
         generation: id("generation.1"),
-        whole_terms: whole_terms.iter().map(|term| (*term).to_owned()).collect(),
-        subtokens: subtokens.iter().map(|term| (*term).to_owned()).collect(),
-        phrases: phrases.iter().map(|term| (*term).to_owned()).collect(),
-        proximities: Vec::new(),
-        field_filters: Vec::<LexicalFieldFilterV1>::new(),
+        whole_terms: Cow::Owned(whole_terms.iter().map(|term| (*term).to_owned()).collect()),
+        subtokens: Cow::Owned(subtokens.iter().map(|term| (*term).to_owned()).collect()),
+        phrases: Cow::Owned(phrases.iter().map(|term| (*term).to_owned()).collect()),
+        proximities: Cow::Owned(Vec::new()),
+        field_filters: Cow::Owned(Vec::<LexicalFieldFilterV1>::new()),
         fuzzy_budget,
         lexical_profile_revision: id("lexical-profile.v1"),
         score_domain: id(QUERY_LEXICAL_SCORE_DOMAIN_V1),

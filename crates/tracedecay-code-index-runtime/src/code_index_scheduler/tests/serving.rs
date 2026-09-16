@@ -377,11 +377,11 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .retrieve_lexical(&LexicalLaneRequest {
             query_view: &query_view,
             generation,
-            whole_terms: vec!["callee".to_owned()],
-            subtokens: vec!["callee".to_owned()],
-            phrases: Vec::new(),
-            proximities: Vec::new(),
-            field_filters: Vec::new(),
+            whole_terms: std::borrow::Cow::Owned(vec!["callee".to_owned()]),
+            subtokens: std::borrow::Cow::Owned(vec!["callee".to_owned()]),
+            phrases: std::borrow::Cow::Owned(Vec::new()),
+            proximities: std::borrow::Cow::Owned(Vec::new()),
+            field_filters: std::borrow::Cow::Owned(Vec::new()),
             fuzzy_budget: 0,
             lexical_profile_revision: ComponentRevision::new(
                 tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
