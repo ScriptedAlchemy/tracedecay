@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::time::Instant;
+use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexWorktreeFreshnessV1,
 };
@@ -20,7 +21,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::registry::{CodeIndexServingScopeV1, ServingGenerationInstallationV1};
 use super::{
-    CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexDemandAdmissionV1, CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
 };
 
@@ -443,24 +444,45 @@ impl BranchPublicationContextV1 {
                 ),
             ));
         }
-        if !schedulers
+        match schedulers
             .notify_hook_overflow(canonical_worktree_root)
             .await
         {
-            return Err(TraceDecayError::project_route(
-                CODE_INDEX_SCHEDULER_UNAVAILABLE,
-                true,
-                format!(
-                    "code-index scheduler rejected refresh for branch worktree '{}'",
-                    canonical_worktree_root.display()
-                ),
-            ));
+            CodeIndexDemandAdmissionV1::Queued => {}
+            CodeIndexDemandAdmissionV1::Terminal(parked) => {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
+                    false,
+                    format!("{}; {}", parked.reason, parked.remediation),
+                ));
+            }
+            CodeIndexDemandAdmissionV1::RefusedByPolicy
+            | CodeIndexDemandAdmissionV1::Unavailable(_) => {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_SCHEDULER_UNAVAILABLE,
+                    true,
+                    format!(
+                        "code-index scheduler rejected refresh for branch worktree '{}'",
+                        canonical_worktree_root.display()
+                    ),
+                ));
+            }
         }
         let hard_deadline = Instant::now() + BRANCH_GENERATION_HARD_TIMEOUT;
         let mut idle_deadline = Instant::now() + BRANCH_GENERATION_IDLE_TIMEOUT;
         loop {
             if cancellation.is_cancelled() {
                 return Err(branch_publication_cancelled_error(&source.reference));
+            }
+            if let Some(parked) = schedulers
+                .publication_authority_corruption(canonical_worktree_root)
+                .await
+            {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
+                    false,
+                    format!("{}; {}", parked.reason, parked.remediation),
+                ));
             }
             let scope = schedulers
                 .serving_code_scope(canonical_worktree_root)

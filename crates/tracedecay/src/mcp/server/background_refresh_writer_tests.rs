@@ -23,10 +23,10 @@ async fn background_refresh_preserves_watch_policy_refusal() {
                 project_root: dir.path().to_path_buf(),
                 mode,
                 reconcile_sink: Some(Arc::new(|_, _| {
-                    Box::pin(async { super::CodeIndexAdmission::LinkedWorktreeDisabled })
+                    Box::pin(async { super::CodeIndexDemandAdmissionV1::RefusedByPolicy })
                 })),
                 freshness_probe_sink: Some(Arc::new(|_| {
-                    Box::pin(async { super::CodeIndexAdmission::LinkedWorktreeDisabled })
+                    Box::pin(async { super::CodeIndexDemandAdmissionV1::RefusedByPolicy })
                 })),
             })
             .await
@@ -49,7 +49,7 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
             let forced = Arc::clone(&forced);
             Box::pin(async move {
                 forced.fetch_add(1, Ordering::AcqRel);
-                true.into()
+                super::CodeIndexDemandAdmissionV1::Queued
             })
         })
     };
@@ -59,7 +59,7 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
             let probed = Arc::clone(&probed);
             Box::pin(async move {
                 probed.fetch_add(1, Ordering::AcqRel);
-                true.into()
+                super::CodeIndexDemandAdmissionV1::Queued
             })
         })
     };

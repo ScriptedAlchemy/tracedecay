@@ -27,6 +27,13 @@ pub enum CodeIndexBuildPhaseV1 {
     Ready,
 }
 
+/// Project-route reason code for a code-index publication authority that only
+/// an explicit operator reset clears. Every producer (scheduler admission,
+/// branch publication, MCP sync, host admission) and every test asserting the
+/// refusal shares this one spelling.
+pub const CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT: &str =
+    "code_index_publication_authority_corrupt";
+
 /// A typed reason an otherwise active generation cannot make durable progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +128,9 @@ pub struct CodeIndexBuildProgressV1 {
 pub struct CodeIndexConvergenceParkedV1 {
     /// Exact typed failure that parked convergence.
     pub reason: String,
+    /// Stable class for callers that must decide whether new work is admissible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
     /// Operator action that clears the violation.
     pub remediation: String,
     /// When the violation was first observed (microseconds since the Unix epoch).
