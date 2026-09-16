@@ -25,7 +25,7 @@ fn synthetic_publication(project_root: &Path, index: usize) -> CodeIndexGenerati
             .expect("generation id"),
         snapshot_content_identity: ContentDigest::new(format!("sha256:{index:064x}"))
             .expect("content digest"),
-        observation_time_micros: index as i64,
+        observation_time_micros: i64::try_from(index).expect("fixture index fits i64"),
     }
 }
 

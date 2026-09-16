@@ -127,8 +127,10 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
         }
         tokio::select! {
             publication = publications.recv() => match publication {
-                Ok(publication) if publication.project_root == project_root => {}
-                Ok(_) => continue,
+                // Any publication wakes the next attempt at the top of the
+                // loop; a foreign project's publication costs one attempt,
+                // which is what the previous per-root filter also paid.
+                Ok(_) => {}
                 // A lagged receiver dropped publications; one of them may have
                 // been this project's. Settle briefly so seating can finish,
                 // then retry — do not install a standing timer.

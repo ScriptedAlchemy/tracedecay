@@ -71,7 +71,7 @@ impl GraphCursorRetentionV1 {
         holds.get(generation).map(|hold| hold.latest.clone())
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn held_until(&self, generation: &CodeGenerationId) -> Option<UtcMicros> {
         self.holds
             .lock()
