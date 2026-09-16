@@ -387,8 +387,8 @@ mod tests {
         }
     }
 
-    /// The fixture shape #1329 came from: a test canonicalizes its `tempfile`
-    /// root, which on Windows *is* a `\\?\` path, and hands it to git.
+    /// A test that canonicalizes its `tempfile` root yields a Windows `\\?\`
+    /// path; that spelling must still reach git without the verbatim prefix.
     #[cfg(windows)]
     #[test]
     fn a_canonicalized_temp_root_reaches_git_without_its_verbatim_prefix() {
