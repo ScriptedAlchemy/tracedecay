@@ -2720,7 +2720,8 @@
         "resident_memory",
         "source_unavailable",
         "artifact_store_unavailable",
-        "retry_backoff"
+        "retry_backoff",
+        "publication_authority_corrupt"
       ],
       "type": "string"
     },
@@ -6031,6 +6032,26 @@
           "required": [
             "kind",
             "generation"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "encounter_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "proximity_encounter",
+              "type": "string"
+            },
+            "relation_kind": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "encounter_id",
+            "relation_kind"
           ],
           "type": "object"
         }

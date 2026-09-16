@@ -26,6 +26,7 @@ use tracedecay_application::delivery::{
     ProjectDeliveryInboxCoverageV1, ProjectDeliveryInboxPullRequestStateV1,
     ProjectDeliveryInboxSourceV1, ProjectDeliveryIndexedHeadV1, ProjectDeliveryMembershipBasisV1,
     ProjectDeliveryProviderMountGateV1, ProjectDeliveryProviderStateV1,
+    ProjectDeliveryProximityAttentionSourceV1,
     ProjectDeliveryPullRequestIdentityV1, ProjectDeliveryPullRequestOperationV1,
     ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1, ProjectDeliveryReadKindV1,
     ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1, ProjectDeliveryRegistrySourceV1,
@@ -676,6 +677,10 @@ pub enum DeliveryAttentionEvidenceV1 {
     IndexedGeneration {
         generation: String,
     },
+    ProximityEncounter {
+        encounter_id: String,
+        relation_kind: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -1007,6 +1012,10 @@ pub async fn inbox(
             indexed,
             delivery,
             memberships: Vec::new(),
+            // The dashboard's inbox HTTP handler does not join proximity
+            // itself; the Delivery UI joins the separate
+            // `/api/feedback/proximity` read client-side (mirroring Loom).
+            proximity: ProjectDeliveryProximityAttentionSourceV1::Unsupported,
         });
     }
     let mut aggregation =
@@ -1267,6 +1276,13 @@ fn map_attention_item(
                         generation: generation.as_str().to_owned(),
                     }
                 }
+                ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
+                    encounter_id,
+                    relation_kind,
+                } => DeliveryAttentionEvidenceV1::ProximityEncounter {
+                    encounter_id: encounter_id.to_string(),
+                    relation_kind,
+                },
             })
             .collect(),
         coverage: map_inbox_coverage(item.coverage),
