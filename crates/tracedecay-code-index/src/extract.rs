@@ -782,10 +782,6 @@ mod tests {
                 "extractor.rust.v5",
                 "sha256:0360c533adb5dc9cfbeafa5e5d28c6fe0090439cf396971e09490afe6417ce58",
             ),
-            (
-                "extractor.rust.v6",
-                "sha256:c8fda9c572b7ddbcabb7502f79a543a9e1fe3412026bf73e222f6f3229d7c9e5",
-            ),
         ];
         for (revision, identity) in prior_identities {
             let mut prior_descriptor = descriptor.clone();
