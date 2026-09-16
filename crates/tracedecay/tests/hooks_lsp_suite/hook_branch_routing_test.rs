@@ -3,22 +3,24 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay_runtime_core::path_safety::{
+    canonical_root_identity, plain_git_args, plain_host_path,
+};
 
+/// The canonical, plainly spelled identity of a fixture path.
+///
+/// Canonicalizing on every host is what keeps the fixture and the production
+/// resolver naming one directory; spelling the result plainly is what lets it
+/// still be handed to `git`, which refuses the `\\?\` form `canonicalize`
+/// returns on Windows.
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
+    canonical_root_identity(path)
 }
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
-        .args(args)
-        .current_dir(project)
+        .args(plain_git_args(args))
+        .current_dir(plain_host_path(project))
         .output()
         .expect("git command should run");
     assert!(
@@ -33,7 +35,7 @@ fn git(project: &Path, args: &[&str]) {
 fn git_head_oid(project: &Path) -> String {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(project)
+        .current_dir(plain_host_path(project))
         .output()
         .expect("git rev-parse should run");
     assert!(output.status.success(), "git rev-parse HEAD failed");

@@ -11,6 +11,9 @@ use tracedecay_code_index::production::{
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{CodeGenerationId, ProjectId};
 use tracedecay_graph_db::NeverCancelled;
+use tracedecay_runtime_core::path_safety::{
+    canonical_root_identity, plain_git_args, plain_host_path,
+};
 
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationPolicyV1, CodeIndexIgnoredDependencyIndexOutcomeV1,
@@ -34,9 +37,12 @@ const PROJECT_ID: &str = "project.ignored-dependency-scheduler-tests";
 /// different scope than the one the scheduler writes and reads. Create the
 /// fixture inside the canonical temporary directory so every path taken from
 /// it is already canonical.
+///
+/// Spelled plainly as well as canonically: on Windows `canonicalize` returns
+/// the `\\?\` verbatim form, and a fixture root carrying that prefix is handed
+/// to `git` as a working directory and as arguments.
 fn canonical_temp_root() -> std::path::PathBuf {
-    let base = std::env::temp_dir();
-    base.canonicalize().unwrap_or(base)
+    canonical_root_identity(&std::env::temp_dir())
 }
 
 struct GitFixture {
@@ -116,8 +122,8 @@ fn git(root: &Path, arguments: &[&str]) {
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
     )
-    .current_dir(root)
-    .args(arguments)
+    .current_dir(plain_host_path(root))
+    .args(plain_git_args(arguments))
     .status()
     .expect("run git fixture command");
     assert!(

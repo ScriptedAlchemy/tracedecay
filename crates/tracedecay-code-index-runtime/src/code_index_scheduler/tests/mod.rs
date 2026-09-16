@@ -27,7 +27,9 @@ use tracedecay_query::retrieval::{
     QueryAuthorityV1, fusion::RetrievalCursorKeyringV1, lexical::LexicalRoutingV1,
     ports::RetrievalExecutionControl,
 };
-use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
+use tracedecay_runtime_core::path_safety::{
+    canonical_root_identity, plain_git_args, plain_host_path,
+};
 
 use crate::code_index_scheduler::{
     CodeIndexHintPolicyV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
@@ -64,8 +66,7 @@ fn decode_hex(encoded: &str) -> Vec<u8> {
 }
 
 fn canonical_temp_root() -> std::path::PathBuf {
-    let base = std::env::temp_dir();
-    base.canonicalize().unwrap_or(base)
+    canonical_root_identity(&std::env::temp_dir())
 }
 
 struct GitFixture {

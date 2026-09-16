@@ -410,15 +410,14 @@ fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
     .unwrap();
 }
 
+/// The canonical, plainly spelled identity of a fixture path.
+///
+/// Canonicalizing on every host is what keeps the fixture and the production
+/// resolver naming one directory; spelling the result plainly is what lets it
+/// still be handed to `git`, which refuses the `\\?\` form `canonicalize`
+/// returns on Windows.
 fn canonical_temp_path(path: &std::path::Path) -> std::path::PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
+    tracedecay_runtime_core::path_safety::canonical_root_identity(path)
 }
 
 #[tokio::test]
@@ -431,7 +430,9 @@ async fn store_layout_resolution_surfaces_split_identity_conflict()
     let project_root = canonical_temp_path(&project_root);
     let status = std::process::Command::new("git")
         .args(["init", "--quiet"])
-        .current_dir(&project_root)
+        .current_dir(tracedecay_runtime_core::path_safety::plain_host_path(
+            &project_root,
+        ))
         .status()?;
     assert!(status.success());
 

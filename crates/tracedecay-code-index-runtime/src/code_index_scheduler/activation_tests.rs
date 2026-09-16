@@ -20,6 +20,9 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision, sha256_hex_suffix};
+use tracedecay_runtime_core::path_safety::{
+    canonical_root_identity, plain_git_args, plain_host_path,
+};
 
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
@@ -29,8 +32,8 @@ use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
-        .current_dir(root)
-        .args(args)
+        .current_dir(plain_host_path(root))
+        .args(plain_git_args(args))
         .output()
         .expect("run git");
     assert!(
@@ -49,9 +52,12 @@ fn git(root: &Path, args: &[&str]) {
 /// different scope than the one the scheduler writes and reads. Create the
 /// fixture inside the canonical temporary directory so every path taken from
 /// it is already canonical.
+///
+/// Spelled plainly as well as canonically: on Windows `canonicalize` returns
+/// the `\\?\` verbatim form, and a fixture root carrying that prefix is handed
+/// to `git` as a working directory and as arguments.
 fn canonical_temp_root() -> std::path::PathBuf {
-    let base = std::env::temp_dir();
-    base.canonicalize().unwrap_or(base)
+    canonical_root_identity(&std::env::temp_dir())
 }
 
 fn fixture() -> TempDir {
