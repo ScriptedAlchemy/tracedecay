@@ -353,6 +353,52 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('backs off while an active build reports the same progress, and says how long it has been quiet', async () => {
+    vi.useFakeTimers();
+    // A stuck scheduler: same epoch and last-progress stamp on every read, and
+    // the daemon's observation clock ten minutes past the last progress.
+    const stalled = {
+      ...envelope('loading', {
+        worktrees: [
+          {
+            ...worktree(),
+            latest_generation_id: null,
+            snapshot_content_identity: null,
+            sealed_at_micros: null,
+            staleness_state: 'indexing',
+            progress: { ...progress(), phase: 'source_scan', completed_files: 0 },
+          },
+        ],
+        note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify(stalled), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('0 / 500 files')).toBeTruthy();
+    expect(screen.getByText('10m')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // First unchanged read arrives after 1 s; the next waits 2 s, then 4 s.
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await advanceTimers(1_000);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await advanceTimers(3_000);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
   it('keeps polling ready progress until the freshness envelope is ready', async () => {
     vi.useFakeTimers();
     const readyProgress = {

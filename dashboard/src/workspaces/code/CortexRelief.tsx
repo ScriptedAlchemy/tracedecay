@@ -243,7 +243,7 @@ function ReliefAbsences({ model }: { model: CortexModel }) {
       <dl className="grid grid-cols-1 gap-x-3 gap-y-1.5 sm:grid-cols-3">
         {cortexAbsences(model).map((panel) => (
           <div key={panel.label} className="flex min-w-0 flex-col">
-            <dt className="td-legend normal-case tracking-normal text-text-muted">
+            <dt className="td-legend whitespace-normal normal-case leading-snug tracking-normal text-text-muted">
               {panel.label} — <span className="text-state-unknown">{panel.reading}</span>
             </dt>
             <dd className="text-3xs leading-snug text-text-muted">{panel.teach}</dd>
