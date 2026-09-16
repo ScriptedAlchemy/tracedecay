@@ -360,11 +360,8 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it('backs a stalled active build to the idle cadence while keeping stall age visible', async () => {
+  it('backs a quiet active build to 4s and keeps stall age visible without claiming SSE resume', async () => {
     vi.useFakeTimers();
-    // A stuck scheduler: same epoch and last-progress stamp on every read, and
-    // the daemon's observation clock ten minutes past the last progress. SSE
-    // owns resume; the poll must not stay at 1 Hz forever.
     const stalled = {
       ...envelope('loading', {
         worktrees: [
@@ -394,13 +391,79 @@ describe('Code index freshness', () => {
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(1);
-    await advanceTimers(28_998);
+    await advanceTimers(2_998);
     expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(1);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(screen.getByText('no progress for')).toBeTruthy();
     expect(screen.getByText('10m')).toBeTruthy();
+    await advanceTimers(4_000);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await advanceTimers(999);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns to the 1s cadence when a quiet build publishes a new progress stamp', async () => {
+    vi.useFakeTimers();
+    const quiet = {
+      ...envelope('loading', {
+        worktrees: [
+          {
+            ...worktree(),
+            latest_generation_id: null,
+            snapshot_content_identity: null,
+            sealed_at_micros: null,
+            staleness_state: 'indexing',
+            rebuild_in_flight: true,
+            progress: { ...progress(), phase: 'source_scan', completed_files: 0 },
+          },
+        ],
+        note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const moving = {
+      ...envelope('loading', {
+        worktrees: [
+          {
+            ...worktree(),
+            latest_generation_id: null,
+            snapshot_content_identity: null,
+            sealed_at_micros: null,
+            staleness_state: 'indexing',
+            rebuild_in_flight: true,
+            progress: {
+              ...progress(),
+              phase: 'source_scan',
+              progress_epoch: 2,
+              completed_files: 12,
+              last_progress_micros: NOW_MICROS + 604_000_000,
+            },
+          },
+        ],
+        note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 604_000_000 },
+    };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(quiet), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(moving), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(moving), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('0 / 500 files')).toBeTruthy();
+    await advanceTimers(4_001);
+    await advanceTimers(0);
+    expect(screen.getByText('12 / 500 files')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it('does not treat a non-building partial envelope as an active 1s poll', async () => {
