@@ -18,8 +18,16 @@ use std::time::{Duration, Instant};
 
 use crate::cancellation::{CancellationToken, MonotonicDeadline};
 
-const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
-const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Default probe budget for synchronous discovery without an explicit deadline.
+///
+/// Modelled identity walks already land near ~750 ms on a slow volume; a 2 s
+/// default multiplied across multi-root composition is a latency cliff before
+/// any code-index work starts.
+const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(750);
+/// Upper bound between `try_wait` polls. Keep slices short enough that cancel
+/// and deadline still interrupt quickly, but avoid waking every 10 ms for the
+/// full discovery budget on a blocking pool worker.
+const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const REPOSITORY_IDENTITY_ARGS: [&str; 4] = [
     "rev-parse",
     "--show-toplevel",
@@ -539,6 +547,9 @@ fn capture_child(
             kill_and_reap(&mut child);
             return ChildCaptureOutcome::DeadlineExceeded;
         }
+        // Sleep at most CHILD_WAIT_POLL_INTERVAL, and never past the deadline.
+        // Larger slices cut blocking-pool wakeups vs a fixed 10 ms poll without
+        // losing cancel/deadline checks between waits.
         std::thread::sleep(
             deadline
                 .instant()

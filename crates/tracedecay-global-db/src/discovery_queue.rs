@@ -1,3 +1,12 @@
+//! Host discovery path queue persisted in the global DB.
+//!
+//! This queue schedules workspace roots for membership probes. Actual git
+//! identity resolution lives in `tracedecay_runtime_core::git_discovery`, which
+//! already single-flights concurrent probes and honors one request deadline.
+//! Callers must inherit that deadline across fan-out instead of restarting a
+//! fresh default budget per queued path — multiplying probe budgets is the
+//! latency cliff this queue must not recreate.
+
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
