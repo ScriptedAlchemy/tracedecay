@@ -321,19 +321,16 @@ async fn projectless_tools_call_response_with_connection(
             return JsonRpcResponse::error(id, ErrorCode::InvalidParams, message.to_string());
         }
     };
+    // Call admission is the discovery predicate: a name `tools/list` did not
+    // advertise is refused here before any account or store work.
+    let discoverable = projectless_tool_is_discoverable(tool_name);
     #[cfg(feature = "hotpath")]
     {
-        let hotpath_tool_name = if matches!(
-            tool_name,
-            "tracedecay_admin_project" | "tracedecay_hook_runtime" | "tracedecay_admin_cli"
-        )
-            || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
-        {
-            tool_name
-        } else {
-            "unknown"
-        };
+        let hotpath_tool_name = if discoverable { tool_name } else { "unknown" };
         hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
+    }
+    if !discoverable {
+        return requires_project_error(id, tool_name);
     }
     if let Err(error) = boxed_projectless_phase(store_administration.ensure_account_active()).await
     {
@@ -362,27 +359,32 @@ async fn projectless_tools_call_response_with_connection(
                 projectless_registry_response(id, tool_name, arguments, store_administration),
             ),
             _ => {
-                if let Some(operation) =
+                // `projectless_tool_is_discoverable` admitted the name above,
+                // so any remaining tool is a retained profile operation.
+                let Some(operation) =
                     tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
-                {
-                    boxed_projectless_phase(projectless_profile_retained_response(
-                        id,
-                        tool_name,
-                        operation,
-                        arguments,
-                        connection,
-                        store_administration,
-                    ))
-                } else {
-                    return JsonRpcResponse::error(
-                        id,
-                        ErrorCode::InternalError,
-                        format!("{tool_name} requires an initialized code project"),
-                    );
-                }
+                else {
+                    return requires_project_error(id, tool_name);
+                };
+                boxed_projectless_phase(projectless_profile_retained_response(
+                    id,
+                    tool_name,
+                    operation,
+                    arguments,
+                    connection,
+                    store_administration,
+                ))
             }
         };
     response.await
+}
+
+fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResponse {
+    JsonRpcResponse::error(
+        id,
+        ErrorCode::InternalError,
+        format!("{tool_name} requires an initialized code project"),
+    )
 }
 
 /// Registry reads are profile-scoped: they answer from the authenticated
