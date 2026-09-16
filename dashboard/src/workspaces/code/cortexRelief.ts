@@ -56,9 +56,34 @@ const PAD = { left: 104, right: 44, top: 44, bottom: 64 } as const;
  * the additive-floor idiom the connectivity spine's `markDiameter` already
  * uses, and the legend states it rather than pretending area is pure. */
 const MIN_RADIUS = 13;
+const READABLE_RADIUS = 22;
 /** Landforms are wider than they are tall. Applied uniformly, so relative area
  * between regions is untouched. */
 export const RELIEF_ASPECT = { x: 1.14, y: 0.76 } as const;
+/** Matches `mono(14)` / `mono(10)` in the renderer so a slot is never narrower
+ * than the on-field label it will carry. */
+const LABEL_EM_14 = 8.4;
+const LABEL_EM_10 = 6;
+
+export function reliefBodyRx(radius: number): number {
+  return radius * RELIEF_ASPECT.x;
+}
+
+export function reliefLabelHalfWidth(label: string, directory: string): number {
+  return Math.max(label.length * LABEL_EM_14, directory.length * LABEL_EM_10) / 2;
+}
+
+export function maxRegionsWithoutOverlap(
+  usableWidth: number,
+  labels: ReadonlyArray<{ readonly label: string; readonly directory: string }> = [],
+): number {
+  const bodyGap = 2 * reliefBodyRx(READABLE_RADIUS);
+  const widestLabel = labels.reduce(
+    (max, item) => Math.max(max, 2 * reliefLabelHalfWidth(item.label, item.directory)),
+    0,
+  );
+  return Math.max(1, Math.floor(usableWidth / Math.max(bodyGap, widestLabel)));
+}
 
 export interface CortexRegion {
   /** `clusters[].directory` — the exact dirname the producer clustered on. */
@@ -171,8 +196,6 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
 
   const placeable = drafts.filter((draft) => draft.depth !== null);
   const chosen = placeable.slice(0, MAX_DRAWN_REGIONS);
-  const chosenKeys = new Set(chosen.map((draft) => draft.cluster.directory));
-
   const maxDepth = Math.max(measurement.max_depth, 0);
   const usableWidth = CORTEX_WORLD.width - PAD.left - PAD.right;
   const usableHeight = CORTEX_WORLD.height - PAD.top - PAD.bottom;
@@ -185,16 +208,37 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     if (bucket) bucket.push(draft);
     else byBand.set(depth, [draft]);
   }
-  const widestBand = [...byBand.values()].reduce((max, band) => Math.max(max, band.length), 1);
+  const drawnByBand = new Map<number, Draft[]>();
+  for (const [depth, band] of byBand) {
+    const inBand = [...band].sort((a, b) => a.cluster.order - b.cluster.order);
+    const bandCapacity = maxRegionsWithoutOverlap(
+      usableWidth,
+      inBand.map((draft) => ({
+        label: labelOf(draft.cluster.directory),
+        directory: draft.cluster.directory,
+      })),
+    );
+    drawnByBand.set(depth, inBand.slice(0, bandCapacity));
+  }
+  const widestBand = [...drawnByBand.values()].reduce((max, band) => Math.max(max, band.length), 1);
+  const drawnKeys = new Set(
+    [...drawnByBand.values()].flatMap((band) => band.map((draft) => draft.cluster.directory)),
+  );
 
   // ONE global scale, so the √-area law holds between every pair of regions
   // on the field rather than being bent per body by a clamp.
   const widestFileCount = chosen.reduce(
-    (max, draft) => Math.max(max, draft.cluster.file_count),
+    (max, draft) =>
+      drawnKeys.has(draft.cluster.directory)
+        ? Math.max(max, draft.cluster.file_count)
+        : max,
     0,
   );
-  const slotWidth = usableWidth / widestBand;
-  const allowedRadius = Math.max(18, Math.min(slotWidth * 0.42, bandGap * 0.40));
+  const slotWidth = usableWidth / Math.max(widestBand, 1);
+  const allowedRadius = Math.max(
+    MIN_RADIUS,
+    Math.min(slotWidth * 0.42, bandGap * 0.40, READABLE_RADIUS),
+  );
   const areaScale =
     widestFileCount > 0 ? (allowedRadius - MIN_RADIUS) / Math.sqrt(widestFileCount) : 0;
 
@@ -204,11 +248,10 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
       : PAD.top + usableHeight / 2;
 
   const placed = new Map<string, { x: number; y: number; radius: number }>();
-  for (const [depth, band] of byBand) {
-    const inBand = [...band].sort((a, b) => a.cluster.order - b.cluster.order);
-    inBand.forEach((draft, index) => {
+  for (const [depth, band] of drawnByBand) {
+    band.forEach((draft, index) => {
       placed.set(draft.cluster.directory, {
-        x: PAD.left + ((index + 0.5) / inBand.length) * usableWidth,
+        x: PAD.left + ((index + 0.5) / band.length) * usableWidth,
         y: bandY(depth),
         radius: MIN_RADIUS + areaScale * Math.sqrt(draft.cluster.file_count),
       });
@@ -219,7 +262,7 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     const { cluster } = draft;
     const density = cluster.file_count > 0 ? cluster.internal_edges / cluster.file_count : 0;
     const spot = placed.get(cluster.directory) ?? null;
-    const drawn = chosenKeys.has(cluster.directory) && spot !== null;
+    const drawn = drawnKeys.has(cluster.directory) && spot !== null;
     return {
       directory: cluster.directory,
       label: labelOf(cluster.directory),
@@ -250,12 +293,12 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     null,
   );
 
-  const strata = [...byBand.keys()]
+  const strata = [...drawnByBand.keys()]
     .sort((a, b) => a - b)
     .map((depth) => ({
       depth,
       y: bandY(depth),
-      regions: byBand.get(depth)?.length ?? 0,
+      regions: drawnByBand.get(depth)?.length ?? 0,
     }));
 
   return {
