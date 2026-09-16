@@ -84,9 +84,15 @@ pub enum DeferredMountAttemptV1 {
 /// outcome or the publication channel closes (daemon shutdown).
 ///
 /// The open-time mount runs before code-index activation, so the first ready
-/// check usually misses. A later `Published` event wakes the waiter on a
-/// fresh build; a restart that restores the same sealed generation records
-/// `Noop` and never repeats that event, so the serving slot is polled too.
+/// check usually misses. Wake sources are event-driven only:
+/// - a matching `Published` broadcast on a fresh build;
+/// - serving-slot / serving-generation watches for a restart `Noop` restore
+///   that never rebroadcasts (partitioned recovery may leave the decoded seat
+///   empty and only flip the generation watch);
+/// - on `Lagged`, one short settle then an immediate retry — never a standing
+///   1 Hz ready poll.
+const DEFERRED_MOUNT_LAGGED_SETTLE: Duration = Duration::from_millis(50);
+
 pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
@@ -96,9 +102,21 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     Fut: std::future::Future<Output = DeferredMountAttemptV1>,
 {
     let mut publications = registry.subscribe_generation_publications();
-    let mut ready_poll = tokio::time::interval(Duration::from_secs(1));
-    ready_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut serving_seats = registry.subscribe_serving_seats();
+    let mut serving_changes = None;
     loop {
+        // Subscribe before probing so a seat that lands between subscribe and
+        // the ready check remains observable. Demand a complete generation once
+        // the watch exists so a late subscribe after a silent Noop still gets a
+        // follow-up wake (same contract as the deferred advisory owner).
+        if serving_changes.is_none() {
+            serving_changes = registry
+                .subscribe_serving_generation_changes(&project_root)
+                .await;
+            if serving_changes.is_some() {
+                let _ = registry.request_complete_generation(&project_root).await;
+            }
+        }
         if registry
             .retained_text_owner_for_root(&project_root)
             .await
@@ -108,14 +126,31 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
             return;
         }
         tokio::select! {
-            _ = ready_poll.tick() => {}
             publication = publications.recv() => match publication {
                 Ok(publication) if publication.project_root == project_root => {}
-                Ok(_) => {}
+                Ok(_) => continue,
                 // A lagged receiver dropped publications; one of them may have
-                // been this project's, so attempt the mount anyway.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                // been this project's. Settle briefly so seating can finish,
+                // then retry — do not install a standing timer.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    tokio::time::sleep(DEFERRED_MOUNT_LAGGED_SETTLE).await;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            },
+            serving = async {
+                match serving_changes.as_mut() {
+                    Some(changes) => changes.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if serving.is_err() {
+                    return;
+                }
+            }
+            seat = serving_seats.changed() => {
+                if seat.is_err() {
+                    return;
+                }
             }
         }
     }
