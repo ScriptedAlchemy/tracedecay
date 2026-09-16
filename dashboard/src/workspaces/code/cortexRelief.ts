@@ -60,9 +60,10 @@ const READABLE_RADIUS = 22;
 /** Landforms are wider than they are tall. Applied uniformly, so relative area
  * between regions is untouched. */
 export const RELIEF_ASPECT = { x: 1.14, y: 0.76 } as const;
-/** Matches `mono(14)` / `mono(10)` in the renderer so a slot is never narrower
- * than the on-field label it will carry. */
+/** Matches `mono(14)` / `mono(11)` / `mono(10)` in the renderer so a slot is
+ * never narrower than the on-field label or caption it will carry. */
 const LABEL_EM_14 = 8.4;
+const LABEL_EM_11 = 6.6;
 const LABEL_EM_10 = 6;
 
 export function reliefBodyRx(radius: number): number {
@@ -71,6 +72,13 @@ export function reliefBodyRx(radius: number): number {
 
 export function reliefLabelHalfWidth(label: string): number {
   return (label.length * LABEL_EM_14) / 2;
+}
+
+export function reliefCaptionHalfWidth(fileCount: number, density: number): number {
+  const files = `${fileCount} files`;
+  const relief =
+    Math.floor(density / CONTOUR_INTERVAL) === 0 ? 'no relief' : `${density.toFixed(2)} e/f`;
+  return (Math.max(files.length, relief.length) * LABEL_EM_11) / 2;
 }
 
 /** On-field directory, elided to the body so the full path stays in the table. */
@@ -83,13 +91,18 @@ export function reliefFieldDirectory(directory: string, radius: number): string 
 export function maxRegionsWithoutOverlap(
   usableWidth: number,
   labels: readonly string[] = [],
+  captions: readonly { readonly fileCount: number; readonly density: number }[] = [],
 ): number {
   const bodyGap = 2 * reliefBodyRx(READABLE_RADIUS);
   const widestLabel = labels.reduce(
     (max, label) => Math.max(max, 2 * reliefLabelHalfWidth(label)),
     0,
   );
-  return Math.max(1, Math.floor(usableWidth / Math.max(bodyGap, widestLabel)));
+  const widestCaption = captions.reduce(
+    (max, caption) => Math.max(max, 2 * reliefCaptionHalfWidth(caption.fileCount, caption.density)),
+    0,
+  );
+  return Math.max(1, Math.floor(usableWidth / Math.max(bodyGap, widestLabel, widestCaption)));
 }
 
 export interface CortexRegion {
@@ -129,7 +142,13 @@ export interface CortexModel {
   readonly drawnRegions: readonly CortexRegion[];
   readonly world: { readonly width: number; readonly height: number };
   /** Strata actually laid out, bedrock first. */
-  readonly strata: readonly { readonly depth: number; readonly y: number; readonly regions: number }[];
+  readonly strata: readonly {
+    readonly depth: number;
+    readonly y: number;
+    /** Placeable regions at this depth, including those folded off the field. */
+    readonly regions: number;
+    readonly drawn: number;
+  }[];
   readonly maxDepth: number;
   readonly idealDepth: number;
   readonly totalRegions: number;
@@ -263,6 +282,13 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     const bandCapacity = maxRegionsWithoutOverlap(
       usableWidth,
       inBand.map((draft) => labelOf(draft.cluster.directory)),
+      inBand.map((draft) => ({
+        fileCount: draft.cluster.file_count,
+        density:
+          draft.cluster.file_count > 0
+            ? draft.cluster.internal_edges / draft.cluster.file_count
+            : 0,
+      })),
     );
     readableByBand.set(depth, inBand.slice(0, bandCapacity));
     readabilityFoldedRegions += Math.max(0, inBand.length - bandCapacity);
@@ -341,12 +367,13 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     null,
   );
 
-  const strata = [...drawnByBand.keys()]
+  const strata = [...byBand.keys()]
     .sort((a, b) => a - b)
     .map((depth) => ({
       depth,
       y: bandY(depth),
-      regions: drawnByBand.get(depth)?.length ?? 0,
+      regions: byBand.get(depth)?.length ?? 0,
+      drawn: drawnByBand.get(depth)?.length ?? 0,
     }));
 
   return {
@@ -468,7 +495,11 @@ export function cortexAbsences(model: CortexModel): readonly CortexPanel[] {
  * also printed as text on the surface, and the table is the equivalent. */
 export function cortexDescription(model: CortexModel): string {
   const bands = model.strata
-    .map((band) => `stratum ${band.depth} holds ${band.regions}`)
+    .map((band) =>
+      band.drawn === band.regions
+        ? `stratum ${band.depth} holds ${band.regions}`
+        : `stratum ${band.depth} holds ${band.drawn} of ${band.regions}`,
+    )
     .join(', ');
   return [
     `Relief terrain of ${model.drawnRegions.length} module regions aggregating ${model.drawnFiles.toLocaleString()} files,`,
