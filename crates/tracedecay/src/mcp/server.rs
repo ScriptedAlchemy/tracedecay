@@ -164,25 +164,6 @@ impl CodeIndexAdmission {
         }
     }
 
-    /// Exhaustive precedence when combining path and overflow (or host) admissions.
-    ///
-    /// Terminal corruption wins, then linked-worktree policy refusal, then
-    /// transient unavailability, then acceptance. Never collapses a typed
-    /// refusal through a bool AND.
-    pub(crate) fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::PublicationAuthorityCorrupt(parked), _)
-            | (_, Self::PublicationAuthorityCorrupt(parked)) => {
-                Self::PublicationAuthorityCorrupt(parked)
-            }
-            (Self::LinkedWorktreeDisabled, _) | (_, Self::LinkedWorktreeDisabled) => {
-                Self::LinkedWorktreeDisabled
-            }
-            (Self::Unavailable, _) | (_, Self::Unavailable) => Self::Unavailable,
-            (Self::Accepted, Self::Accepted) => Self::Accepted,
-        }
-    }
-
     pub(crate) fn host_outcome(self) -> HostAdmissionOutcome {
         match self {
             Self::Accepted => HostAdmissionOutcome::replay_completed(true, false),

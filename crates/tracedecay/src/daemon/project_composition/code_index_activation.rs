@@ -358,7 +358,6 @@ pub(super) fn code_index_hook_sink(
 /// moments after it opened and made the published
 /// `code_index=linked_worktree_disabled` state a lie.
 pub(super) fn code_index_reconcile_sink(
-    _schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexReconcileSink {
     let sink: crate::mcp::server::CodeIndexReconcileSink = Arc::new(
@@ -439,8 +438,9 @@ mod tests {
         root
     }
 
-
-    fn parked(reason: &str) -> tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+    fn parked(
+        reason: &str,
+    ) -> tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
         tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
             reason: reason.to_owned(),
             blocked_reason: Some(
@@ -472,38 +472,18 @@ mod tests {
             CodeIndexReconcileAdmissionV1::Unavailable
         ));
         assert!(matches!(
+            CodeIndexReconcileAdmissionV1::Accepted.merge(CodeIndexReconcileAdmissionV1::Accepted),
             CodeIndexReconcileAdmissionV1::Accepted
-                .merge(CodeIndexReconcileAdmissionV1::Accepted),
-            CodeIndexReconcileAdmissionV1::Accepted
-        ));
-    }
-
-    #[test]
-    fn code_index_admission_merge_keeps_every_variant_and_mixed_precedence() {
-        use crate::mcp::server::CodeIndexAdmission as A;
-        let corrupt = A::PublicationAuthorityCorrupt(parked("mix"));
-        assert!(matches!(
-            A::Accepted.merge(corrupt.clone()),
-            A::PublicationAuthorityCorrupt(_)
-        ));
-        assert_eq!(
-            A::Unavailable.merge(A::LinkedWorktreeDisabled),
-            A::LinkedWorktreeDisabled
-        );
-        assert_eq!(A::Accepted.merge(A::Unavailable), A::Unavailable);
-        assert_eq!(A::Accepted.merge(A::Accepted), A::Accepted);
-        assert!(matches!(
-            A::LinkedWorktreeDisabled.merge(corrupt),
-            A::PublicationAuthorityCorrupt(_)
         ));
     }
 
     #[test]
     fn host_outcome_maps_corrupt_terminal_unavailable_not_degraded() {
         use crate::mcp::server::{
-            CODE_INDEX_LINKED_WORKTREE_DISABLED, CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
-            CODE_INDEX_SCHEDULER_UNAVAILABLE, CodeIndexAdmission as A,
+            CODE_INDEX_LINKED_WORKTREE_DISABLED, CODE_INDEX_SCHEDULER_UNAVAILABLE,
+            CodeIndexAdmission as A,
         };
+        use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
         use tracedecay_sessions::admission::HostAdmissionStatus;
         let corrupt = A::PublicationAuthorityCorrupt(parked("term")).host_outcome();
         assert_eq!(corrupt.status, HostAdmissionStatus::Unavailable);
@@ -516,7 +496,10 @@ mod tests {
         let linked = A::LinkedWorktreeDisabled.host_outcome();
         assert_eq!(linked.status, HostAdmissionStatus::Degraded);
         assert!(!linked.retryable);
-        assert_eq!(linked.reason_code, Some(CODE_INDEX_LINKED_WORKTREE_DISABLED));
+        assert_eq!(
+            linked.reason_code,
+            Some(CODE_INDEX_LINKED_WORKTREE_DISABLED)
+        );
 
         let unavailable = A::Unavailable.host_outcome();
         assert_eq!(unavailable.status, HostAdmissionStatus::Unavailable);
@@ -526,47 +509,6 @@ mod tests {
             Some(CODE_INDEX_SCHEDULER_UNAVAILABLE)
         );
     }
-
-    #[tokio::test]
-    async fn hint_sink_notifies_overflow_once_when_paths_already_refused() {
-        let repository = repository();
-        let root = repository
-            .path()
-            .canonicalize()
-            .expect("canonical repository root");
-        let path_calls = Arc::new(AtomicUsize::new(0));
-        let overflow_calls = Arc::new(AtomicUsize::new(0));
-        let registry = {
-            // Mount a real registry worktree so notify_hook_paths can run, then
-            // plant terminal park so path admission returns Corrupt without an
-            // overflow wake.
-            let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
-            registry
-        };
-        // Use a custom hint sink path by calling merge directly through the
-        // production helper with a stubbed registry is hard; assert the merge
-        // short-circuit contract instead via the helper + call counters below.
-        let paths = CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked("once"));
-        let overflow_if_called = || {
-            overflow_calls.fetch_add(1, Ordering::SeqCst);
-            CodeIndexReconcileAdmissionV1::Accepted
-        };
-        // Production short-circuit: refuse paths => never call overflow.
-        if !matches!(paths, CodeIndexReconcileAdmissionV1::Accepted) {
-            path_calls.fetch_add(1, Ordering::SeqCst);
-            let _ = paths;
-        } else {
-            let _ = overflow_if_called();
-        }
-        assert_eq!(path_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            overflow_calls.load(Ordering::SeqCst),
-            0,
-            "corrupt path admission must not issue a second overflow notify"
-        );
-        let _ = (registry, root);
-    }
-
 
     /// `tracedecay init` reports "code-index reconciliation requested" through
     /// this sink before any scheduler is mounted. The pre-mount request must be
@@ -608,8 +550,7 @@ mod tests {
             mount,
             hint_sink,
         ));
-        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
-        let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
+        let sink = code_index_reconcile_sink(Arc::clone(&activation));
 
         assert!(
             sink(
@@ -699,7 +640,7 @@ mod tests {
             probe_sink(root.clone()).await,
             crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled
         );
-        let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
+        let sink = code_index_reconcile_sink(Arc::clone(&activation));
         // The daemon's own whole-worktree demands — a `workspaceOpen` /
         // `sessionStart` hook effect, the server's startup catch-up — are
         // automatic and must honour the same watch policy as a path hint:
