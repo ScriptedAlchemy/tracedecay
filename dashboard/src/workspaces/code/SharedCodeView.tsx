@@ -2,7 +2,11 @@
  * SHARED CODE — verified exact copies of one selected body.
  *
  * Two reads per selected symbol occurrence, one per match class, against
- * `GET /api/plugins/graph/shared-code/family` (code_read_api.rs). Each family
+ * `GET /api/plugins/graph/shared-code/family` (code_read_api.rs), issued one
+ * after the other: the daemon admits one code-index reader per generation at
+ * a time and answers the loser of a race with the same capacity refusal it
+ * gives a genuinely oversized read, so two parallel reads made one section
+ * "unavailable" on every load. Each family
  * is a digest group: the daemon verified every member's token bytes against
  * the representative payload before listing it, so a member here is a copy,
  * not a candidate. The route serves groups, never pairs — a thousand identical
@@ -20,7 +24,7 @@
  * Near-clone, containment, difference, and stale-relation stitches belong to
  * the routes that carry that evidence and are not drawn from this one.
  */
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Waypoints } from 'lucide-react';
 import {
   SimilarResultV1Schema,
@@ -35,7 +39,7 @@ import { CenteredState, ReadSection } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn';
 import { elideStart } from '../../ui/format.ts';
-import { codeReadState } from './codeRead.ts';
+import { CODE_READ_RETRY_REASONS, codeReadState } from './codeRead.ts';
 import type { TraceFocus } from './TraceView.tsx';
 import {
   SHARED_CODE_MATCH_CLASSES,
@@ -56,6 +60,17 @@ export function SharedCodeView({
   /** Open Trace on one listed copy. */
   onTraceMember: (symbolOccurrenceId: string) => void;
 }) {
+  // Classes read in catalogue order; a section starts its read once the one
+  // above it has settled, so the daemon never sees two readers at once.
+  const [settledClasses, setSettledClasses] = useState<readonly SimilarMatchClassV1[]>([]);
+  useEffect(() => setSettledClasses([]), [focus.id]);
+  const markSettled = useCallback(
+    (matchClass: SimilarMatchClassV1) =>
+      setSettledClasses((settled) =>
+        settled.includes(matchClass) ? settled : [...settled, matchClass],
+      ),
+    [],
+  );
   return (
     <div className="flex min-h-full flex-col" data-shared-code-source={focus.id}>
       <header className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-2">
@@ -69,15 +84,20 @@ export function SharedCodeView({
         </p>
         <StitchLegend />
       </header>
-      {SHARED_CODE_MATCH_CLASSES.map((definition) => (
-        <FamilyClassSection
-          key={definition.matchClass}
-          focus={focus}
-          definition={definition}
-          onFocusMember={onFocusMember}
-          onTraceMember={onTraceMember}
-        />
-      ))}
+      {SHARED_CODE_MATCH_CLASSES.map((definition, index) => {
+        const previous = SHARED_CODE_MATCH_CLASSES[index - 1];
+        return (
+          <FamilyClassSection
+            key={definition.matchClass}
+            focus={focus}
+            definition={definition}
+            enabled={previous === undefined || settledClasses.includes(previous.matchClass)}
+            onSettled={markSettled}
+            onFocusMember={onFocusMember}
+            onTraceMember={onTraceMember}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -116,11 +136,15 @@ function StitchMark({ stitch }: { stitch: 'solid' | 'double' }) {
 function FamilyClassSection({
   focus,
   definition,
+  enabled,
+  onSettled,
   onFocusMember,
   onTraceMember,
 }: {
   focus: TraceFocus;
   definition: (typeof SHARED_CODE_MATCH_CLASSES)[number];
+  enabled: boolean;
+  onSettled: (matchClass: SimilarMatchClassV1) => void;
   onFocusMember: (symbolOccurrenceId: string) => void;
   onTraceMember: (symbolOccurrenceId: string) => void;
 }) {
@@ -142,6 +166,8 @@ function FamilyClassSection({
         matchClass={definition.matchClass}
         stitch={definition.stitch}
         cursor={null}
+        enabled={enabled}
+        onSettled={onSettled}
         onFocusMember={onFocusMember}
         onTraceMember={onTraceMember}
       />
@@ -160,6 +186,8 @@ function FamilyPage({
   matchClass,
   stitch,
   cursor,
+  enabled = true,
+  onSettled,
   onFocusMember,
   onTraceMember,
 }: {
@@ -167,6 +195,8 @@ function FamilyPage({
   matchClass: SimilarMatchClassV1;
   stitch: 'solid' | 'double';
   cursor: string | null;
+  enabled?: boolean;
+  onSettled?: (matchClass: SimilarMatchClassV1) => void;
   onFocusMember: (symbolOccurrenceId: string) => void;
   onTraceMember: (symbolOccurrenceId: string) => void;
 }) {
@@ -175,6 +205,8 @@ function FamilyPage({
     sharedFamilyUrl(focus.id, matchClass, cursor),
     SimilarResultV1Schema,
     {
+      enabled,
+      retryOnDetail: CODE_READ_RETRY_REASONS,
       activity: {
         id: `shared-code-${matchClass}`,
         label: `Reading ${matchClass.replace(/_/g, ' ')} families`,
@@ -184,6 +216,10 @@ function FamilyPage({
   );
   // The route answers one match class per request and a body has one exact key
   // per class, so a page carries at most one family and at most one cursor.
+  const settled = enabled && !read.isPending;
+  useEffect(() => {
+    if (settled) onSettled?.(matchClass);
+  }, [settled, matchClass, onSettled]);
   const [followed, setFollowed] = useState<string | null>(null);
   return (
     <ReadSection

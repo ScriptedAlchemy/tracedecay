@@ -30,16 +30,6 @@ pub fn project_owner_capabilities() -> Result<BTreeSet<CapabilityId>, Applicatio
         "capability.application.feedback.impact",
         "capability.application.feedback.affected-tests",
         "capability.application.feedback.test-results",
-        "capability.application.code-query.exact-occurrence",
-        "capability.application.code-query.phrase-search",
-        "capability.application.code-query.callees",
-        "capability.application.code-query.facets",
-        "capability.application.code-query.timeline",
-        "capability.application.code-query.declaration",
-        "capability.application.code-query.definition",
-        "capability.application.code-query.type-definition",
-        "capability.application.code-query.references",
-        "capability.application.code-query.source-metadata",
         "capability.application.symbol-search",
         GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
         CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
@@ -69,6 +59,16 @@ pub fn project_owner_capabilities() -> Result<BTreeSet<CapabilityId>, Applicatio
                 field: "project-open capability",
             }
         })?);
+    }
+    // The dashboard's graph routes each admit through one callable code
+    // operation; the grant follows the enum so a new kind can never ship as a
+    // reasonless `denied` envelope the way `symbol_search` and `callers` did.
+    for kind in tracedecay_contracts::CallableCodeOperationKind::ALL {
+        capabilities.insert(
+            tracedecay_contracts::callable_code_operation(kind)?
+                .capability_id()
+                .clone(),
+        );
     }
     for descriptor in
         tracedecay_contracts::retrieval::catalog::primitive_read_handler_descriptors()?
@@ -119,6 +119,28 @@ mod tests {
         {
             assert!(capabilities.contains(descriptor.operation().capability_id()));
         }
+    }
+
+    /// Every dashboard graph route admits through one
+    /// `CallableCodeOperationKind`; a kind missing from the grant reads as a
+    /// bare `denied` envelope with no reason (the Code page's symbol search
+    /// was exactly that), so the grant must cover the whole enum.
+    #[test]
+    fn project_owner_capabilities_cover_every_callable_code_operation() {
+        let capabilities = project_owner_capabilities().expect("project-owner capabilities");
+        let missing = tracedecay_contracts::CallableCodeOperationKind::ALL
+            .into_iter()
+            .filter(|kind| {
+                let operation = tracedecay_contracts::callable_code_operation(*kind)
+                    .expect("callable code operation");
+                !capabilities.contains(operation.capability_id())
+            })
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "ungranted callable code operations: {missing:?}"
+        );
     }
 
     #[test]
