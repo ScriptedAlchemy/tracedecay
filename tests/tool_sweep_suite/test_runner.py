@@ -193,6 +193,30 @@ class ArgumentTests(unittest.TestCase):
 
 
 class ProblemCodeTests(unittest.TestCase):
+    def test_plain_resource_unavailability_is_not_success(self) -> None:
+        runner = load_runner()
+        for text, expected_verdict, expected_code in [
+            (
+                "status: unavailable\nreason: verified_generation_file_inventory_not_admitted",
+                "FAIL",
+                "verified_generation_file_inventory_not_admitted",
+            ),
+            ("status: unavailable", "FAIL", "tool_sweep.problem_code_missing"),
+            ("Project: /isolated/project\nGraph statistics: unavailable", "PASS", None),
+        ]:
+            with self.subTest(text=text):
+                response = {"result": {"contents": [{
+                    "uri": "tracedecay://files",
+                    "mimeType": "text/plain",
+                    "text": text,
+                }]}}
+                row = runner.response_row(
+                    "resource", "tracedecay://files", response, 17, 30_000
+                )
+                self.assertEqual(row["verdict"], expected_verdict)
+                self.assertEqual(row["problem_code"], expected_code)
+                self.assertEqual(row["elapsed_ms"], 17)
+
     def test_problem_code_is_a_first_class_field_for_success_framed_unavailable(self) -> None:
         """A rendered unavailable result must not become an apparently clean response."""
         runner = load_runner()
