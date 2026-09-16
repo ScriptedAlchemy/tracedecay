@@ -797,6 +797,21 @@ mod tests {
         }
     }
 
+    /// Gain a label earns when its first match sits at `rank` (1-based), using
+    /// the same `1 / log2(rank + 1)` discount the production scorer applies.
+    fn discounted_gain(rank: usize) -> f64 {
+        1.0 / ((rank + 1) as f64).log2()
+    }
+
+    /// nDCG@10 in parts per million for labels first matched at `ranks`, out of
+    /// `labels` labelled targets. The ideal ranking places every label in the
+    /// leading ranks, so the denominator is the sum over ranks `1..=labels`.
+    fn expected_ndcg_ppm(ranks: &[usize], labels: usize) -> u32 {
+        let dcg = ranks.iter().copied().map(discounted_gain).sum::<f64>();
+        let ideal = (1..=labels.min(10)).map(discounted_gain).sum::<f64>();
+        ((dcg / ideal) * 1_000_000.0).round() as u32
+    }
+
     fn row(id: &str, ranked: Vec<RankedCandidateRowV1>) -> QueryCandidateRowV1 {
         QueryCandidateRowV1 {
             query_id: id.to_owned(),
@@ -904,7 +919,10 @@ mod tests {
         let repeated = evaluate_query(&query, &row("aliases", candidates.clone())).unwrap();
         assert_eq!(repeated.quality.recall_at_10.numerator, 1);
         assert_eq!(repeated.quality.duplicate_rate.numerator, 0);
-        assert_eq!(repeated.quality.ndcg_at_10_ppm, 469_279);
+        // Only label "a" is matched, at rank 1, so DCG is 1/log2(2) = 1. The
+        // ideal ranking holds all three labels: 1/log2(2) + 1/log2(3) +
+        // 1/log2(4) = 2.130930, giving 469_279 ppm.
+        assert_eq!(repeated.quality.ndcg_at_10_ppm, expected_ndcg_ppm(&[1], 3));
 
         // Adding genuinely new labelled evidence earns gain at its real rank;
         // extra aliases of the first label did not move its first occurrence.
@@ -912,6 +930,12 @@ mod tests {
         candidates.push(ranked("c"));
         let covered = evaluate_query(&query, &row("aliases", candidates)).unwrap();
         assert_eq!(covered.quality.recall_at_10.numerator, 3);
+        // "a" still ranks 1; the five alias rows push "b" to rank 6 and "c" to
+        // rank 7, so the discounts are 1/log2(2) + 1/log2(7) + 1/log2(8).
+        assert_eq!(
+            covered.quality.ndcg_at_10_ppm,
+            expected_ndcg_ppm(&[1, 6, 7], 3)
+        );
         assert!(covered.quality.ndcg_at_10_ppm > repeated.quality.ndcg_at_10_ppm);
         assert!(covered.quality.ndcg_at_10_ppm < 1_000_000);
 
@@ -920,6 +944,10 @@ mod tests {
             &row("aliases", vec![ranked("a"), ranked("b"), ranked("c")]),
         )
         .unwrap();
+        assert_eq!(
+            ideal.quality.ndcg_at_10_ppm,
+            expected_ndcg_ppm(&[1, 2, 3], 3)
+        );
         assert_eq!(ideal.quality.ndcg_at_10_ppm, 1_000_000);
 
         // One row can satisfy multiple labelled targets; each earns its first
@@ -928,7 +956,12 @@ mod tests {
         composite.anchors = vec!["a".to_owned(), "b".to_owned()];
         let multiple = evaluate_query(&query, &row("aliases", vec![composite])).unwrap();
         assert_eq!(multiple.quality.recall_at_10.numerator, 2);
-        assert_eq!(multiple.quality.ndcg_at_10_ppm, 938_557);
+        // Labels "a" and "b" both first match at rank 1, so DCG is 2/log2(2)
+        // against the same three-label ideal 2.130930: 938_557 ppm.
+        assert_eq!(
+            multiple.quality.ndcg_at_10_ppm,
+            expected_ndcg_ppm(&[1, 1], 3)
+        );
     }
 
     fn resource_sample(
