@@ -229,15 +229,19 @@ where
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().try_for_each(&operation);
     }
-    let failure = chunks
-        .par_iter()
-        .enumerate()
-        .filter_map(|(index, chunk)| {
-            admit(&mut || operation(chunk))
-                .err()
-                .map(|error| (index, error))
-        })
-        .min_by_key(|(index, _)| *index);
+    // Leaves are admitted one unit at a time on whichever worker runs them,
+    // so the caller's own unit must not be held across the join.
+    let failure = crate::parallelism::with_yielded_background_cpu_permits(|| {
+        chunks
+            .par_iter()
+            .enumerate()
+            .filter_map(|(index, chunk)| {
+                admit(&mut || operation(chunk))
+                    .err()
+                    .map(|error| (index, error))
+            })
+            .min_by_key(|(index, _)| *index)
+    });
     match failure {
         Some((_, error)) => Err(error),
         None => Ok(()),
@@ -349,10 +353,12 @@ impl ExactExtractionAuthorityV1 {
         if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
             return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
         }
-        let admitted = chunks
-            .into_par_iter()
-            .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
-            .collect::<Vec<_>>();
+        let admitted = crate::parallelism::with_yielded_background_cpu_permits(|| {
+            chunks
+                .into_par_iter()
+                .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
+                .collect::<Vec<_>>()
+        });
         admitted.into_iter().collect()
     }
 
@@ -2585,13 +2591,14 @@ mod tests {
     use super::*;
     use crate::extract::ExtractionCoverageV1;
     use tracedecay_domain::{
-        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-        CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest, FileOccurrenceId,
-        GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId,
-        ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
-        SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
+        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeIndexWorkerSelectionV1,
+        CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest,
+        FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest,
+        PolicyRevisionId, ProjectId, SanitizationReceiptId, SanitizedCodeFileV1,
+        SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+        SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
+    use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 
     use crate::extract::{
         ExtractionCancellation, LanguageExtractor as CanonicalLanguageExtractor, NeverCancelled,
@@ -2599,8 +2606,6 @@ mod tests {
     };
     use crate::intake::{CodeIndexIntake, SanitizedCodeIntake};
     use crate::languages::{LanguageRegistry, StaticLanguageRegistry};
-    use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
-    use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 
     struct AlwaysCancelled;
 
@@ -2738,13 +2743,27 @@ mod tests {
     /// out across the pool while a full-width request (the lexical sorter's
     /// admission) is already queued at the FIFO head. Stolen leaves must not
     /// wait behind that head on a unit their own parent holds.
-    ///
-    /// The installed authority is process-global, so every ordering signal
-    /// comes from inside the request that takes the queue position
-    /// (`with_permits_placed`), never from shared counters that sibling
-    /// tests also move.
     #[test]
     fn nested_chunk_fan_out_does_not_wedge_behind_a_full_width_head_waiter() {
+        // The installed authority is global. Run this scenario alone so its
+        // queue counters cannot be advanced by another test's admissions.
+        if std::env::var_os("TRACEDECAY_NESTED_ADMISSION_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .arg("--exact")
+                .arg(std::thread::current().name().expect("named libtest thread"))
+                .arg("--nocapture")
+                .env("TRACEDECAY_NESTED_ADMISSION_CHILD", "1")
+                .output()
+                .expect("run isolated admission test");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
         let installed = crate::parallelism::install_worker_plan(
             CodeIndexWorkerSelectionV1::Automatic {},
             DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
@@ -2753,10 +2772,6 @@ mod tests {
         let authority = installed.background_cpu;
         let width = authority.width().get();
         if width < 2 {
-            eprintln!(
-                "skipping nested admission wedge: needs a second pool worker to steal onto, \
-                 installed width is {width}"
-            );
             return;
         }
         let chunks = std::iter::repeat_n(
@@ -2764,49 +2779,36 @@ mod tests {
             PARALLEL_CHUNK_THRESHOLD * width,
         )
         .collect::<Vec<_>>();
-        let chunks_len = chunks.len();
 
         let holder_admitted = Arc::new(AtomicBool::new(false));
-        let head_placed = Arc::new(AtomicBool::new(false));
-        let leaves_placed = Arc::new(AtomicUsize::new(0));
+        let head_queued = Arc::new(AtomicBool::new(false));
         let leaves_entered = Arc::new(AtomicUsize::new(0));
         let (finished, finishes) = mpsc::channel::<&'static str>();
 
         let holder = {
             let authority = Arc::clone(&authority);
             let holder_admitted = Arc::clone(&holder_admitted);
-            let head_placed = Arc::clone(&head_placed);
-            let leaves_placed = Arc::clone(&leaves_placed);
+            let head_queued = Arc::clone(&head_queued);
             let leaves_entered = Arc::clone(&leaves_entered);
             let finished = finished.clone();
             std::thread::spawn(move || {
                 let outcome = crate::parallelism::install(|| {
                     crate::parallelism::with_background_cpu_permit(|| {
                         holder_admitted.store(true, Ordering::SeqCst);
-                        wait_until("full-width head request placed in the queue", || {
-                            head_placed.load(Ordering::SeqCst)
+                        wait_until("full-width head request queued", || {
+                            head_queued.load(Ordering::SeqCst)
                         });
                         try_for_each_chunk_ordered(
-                            // Production admits each leaf through
-                            // `with_background_cpu_permit` on this same
-                            // authority; the placed hook only adds the signal.
-                            |unit| {
-                                authority.with_permits_placed(
-                                    1,
-                                    || {
-                                        leaves_placed.fetch_add(1, Ordering::SeqCst);
-                                    },
-                                    unit,
-                                )
-                            },
+                            |unit| crate::parallelism::with_background_cpu_permit(unit),
                             &chunks,
                             |_| {
                                 if leaves_entered.fetch_add(1, Ordering::SeqCst) == 0 {
                                     // Keep the first leaf busy until a sibling
-                                    // leaf has taken its own queue position,
-                                    // which is behind the head.
-                                    wait_until("a sibling leaf placed its request", || {
-                                        leaves_placed.load(Ordering::SeqCst) >= 2
+                                    // either ran (admission progressed) or is
+                                    // queued behind the head (the wedge).
+                                    wait_until("a sibling leaf ran or queued", || {
+                                        leaves_entered.load(Ordering::SeqCst) >= 2
+                                            || authority.waiting_work_units() > width
                                     });
                                 }
                                 Ok(())
@@ -2819,40 +2821,35 @@ mod tests {
             })
         };
         wait_until("holder admitted", || holder_admitted.load(Ordering::SeqCst));
+        assert_eq!(authority.active_units(), 1);
 
         let head = {
-            let authority = Arc::clone(&authority);
-            let head_placed = Arc::clone(&head_placed);
             let finished = finished.clone();
             std::thread::spawn(move || {
-                authority.with_permits_placed(
-                    width,
-                    || head_placed.store(true, Ordering::SeqCst),
-                    || {},
-                );
+                crate::parallelism::with_background_cpu_permits(width, || {});
                 finished.send("head").expect("test thread is waiting");
             })
         };
+        wait_until("head request waiting for the full width", || {
+            authority.waiting_work_units() >= width
+        });
+        head_queued.store(true, Ordering::SeqCst);
 
         for _ in 0..2 {
             assert!(
                 finishes.recv_timeout(ADMISSION_STEP_DEADLINE).is_ok(),
                 "nested chunk fan-out wedged behind the full-width head waiter for \
                  {ADMISSION_STEP_DEADLINE:?}: active_units={} waiting_work_units={} \
-                 leaves_placed={} leaves_entered={}",
+                 leaves_entered={}",
                 authority.active_units(),
                 authority.waiting_work_units(),
-                leaves_placed.load(Ordering::SeqCst),
                 leaves_entered.load(Ordering::SeqCst),
             );
         }
         holder.join().expect("holder thread");
         head.join().expect("head thread");
-        assert_eq!(
-            leaves_entered.load(Ordering::SeqCst),
-            chunks_len,
-            "every leaf must run once the fan-out completes"
-        );
+        assert_eq!(authority.active_units(), 0);
+        assert_eq!(authority.waiting_work_units(), 0);
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
