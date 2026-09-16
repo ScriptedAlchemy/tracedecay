@@ -124,13 +124,15 @@ fn aggregate_from_parent(
         }
     }
 
-    let mut chunks = parent
-        .chunks
-        .chunks()
+    let shared_occurrence_set = shared_occurrences
         .iter()
-        .filter(|chunk| shared_occurrences.contains(&chunk.anchor.file_occurrence_id))
         .cloned()
-        .collect::<Vec<_>>();
+        .collect::<HashSet<_>>();
+
+    // One parent pointer copy + in-place retain of shared rows, then merge the
+    // tiny fresh set. Avoids building a second nearly-full filter vec.
+    let mut chunks = parent.chunks.chunks().to_vec();
+    chunks.retain(|chunk| shared_occurrence_set.contains(&chunk.anchor.file_occurrence_id));
     let mut fresh_chunks = fresh_files
         .iter()
         .flat_map(|file| file.artifacts.chunks.chunks.iter().cloned())
@@ -145,13 +147,8 @@ fn aggregate_from_parent(
         .flat_map(|file| file.artifacts.symbols.iter())
         .map(Arc::as_ptr)
         .collect::<HashSet<_>>();
-    let mut symbols = parent
-        .symbols
-        .symbols
-        .iter()
-        .filter(|symbol| shared_symbol_ptrs.contains(&Arc::as_ptr(symbol)))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut symbols = parent.symbols.symbols.to_vec();
+    symbols.retain(|symbol| shared_symbol_ptrs.contains(&Arc::as_ptr(symbol)));
     let mut fresh_symbols = fresh_files
         .iter()
         .flat_map(|file| file.artifacts.symbols.iter().cloned())

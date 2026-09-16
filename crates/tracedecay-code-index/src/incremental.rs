@@ -445,21 +445,31 @@ pub fn plan_chunk_increment(
 /// Plan an increment when unchanged file pages are Arc-shared from `prior`.
 ///
 /// Shared occurrences reuse by pointer identity (no digest clone on the match
-/// path). The reused seal hashes borrowed ids/digests so the complement does
-/// not allocate a second owned corpus.
+/// path). The reused seal is the parent full-replay attestation plus reused
+/// cardinality — parent publish already authenticated those bytes.
 #[hotpath::measure(label = "code_index.build.plan_chunk_increment_arc_shared")]
 pub(crate) fn plan_chunk_increment_arc_shared(
     prior: &GenerationChunkManifestV1,
     current: &GenerationChunkManifestV1,
     shared_occurrences: &BTreeSet<FileOccurrenceId>,
+    parent_full_replay_digest: &ManifestDigest,
 ) -> Result<ChangedCodeChunkSetV1, ChunkIncrementErrorV1> {
     if prior.generation_id == current.generation_id {
         return Err(ChunkIncrementErrorV1::SameGeneration);
     }
+    if shared_occurrences.is_empty() {
+        return Err(ChunkIncrementErrorV1::NonCanonical(
+            "arc-share increment requires shared file pages".to_owned(),
+        ));
+    }
 
+    let shared_files = shared_occurrences
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     let mut previous = prior.chunks.iter().peekable();
     let mut added_or_changed = Vec::new();
-    let mut reused_refs: Vec<(&CodeSearchChunkId, &tracedecay_domain::ContentDigest)> = Vec::new();
+    let mut reused_count = 0_u64;
     let mut deleted = Vec::new();
     for chunk in &current.chunks {
         while let Some(removed) = previous.next_if(|prior| prior.id < chunk.id) {
@@ -470,14 +480,14 @@ pub(crate) fn plan_chunk_increment_arc_shared(
             });
         }
         let matched = previous.next_if(|prior| prior.id == chunk.id);
-        let shared = shared_occurrences.contains(&chunk.anchor.file_occurrence_id);
+        let shared = shared_files.contains(&chunk.anchor.file_occurrence_id);
         match matched {
             Some(prior_chunk)
                 if shared
                     || Arc::ptr_eq(prior_chunk, chunk)
                     || prior_chunk.content_digest == chunk.content_digest =>
             {
-                reused_refs.push((&chunk.id, &chunk.content_digest));
+                reused_count = reused_count.saturating_add(1);
             }
             Some(prior_chunk) => {
                 added_or_changed.push(ChangedCodeChunkV1 {
@@ -501,9 +511,17 @@ pub(crate) fn plan_chunk_increment_arc_shared(
         current_digest: None,
     }));
 
-    let (reused_count, reused_digest) =
-        ChangedCodeChunkSetV1::seal_reused_partition_refs_trusted(&reused_refs)
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+    let shared_file_count = u64::try_from(shared_occurrences.len()).map_err(|_| {
+        ChunkIncrementErrorV1::NonCanonical("shared file count exceeds u64".to_owned())
+    })?;
+    let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+        parent_full_replay_digest,
+        &prior.generation_id,
+        &current.generation_id,
+        reused_count,
+        shared_file_count,
+    )
+    .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: Some(prior.generation_id.clone()),
         to_generation: current.generation_id.clone(),
