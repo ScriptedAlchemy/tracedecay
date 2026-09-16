@@ -202,7 +202,7 @@ async fn transient_serving_claim_does_not_erase_pending_branch_tracking() {
     drop(held);
     assert!(matches!(
         registry.notify_hook_overflow(fixture.path()).await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     assert_eq!(
         publication

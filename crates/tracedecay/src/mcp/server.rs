@@ -13,7 +13,7 @@ use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
 use crate::project::TraceDecay;
-use tracedecay_code_index_runtime::code_index_scheduler::{
+pub(crate) use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandV1,
 };
 use tracedecay_contracts::code_index_freshness::{

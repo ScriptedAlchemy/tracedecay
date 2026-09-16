@@ -37,7 +37,7 @@ async fn unchanged_reconcile_does_not_reactivate_the_serving_generation() {
     assert!(
         matches!(
             registry.notify_hook_overflow(fixture.path()).await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "mounted worktree accepts an unchanged reconcile"
     );

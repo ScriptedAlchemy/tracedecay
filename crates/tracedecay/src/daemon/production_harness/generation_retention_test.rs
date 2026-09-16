@@ -67,7 +67,7 @@ async fn publish_code_edit(
             schedulers
                 .notify_hook_paths(project_root, &["src/lib.rs".to_owned()])
                 .await,
-            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued
         ),
         "mounted scheduler accepts the exact worktree hint"
     );

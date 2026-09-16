@@ -2246,7 +2246,7 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
     let reconcile_sink: crate::mcp::server::CodeIndexReconcileSink = std::sync::Arc::new(
         move |_, _| {
             Box::pin(async move {
-                crate::mcp::server::CodeIndexAdmission::PublicationAuthorityCorrupt(
+                crate::mcp::server::CodeIndexDemandAdmissionV1::Terminal(
                     tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
                         reason: "the publication authority is corrupt and requires an index reset: injected sync refusal".to_owned(),
                         blocked_reason: Some(

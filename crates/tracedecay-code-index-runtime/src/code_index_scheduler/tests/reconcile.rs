@@ -657,7 +657,7 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
         registry
             .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     let changed = tokio::time::timeout(Duration::from_secs(2), publications.recv())
         .await
@@ -704,7 +704,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
         registry
             .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
@@ -778,7 +778,7 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
         restarted
             .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     let first_broadcast = tokio::time::timeout(Duration::from_secs(5), publications.recv())
         .await
@@ -1020,7 +1020,7 @@ async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
         .expect("notification task");
     assert!(matches!(
         notified,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     assert!(
         registry
@@ -2459,7 +2459,7 @@ async fn source_currency_witness_refuses_a_stale_generation() {
             registry
                 .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
                 .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "the changed source is admitted to the retained worker"
     );
@@ -2691,7 +2691,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             registry
                 .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
                 .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "changed source reaches the mounted owner"
     );
@@ -3458,7 +3458,7 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
             registry
                 .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
                 .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "the mounted worktree must accept a refresh hint"
     );
@@ -3851,7 +3851,7 @@ async fn diagnostics_change_generation_is_stable_until_a_sibling_edit_hint() {
         registry
             .notify_hook_paths(fixture.path(), &["src/sibling.rs".to_owned()])
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     let changed = registry
         .diagnostics_change_generation(fixture.path())
@@ -3991,7 +3991,7 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
             registry
                 .notify_hook_paths(fixture.path(), &["src/main.rs".to_owned()])
                 .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "the source change must publish a pending scheduler wake"
     );
@@ -5377,7 +5377,7 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
             registry
                 .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
                 .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "foreign hint wake is accepted for the mounted root"
     );
@@ -5436,7 +5436,7 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     assert!(
         matches!(
             foreign_wake.await.expect("foreign wake task joins"),
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "foreign hint wake is accepted after the claim release"
     );
@@ -5670,7 +5670,7 @@ async fn background_reconciles_respect_a_single_admission_permit() {
         registry
             .notify_path(second.path(), second.path().join("src/lib.rs"))
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
@@ -5711,7 +5711,7 @@ async fn build_publication_lock_serializes_source_reconcile() {
         registry
             .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
@@ -5791,7 +5791,7 @@ async fn distinct_stores_reconcile_in_parallel_under_bounded_admission() {
         registry
             .notify_path(second.path(), second.path().join("src/lib.rs"))
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     let advanced_second =
         wait_for_generation_change(&registry, second.path(), &second_generation).await;
@@ -7836,7 +7836,7 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
     assert!(
         matches!(
             registry.notify_hook_overflow(fixture.path()).await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "restored worktree accepts a retry hint"
     );
@@ -8429,7 +8429,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             registry
                 .notify_hook_paths(fixture.path(), &["src/file_0000.rs".to_owned()])
                 .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "changed source wakes the mounted graph-off owner"
     );
@@ -8525,7 +8525,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             registry
                 .notify_hook_paths(fixture.path(), &["src/file_0000.rs".to_owned()])
                 .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
+            super::super::CodeIndexDemandAdmissionV1::Queued
         ),
         "retry wake reaches the restored source hint"
     );
@@ -9715,7 +9715,7 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
         registry
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
 
@@ -9823,7 +9823,7 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
         registry
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
             .await,
-        super::super::CodeIndexReconcileAdmissionV1::Accepted
+        super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     let _ = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
 

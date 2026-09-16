@@ -1813,7 +1813,9 @@ mod tests {
                 Arc::new(|| Box::pin(async { panic!("disabled activation must not mount") })),
                 Arc::new(|_| {
                     Box::pin(async {
-                        code_index_scheduler::CodeIndexReconcileAdmissionV1::Unavailable
+                        code_index_scheduler::CodeIndexDemandAdmissionV1::Unavailable(
+                            code_index_scheduler::CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+                        )
                     })
                 }),
             ),

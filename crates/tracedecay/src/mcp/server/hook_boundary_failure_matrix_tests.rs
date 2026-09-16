@@ -54,7 +54,11 @@ async fn server_without_broker(
 
 fn failing_reconcile_sink() -> CodeIndexReconcileSink {
     Arc::new(|_request: PathBuf, _demand| {
-        Box::pin(async { super::CodeIndexAdmission::Unavailable })
+        Box::pin(async {
+            super::CodeIndexDemandAdmissionV1::Unavailable(
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+            )
+        })
     })
 }
 
@@ -63,7 +67,7 @@ fn counting_success_reconcile_sink(attempts: Arc<Mutex<usize>>) -> CodeIndexReco
         let attempts = Arc::clone(&attempts);
         Box::pin(async move {
             *attempts.lock().unwrap() += 1;
-            super::CodeIndexAdmission::Accepted
+            super::CodeIndexDemandAdmissionV1::Queued
         })
     })
 }
@@ -205,7 +209,7 @@ async fn matrix_daemon_unavailable_without_broker_skips_reconcile_and_frontier()
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() = true;
-                super::CodeIndexAdmission::Accepted
+                super::CodeIndexDemandAdmissionV1::Queued
             })
         })
     };
@@ -246,7 +250,9 @@ async fn matrix_backpressure_overflow_rejects_before_reconcile_without_pending_g
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() += 1;
-                super::CodeIndexAdmission::Unavailable
+                super::CodeIndexDemandAdmissionV1::Unavailable(
+                    tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+                )
             })
         })
     };
@@ -342,7 +348,7 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
         Box::pin(async move {
             sink_recorded.lock().unwrap().push((root, rel_paths));
             // Report "delivered": a mounted worktree accepted the paths.
-            super::CodeIndexAdmission::Accepted
+            super::CodeIndexDemandAdmissionV1::Queued
         })
     });
     let context = registered_context(cg, &authority).with_code_index_hook_sink(sink);

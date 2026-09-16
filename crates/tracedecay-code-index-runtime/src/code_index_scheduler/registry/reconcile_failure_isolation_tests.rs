@@ -15,7 +15,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::super::{
-    CodeIndexCadenceTriggerV1, CodeIndexReconcileAdmissionV1,
+    CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1,
     reconcile_panic_guard::{
         MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
         ReconcileFaultInjectionV1, ReconcileFaultKindV1,
@@ -287,7 +287,7 @@ async fn changed_input_lifts_a_quarantined_reconcile() {
                 .registry
                 .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
                 .await,
-            CodeIndexReconcileAdmissionV1::Accepted
+            CodeIndexDemandAdmissionV1::Queued
         ),
         "the hint must reach the mounted scheduler"
     );
@@ -530,7 +530,7 @@ async fn corrupt_publication_authority_stops_after_one_attempt_and_reports_termi
                 .registry
                 .notify_hook_overflow(&fixture.project)
                 .await,
-            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+            CodeIndexDemandAdmissionV1::Terminal(_)
         ),
         "the mounted scheduler must return the terminal state until reset"
     );
@@ -557,14 +557,14 @@ async fn corrupt_publication_without_build_progress_returns_terminal_admission()
             .registry
             .notify_hook_overflow(&fixture.project)
             .await,
-        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+        CodeIndexDemandAdmissionV1::Terminal(_)
     ));
     assert!(matches!(
         fixture
             .registry
             .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
             .await,
-        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+        CodeIndexDemandAdmissionV1::Terminal(_)
     ));
     fixture.registry.shutdown().await;
 }
@@ -582,14 +582,14 @@ async fn park_visible_before_progress_reason_returns_terminal_admission() {
             .registry
             .notify_hook_overflow(&fixture.project)
             .await,
-        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+        CodeIndexDemandAdmissionV1::Terminal(_)
     ));
     assert!(matches!(
         fixture
             .registry
             .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
             .await,
-        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+        CodeIndexDemandAdmissionV1::Terminal(_)
     ));
     fixture.registry.shutdown().await;
 }
@@ -608,7 +608,7 @@ async fn retire_and_remount_clears_terminal_publication_park_for_new_admission()
             .registry
             .notify_hook_overflow(&fixture.project)
             .await,
-        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+        CodeIndexDemandAdmissionV1::Terminal(_)
     ));
 
     let mut roots = std::collections::BTreeSet::new();
@@ -634,7 +634,7 @@ async fn retire_and_remount_clears_terminal_publication_park_for_new_admission()
                 .registry
                 .notify_hook_overflow(&fixture.project)
                 .await,
-            CodeIndexReconcileAdmissionV1::Accepted
+            CodeIndexDemandAdmissionV1::Queued
         ),
         "retire/remount must admit work again on a repaired mount"
     );
@@ -644,7 +644,7 @@ async fn retire_and_remount_clears_terminal_publication_park_for_new_admission()
                 .registry
                 .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
                 .await,
-            CodeIndexReconcileAdmissionV1::Accepted
+            CodeIndexDemandAdmissionV1::Queued
         ),
         "exact-path hooks must recover with the remounted owner"
     );
