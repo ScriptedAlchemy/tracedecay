@@ -40,7 +40,9 @@ import { elideStart, formatCount, formatMicrosUtc, splitBytes } from '../../ui/f
 type CodeIndexBuildProgress = NonNullable<CodeIndexWorktreeFreshnessV1['progress']>;
 
 const ACTIVE_POLL_MS = 1_000;
+const QUIET_ACTIVE_POLL_MS = 4_000;
 const IDLE_POLL_MS = 30_000;
+const QUIET_AFTER_SECONDS = 4;
 const STALLED_AFTER_SECONDS = 30;
 
 export function IndexFreshness() {
@@ -49,7 +51,8 @@ export function IndexFreshness() {
     queryKey: ['code-index', 'freshness', scopeKey(scope)],
     queryFn: () =>
       fetchEnvelope(scopedUrl(scope, '/api/code-index/freshness'), CodeIndexFreshnessPayloadV1Schema),
-    refetchInterval: (query) => (hasActiveBuild(query.state.data) ? ACTIVE_POLL_MS : IDLE_POLL_MS),
+    refetchInterval: (query) => freshnessPollIntervalMs(query.state.data),
+    refetchIntervalInBackground: false,
   });
 
   return (
@@ -140,6 +143,14 @@ function WorktreeReading({
       {progress ? (
         <BuildProgressReading progress={progress} observedAtMicros={observedAtMicros} />
       ) : null}
+      {worktree.parked ? (
+        <p className="text-state-warning">
+          parked: {worktree.parked.reason}
+          {worktree.parked.retries_on_wake ? '' : ' · does not retry on wake'}
+          {' — '}
+          {worktree.parked.remediation}
+        </p>
+      ) : null}
       <dl className="flex flex-col gap-1 text-3xs leading-snug">
         <Row label="staleness">{worktree.staleness_state ?? 'not reported'}</Row>
         <Row label="coverage">{worktree.coverage}</Row>
@@ -184,10 +195,6 @@ function BuildProgressReading({
   observedAtMicros: number;
 }) {
   const percentage = progressPercentage(progress);
-  // Both stamps are the daemon's clock, so browser skew cannot invent a stall.
-  // Said plainly once a build that is not ready has been quiet for a while: the
-  // reader sees the stall instead of a frozen percentage (measured: a wedged
-  // scheduler sat at `source_scan 0/151` for ten minutes with no other tell).
   const quietSeconds =
     progress.phase !== 'ready' &&
     observedAtMicros - progress.last_progress_micros >= STALLED_AFTER_SECONDS * 1_000_000
@@ -253,14 +260,40 @@ function BuildProgressReading({
   );
 }
 
+function freshnessPollIntervalMs(
+  result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
+): number {
+  if (!hasActiveBuild(result)) return IDLE_POLL_MS;
+  // Quiet-active fallback. code_index_activity is hook admission, not scheduler
+  // resume. Freshness samples peaked at 95ms; 4s detects a new progress stamp
+  // without 1 Hz on a wedged build. Terminal and idle stay at 30s.
+  if (hasQuietActiveBuild(result)) return QUIET_ACTIVE_POLL_MS;
+  return ACTIVE_POLL_MS;
+}
+
 function hasActiveBuild(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined): boolean {
-  return (
-    result?.outcome === 'envelope' &&
-    (result.envelope.domain_state !== 'ready' ||
-      result.envelope.payload.worktrees.some(
-        (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
-      ))
-  );
+  if (result?.outcome !== 'envelope') return false;
+  return result.envelope.payload.worktrees.some(worktreeHasActiveBuild);
+}
+
+function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean {
+  if (!worktree.rebuild_in_flight) return false;
+  if (worktree.parked != null && !worktree.parked.retries_on_wake) return false;
+  if (worktree.progress?.blocked_reason === 'publication_authority_corrupt') return false;
+  return true;
+}
+
+function hasQuietActiveBuild(
+  result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
+): boolean {
+  if (result?.outcome !== 'envelope') return false;
+  const observedAt = result.envelope.time.observation_time_micros;
+  return result.envelope.payload.worktrees.some((worktree) => {
+    if (!worktreeHasActiveBuild(worktree)) return false;
+    const progress = worktree.progress;
+    if (progress == null) return false;
+    return observedAt - progress.last_progress_micros >= QUIET_AFTER_SECONDS * 1_000_000;
+  });
 }
 
 function useLatestBuildProgress(

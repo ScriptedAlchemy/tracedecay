@@ -38,6 +38,7 @@ import {
   cortexAbsences,
   cortexLegendPanels,
   directoryOf,
+  foldNote,
   type CortexModel,
   type CortexRegion,
 } from './cortexRelief.ts';
@@ -172,10 +173,7 @@ function ReliefPlate({ model }: { model: CortexModel }) {
       label: 'folded out',
       value: model.foldedRegions.toLocaleString(),
       unit: 'regions',
-      note:
-        model.foldedRegions === 0
-          ? 'the whole clustering is drawn'
-          : `${model.foldedFiles.toLocaleString()} files, all in the table`,
+      note: foldNote(model),
     },
   ];
   return (
@@ -303,7 +301,7 @@ function RegionTable({
   selected: string | null;
   onSelect: (directory: string | null) => void;
 }) {
-  const caption = `Every module region the strata scan clustered — ${model.totalRegions.toLocaleString()} directories over ${model.totalFiles.toLocaleString()} files — including the ${model.foldedRegions.toLocaleString()} the drawing cap folds out. Ordered by ${model.clusterOrdering}.`;
+  const caption = `Every module region the strata scan clustered — ${model.totalRegions.toLocaleString()} directories over ${model.totalFiles.toLocaleString()} files — including the ${model.foldedRegions.toLocaleString()} folded out (${foldNote(model)}). Ordered by ${model.clusterOrdering}.`;
   const windowed = model.regions.length > 200;
   return (
     <div
