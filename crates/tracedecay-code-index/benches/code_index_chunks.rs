@@ -768,7 +768,7 @@ fn execute_case(
         files_parsed,
         chunks_added_or_changed: changes.added_or_changed.len() as u64,
         chunks_deleted: changes.deleted.len() as u64,
-        chunks_reused: changes.reused_count as usize as u64,
+        chunks_reused: changes.reused_count,
         projection_calls: sink.calls,
         corpus_files: current.artifacts.len() as u64,
         corpus_bytes,
