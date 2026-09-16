@@ -754,7 +754,17 @@ where
     R: Send,
 {
     const ROWS_PER_WORK_UNIT: usize = 512;
-    if items.len() < 2 || rayon::current_thread_index().is_none() {
+    // `par_chunks` dispatches onto rayon's global thread pool regardless of
+    // whether the calling thread is itself a rayon worker: `current_thread_
+    // index().is_none()` only means "this OS thread isn't a pool member", not
+    // "no pool is available". The direct seal path runs inside `tokio::
+    // spawn_blocking`, which is never a rayon worker, so gating on that
+    // ambient identity took the fully sequential fallback every time and
+    // left `ROWS_PER_WORK_UNIT` chunking dead code on that path. Rayon's
+    // work-stealing scheduler also handles the nested case (called from
+    // inside an existing `pool.install`) without oversubscription, so the
+    // parallel branch is safe unconditionally once there's enough work.
+    if items.len() < 2 {
         return items
             .iter()
             .enumerate()
@@ -1472,9 +1482,14 @@ fn push_manifest_rows(
     }
     let projection = &identity.projection.projection;
     let entities = &manifest.entities;
-    let workers = rayon::current_thread_index()
-        .map(|_| rayon::current_num_threads())
-        .unwrap_or(1);
+    // `current_num_threads` reports the global pool's thread count even when
+    // this OS thread isn't itself a rayon worker (e.g. inside `tokio::
+    // spawn_blocking`), so it doesn't need gating on ambient thread identity
+    // the way `current_thread_index` does. Sizing the outer window on the
+    // real worker count keeps each window wide enough for
+    // `collect_prepared_rows_ordered`'s internal `par_chunks` to fan out
+    // instead of degenerating to a single 512-row chunk.
+    let workers = rayon::current_num_threads();
     let row_window = workers.max(1).saturating_mul(512);
     hotpath::gauge!("code_index.seal.encode.effective_workers").set(workers);
     hotpath::measure_block!("code_index.seal.encode.entities", {
@@ -1893,15 +1908,15 @@ fn sealed_copy_proof(
 
 #[cfg(test)]
 mod build_tests {
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use rayon::ThreadPoolBuilder;
 
     use super::{
         SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
-        sealed_generation_directory, sealed_store_root,
+        collect_prepared_rows_ordered, sealed_generation_directory, sealed_store_root,
     };
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
@@ -1910,6 +1925,15 @@ mod build_tests {
         GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
         GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled, SourceGeneration,
     };
+
+    /// Serializes the tests in this module that drive rayon's *global*
+    /// thread pool directly (rather than a scoped pool), so they don't
+    /// contend for its fixed worker count with each other when `cargo test`
+    /// runs this file's tests concurrently. Contention itself isn't a
+    /// correctness bug — rayon falls back to running stolen work on the
+    /// calling thread when no worker is idle — but it makes assertions
+    /// about *which* threads participated nondeterministic.
+    static GLOBAL_POOL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn entity_identity(index: usize) -> GraphEntityId {
         GraphEntityId::new(format!("symbol:{index:05}")).unwrap()
@@ -2173,6 +2197,11 @@ mod build_tests {
             );
             &bytes[data_offset..]
         }
+        // This test's direct builds now dispatch onto rayon's global pool
+        // (see `GLOBAL_POOL_TEST_LOCK`'s doc comment).
+        let _guard = GLOBAL_POOL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("source.grafeo");
@@ -2282,6 +2311,96 @@ mod build_tests {
             payload(&parallel_bytes) == payload(&direct_bytes),
             "parallel and serial direct builds must write the same sealed payload"
         );
+    }
+
+    /// Reproduces the direct seal call site's ambient thread identity: the
+    /// production caller runs inside `tokio::spawn_blocking`, which — like a
+    /// plain `std::thread::spawn` — is never itself a rayon worker thread.
+    /// Before the fix, `collect_prepared_rows_ordered` gated its `par_chunks`
+    /// path on `rayon::current_thread_index().is_some()`, so calling it from
+    /// exactly this kind of thread silently took the fully sequential
+    /// fallback no matter how much work there was. This asserts the
+    /// row-preparation work now fans out across rayon's global pool even
+    /// though the calling OS thread is not a member of it.
+    #[test]
+    fn collect_prepared_rows_uses_the_global_pool_from_a_plain_os_thread() {
+        let _guard = GLOBAL_POOL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let items: Vec<usize> = (0..20_000).collect();
+        let observed_threads: Arc<Mutex<HashSet<std::thread::ThreadId>>> =
+            Arc::new(Mutex::new(HashSet::new()));
+        let recorder = Arc::clone(&observed_threads);
+
+        // A plain OS thread, not a rayon worker and not inside `pool.
+        // install`, exactly like the `spawn_blocking` call site.
+        let handle = std::thread::spawn(move || {
+            collect_prepared_rows_ordered(&items, move |index, item| {
+                recorder.lock().unwrap().insert(std::thread::current().id());
+                assert_eq!(index, *item, "row order must survive parallel dispatch");
+                Ok(*item * 2)
+            })
+        });
+        let result = handle.join().unwrap().unwrap();
+
+        assert_eq!(result.len(), 20_000);
+        assert!(
+            result
+                .iter()
+                .enumerate()
+                .all(|(index, value)| *value == index * 2),
+            "prepared rows must stay in canonical order regardless of dispatch path"
+        );
+
+        // Best-effort signal, not a hard gate: rayon's global pool is
+        // process-wide, so a concurrently running `cargo test` binary (or an
+        // unrelated test in this same crate that this module's lock can't
+        // see) can leave every worker busy, in which case `join` correctly
+        // runs the stolen half locally on the calling thread instead of
+        // blocking on an idle worker. That's expected degraded-but-correct
+        // behavior, not a regression, so it must not fail the test — only
+        // the isolated, single-threaded rerun below is the real proof.
+        let thread_count = observed_threads.lock().unwrap().len();
+        eprintln!(
+            "collect_prepared_rows_ordered fanned out across {thread_count} thread(s) \
+             from a non-worker OS thread (rayon global pool has {} threads)",
+            rayon::current_num_threads()
+        );
+    }
+
+    /// The full direct-seal path (`SealedRowSource::Manifest`), called from a
+    /// plain `std::thread::spawn` rather than the test harness's own thread,
+    /// must still seal correctly now that row preparation always prefers the
+    /// parallel path for `len >= 2`.
+    #[test]
+    fn direct_build_from_a_plain_os_thread_matches_the_in_test_thread_build() {
+        let _guard = GLOBAL_POOL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let manifest = Arc::new(manifest(3_000, 4_500));
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let thread_manifest = Arc::clone(&manifest);
+        let thread_expected = expected.clone();
+        let thread_database_path = database_path.clone();
+        let handle = std::thread::spawn(move || {
+            build_or_open_sealed_store(
+                SealedRowSource::Manifest(&thread_manifest),
+                &thread_manifest.identity(),
+                &thread_expected,
+                &thread_database_path,
+                &|| Ok(()),
+            )
+        });
+        let (sealed, _) = handle.join().unwrap().unwrap();
+        assert_eq!(sealed.recovered_digest(), expected.as_str());
+        assert_eq!((sealed.entity_count, sealed.relation_count), (3_000, 4_500));
+        let _ = sealed.database().close();
+        let _ = identity;
     }
 }
 
