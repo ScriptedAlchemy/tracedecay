@@ -12,6 +12,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+    FeedbackProximityEncounterV1, FeedbackProximityReadResultV1, FeedbackProximityRelationV1,
     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
     GitHubReviewReadRequestV1, GitHubReviewReadResponseV1,
 };
@@ -444,11 +445,51 @@ pub struct ProjectDeliveryInboxSourceV1 {
     pub indexed: Option<ProjectDeliveryIndexedHeadV1>,
     pub delivery: ProjectDeliveryReadOutcomeV1,
     pub memberships: Vec<ProjectDeliveryMembershipEvidenceV1>,
-    /// Attention join input from the daemon's proximity read authority
-    /// (`POST /api/feedback/proximity`). This stays a thin local DTO instead
-    /// of importing `FeedbackProximityReadResultV1` directly so Delivery does
-    /// not pull the full proximity contract graph into its aggregation.
+    /// Attention join input from the daemon's proximity read authority.
+    /// Callers mount a real `FeedbackProximityReadResultV1` (via
+    /// [`project_delivery_proximity_attention_source_from_read_v1`]) so the
+    /// server-owned inbox is the one join authority — never a client re-join.
     pub proximity: ProjectDeliveryProximityAttentionSourceV1,
+}
+
+/// Delivery-local newtype of `FeedbackProximityRelationV1`'s discriminants.
+/// Keeps the hot join typed without dragging clone/conflict handles into the
+/// Delivery aggregation graph.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDeliveryProximityRelationV1 {
+    CodeNeighborhoodCandidate,
+    SharedCodeCandidate,
+    OverlappingEdit,
+    ConfirmedConflict,
+}
+
+impl From<&FeedbackProximityRelationV1> for ProjectDeliveryProximityRelationV1 {
+    fn from(relation: &FeedbackProximityRelationV1) -> Self {
+        match relation {
+            FeedbackProximityRelationV1::CodeNeighborhoodCandidate { .. } => {
+                Self::CodeNeighborhoodCandidate
+            }
+            FeedbackProximityRelationV1::SharedCodeCandidate { .. } => Self::SharedCodeCandidate,
+            FeedbackProximityRelationV1::OverlappingEdit { .. } => Self::OverlappingEdit,
+            FeedbackProximityRelationV1::ConfirmedConflict { .. } => Self::ConfirmedConflict,
+        }
+    }
+}
+
+impl ProjectDeliveryProximityRelationV1 {
+    /// The Delivery attention source this relation can settle, if any.
+    /// Neighborhood candidates have no Delivery counterpart.
+    pub fn attention_source(self) -> Option<ProjectDeliveryAttentionSourceV1> {
+        match self {
+            Self::OverlappingEdit => Some(ProjectDeliveryAttentionSourceV1::OverlappingEdit),
+            Self::ConfirmedConflict => Some(ProjectDeliveryAttentionSourceV1::ConfirmedConflict),
+            Self::SharedCodeCandidate => {
+                Some(ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation)
+            }
+            Self::CodeNeighborhoodCandidate => None,
+        }
+    }
 }
 
 /// Bounded, local shape of one proximity encounter's contribution to
@@ -458,11 +499,7 @@ pub struct ProjectDeliveryInboxSourceV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectDeliveryProximityEncounterV1 {
     pub encounter_id: ManifestDigest,
-    /// Mirrors `FeedbackProximityRelationV1`'s serialized `relation_kind`:
-    /// `"overlapping_edit"`, `"confirmed_conflict"`, `"shared_code_candidate"`,
-    /// or `"code_neighborhood_candidate"` (the last never joins Delivery
-    /// attention, which only tracks the three head-bound relations above).
-    pub relation_kind: String,
+    pub relation: ProjectDeliveryProximityRelationV1,
     pub observed_at: UtcMicros,
     /// Head commit ids observed on this encounter's participants. A match
     /// against a pull request's indexed head admits the encounter into that
@@ -471,9 +508,9 @@ pub struct ProjectDeliveryProximityEncounterV1 {
 }
 
 /// Typed proximity join input for one project's Delivery inbox source.
-/// `Unsupported` is the current default: until a caller mounts a proximity
-/// read, Overlapping edit/Confirmed conflict/Divergent shared implementation
-/// stay explicitly unsupported rather than silently reading as clear.
+/// `Unsupported` is the default when no proximity authority is mounted;
+/// Overlapping edit/Confirmed conflict/Divergent shared implementation stay
+/// explicitly unsupported rather than silently reading as clear.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ProjectDeliveryProximityAttentionSourceV1 {
     #[default]
@@ -481,7 +518,70 @@ pub enum ProjectDeliveryProximityAttentionSourceV1 {
     Unavailable,
     Ready {
         encounters: Vec<ProjectDeliveryProximityEncounterV1>,
+        /// Coverage of the mounted proximity read (`complete` /
+        /// `partial` / `stale`). Ready never collapses incomplete reads.
+        coverage: ProjectDeliveryInboxCoverageV1,
     },
+}
+
+/// Fold the canonical proximity read into Delivery's join input. Denied and
+/// unavailable reads become `Unavailable`; ready pages keep their typed
+/// coverage so partial/stale never upgrade to complete.
+pub fn project_delivery_proximity_attention_source_from_read_v1(
+    result: &FeedbackProximityReadResultV1,
+) -> ProjectDeliveryProximityAttentionSourceV1 {
+    match result {
+        FeedbackProximityReadResultV1::Denied { .. }
+        | FeedbackProximityReadResultV1::Unavailable { .. } => {
+            ProjectDeliveryProximityAttentionSourceV1::Unavailable
+        }
+        FeedbackProximityReadResultV1::Complete { page }
+        | FeedbackProximityReadResultV1::CompleteZero { page } => {
+            ProjectDeliveryProximityAttentionSourceV1::Ready {
+                encounters: page
+                    .encounters
+                    .iter()
+                    .map(project_delivery_proximity_encounter_from_v1)
+                    .collect(),
+                coverage: ProjectDeliveryInboxCoverageV1::Complete,
+            }
+        }
+        FeedbackProximityReadResultV1::Partial { page, .. } => {
+            ProjectDeliveryProximityAttentionSourceV1::Ready {
+                encounters: page
+                    .encounters
+                    .iter()
+                    .map(project_delivery_proximity_encounter_from_v1)
+                    .collect(),
+                coverage: ProjectDeliveryInboxCoverageV1::Partial,
+            }
+        }
+        FeedbackProximityReadResultV1::Stale { page, .. } => {
+            ProjectDeliveryProximityAttentionSourceV1::Ready {
+                encounters: page
+                    .encounters
+                    .iter()
+                    .map(project_delivery_proximity_encounter_from_v1)
+                    .collect(),
+                coverage: ProjectDeliveryInboxCoverageV1::Stale,
+            }
+        }
+    }
+}
+
+fn project_delivery_proximity_encounter_from_v1(
+    encounter: &FeedbackProximityEncounterV1,
+) -> ProjectDeliveryProximityEncounterV1 {
+    ProjectDeliveryProximityEncounterV1 {
+        encounter_id: encounter.encounter_id.clone(),
+        relation: ProjectDeliveryProximityRelationV1::from(&encounter.relation),
+        observed_at: encounter.observed_at,
+        participant_head_revisions: encounter
+            .participants
+            .iter()
+            .filter_map(|participant| participant.head_revision.clone())
+            .collect(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -570,7 +670,7 @@ pub enum ProjectDeliveryAttentionEvidenceV1 {
     },
     ProximityEncounter {
         encounter_id: ManifestDigest,
-        relation_kind: String,
+        relation: ProjectDeliveryProximityRelationV1,
     },
 }
 
@@ -1093,41 +1193,37 @@ fn delivery_attention(
 /// admits only encounters naming the pull request's indexed head as a
 /// participant revision, and clears sources with zero matches instead of
 /// leaving them unsupported (proximity is mounted and measured zero).
+/// Ready coverage (`complete` / `partial` / `stale`) is preserved on every
+/// settled source so an incomplete proximity read never upgrades to complete.
 fn apply_proximity_attention(
     items: &mut [ProjectDeliveryAttentionItemV1],
     proximity: &ProjectDeliveryProximityAttentionSourceV1,
     indexed_head: &CommitId,
 ) {
-    const PROXIMITY_SOURCES: [(&str, ProjectDeliveryAttentionSourceV1); 3] = [
-        (
-            "overlapping_edit",
-            ProjectDeliveryAttentionSourceV1::OverlappingEdit,
-        ),
-        (
-            "confirmed_conflict",
-            ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
-        ),
-        (
-            "shared_code_candidate",
-            ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
-        ),
+    const PROXIMITY_SOURCES: [ProjectDeliveryAttentionSourceV1; 3] = [
+        ProjectDeliveryAttentionSourceV1::OverlappingEdit,
+        ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
+        ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
     ];
     match proximity {
         ProjectDeliveryProximityAttentionSourceV1::Unsupported => {}
         ProjectDeliveryProximityAttentionSourceV1::Unavailable => {
-            for (_, source) in PROXIMITY_SOURCES {
+            for source in PROXIMITY_SOURCES {
                 if let Some(item) = items.iter_mut().find(|item| item.source == source) {
                     item.state = ProjectDeliveryAttentionStateV1::Unavailable;
                     item.coverage = ProjectDeliveryInboxCoverageV1::Unavailable;
                 }
             }
         }
-        ProjectDeliveryProximityAttentionSourceV1::Ready { encounters } => {
-            for (relation_kind, source) in PROXIMITY_SOURCES {
+        ProjectDeliveryProximityAttentionSourceV1::Ready {
+            encounters,
+            coverage,
+        } => {
+            for source in PROXIMITY_SOURCES {
                 let matching = encounters
                     .iter()
                     .filter(|encounter| {
-                        encounter.relation_kind == relation_kind
+                        encounter.relation.attention_source() == Some(source)
                             && encounter
                                 .participant_head_revisions
                                 .iter()
@@ -1139,16 +1235,16 @@ fn apply_proximity_attention(
                 };
                 if matching.is_empty() {
                     item.state = ProjectDeliveryAttentionStateV1::Clear;
-                    item.coverage = ProjectDeliveryInboxCoverageV1::Complete;
+                    item.coverage = *coverage;
                     continue;
                 }
                 item.state = ProjectDeliveryAttentionStateV1::Active;
-                item.coverage = ProjectDeliveryInboxCoverageV1::Complete;
+                item.coverage = *coverage;
                 item.evidence = matching
                     .iter()
                     .map(|encounter| ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
                         encounter_id: encounter.encounter_id.clone(),
-                        relation_kind: encounter.relation_kind.clone(),
+                        relation: encounter.relation,
                     })
                     .collect();
                 item.observed_at = matching.iter().map(|encounter| encounter.observed_at).max();
@@ -2712,12 +2808,12 @@ mod tests {
     fn inbox_marks_proximity_overlap_as_active_attention_with_evidence() {
         fn proximity_encounter(
             id: &str,
-            relation_kind: &str,
+            relation: ProjectDeliveryProximityRelationV1,
             head: &str,
         ) -> ProjectDeliveryProximityEncounterV1 {
             ProjectDeliveryProximityEncounterV1 {
                 encounter_id: ManifestDigest::new(format!("sha256:{}", id.repeat(64))).unwrap(),
-                relation_kind: relation_kind.to_owned(),
+                relation,
                 observed_at: UtcMicros(50),
                 participant_head_revisions: vec![
                     CommitId::new(head).unwrap(),
@@ -2739,15 +2835,24 @@ mod tests {
             "commit.delivery.proximity",
             ProjectDeliveryGitHubSourceV1::Ready { timeline },
         );
-        let overlap = proximity_encounter("a", "overlapping_edit", "commit.delivery.proximity");
-        let conflict = proximity_encounter("b", "confirmed_conflict", "commit.delivery.proximity");
+        let overlap = proximity_encounter(
+            "a",
+            ProjectDeliveryProximityRelationV1::OverlappingEdit,
+            "commit.delivery.proximity",
+        );
+        let conflict = proximity_encounter(
+            "b",
+            ProjectDeliveryProximityRelationV1::ConfirmedConflict,
+            "commit.delivery.proximity",
+        );
         let unrelated = proximity_encounter(
             "c",
-            "shared_code_candidate",
+            ProjectDeliveryProximityRelationV1::SharedCodeCandidate,
             "commit.delivery.proximity-unmatched-head",
         );
         source.proximity = ProjectDeliveryProximityAttentionSourceV1::Ready {
             encounters: vec![overlap.clone(), conflict.clone(), unrelated],
+            coverage: ProjectDeliveryInboxCoverageV1::Complete,
         };
 
         let inbox = aggregate_project_delivery_inbox_v1(vec![source], 16);
@@ -2763,7 +2868,7 @@ mod tests {
             overlapping.evidence,
             vec![ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
                 encounter_id: overlap.encounter_id.clone(),
-                relation_kind: "overlapping_edit".to_owned(),
+                relation: ProjectDeliveryProximityRelationV1::OverlappingEdit,
             }]
         );
         assert_eq!(overlapping.observed_at, Some(UtcMicros(50)));
@@ -2777,7 +2882,7 @@ mod tests {
             confirmed.evidence,
             vec![ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
                 encounter_id: conflict.encounter_id.clone(),
-                relation_kind: "confirmed_conflict".to_owned(),
+                relation: ProjectDeliveryProximityRelationV1::ConfirmedConflict,
             }]
         );
 

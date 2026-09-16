@@ -1177,7 +1177,7 @@ export const DeliveryAttentionEvidenceV1Schema = z.discriminatedUnion("kind", [z
 }), z.object({
   encounter_id: z.string(),
   kind: z.literal("proximity_encounter"),
-  relation_kind: z.string(),
+  relation: z.lazy(() => DeliveryProximityRelationV1Schema),
 }), z.object({
   comment_id: z.string(),
   kind: z.literal("review_comment"),
@@ -1715,6 +1715,9 @@ export type DeliveryProjectionV18 = z.infer<typeof DeliveryProjectionV18Schema>;
 
 export const DeliveryProviderStateV1Schema = z.enum(["denied", "failed", "not_configured", "not_published", "partial", "rate_limited", "ready", "stale", "unavailable"]);
 export type DeliveryProviderStateV1 = z.infer<typeof DeliveryProviderStateV1Schema>;
+
+export const DeliveryProximityRelationV1Schema = z.enum(["code_neighborhood_candidate", "confirmed_conflict", "overlapping_edit", "shared_code_candidate"]);
+export type DeliveryProximityRelationV1 = z.infer<typeof DeliveryProximityRelationV1Schema>;
 
 export const DeliveryPullRequestIdentityV1Schema = z.object({
   additions: z.number().int().safe().min(0),

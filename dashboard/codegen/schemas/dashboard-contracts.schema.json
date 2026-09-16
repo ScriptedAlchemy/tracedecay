@@ -6044,14 +6044,14 @@
               "const": "proximity_encounter",
               "type": "string"
             },
-            "relation_kind": {
-              "type": "string"
+            "relation": {
+              "$ref": "#/$defs/DeliveryProximityRelationV1"
             }
           },
           "required": [
             "kind",
             "encounter_id",
-            "relation_kind"
+            "relation"
           ],
           "type": "object"
         }
@@ -8596,6 +8596,15 @@
         "not_published",
         "not_configured",
         "unavailable"
+      ],
+      "type": "string"
+    },
+    "DeliveryProximityRelationV1": {
+      "enum": [
+        "code_neighborhood_candidate",
+        "shared_code_candidate",
+        "overlapping_edit",
+        "confirmed_conflict"
       ],
       "type": "string"
     },

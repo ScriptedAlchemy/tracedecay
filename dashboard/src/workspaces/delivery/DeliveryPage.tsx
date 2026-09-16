@@ -18,10 +18,6 @@ import { ReadSection, type ReadState } from '../../ui/ReadSection.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel, ReadoutBar, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
-import { useFeedbackProximity } from '../../viz/proximity/index.ts';
-import type { FeedbackProximityReadResultV1 } from '../../contracts/index.ts';
-import type { WorkResult } from '../work/workApi.ts';
-import { applyProximityAttention } from './deliveryProximity.ts';
 
 const ATTENTION_SOURCES = [
   'ci_failure',
@@ -45,11 +41,6 @@ export function DeliveryPage() {
     '/api/delivery/inbox',
     DeliveryInboxV1Schema,
   );
-  // The dashboard's inbox HTTP handler leaves `overlapping_edit`,
-  // `confirmed_conflict` and `divergent_shared_implementation` typed
-  // `unsupported` on purpose; this joins the separate proximity read
-  // client-side, the same pattern `useLoomProximity` uses for Loom.
-  const proximity = useFeedbackProximity(true);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -61,7 +52,7 @@ export function DeliveryPage() {
       <ReadSection
         title="Delivery inbox"
         chrome="centered"
-        state={inboxReadState(inbox.isPending, inbox.data, proximity.data)}
+        state={inboxReadState(inbox.isPending, inbox.data)}
       >
         {(payload) => <Inbox payload={payload} />}
       </ReadSection>
@@ -72,7 +63,6 @@ export function DeliveryPage() {
 function inboxReadState(
   pending: boolean,
   result: EnvelopeResult<DeliveryInboxV1> | undefined,
-  proximity: WorkResult<FeedbackProximityReadResultV1> | undefined,
 ): ReadState<DeliveryInboxV1> {
   if (pending) {
     return { kind: 'blocked', state: 'loading', detail: 'reading the admitted delivery inbox' };
@@ -94,12 +84,10 @@ function inboxReadState(
       detail: 'delivery evidence was not disclosed',
     };
   }
+  // Server-owned `GET /api/delivery/inbox` already joined proximity attention.
   return {
     kind: 'ready',
-    value: applyProximityAttention(
-      result.envelope.payload,
-      proximity?.outcome === 'value' ? proximity.value : undefined,
-    ),
+    value: result.envelope.payload,
   };
 }
 
@@ -598,7 +586,7 @@ function evidenceIdentity(evidence: DeliveryAttentionEvidenceV1): string {
     case 'indexed_generation':
       return evidence.generation;
     case 'proximity_encounter':
-      return `${evidence.encounter_id}:${evidence.relation_kind}`;
+      return `${evidence.encounter_id}:${evidence.relation}`;
     default: {
       const unhandled: never = evidence;
       return unhandled;
