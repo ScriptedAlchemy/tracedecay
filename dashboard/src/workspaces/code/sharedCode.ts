@@ -124,12 +124,3 @@ export function shortDigest(digest: string): string {
 export function describeOccurrence(occurrence: SimilarOccurrenceV1): string {
   return `${occurrence.path} · bytes ${occurrence.body_span.start_byte.toLocaleString()}–${occurrence.body_span.end_byte.toLocaleString()}`;
 }
-
-/** Members other than the selected source itself. The daemon includes the
- * source in its own family; the copies are what the reader came to see. */
-export function copiesOf(
-  members: ReadonlyArray<SimilarOccurrenceV1>,
-  sourceId: string,
-): SimilarOccurrenceV1[] {
-  return members.filter((member) => member.symbol_occurrence_id !== sourceId);
-}

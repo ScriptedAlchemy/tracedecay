@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   SHARED_CODE_MATCH_CLASSES,
-  copiesOf,
   describeOccurrence,
   readSharedCodeCoverage,
   sharedFamilyUrl,
@@ -76,21 +75,5 @@ describe('shared-code identities', () => {
         body_span: { start_byte: 1200, end_byte: 1942 },
       }),
     ).toBe('src/lib.rs · bytes 1,200–1,942');
-  });
-
-  it('lists the copies of a body, not the body itself', () => {
-    const member = (id: string) => ({
-      symbol_occurrence_id: id,
-      project_id: 'p',
-      repository_id: 'r',
-      worktree_id: null,
-      source_generation: 'g',
-      snapshot_digest: 's',
-      path: `${id}.rs`,
-      body_span: { start_byte: 0, end_byte: 1 },
-    });
-    expect(
-      copiesOf([member('a'), member('b'), member('c')], 'b').map((m) => m.symbol_occurrence_id),
-    ).toEqual(['a', 'c']);
   });
 });
