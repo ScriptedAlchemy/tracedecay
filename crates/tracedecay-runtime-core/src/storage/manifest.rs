@@ -168,8 +168,8 @@ fn validate_profile_shard_manifest(
 ) -> std::result::Result<(), ProfileShardValidationError> {
     use super::ProfileShardNonCanonicalReasonV1 as Reason;
     let invalid = |reason: Reason| ProfileShardValidationError::NonCanonical { reason };
-    let manifest = read_store_manifest(manifest_path)
-        .map_err(|_| invalid(Reason::ManifestInvalid))?;
+    let manifest =
+        read_store_manifest(manifest_path).map_err(|_| invalid(Reason::ManifestInvalid))?;
     if manifest.schema_version != STORE_MANIFEST_SCHEMA_VERSION {
         return Err(invalid(Reason::ManifestSchemaMismatch));
     }

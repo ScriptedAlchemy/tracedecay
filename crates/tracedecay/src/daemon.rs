@@ -47,13 +47,23 @@ use tracedecay_mcp::tools::catalog_discovery::{
 };
 use tracedecay_mcp::transport::ReplayTransport;
 use tracedecay_mcp::{
-    BrokerStreamTransport, ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport,
+    BrokerStreamTransport, ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
 };
 use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
+/// Human-facing detail fragment for a still-warming project/profile owner.
+///
+/// Protocol control flow must key on [`PROJECT_WARMING_REASON_CODE`] (or the
+/// sibling deferred/revoked codes below), never on this English prose.
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
+/// Typed reason a project/profile/owner open has not finished yet.
+pub const PROJECT_WARMING_REASON_CODE: &str = "project_warming";
+/// Typed reason a repository-identity probe deferred past its budget.
+pub const REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE: &str = "repository_discovery_deferred";
+/// Typed reason a retained project server was retired mid-response.
+pub const PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE: &str = "project_server_response_revoked";
 #[cfg(unix)]
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
@@ -120,7 +130,7 @@ pub(crate) const PROJECT_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(5
 
 /// Daemon error messages for a saturated project-open queue. Both clear on
 /// their own as in-flight opens finish, so they are retryable for the same
-/// reason [`PROJECT_WARMING_RETRY_HINT`] is.
+/// reason [`PROJECT_WARMING_REASON_CODE`] is.
 const PROJECT_OPEN_CAPACITY_MESSAGES: [&str; 2] = [
     "daemon project open task capacity reached",
     "daemon project server capacity reached",
@@ -137,32 +147,69 @@ const DAEMON_READ_DEADLINE_MESSAGES: [&str; 3] = [
     "did not answer after",
 ];
 
-/// True when a daemon error message carries the project warming hint.
-pub(crate) fn error_message_is_project_warming(message: &str) -> bool {
-    message.contains(PROJECT_WARMING_RETRY_HINT)
+/// True when a daemon error is the typed project/profile/owner warming refusal.
+pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((PROJECT_WARMING_REASON_CODE, true, _))
+    )
 }
 
-/// True when a daemon error message describes a project open that has not
-/// finished yet: either the route's warming hint or a saturated open queue.
-pub(crate) fn error_message_is_project_open_retryable(message: &str) -> bool {
-    error_message_is_project_warming(message)
-        || PROJECT_OPEN_CAPACITY_MESSAGES
-            .iter()
-            .any(|capacity| message.contains(capacity))
+/// True when a daemon error describes a project open that has not finished
+/// yet: typed warming, deferred repository discovery, or a saturated open
+/// queue (still named in the `Config` message until those producers migrate).
+pub(crate) fn error_is_project_open_retryable(error: &TraceDecayError) -> bool {
+    error_is_project_warming(error)
+        || matches!(
+            error.project_route_context(),
+            Some((REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, _))
+        )
+        || matches!(
+            error,
+            TraceDecayError::Config { message }
+                if PROJECT_OPEN_CAPACITY_MESSAGES
+                    .iter()
+                    .any(|capacity| message.contains(*capacity))
+        )
 }
 
-/// Response-side form of [`error_message_is_project_open_retryable`] for
-/// clients that still hold the JSON-RPC `error` member, where the capacity
-/// states also carry a typed `data.kind`.
+/// Response-side form of [`error_is_project_open_retryable`] for clients that
+/// still hold the JSON-RPC `error` member. Warming/deferred key on
+/// `data.reason_code`; capacity states also carry a typed `data.kind`.
 pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value) -> bool {
     error
-        .get("message")
+        .pointer("/data/reason_code")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(error_message_is_project_open_retryable)
+        .is_some_and(|reason| {
+            reason == PROJECT_WARMING_REASON_CODE
+                || reason == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE
+        })
         || error
             .pointer("/data/kind")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|kind| PROJECT_OPEN_CAPACITY_ERROR_KINDS.contains(&kind))
+        || error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| {
+                PROJECT_OPEN_CAPACITY_MESSAGES
+                    .iter()
+                    .any(|capacity| message.contains(*capacity))
+            })
+}
+
+/// True when a one-shot tool-call transport error should be retried by a
+/// journey (or any client riding out a transient open/retirement).
+///
+/// Keys only on typed reason codes — never on English detail prose.
+pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((reason, true, _))
+            if reason == PROJECT_WARMING_REASON_CODE
+                || reason == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE
+                || reason == PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE
+    )
 }
 
 /// True when a daemon error message reports a missed read deadline.

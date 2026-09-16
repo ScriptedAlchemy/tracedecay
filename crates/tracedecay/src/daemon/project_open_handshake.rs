@@ -229,6 +229,25 @@ pub(super) fn project_open_error_response(
     error: &TraceDecayError,
 ) -> JsonRpcResponse {
     match error {
+        TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable,
+            detail,
+        } if reason_code == PROJECT_WARMING_REASON_CODE
+            || reason_code == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE =>
+        {
+            JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InternalError,
+                detail.clone(),
+                Some(json!({
+                    "reason_code": reason_code,
+                    "retryable": retryable,
+                    "detail": detail,
+                    "kind": reason_code,
+                })),
+            )
+        }
         TraceDecayError::Config { message }
             if message.contains(PROJECT_OPEN_FAILURE_RETRY_HINT) =>
         {

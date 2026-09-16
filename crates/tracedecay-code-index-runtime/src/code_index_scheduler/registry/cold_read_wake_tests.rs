@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use tracedecay_contracts::ResolvedScope;
 
 use super::super::{DaemonCodeIndexControlV1, ReconcilePassGuard};
-use super::CodeIndexSchedulerRegistryV1;
+use super::{CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1};
 use crate::code_index::production::CodeIndexExecutionControlV1;
 
 #[tokio::test]
@@ -100,7 +100,10 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
     let query_control =
         DaemonCodeIndexControlV1::new(Arc::clone(&epoch), Arc::clone(&shutting_down));
     assert!(
-        registry.request_query_background_reconcile(&scope).await,
+        matches!(
+            registry.request_query_background_reconcile(&scope).await,
+            CodeIndexReconcileAdmissionV1::Accepted
+        ),
         "a cold query still records one follow-up wake"
     );
     assert!(

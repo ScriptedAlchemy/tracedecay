@@ -10,13 +10,81 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::daemon::{call_tool, notify_hook_event};
+use tracedecay::daemon::{
+    PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
+    REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, call_tool, notify_hook_event,
+    tool_call_transport_error_is_retryable,
+};
 use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent, HookEventNotifyOutcomeV1};
 
 use crate::common::{DaemonProcess, tracedecay_command_with_home};
 
 pub const RECEIPT_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Lanes a terminal receipt still waits for.
+///
+/// Every lane must answer from the current complete generation. The lexical
+/// lane may do so `partial` with the typed reason
+/// [`tracedecay_query::code_search::partial_reason::CANDIDATE_SOURCES_PRUNED`]:
+/// the query's identifier split produced a term whose document frequency
+/// exceeds the lexical candidate budget (`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`),
+/// so recall for that route is policy-bounded, not missing. A journey whose
+/// probe symbol shares its identifier parts with the whole fixture batch
+/// (`cancellation_probe_NNNN_MMM`) trips that policy by construction. Only
+/// the current-generation form is terminal: `generation` names an older
+/// generation whenever the request fell back to one, and that stays warming.
+fn lanes_short_of_terminal(search: &Value) -> Vec<&'static str> {
+    crate::common::incomplete_code_index_query_lanes(search)
+        .into_iter()
+        .filter(|lane| {
+            let coverage = &search["coverage"][*lane];
+            !(*lane == "lexical"
+                && coverage["status"] == "partial"
+                && coverage["reason"]
+                    == tracedecay_query::code_search::partial_reason::CANDIDATE_SOURCES_PRUNED
+                && coverage["generation"].is_null())
+        })
+        .collect()
+}
+
+#[test]
+fn policy_bounded_lexical_partial_is_terminal_only_on_current_generation() {
+    use tracedecay_query::code_search::partial_reason::CANDIDATE_SOURCES_PRUNED;
+
+    let current = json!({
+        "coverage": {
+            "exact": "complete",
+            "lexical": {
+                "status": "partial",
+                "reason": CANDIDATE_SOURCES_PRUNED,
+                "generation": null,
+            },
+            "graph": "complete",
+        }
+    });
+    assert!(
+        lanes_short_of_terminal(&current).is_empty(),
+        "current-generation policy-bounded lexical partial is terminal"
+    );
+
+    let stale = json!({
+        "coverage": {
+            "exact": "complete",
+            "lexical": {
+                "status": "partial",
+                "reason": CANDIDATE_SOURCES_PRUNED,
+                "generation": "generation.previous",
+            },
+            "graph": "complete",
+        }
+    });
+    assert_eq!(
+        lanes_short_of_terminal(&stale),
+        vec!["lexical"],
+        "stale-generation partial with the same reason must keep waiting"
+    );
+}
 
 pub fn daemon_log_for_failure() -> String {
     let Some(path) = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG") else {
@@ -147,6 +215,45 @@ fn tool_payload(result: Value, operation: &str) -> Value {
         .unwrap_or_else(|| panic!("{operation} did not return JSON content: {result}"))
 }
 
+#[test]
+fn journey_transport_retry_keys_on_typed_reason_codes() {
+    let warming = tracedecay_domain::errors::TraceDecayError::project_route(
+        PROJECT_WARMING_REASON_CODE,
+        true,
+        "TraceDecay project '/tmp/fixture' is warming in the background; retry the same tool shortly",
+    );
+    let deferred = tracedecay_domain::errors::TraceDecayError::project_route(
+        REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+        true,
+        "repository discovery deferred",
+    );
+    let revoked = tracedecay_domain::errors::TraceDecayError::project_route(
+        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+        true,
+        "the retained project server was retired before response completion",
+    );
+    let terminal = tracedecay_domain::errors::TraceDecayError::project_route(
+        "tool_dispatch_shutdown",
+        true,
+        "MCP server was released before retained dispatch admission",
+    );
+    let untyped = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "project is warming in the background; retry the same tool shortly".to_owned(),
+    };
+
+    assert!(tool_call_transport_error_is_retryable(&warming));
+    assert!(tool_call_transport_error_is_retryable(&deferred));
+    assert!(tool_call_transport_error_is_retryable(&revoked));
+    assert!(
+        !tool_call_transport_error_is_retryable(&terminal),
+        "unrelated retryable project-route codes must not ride the journey transport loop"
+    );
+    assert!(
+        !tool_call_transport_error_is_retryable(&untyped),
+        "English warming prose alone must not decide journey transport retry"
+    );
+}
+
 pub async fn tool(
     socket: &Path,
     handshake: &DaemonHandshake,
@@ -164,11 +271,7 @@ pub async fn tool(
         match result {
             Ok(payload) => return tool_payload(payload, name),
             Err(error)
-                if Instant::now() < deadline
-                    && (error.to_string().contains("warming in the background")
-                        || error
-                            .to_string()
-                            .contains("retired before response completion")) =>
+                if Instant::now() < deadline && tool_call_transport_error_is_retryable(&error) =>
             {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -416,7 +519,7 @@ pub async fn wait_for_terminal_generation(
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             }
-            let incomplete = crate::common::incomplete_code_index_query_lanes(&last_search);
+            let incomplete = lanes_short_of_terminal(&last_search);
             if !incomplete.is_empty() {
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
@@ -440,7 +543,7 @@ pub async fn wait_for_terminal_generation(
     .unwrap_or_else(|_| {
         panic!(
             "timed out waiting for terminal generation for {query}; incomplete lanes={:?}; status={last_status}; search={last_search}; daemon_log={}",
-            crate::common::incomplete_code_index_query_lanes(&last_search),
+            lanes_short_of_terminal(&last_search),
             daemon_log_for_failure()
         )
     })

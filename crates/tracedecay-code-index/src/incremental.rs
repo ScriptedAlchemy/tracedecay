@@ -85,22 +85,17 @@ impl GenerationChunkManifestV1 {
         generation_id: CodeGenerationId,
         files: Vec<CodeFileChunksV1>,
     ) -> Result<Self, ChunkIncrementErrorV1> {
-        generation_id
-            .validate()
-            .map_err(|error| {
-                ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
-                    error,
-                ))
-            })?;
+        generation_id.validate().map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
 
         let capacity = files.iter().map(|file| file.chunks.len()).sum();
         let mut chunks = Vec::with_capacity(capacity);
         let mut file_occurrences = BTreeSet::new();
         for file in files {
-            file.document
-                .generation_id
-                .validate()
-                .map_err(|error| {
+            file.document.generation_id.validate().map_err(|error| {
                 ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
                     error,
                 ))
@@ -133,13 +128,11 @@ impl GenerationChunkManifestV1 {
         generation_id: CodeGenerationId,
         chunks: Vec<Arc<CodeSearchChunkV1>>,
     ) -> Result<Self, ChunkIncrementErrorV1> {
-        generation_id
-            .validate()
-            .map_err(|error| {
-                ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
-                    error,
-                ))
-            })?;
+        generation_id.validate().map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
         if let Some(duplicate) = chunks
             .windows(2)
             .find(|pair| pair[0].id >= pair[1].id)
@@ -158,9 +151,11 @@ impl GenerationChunkManifestV1 {
         generation_id: CodeGenerationId,
         files: Vec<CodeFileChunksV1>,
     ) -> Result<Self, ChunkIncrementErrorV1> {
-        generation_id
-            .validate()
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
+        generation_id.validate().map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
 
         // Per-file validation is independent work and dominates a
         // corpus-sized aggregate, so it fans out over the indexing pool
@@ -366,7 +361,11 @@ pub fn materialize_generation_increment(
         }
     }
     if !reextracted_files.is_empty() || !reextracted_symbols.is_empty() {
-        return Err(ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::UnplannedReextractedEvidence)));
+        return Err(ChunkIncrementErrorV1::NonCanonical(
+            crate::noncanonical::NonCanonicalCauseV1::new(
+                crate::noncanonical::NonCanonicalReasonCodeV1::UnplannedReextractedEvidence,
+            ),
+        ));
     }
 
     let chunks = GenerationChunkManifestV1::new(generation_id.clone(), files)?;
@@ -449,20 +448,12 @@ pub fn plan_chunk_increment(
         reused_count,
         reused_digest,
     };
-    changes.manifest_digest = changes
-        .compute_digest()
-        .map_err(|error| {
-            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
-                error,
-            ))
-        })?;
-    changes
-        .validate()
-        .map_err(|error| {
-            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
-                error,
-            ))
-        })?;
+    changes.manifest_digest = changes.compute_digest().map_err(|error| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
+    })?;
+    changes.validate().map_err(|error| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
+    })?;
     Ok(changes)
 }
 
@@ -563,12 +554,12 @@ pub(crate) fn plan_chunk_increment_arc_shared(
         reused_count,
         reused_digest,
     };
-    changes.manifest_digest = changes
-        .compute_digest()
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
-    changes
-        .validate()
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
+    changes.manifest_digest = changes.compute_digest().map_err(|error| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
+    })?;
+    changes.validate().map_err(|error| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
+    })?;
     Ok(changes)
 }
 

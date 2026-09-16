@@ -1345,6 +1345,17 @@ type ReadyProbeServingPartsV1 = (
     Arc<AtomicUsize>,
 );
 
+/// Typed verdict from a demand-driven reconcile wake (hooks, overflow, query
+/// admission). Callers must match this — especially
+/// [`Self::PublicationAuthorityCorrupt`] — instead of swallowing a bool and
+/// driving inline work against a terminal park.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexReconcileAdmissionV1 {
+    Accepted,
+    PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
+    Unavailable,
+}
+
 #[derive(Clone)]
 pub struct CodeIndexSchedulerRegistryV1 {
     pub max_worktrees: usize,
@@ -2156,6 +2167,15 @@ impl CodeIndexSchedulerRegistryV1 {
         while text.text_projection_needs_work() {
             if shutting_down.load(Ordering::Acquire) {
                 return PublishedTextProjectionOutcomeV1::Shutdown;
+            }
+            // A publication's pass waits only for the owners the seat needs.
+            // Once the admission artifact serves exact and lexical, the slot
+            // may still hold the clone-fingerprint successor: that backfill
+            // re-decodes the whole sealed source into a second artifact and
+            // is not a seat precondition, so it continues on the retained
+            // driver of a later pass instead of holding graph activation.
+            if installed.is_none() && text.query_owners_are_ready() {
+                break;
             }
             advances += 1;
             if advances > TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1 {

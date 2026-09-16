@@ -480,8 +480,7 @@ mod tests {
                 CODE_INDEX_NO_PROVEN_CHANGE,
             ),
         ] {
-            let outcome =
-                code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(cause));
+            let outcome = code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(cause));
             assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
             assert!(
                 !outcome.retryable,

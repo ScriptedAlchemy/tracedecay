@@ -21,25 +21,25 @@ use tracedecay_contracts::feedback::{
 use tracedecay_contracts::{
     CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestContext, ResolvedScope,
 };
-use tracedecay_dashboard_api::{
-    DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
-    DashboardHttpRequestControlV1,
-};
 use tracedecay_daemon_service::{
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
     DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
     DaemonInvocationService, feedback_proximity_invocation_result,
 };
+use tracedecay_dashboard_api::{
+    DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
+    DashboardHttpRequestControlV1,
+};
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCoverageV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
-    ProximityAddressV1, ProximityCoverageV1, ProximityWarningClassV1,
+    GitHubReviewIngressProviderOutcomeV1, GitHubReviewReadCheckpointV1,
+    GitHubReviewReadOperationV1, ProximityAddressV1, ProximityCoverageV1, ProximityWarningClassV1,
 };
 use tracedecay_domain::{
     ActorId, AgentInstanceId, CodeGenerationId, CommitId, FileOccurrenceId, ManifestDigest,
-    ObservationSourceIdentityV1, ProjectId, ProviderId, RefId, RepositoryId, SessionId,
-    SourceSpan, SymbolOccurrenceId, UtcMicros, WorktreeId,
+    ObservationSourceIdentityV1, ProjectId, ProviderId, RefId, RepositoryId, SessionId, SourceSpan,
+    SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
 use tracedecay_mcp::handlers::dashboard_delivery::DashboardProximityAttentionReadAdapter;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -224,7 +224,10 @@ impl DaemonAdvisoryCycleInvocationPort for DeliveryHttpProximityOwner {
     }
 }
 
-fn delivery_http_admission_pull_request(id: &str, retained_head: &str) -> ProjectDeliveryPullRequestV1 {
+fn delivery_http_admission_pull_request(
+    id: &str,
+    retained_head: &str,
+) -> ProjectDeliveryPullRequestV1 {
     ProjectDeliveryPullRequestV1 {
         provider: ProviderId::new("github").unwrap(),
         pull_request_id: GitHubPullRequestIdV1::new(id).unwrap(),
@@ -239,7 +242,8 @@ fn delivery_http_admission_pull_request(id: &str, retained_head: &str) -> Projec
         operations: vec![ProjectDeliveryPullRequestOperationV1 {
             operation: GitHubReviewReadOperationV1::RestGetPullRequest,
             latest_attempt: Some(ProjectDeliveryGitHubOperationSnapshotV1 {
-                provider_base_commit_id: CommitId::new("commit.delivery-http-admission.base").unwrap(),
+                provider_base_commit_id: CommitId::new("commit.delivery-http-admission.base")
+                    .unwrap(),
                 provider_head_commit_id: CommitId::new(retained_head).unwrap(),
                 merge_base_commit_id: CommitId::new("commit.delivery-http-admission.merge-base")
                     .unwrap(),

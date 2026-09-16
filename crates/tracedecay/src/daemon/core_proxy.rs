@@ -14,8 +14,8 @@ use tokio::time::{Duration, Instant};
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
     PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
-    connect_to_current_daemon_within, json_rpc_error_is_project_open_retryable,
-    next_daemon_response_line, write_daemon_preamble,
+    REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, connect_to_current_daemon_within,
+    json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{binary_version, connect_with_restart_grace};
@@ -573,11 +573,6 @@ pub(super) fn repository_discovery_deferred(
         reason,
         tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded
     );
-    let retry_hint = if deferred {
-        PROJECT_WARMING_RETRY_HINT
-    } else {
-        "cannot be resolved"
-    };
     let progress = if deferred {
         let retry_after_ms = super::REPOSITORY_DISCOVERY_DEADLINE.as_millis();
         match tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(path) {
@@ -590,11 +585,19 @@ pub(super) fn repository_discovery_deferred(
     } else {
         String::new()
     };
-    TraceDecayError::Config {
-        message: format!(
-            "repository discovery for '{}' is deferred ({reason:?}){progress}; the project route {retry_hint}",
-            path.display()
-        ),
+    let detail = format!(
+        "repository discovery for '{}' is deferred ({reason:?}){progress}; the project route {}",
+        path.display(),
+        if deferred {
+            PROJECT_WARMING_RETRY_HINT
+        } else {
+            "cannot be resolved"
+        }
+    );
+    if deferred {
+        TraceDecayError::project_route(REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, detail)
+    } else {
+        TraceDecayError::Config { message: detail }
     }
 }
 
@@ -956,7 +959,13 @@ mod tests {
                 "id": 1,
                 "error": {
                     "code": -32603,
-                    "message": "project is warming in the background; retry the same tool shortly"
+                    "message": "project is warming in the background; retry the same tool shortly",
+                    "data": {
+                        "reason_code": "project_warming",
+                        "retryable": true,
+                        "detail": "project is warming in the background; retry the same tool shortly",
+                        "kind": "project_warming"
+                    }
                 }
             }),
             json!({
