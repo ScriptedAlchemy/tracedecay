@@ -408,12 +408,12 @@ impl CodeFileIndexArtifactsV1 {
                     "clone body evidence payload digest does not match its payload".to_owned(),
                 ));
             }
-            if validate_payloads {
-                if let Err(detail) = body.payload.validate() {
-                    return Err(ChunkingFailureV1::NonCanonicalIdentity(format!(
-                        "clone body evidence payload is not canonical: {detail}"
-                    )));
-                }
+            if validate_payloads
+                && let Err(detail) = body.payload.validate()
+            {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(format!(
+                    "clone body evidence payload is not canonical: {detail}"
+                )));
             }
             if !occurrences.contains(&body.occurrence.symbol_occurrence_id) {
                 return Err(ChunkingFailureV1::NonCanonicalIdentity(
