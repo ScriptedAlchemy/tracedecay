@@ -71,7 +71,7 @@ use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
     EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
     PRODUCTION_BOUNDARY, ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1,
-    REQUIRED_CANCELLATION, REQUIRED_OFFLINE, RankedCandidateRowV1, ResourceSampleV1,
+    RankedCandidateRowV1, RequiredCancellationV1, RequiredOfflineV1, ResourceSampleV1,
     WORKLOAD_RELATIVE, WorkloadQueryV1, canonical_json_bytes, canonical_sha256,
     compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
     evaluated_diversity_policy, fusion_profile, load_candidate_workload, retrieval_budget,
@@ -659,8 +659,8 @@ fn generate_partition_output(
         query_fallback_digest: query_digest,
         expected_query_fallback_digest,
         query_fallback_matches_expected,
-        cancellation: REQUIRED_CANCELLATION.to_owned(),
-        offline: REQUIRED_OFFLINE.to_owned(),
+        cancellation: RequiredCancellationV1::BoundedTypedCancelled,
+        offline: RequiredOfflineV1::NoNetworkAndQueryFallbackAvailable,
         resources,
         queries: rows,
     })
@@ -964,15 +964,11 @@ fn historical_candidates(
     published: &PublishedCorpus,
     query: &WorkloadQueryV1,
 ) -> Result<(HistoricalQueryExecutionV1, Vec<RankedCandidateRowV1>), CandidateOutputError> {
-    if !query.strata.iter().any(|stratum| {
-        matches!(
-            stratum.as_str(),
-            "incremental_edit"
-                | "incremental_delete"
-                | "incremental_rename"
-                | "renamed_moved_symbol"
-        )
-    }) {
+    if !query
+        .strata
+        .iter()
+        .any(|stratum| stratum.requires_historical_query())
+    {
         return Ok((HistoricalQueryExecutionV1::NotRequested, Vec::new()));
     }
 
@@ -1514,12 +1510,13 @@ fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<(), Candidat
 #[cfg(test)]
 pub(crate) mod tests {
     use super::peak_rss::{
-        PeakRssObservation, PeakRssPendingReason, peak_rss_bytes_from_status,
-        windows_peak_rss_observation,
+        PeakRssObservation, peak_rss_bytes_from_status, windows_peak_rss_observation,
     };
     use super::*;
     use crate::packaged_assets::PackagedEvaluatorAssets;
-    use tracedecay_query::search_quality::candidate_output::ResourceMeasurementStatusV1;
+    use tracedecay_query::search_quality::candidate_output::{
+        ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1,
+    };
 
     /// One materialized copy of the packaged workload, corpus, and Git
     /// authority shared by every test in this binary. The packaged root is
@@ -1793,8 +1790,14 @@ pub(crate) mod tests {
             assert_eq!(output.schema_version, 2);
             assert!(output.partition == "train" || output.partition == "validation");
             assert_eq!(output.production_boundary, PRODUCTION_BOUNDARY);
-            assert_eq!(output.cancellation, REQUIRED_CANCELLATION);
-            assert_eq!(output.offline, REQUIRED_OFFLINE);
+            assert_eq!(
+                output.cancellation,
+                RequiredCancellationV1::BoundedTypedCancelled
+            );
+            assert_eq!(
+                output.offline,
+                RequiredOfflineV1::NoNetworkAndQueryFallbackAvailable
+            );
             assert_eq!(output.fallback_digest, output.query_fallback_digest);
             assert_eq!(
                 output.expected_query_fallback_digest,
@@ -2161,43 +2164,62 @@ pub(crate) mod tests {
         assert_eq!(measured.peak_rss_bytes, Some(4096));
         assert_eq!(measured.pending_reason, None);
 
+        // The retained reason is the typed sampler outcome, and its wire form
+        // is a tagged member of the closed vocabulary rather than prose.
         for (reason, expected) in [
             (
-                PeakRssPendingReason::LinuxStatusReadFailure("denied".to_owned()),
-                "Linux peak_rss_bytes is unavailable because /proc/self/status could not be read: denied",
+                ResourceMeasurementPendingReasonV1::LinuxStatusReadFailure {
+                    error: "denied".to_owned(),
+                },
+                serde_json::json!({ "reason": "linux_status_read_failure", "error": "denied" }),
             ),
             (
-                PeakRssPendingReason::LinuxMissingNonzeroVmHwm,
-                "Linux peak_rss_bytes is unavailable because /proc/self/status has no nonzero VmHWM value",
+                ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm,
+                serde_json::json!({ "reason": "linux_missing_nonzero_vm_hwm" }),
             ),
             (
-                PeakRssPendingReason::MacOsGetrusageFailure("denied".to_owned()),
-                "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) failed: denied",
+                ResourceMeasurementPendingReasonV1::MacOsGetrusageFailure {
+                    error: "denied".to_owned(),
+                },
+                serde_json::json!({ "reason": "mac_os_getrusage_failure", "error": "denied" }),
             ),
             (
-                PeakRssPendingReason::MacOsNonPositiveMaxRss,
-                "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) returned a non-positive ru_maxrss",
+                ResourceMeasurementPendingReasonV1::MacOsNonPositiveMaxRss,
+                serde_json::json!({ "reason": "mac_os_non_positive_max_rss" }),
             ),
             (
-                PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(
-                    "access denied".to_owned(),
-                ),
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo failed before PeakWorkingSetSize could be read: access denied",
+                ResourceMeasurementPendingReasonV1::WindowsProcessMemoryInfoFailure {
+                    error: "access denied".to_owned(),
+                },
+                serde_json::json!({
+                    "reason": "windows_process_memory_info_failure",
+                    "error": "access denied",
+                }),
             ),
             (
-                PeakRssPendingReason::WindowsZeroPeakWorkingSetSize,
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned zero PeakWorkingSetSize",
+                ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize,
+                serde_json::json!({ "reason": "windows_zero_peak_working_set_size" }),
             ),
             (
-                PeakRssPendingReason::UnsupportedPlatform("other"),
-                "other peak_rss_bytes is unavailable because the platform is unsupported",
+                ResourceMeasurementPendingReasonV1::UnsupportedPlatform {
+                    platform: "other".to_owned(),
+                },
+                serde_json::json!({ "reason": "unsupported_platform", "platform": "other" }),
             ),
         ] {
-            let pending =
-                completed_resource_sample(12, PeakRssObservation::Pending(reason), vec![7], 1);
+            let pending = completed_resource_sample(
+                12,
+                PeakRssObservation::Pending(reason.clone()),
+                vec![7],
+                1,
+            );
             assert_eq!(pending.status, ResourceMeasurementStatusV1::Pending);
             assert_eq!(pending.peak_rss_bytes, None);
-            assert_eq!(pending.pending_reason.as_deref(), Some(expected));
+            assert_eq!(pending.pending_reason, Some(reason));
+            assert_eq!(
+                serde_json::to_value(&pending.pending_reason).expect("serialize pending reason"),
+                expected
+            );
         }
     }
 
@@ -2206,14 +2228,16 @@ pub(crate) mod tests {
         assert_eq!(
             windows_peak_rss_observation(4096, Some("access denied".to_owned())),
             PeakRssObservation::Pending(
-                PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(
-                    "access denied".to_owned(),
-                )
+                ResourceMeasurementPendingReasonV1::WindowsProcessMemoryInfoFailure {
+                    error: "access denied".to_owned(),
+                }
             )
         );
         assert_eq!(
             windows_peak_rss_observation(0, None),
-            PeakRssObservation::Pending(PeakRssPendingReason::WindowsZeroPeakWorkingSetSize)
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize
+            )
         );
         assert_eq!(
             windows_peak_rss_observation(4096, None),
@@ -2223,28 +2247,31 @@ pub(crate) mod tests {
 
     #[test]
     fn peak_rss_combination_keeps_failed_required_observation_pending() {
-        let reason =
-            PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure("access denied".to_owned());
+        let reason = ResourceMeasurementPendingReasonV1::WindowsProcessMemoryInfoFailure {
+            error: "access denied".to_owned(),
+        };
         assert_eq!(
-            PeakRssObservation::Pending(
-                PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(
-                    "access denied".to_owned(),
-                ),
-            )
-            .max(PeakRssObservation::Measured(4096)),
+            PeakRssObservation::Pending(reason.clone()).max(PeakRssObservation::Measured(4096)),
             PeakRssObservation::Pending(reason)
         );
         assert_eq!(
             PeakRssObservation::Measured(4096).max(PeakRssObservation::Pending(
-                PeakRssPendingReason::LinuxMissingNonzeroVmHwm,
+                ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm,
             )),
-            PeakRssObservation::Pending(PeakRssPendingReason::LinuxMissingNonzeroVmHwm)
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm
+            )
         );
         assert_eq!(
-            PeakRssObservation::Pending(PeakRssPendingReason::WindowsZeroPeakWorkingSetSize).max(
-                PeakRssObservation::Pending(PeakRssPendingReason::LinuxMissingNonzeroVmHwm),
-            ),
-            PeakRssObservation::Pending(PeakRssPendingReason::WindowsZeroPeakWorkingSetSize)
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize
+            )
+            .max(PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm,
+            )),
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize
+            )
         );
     }
 

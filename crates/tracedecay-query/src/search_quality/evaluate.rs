@@ -1,4 +1,9 @@
-//! Direct-evaluation scoring and packaged-profile activation inputs.
+//! Direct-evaluation scoring over packaged-profile measurement inputs.
+//!
+//! The statuses here are evidence about the checked-in labels. No status
+//! qualifies or activates a retrieval profile; see the module documentation in
+//! [`crate::search_quality`] for why no qualification gate survives the dense
+//! lane's retirement.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -23,17 +28,6 @@ use super::report::{
 /// The checked-in exact/lexical/graph profile every packaged evaluation runs.
 pub const QUERY_BASELINE_PROFILE: &str = "query-fallback";
 const METRIC_SCALE_PPM: u64 = 1_000_000;
-const PROTECTED_STRATA: &[&str] = &[
-    "config_key",
-    "exact_error",
-    "exact_flag",
-    "exact_path",
-    "exact_symbol",
-    "qualified_name",
-    "quoted_phrase",
-    "tool_name",
-    "commit_identifier",
-];
 
 #[derive(Debug, Error)]
 pub enum SearchEvalError {
@@ -345,10 +339,7 @@ fn evaluate_query(
     let anchors = label_strings(label, "anchors")?;
     let forbidden_anchors = label_strings(label, "forbidden_anchors")?;
     let forbidden_documents = label_strings(label, "forbidden_documents")?;
-    let protected = query
-        .strata
-        .iter()
-        .any(|stratum| PROTECTED_STRATA.contains(&stratum.as_str()));
+    let protected = query.strata.iter().any(|stratum| stratum.protected());
     let first_useful_rank = row
         .ranked
         .iter()
@@ -532,7 +523,7 @@ fn aggregate_quality(results: &[DirectQueryEvaluationV1]) -> DirectQualityMetric
     );
     let strata_names = results
         .iter()
-        .flat_map(|result| result.strata.iter().cloned())
+        .flat_map(|result| result.strata.iter().copied())
         .collect::<BTreeSet<_>>();
     let strata = strata_names
         .into_iter()
@@ -544,8 +535,8 @@ fn aggregate_quality(results: &[DirectQueryEvaluationV1]) -> DirectQualityMetric
                 .collect::<Vec<_>>();
             let quality = aggregate_quality_rows(&stratum_rows);
             DirectStratumQualityV1 {
-                stratum: stratum.clone(),
-                protected: PROTECTED_STRATA.contains(&stratum.as_str()),
+                stratum,
+                protected: stratum.protected(),
                 query_count: stratum_rows.len() as u64,
                 relevant_query_count: quality.relevant_query_count,
                 recall_at_10: quality.recall_at_10,
@@ -574,7 +565,7 @@ fn aggregate_quality(results: &[DirectQueryEvaluationV1]) -> DirectQualityMetric
                 ))
         })
         .map(|stratum| DirectWorstStratumV1 {
-            stratum: stratum.stratum.clone(),
+            stratum: stratum.stratum,
             protected: stratum.protected,
             relevant_query_count: stratum.relevant_query_count,
             recall_at_10: stratum.recall_at_10.clone(),
@@ -726,10 +717,7 @@ fn resource_sample_verdict(
         ResourceMeasurementStatusV1::Pending => {
             if sample.peak_rss_bytes.is_some()
                 || (sample.measured_queries != 0 && sample.measured_queries != expected_queries)
-                || sample
-                    .pending_reason
-                    .as_deref()
-                    .is_none_or(|reason| reason.trim().is_empty())
+                || sample.pending_reason.is_none()
             {
                 return None;
             }
@@ -766,8 +754,9 @@ fn aggregate_profile_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEva
 mod tests {
     use super::{aggregate_quality, evaluate_query};
     use crate::search_quality::candidate_output::{
-        HistoricalQueryExecutionV1, QueryCandidateRowV1, RankedCandidateRowV1,
-        ResourceMeasurementStatusV1, ResourceSampleV1, WorkloadQueryV1,
+        HistoricalQueryExecutionV1, QueryCandidateRowV1, QueryStratumV1, RankedCandidateRowV1,
+        ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1, ResourceSampleV1,
+        WorkloadQueryV1,
     };
 
     fn ranked(anchor: &str) -> RankedCandidateRowV1 {
@@ -780,11 +769,11 @@ mod tests {
         }
     }
 
-    fn query(id: &str, stratum: &str, anchors: &[&str]) -> WorkloadQueryV1 {
+    fn query(id: &str, stratum: QueryStratumV1, anchors: &[&str]) -> WorkloadQueryV1 {
         WorkloadQueryV1 {
             query_id: id.to_owned(),
             partition: "validation".to_owned(),
-            strata: vec![stratum.to_owned()],
+            strata: vec![stratum],
             query: id.to_owned(),
             allowed_scopes: vec!["research".to_owned()],
             lexical_aliases: Vec::new(),
@@ -792,6 +781,21 @@ mod tests {
             label: Some(serde_json::json!({ "anchors": anchors })),
             need_provenance: None,
         }
+    }
+
+    /// Gain a label earns when its first match sits at `rank` (1-based), using
+    /// the same `1 / log2(rank + 1)` discount the production scorer applies.
+    fn discounted_gain(rank: usize) -> f64 {
+        1.0 / ((rank + 1) as f64).log2()
+    }
+
+    /// nDCG@10 in parts per million for labels first matched at `ranks`, out of
+    /// `labels` labelled targets. The ideal ranking places every label in the
+    /// leading ranks, so the denominator is the sum over ranks `1..=labels`.
+    fn expected_ndcg_ppm(ranks: &[usize], labels: usize) -> u32 {
+        let dcg = ranks.iter().copied().map(discounted_gain).sum::<f64>();
+        let ideal = (1..=labels.min(10)).map(discounted_gain).sum::<f64>();
+        ((dcg / ideal) * 1_000_000.0).round() as u32
     }
 
     fn row(id: &str, ranked: Vec<RankedCandidateRowV1>) -> QueryCandidateRowV1 {
@@ -806,12 +810,12 @@ mod tests {
     #[test]
     fn quality_metrics_retain_exact_numerators_denominators_and_worst_stratum() {
         let exact = evaluate_query(
-            &query("exact", "exact_symbol", &["a", "b"]),
+            &query("exact", QueryStratumV1::ExactSymbol, &["a", "b"]),
             &row("exact", vec![ranked("a"), ranked("noise"), ranked("b")]),
         )
         .expect("exact query");
         let natural = evaluate_query(
-            &query("natural", "natural_language", &["c"]),
+            &query("natural", QueryStratumV1::NaturalLanguage, &["c"]),
             &row("natural", vec![ranked("noise-2"), ranked("c")]),
         )
         .expect("natural query");
@@ -866,7 +870,7 @@ mod tests {
         candidates.push(ranked("wanted"));
         candidates.push(ranked("noise-0"));
         let result = evaluate_query(
-            &query("late", "qualified_name", &["wanted"]),
+            &query("late", QueryStratumV1::QualifiedName, &["wanted"]),
             &row("late", candidates),
         )
         .expect("quality result");
@@ -890,7 +894,7 @@ mod tests {
 
     #[test]
     fn ndcg_credits_each_label_once_despite_distinct_candidate_aliases() {
-        let query = query("aliases", "natural_language", &["a", "b", "c"]);
+        let query = query("aliases", QueryStratumV1::NaturalLanguage, &["a", "b", "c"]);
         let mut candidates = (0..5)
             .map(|index| {
                 let mut candidate = ranked(&format!("symbol-{index}"));
@@ -901,7 +905,10 @@ mod tests {
         let repeated = evaluate_query(&query, &row("aliases", candidates.clone())).unwrap();
         assert_eq!(repeated.quality.recall_at_10.numerator, 1);
         assert_eq!(repeated.quality.duplicate_rate.numerator, 0);
-        assert_eq!(repeated.quality.ndcg_at_10_ppm, 469_279);
+        // Only label "a" is matched, at rank 1, so DCG is 1/log2(2) = 1. The
+        // ideal ranking holds all three labels: 1/log2(2) + 1/log2(3) +
+        // 1/log2(4) = 2.130930, giving 469_279 ppm.
+        assert_eq!(repeated.quality.ndcg_at_10_ppm, expected_ndcg_ppm(&[1], 3));
 
         // Adding genuinely new labelled evidence earns gain at its real rank;
         // extra aliases of the first label did not move its first occurrence.
@@ -909,6 +916,12 @@ mod tests {
         candidates.push(ranked("c"));
         let covered = evaluate_query(&query, &row("aliases", candidates)).unwrap();
         assert_eq!(covered.quality.recall_at_10.numerator, 3);
+        // "a" still ranks 1; the five alias rows push "b" to rank 6 and "c" to
+        // rank 7, so the discounts are 1/log2(2) + 1/log2(7) + 1/log2(8).
+        assert_eq!(
+            covered.quality.ndcg_at_10_ppm,
+            expected_ndcg_ppm(&[1, 6, 7], 3)
+        );
         assert!(covered.quality.ndcg_at_10_ppm > repeated.quality.ndcg_at_10_ppm);
         assert!(covered.quality.ndcg_at_10_ppm < 1_000_000);
 
@@ -917,6 +930,10 @@ mod tests {
             &row("aliases", vec![ranked("a"), ranked("b"), ranked("c")]),
         )
         .unwrap();
+        assert_eq!(
+            ideal.quality.ndcg_at_10_ppm,
+            expected_ndcg_ppm(&[1, 2, 3], 3)
+        );
         assert_eq!(ideal.quality.ndcg_at_10_ppm, 1_000_000);
 
         // One row can satisfy multiple labelled targets; each earns its first
@@ -925,14 +942,19 @@ mod tests {
         composite.anchors = vec!["a".to_owned(), "b".to_owned()];
         let multiple = evaluate_query(&query, &row("aliases", vec![composite])).unwrap();
         assert_eq!(multiple.quality.recall_at_10.numerator, 2);
-        assert_eq!(multiple.quality.ndcg_at_10_ppm, 938_557);
+        // Labels "a" and "b" both first match at rank 1, so DCG is 2/log2(2)
+        // against the same three-label ideal 2.130930: 938_557 ppm.
+        assert_eq!(
+            multiple.quality.ndcg_at_10_ppm,
+            expected_ndcg_ppm(&[1, 1], 3)
+        );
     }
 
     fn resource_sample(
         status: ResourceMeasurementStatusV1,
         peak_rss_bytes: Option<u64>,
         latency_samples_us: Vec<u64>,
-        pending_reason: Option<&str>,
+        pending_reason: Option<ResourceMeasurementPendingReasonV1>,
     ) -> ResourceSampleV1 {
         ResourceSampleV1 {
             status,
@@ -940,8 +962,12 @@ mod tests {
             peak_rss_bytes,
             measured_queries: latency_samples_us.len() as u64,
             latency_samples_us,
-            pending_reason: pending_reason.map(str::to_owned),
+            pending_reason,
         }
+    }
+
+    fn linux_peak_rss_unavailable() -> Option<ResourceMeasurementPendingReasonV1> {
+        Some(ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm)
     }
 
     #[test]
@@ -952,7 +978,7 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             None,
             vec![10, 20, 30],
-            Some("Linux peak RSS measurement is unavailable"),
+            linux_peak_rss_unavailable(),
         );
         assert_eq!(
             super::resource_sample_verdict(&sample, 3),
@@ -962,7 +988,7 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             None,
             Vec::new(),
-            Some("resource measurement pending"),
+            linux_peak_rss_unavailable(),
         );
         assert_eq!(
             super::resource_sample_verdict(&not_run, 3),
@@ -976,7 +1002,7 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             None,
             vec![10, 20],
-            Some("Linux peak RSS measurement is unavailable"),
+            linux_peak_rss_unavailable(),
         );
         assert_eq!(
             super::resource_sample_verdict(&partial_pending, 3),
@@ -987,14 +1013,16 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             Some(4096),
             vec![10, 20, 30],
-            Some("Linux peak RSS measurement is unavailable"),
+            linux_peak_rss_unavailable(),
         );
         assert_eq!(super::resource_sample_verdict(&pending_with_rss, 3), None);
+        // Pending is only evidence when it names why: the typed reason is
+        // required, so an unexplained pending sample stays inconsistent.
         let unexplained = resource_sample(
             ResourceMeasurementStatusV1::Pending,
             None,
             vec![10, 20, 30],
-            Some("  "),
+            None,
         );
         assert_eq!(super::resource_sample_verdict(&unexplained, 3), None);
         let mut miscounted = resource_sample(
@@ -1040,10 +1068,7 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             None,
             vec![10, 20, 30],
-            Some(
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned \
-                 zero PeakWorkingSetSize",
-            ),
+            Some(ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize),
         );
         assert_eq!(
             super::resource_sample_verdict(&honest, 3),

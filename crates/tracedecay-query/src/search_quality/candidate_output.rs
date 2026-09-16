@@ -27,15 +27,13 @@ use crate::retrieval::lexical::LexicalAliasV1;
 pub const WORKLOAD_RELATIVE: &str =
     "tests/fixtures/search_quality/query-lexical-graph-workload-v1.json";
 pub const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
-pub const REQUIRED_CANCELLATION: &str = "bounded_typed_cancelled";
-pub const REQUIRED_OFFLINE: &str = "no_network_and_query_fallback_available";
 pub const EVALUATION_SEED: &str = "not_applicable_deterministic_no_rng";
 pub const EVALUATION_CACHE_STATE: &str = "cold_empty_in_memory_publication";
 /// The stratum whose queries are conceptual needs rather than technical
 /// lookups. Every query in it must document where the need came from and
 /// which corpus symbols answer it, so a relevance judgment is never an
 /// unsourced assertion.
-pub const NEED_STRATUM: &str = "natural_language";
+pub const NEED_STRATUM: QueryStratumV1 = QueryStratumV1::NaturalLanguage;
 const CORPUS_DIGEST_DOMAIN: &str = "tracedecay.search-eval.corpus-content.v1";
 
 #[derive(Debug, Error)]
@@ -62,6 +60,11 @@ pub enum CandidateOutputError {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateWorkloadV1 {
+    /// Always 1: the schema of the checked-in workload fixture, owned by this
+    /// contract and pinned by `packaged::WORKLOAD_SHA256`. It is unrelated to
+    /// the candidate-output schema an evaluator run emits
+    /// ([`ProductionCandidateOutputV1::schema_version`]), and a schema-1
+    /// document is never a candidate output or a qualification record.
     pub schema_version: u32,
     pub workload_id: String,
     pub source_repository_commit: String,
@@ -156,9 +159,121 @@ pub struct ProfileSpecV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionPolicySliceV1 {
-    pub required_cancellation: String,
-    pub required_offline: String,
+    pub required_cancellation: RequiredCancellationV1,
+    pub required_offline: RequiredOfflineV1,
     pub required_fallback_byte_stability: bool,
+}
+
+/// The cancellation discipline a candidate run must demonstrate. Closed: a run
+/// either bounded its cancellation through the typed path or it is not evidence.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredCancellationV1 {
+    /// Every query settled through a bounded, typed cancellation.
+    BoundedTypedCancelled,
+}
+
+/// The offline discipline a candidate run must demonstrate. Closed: retrieval
+/// under evaluation never reaches the network, and the query fallback stays
+/// available without it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredOfflineV1 {
+    /// No network was reachable and the query fallback remained available.
+    NoNetworkAndQueryFallbackAvailable,
+}
+
+/// One need class a workload query belongs to.
+///
+/// Closed vocabulary: a stratum decides how a query is judged — whether recall
+/// must be complete, and whether the query re-runs retrieval at a past commit —
+/// so an unrecognized name is refused instead of silently scored as ordinary.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryStratumV1 {
+    AliasRecovery,
+    CommitIdentifier,
+    ConfigKey,
+    ExactError,
+    ExactFlag,
+    ExactPath,
+    ExactSymbol,
+    GeneratedVendorNoise,
+    IdentifierSplit,
+    IncrementalDelete,
+    IncrementalEdit,
+    IncrementalRename,
+    NaturalLanguage,
+    NoAnswer,
+    PrivacyCanary,
+    QualifiedName,
+    QuotedPhrase,
+    RenamedMovedSymbol,
+    SameNameCrossScope,
+    ToolName,
+    UnsupportedLanguage,
+    WrongScope,
+}
+
+impl QueryStratumV1 {
+    /// Whether a miss in this stratum is a defect rather than a ranking cost.
+    ///
+    /// Exact technical needs have one right answer, so their recall must be
+    /// complete; conceptual and adversarial strata are scored on ranking.
+    pub const fn protected(self) -> bool {
+        matches!(
+            self,
+            Self::CommitIdentifier
+                | Self::ConfigKey
+                | Self::ExactError
+                | Self::ExactFlag
+                | Self::ExactPath
+                | Self::ExactSymbol
+                | Self::QualifiedName
+                | Self::QuotedPhrase
+                | Self::ToolName
+        )
+    }
+
+    /// Whether queries in this stratum are answered against a past commit and
+    /// therefore need the historical code-index join.
+    pub const fn requires_historical_query(self) -> bool {
+        matches!(
+            self,
+            Self::IncrementalDelete
+                | Self::IncrementalEdit
+                | Self::IncrementalRename
+                | Self::RenamedMovedSymbol
+        )
+    }
+
+    /// Stable wire name, identical to this stratum's serialized form.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AliasRecovery => "alias_recovery",
+            Self::CommitIdentifier => "commit_identifier",
+            Self::ConfigKey => "config_key",
+            Self::ExactError => "exact_error",
+            Self::ExactFlag => "exact_flag",
+            Self::ExactPath => "exact_path",
+            Self::ExactSymbol => "exact_symbol",
+            Self::GeneratedVendorNoise => "generated_vendor_noise",
+            Self::IdentifierSplit => "identifier_split",
+            Self::IncrementalDelete => "incremental_delete",
+            Self::IncrementalEdit => "incremental_edit",
+            Self::IncrementalRename => "incremental_rename",
+            Self::NaturalLanguage => "natural_language",
+            Self::NoAnswer => "no_answer",
+            Self::PrivacyCanary => "privacy_canary",
+            Self::QualifiedName => "qualified_name",
+            Self::QuotedPhrase => "quoted_phrase",
+            Self::RenamedMovedSymbol => "renamed_moved_symbol",
+            Self::SameNameCrossScope => "same_name_cross_scope",
+            Self::ToolName => "tool_name",
+            Self::UnsupportedLanguage => "unsupported_language",
+            Self::WrongScope => "wrong_scope",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,7 +281,7 @@ pub struct DecisionPolicySliceV1 {
 pub struct WorkloadQueryV1 {
     pub query_id: String,
     pub partition: String,
-    pub strata: Vec<String>,
+    pub strata: Vec<QueryStratumV1>,
     pub query: String,
     pub allowed_scopes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -215,6 +330,32 @@ pub enum ResourceMeasurementStatusV1 {
     Pending,
 }
 
+/// Why a resource sample carries no peak resident-set observation.
+///
+/// Closed beside [`ResourceMeasurementStatusV1`]: a pending sample names the
+/// sampler that could not report a high-water mark, so "pending" stays a typed
+/// observation instead of free prose. The failure detail remains a string
+/// because it is an operating-system message, never a decision input.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum ResourceMeasurementPendingReasonV1 {
+    /// Linux `/proc/self/status` could not be read.
+    LinuxStatusReadFailure { error: String },
+    /// Linux `/proc/self/status` carried no nonzero `VmHWM`.
+    LinuxMissingNonzeroVmHwm,
+    /// macOS `getrusage(RUSAGE_SELF)` failed.
+    MacOsGetrusageFailure { error: String },
+    /// macOS `getrusage(RUSAGE_SELF)` reported a non-positive `ru_maxrss`.
+    MacOsNonPositiveMaxRss,
+    /// Windows `K32GetProcessMemoryInfo` failed before `PeakWorkingSetSize`
+    /// could be read.
+    WindowsProcessMemoryInfoFailure { error: String },
+    /// Windows `K32GetProcessMemoryInfo` reported a zero `PeakWorkingSetSize`.
+    WindowsZeroPeakWorkingSetSize,
+    /// The host platform has no supported peak resident-set sampler.
+    UnsupportedPlatform { platform: String },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceSampleV1 {
@@ -225,12 +366,16 @@ pub struct ResourceSampleV1 {
     pub latency_samples_us: Vec<u64>,
     pub measured_queries: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_reason: Option<String>,
+    pub pending_reason: Option<ResourceMeasurementPendingReasonV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProductionCandidateOutputV1 {
+    /// Always 2: the schema of candidate evidence produced by an evaluator run,
+    /// owned by the producer in `tracedecay-search-eval`. The direct evaluator
+    /// refuses any other version, so workload documents (schema 1) cannot be
+    /// re-read as candidate evidence.
     pub schema_version: u32,
     pub workload_digest: String,
     pub profile_id: String,
@@ -248,8 +393,8 @@ pub struct ProductionCandidateOutputV1 {
     pub query_fallback_digest: String,
     pub expected_query_fallback_digest: String,
     pub query_fallback_matches_expected: bool,
-    pub cancellation: String,
-    pub offline: String,
+    pub cancellation: RequiredCancellationV1,
+    pub offline: RequiredOfflineV1,
     pub resources: BTreeMap<String, ResourceSampleV1>,
     pub queries: Vec<QueryCandidateRowV1>,
 }
@@ -314,6 +459,10 @@ pub fn compute_corpus_digest(
 /// so this refuses a fabricated citation instead of trusting the workload's own
 /// claim about itself. Comment markers and line wrapping are normalized away:
 /// the quote is prose, not a byte-exact source line.
+///
+/// Verified provenance means the needs are sourced, not that retrieval is
+/// qualified: it bounds what the measurement is worth, and grants no activation
+/// authority.
 pub fn validate_need_provenance_against_embedded_corpus(
     workload: &CandidateWorkloadV1,
     files: &[(&str, &[u8])],
@@ -494,6 +643,13 @@ fn validate_source_bindings(
     Ok(())
 }
 
+/// Refuse a workload that cannot honestly be measured on.
+///
+/// This attests the fitness of measurement *inputs*: schema, execution
+/// contract, corpus identity, partitions, labels, and need provenance. It is
+/// not a qualification verdict — there is no held-out methodology in schema 1
+/// to qualify against — so a workload passing here still says nothing about
+/// whether any retrieval profile may be activated.
 pub fn validate_workload_for_tuning(
     workload: &CandidateWorkloadV1,
 ) -> Result<(), CandidateOutputError> {
@@ -684,11 +840,12 @@ fn is_canonical_sha256(digest: &str) -> bool {
 /// than scored.
 fn validate_need_provenance(workload: &CandidateWorkloadV1) -> Result<(), CandidateOutputError> {
     for need in &workload.queries {
-        let in_need_stratum = need.strata.iter().any(|name| name == NEED_STRATUM);
+        let in_need_stratum = need.strata.contains(&NEED_STRATUM);
         let Some(provenance) = &need.need_provenance else {
             if in_need_stratum {
                 return Err(CandidateOutputError::Contract(format!(
-                    "{NEED_STRATUM} need {} has no documented provenance",
+                    "{} need {} has no documented provenance",
+                    NEED_STRATUM.as_str(),
                     need.query_id
                 )));
             }
@@ -892,7 +1049,7 @@ mod need_provenance_tests {
         workload
             .queries
             .iter_mut()
-            .find(|query| query.strata.iter().any(|stratum| stratum == NEED_STRATUM))
+            .find(|query| query.strata.contains(&NEED_STRATUM))
             .expect("a natural-language need")
     }
 
@@ -976,6 +1133,41 @@ mod need_provenance_tests {
             )
             .map_err(|error| error.to_string()),
             Ok(())
+        );
+    }
+
+    /// The held-out Student-t gate was deleted with the dense lane it governed,
+    /// and schema 1 cannot express a replacement: a workload declaring a
+    /// methodology, a practical-effect bound, or a policy freeze is refused
+    /// rather than trusted as activation authority.
+    #[test]
+    fn a_workload_declaring_a_qualification_methodology_is_refused() {
+        for field in [
+            "methodology_version",
+            "practical_effect_ppm",
+            "policy_freeze",
+        ] {
+            let mut json = serde_json::to_value(workload()).expect("serialize workload");
+            json["decision_policy"][field] = serde_json::json!("held_out_student_t_v1");
+            let error = serde_json::from_value::<CandidateWorkloadV1>(json)
+                .expect_err("schema 1 carries no qualification methodology")
+                .to_string();
+            assert!(error.contains(field), "{error}");
+        }
+    }
+
+    /// Nothing is left to qualify: the packaged matrix holds only the always-on
+    /// baseline, so there is no candidate profile a paired held-out effect could
+    /// be measured against.
+    #[test]
+    fn the_packaged_matrix_has_no_candidate_profile_to_qualify() {
+        assert_eq!(
+            workload()
+                .profile_matrix
+                .iter()
+                .map(|profile| profile.profile_id.clone())
+                .collect::<Vec<_>>(),
+            [crate::search_quality::evaluate::QUERY_BASELINE_PROFILE]
         );
     }
 }
