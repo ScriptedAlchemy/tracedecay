@@ -1614,6 +1614,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn similar_unavailable_wire_preserves_reason_and_retryability() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let admitted = crate::tool_context::tests::scope("similar-unavailable");
+        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
+        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
+            principal: tracedecay_domain::PrincipalId::new("principal.similar-unavailable")
+                .expect("principal"),
+            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                "revision.similar-unavailable",
+            )
+            .expect("revision"),
+        };
+
+        for (reason, reason_code, retryable) in [
+            (
+                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                "generation_unavailable",
+                true,
+            ),
+            (
+                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                "index_corruption_reset_required",
+                false,
+            ),
+        ] {
+            let executor: tracedecay_query::code_search::CodeIndexSimilarExecutor =
+                std::sync::Arc::new(move |_| {
+                    Box::pin(async move {
+                        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason)
+                    })
+                });
+            let code_index =
+                crate::AdmittedCodeIndex::new(&authority, None, Some(&executor), None, None)
+                    .expect("similar executor admits");
+            let ctx = crate::McpToolContext::bind(crate::McpToolBinding {
+                project: &project,
+                request: crate::McpRequestAuthoritiesV1 {
+                    code_index: Some(code_index),
+                    ..crate::McpRequestAuthoritiesV1::default()
+                },
+            })
+            .expect("admitted similar binding");
+            let result = handle_similar(
+                &ctx,
+                json!({
+                    "project_id": admitted.project_id,
+                    "repository_id": admitted.repository_id,
+                    "target": {
+                        "kind": "symbol_occurrence",
+                        "symbol_occurrence_id": "symbol.similar-unavailable",
+                    },
+                    "match_classes": ["conservative_exact"],
+                    "result_limit": 10,
+                    "work_limit": 20,
+                }),
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("unavailable similar executor must remain a transport failure");
+            };
+            let response =
+                crate::tool_error_response(json!(1), "tracedecay_similar", &error);
+            let wire: Value = serde_json::from_str(&crate::serialize_response_line(&response))
+                .expect("JSON-RPC response");
+
+            assert_eq!(wire["error"]["data"]["reason_code"], reason_code);
+            assert_eq!(wire["error"]["data"]["retryable"], retryable);
+        }
+    }
+
     fn context_memory_hit(content: &str) -> FactSearchHitV1 {
         serde_json::from_value(json!({
             "fact": {
