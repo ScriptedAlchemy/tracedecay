@@ -20,20 +20,13 @@ const CODE_READ_REASONS: Readonly<Record<string, string>> = {
   code_read_authority_unavailable: 'The code-read authority is not mounted on this daemon.',
   code_generation_unavailable: 'No sealed code-index generation is available for this scope yet.',
   code_read_capacity_unavailable:
-    'The daemon could not admit this read: another code-index read holds the generation right now, or the retained generation exceeds the bounded-read limits. Nothing was read partially.',
+    'A retained generation exceeds the bounded-read limits, so the daemon refused rather than read it partially.',
   code_index_reset_required:
     'The clone index reports corruption and requires an explicit reset; nothing was read.',
   request_cancelled: 'The read was cancelled before it finished.',
   request_timed_out: 'The read did not finish within its deadline.',
   code_read_failed: 'The read failed inside the daemon.',
 };
-
-/**
- * The one refusal that is about timing rather than the request: the daemon
- * hands the same reason to a reader that lost a lock race and to a read that
- * is genuinely too large. A second attempt settles which one it was.
- */
-export const CODE_READ_RETRY_REASONS: readonly string[] = ['code_read_capacity_unavailable'];
 
 export function describeCodeReadReason(reason: string | undefined): string | undefined {
   if (reason === undefined) return undefined;
