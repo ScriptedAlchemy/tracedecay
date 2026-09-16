@@ -1702,11 +1702,22 @@ impl CodeIndexSchedulerRegistryV1 {
                         PublishedTextProjectionOutcomeV1::Finished => {
                             // The seat needs only the ready exact/lexical
                             // owners. A clone-fingerprint successor left in
-                            // the slot is retained-owner work: the next wake
-                            // (a query over pending clone work requests one,
-                            // as does the ordinary cadence) drives it on the
-                            // retained path, so the worker is idle after the
-                            // seat exactly as before.
+                            // the slot is retained-owner work on the next
+                            // pass (no pass guard once owners already serve).
+                            // Schedule that pass here: there is no periodic
+                            // cadence timer, and leaving the successor parked
+                            // until the first similar/redundancy request made
+                            // that request own the whole backfill inline on a
+                            // Tokio worker thread (#1339 change-risk S1).
+                            if graph_text
+                                .as_ref()
+                                .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work)
+                            {
+                                Self::note_worker_continuation(
+                                    &worker_pending_wake,
+                                    &worker_wake,
+                                );
+                            }
                             // Large text projections can outlive the bounded
                             // source proof established before publication. The
                             // serving swap must bind to source truth observed
