@@ -383,7 +383,10 @@ impl CodeIndexActivationV1 {
         let rel_paths = match demand {
             CodeIndexDemandV1::HookPaths(rel_paths) => {
                 if rel_paths.is_empty() {
-                    return CodeIndexDemandAdmissionV1::Queued;
+                    // Empty path batches are a no-op, not a queue seat.
+                    return CodeIndexDemandAdmissionV1::Unavailable(
+                        CodeIndexDemandUnavailableV1::NoProvenChange,
+                    );
                 }
                 rel_paths
             }
@@ -554,6 +557,29 @@ mod tests {
         gate.notify_waiters();
         wait_until(|| activation.is_mounted()).await;
         assert_eq!(mount_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_hook_paths_are_unavailable_no_proven_change_not_queued() {
+        let repository = repository();
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let activation = activation(
+            repository.path(),
+            Arc::clone(&mount_attempts),
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+        );
+
+        assert_eq!(
+            activation
+                .admit(repository.path(), CodeIndexDemandV1::HookPaths(Vec::new()))
+                .await,
+            CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::NoProvenChange
+            )
+        );
+        assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
+        assert!(!activation.is_mounted());
     }
 
     #[tokio::test]

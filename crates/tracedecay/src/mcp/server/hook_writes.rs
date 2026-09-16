@@ -101,10 +101,8 @@ pub(crate) async fn execute_background_refresh_direct(
         CodeIndexDemandAdmissionV1::Terminal(parked) => {
             Err(super::code_index_publication_corrupt(parked))
         }
-        CodeIndexDemandAdmissionV1::Unavailable(_) => Err(TraceDecayError::project_route(
-            super::CODE_INDEX_SCHEDULER_UNAVAILABLE,
-            true,
-            "background refresh was not accepted by the code-index scheduler",
-        )),
+        CodeIndexDemandAdmissionV1::Unavailable(cause) => {
+            Err(super::code_index_unavailable_error(cause))
+        }
     }
 }

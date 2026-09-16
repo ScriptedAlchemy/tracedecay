@@ -432,8 +432,9 @@ mod tests {
     #[test]
     fn host_outcome_maps_corrupt_terminal_unavailable_not_degraded() {
         use crate::mcp::server::{
-            CODE_INDEX_LINKED_WORKTREE_DISABLED, CODE_INDEX_SCHEDULER_UNAVAILABLE,
-            code_index_host_outcome,
+            CODE_INDEX_FOREIGN_ROOT, CODE_INDEX_LINKED_WORKTREE_DISABLED,
+            CODE_INDEX_NO_PROVEN_CHANGE, CODE_INDEX_ROUTE_RETIRED,
+            CODE_INDEX_SCHEDULER_UNAVAILABLE, code_index_host_outcome,
         };
         use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1;
         use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
@@ -455,15 +456,39 @@ mod tests {
             Some(CODE_INDEX_LINKED_WORKTREE_DISABLED)
         );
 
-        let unavailable = code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(
+        let unmounted = code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(
             CodeIndexDemandUnavailableV1::SchedulerUnmounted,
         ));
-        assert_eq!(unavailable.status, HostAdmissionStatus::Unavailable);
-        assert!(unavailable.retryable);
+        assert_eq!(unmounted.status, HostAdmissionStatus::Unavailable);
+        assert!(unmounted.retryable);
         assert_eq!(
-            unavailable.reason_code,
+            unmounted.reason_code,
             Some(CODE_INDEX_SCHEDULER_UNAVAILABLE)
         );
+
+        for (cause, reason) in [
+            (
+                CodeIndexDemandUnavailableV1::RouteRetired,
+                CODE_INDEX_ROUTE_RETIRED,
+            ),
+            (
+                CodeIndexDemandUnavailableV1::ForeignRoot,
+                CODE_INDEX_FOREIGN_ROOT,
+            ),
+            (
+                CodeIndexDemandUnavailableV1::NoProvenChange,
+                CODE_INDEX_NO_PROVEN_CHANGE,
+            ),
+        ] {
+            let outcome =
+                code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(cause));
+            assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+            assert!(
+                !outcome.retryable,
+                "{reason} must stay non-retryable at the host wire"
+            );
+            assert_eq!(outcome.reason_code, Some(reason));
+        }
     }
 
     /// `tracedecay init` reports "code-index reconciliation requested" through

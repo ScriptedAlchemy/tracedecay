@@ -38,12 +38,8 @@ pub(crate) async fn handle_admin_sync(
         CodeIndexDemandAdmissionV1::RefusedByPolicy => {
             return Err(crate::mcp::server::code_index_linked_worktree_disabled());
         }
-        CodeIndexDemandAdmissionV1::Unavailable(_) => {
-            return Err(TraceDecayError::project_route(
-                crate::mcp::server::CODE_INDEX_SCHEDULER_UNAVAILABLE,
-                true,
-                "admin sync was not accepted by the code-index scheduler",
-            ));
+        CodeIndexDemandAdmissionV1::Unavailable(cause) => {
+            return Err(crate::mcp::server::code_index_unavailable_error(cause));
         }
     }
     let output = json!({
