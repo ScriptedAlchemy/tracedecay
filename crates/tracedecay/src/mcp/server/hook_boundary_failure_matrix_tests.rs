@@ -53,7 +53,9 @@ async fn server_without_broker(
 }
 
 fn failing_reconcile_sink() -> CodeIndexReconcileSink {
-    Arc::new(|_request: PathBuf, _demand| Box::pin(async { super::CodeIndexAdmission::Unavailable }))
+    Arc::new(|_request: PathBuf, _demand| {
+        Box::pin(async { super::CodeIndexAdmission::Unavailable })
+    })
 }
 
 fn counting_success_reconcile_sink(attempts: Arc<Mutex<usize>>) -> CodeIndexReconcileSink {

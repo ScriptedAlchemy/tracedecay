@@ -393,10 +393,7 @@ impl CodeIndexActivationV1 {
         label = "daemon.code_index.activation.notify_hook_overflow",
         future = true
     )]
-    pub async fn notify_hook_overflow(
-        &self,
-        project_root: &Path,
-    ) -> CodeIndexReconcileAdmissionV1 {
+    pub async fn notify_hook_overflow(&self, project_root: &Path) -> CodeIndexReconcileAdmissionV1 {
         self.request_reconciliation(project_root, ActivationDemandV1::Automatic)
             .await
     }

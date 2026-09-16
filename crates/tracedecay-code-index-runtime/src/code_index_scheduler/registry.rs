@@ -1005,9 +1005,8 @@ mod terminal_publication_park_tests {
 
     #[test]
     fn reconcile_admission_merge_preserves_corrupt_and_unavailable() {
-        let corrupt = CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(terminal_park(
-            "corrupt",
-        ));
+        let corrupt =
+            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(terminal_park("corrupt"));
         assert!(matches!(
             CodeIndexReconcileAdmissionV1::Accepted.merge(corrupt.clone()),
             CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
@@ -1377,8 +1376,9 @@ impl CodeIndexReconcileAdmissionV1 {
     pub fn merge(self, other: Self) -> Self {
         use CodeIndexReconcileAdmissionV1::*;
         match (self, other) {
-            (PublicationAuthorityCorrupt(parked), _)
-            | (_, PublicationAuthorityCorrupt(parked)) => PublicationAuthorityCorrupt(parked),
+            (PublicationAuthorityCorrupt(parked), _) | (_, PublicationAuthorityCorrupt(parked)) => {
+                PublicationAuthorityCorrupt(parked)
+            }
             (Unavailable, _) | (_, Unavailable) => Unavailable,
             (Accepted, Accepted) => Accepted,
         }

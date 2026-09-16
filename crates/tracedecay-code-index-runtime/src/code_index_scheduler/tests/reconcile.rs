@@ -653,14 +653,12 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_eq!(freshness.hook_hint_count, Some(0));
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert!(
-        matches!(
-            registry
-                .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     let changed = tokio::time::timeout(Duration::from_secs(2), publications.recv())
         .await
         .expect("changed publication timeout")
@@ -702,14 +700,12 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert!(
-        matches!(
-            registry
-                .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
     let changed = registry
@@ -778,14 +774,12 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
     );
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert!(
-        matches!(
-            restarted
-                .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        restarted
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     let first_broadcast = tokio::time::timeout(Duration::from_secs(5), publications.recv())
         .await
         .expect("post-restart publication timeout")
@@ -1024,7 +1018,10 @@ async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
         .await
         .expect("scheduler notification must not wait for the reconcile lock")
         .expect("notification task");
-    assert!(matches!(notified, super::super::CodeIndexReconcileAdmissionV1::Accepted));
+    assert!(matches!(
+        notified,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     assert!(
         registry
             .latest_complete_ready(fixture.path())
@@ -2460,8 +2457,8 @@ async fn source_currency_witness_refuses_a_stale_generation() {
     assert!(
         matches!(
             registry
-            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
-            .await,
+                .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+                .await,
             super::super::CodeIndexReconcileAdmissionV1::Accepted
         ),
         "the changed source is admitted to the retained worker"
@@ -2692,8 +2689,8 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     assert!(
         matches!(
             registry
-            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
-            .await,
+                .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+                .await,
             super::super::CodeIndexReconcileAdmissionV1::Accepted
         ),
         "changed source reaches the mounted owner"
@@ -3459,8 +3456,8 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
     assert!(
         matches!(
             registry
-            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
-            .await,
+                .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+                .await,
             super::super::CodeIndexReconcileAdmissionV1::Accepted
         ),
         "the mounted worktree must accept a refresh hint"
@@ -3850,14 +3847,12 @@ async fn diagnostics_change_generation_is_stable_until_a_sibling_edit_hint() {
         "src/sibling.rs",
         "pub fn sibling() { println!(\"changed\"); }\n",
     );
-    assert!(
-        matches!(
-            registry
-                .notify_hook_paths(fixture.path(), &["src/sibling.rs".to_owned()])
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/sibling.rs".to_owned()])
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     let changed = registry
         .diagnostics_change_generation(fixture.path())
         .await
@@ -5380,8 +5375,8 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
     assert!(
         matches!(
             registry
-            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
-            .await,
+                .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+                .await,
             super::super::CodeIndexReconcileAdmissionV1::Accepted
         ),
         "foreign hint wake is accepted for the mounted root"
@@ -5671,14 +5666,12 @@ async fn background_reconciles_respect_a_single_admission_permit() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     second.edit("src/lib.rs", "pub fn second() -> u32 { 2 }\n");
-    assert!(
-        matches!(
-            registry
-                .notify_path(second.path(), second.path().join("src/lib.rs"))
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        registry
+            .notify_path(second.path(), second.path().join("src/lib.rs"))
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
         registry.latest_generation_id(second.path()).await,
@@ -5714,14 +5707,12 @@ async fn build_publication_lock_serializes_source_reconcile() {
     let held = build_lock.lock_owned().await;
 
     fixture.edit("src/lib.rs", "pub fn source() -> u32 { 2 }\n");
-    assert!(
-        matches!(
-            registry
-                .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
@@ -5796,14 +5787,12 @@ async fn distinct_stores_reconcile_in_parallel_under_bounded_admission() {
     // query the first worktree via `latest_generation_id`, which would block on
     // that lock while holding the registry map lock.)
     second.edit("src/lib.rs", "pub fn second() -> u32 { 2 }\n");
-    assert!(
-        matches!(
-            registry
-                .notify_path(second.path(), second.path().join("src/lib.rs"))
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        registry
+            .notify_path(second.path(), second.path().join("src/lib.rs"))
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     let advanced_second =
         wait_for_generation_change(&registry, second.path(), &second_generation).await;
     assert_ne!(
@@ -9722,14 +9711,12 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
         .await
         .expect("initial generation");
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert!(
-        matches!(
-            registry
-                .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(1);
@@ -9832,14 +9819,12 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
     // not after optional graph seating.
     let initial = initial_text.metadata().manifest().generation_id.clone();
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert!(
-        matches!(
-            registry
-                .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
-                .await,
-            super::super::CodeIndexReconcileAdmissionV1::Accepted
-        )
-    );
+    assert!(matches!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     let _ = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
 
     // One real query composition through the mounted authority carries the
