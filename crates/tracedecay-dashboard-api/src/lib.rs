@@ -1179,6 +1179,11 @@ pub struct DashboardHttpRequestControlV1 {
     observed_at: tracedecay_domain::UtcMicros,
 }
 
+pub(crate) const DASHBOARD_REQUEST_CONTROL_MISSING_CODE: &str =
+    "dashboard_request_admission_unavailable";
+pub(crate) const DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL: &str =
+    "dashboard HTTP request admission is unavailable";
+
 impl DashboardHttpRequestControlV1 {
     #[cfg(feature = "test-transport")]
     pub fn from_parts_for_test(
@@ -3107,6 +3112,54 @@ mod authority_tests {
                 response.status(),
                 StatusCode::NOT_FOUND,
                 "{path} is not mounted"
+            );
+        }
+    }
+
+    /// A router served without [`with_dashboard_http_admission`] has no request
+    /// control. That is a wiring fault, and every canonical read must answer it
+    /// the same way: one 503 with the shared admission problem body, never a
+    /// 200 carrying fabricated empty data.
+    #[tokio::test]
+    async fn reads_without_request_control_fail_closed_with_one_problem_shape() {
+        let fixture = DashboardStateFixture::open("project.dashboard-missing-control").await;
+        let bare = router_with_active_application(fixture.state, None, Router::new());
+        for path in [
+            "/api/plugins/holographic/projection",
+            "/api/plugins/holographic/similarity",
+            "/api/plugins/holographic/oplog",
+            "/api/plugins/holographic/status",
+            "/api/capabilities",
+        ] {
+            let response = bare
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
+                        .body(Body::empty())
+                        .expect("bare read request"),
+                )
+                .await
+                .expect("bare read response");
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} must fail closed without request control"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .expect("bare read body");
+            let body: Value = serde_json::from_slice(&body).expect("bare read JSON");
+            assert_eq!(
+                body,
+                json!({
+                    "status": "unavailable",
+                    "error": DASHBOARD_REQUEST_CONTROL_MISSING_CODE,
+                    "detail": DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL,
+                }),
+                "{path} must carry the shared admission problem body"
             );
         }
     }
