@@ -254,8 +254,16 @@ impl DashboardProximityAttentionReadAdapter {
         match outcome {
             Ok(result) if result.project_id().as_str() == project.project_id => {
                 match result.feedback_proximity_read_result() {
-                    Some(read) => project_delivery_proximity_attention_source_from_read_v1(&read),
-                    None => ProjectDeliveryProximityAttentionSourceV1::Unavailable,
+                    Ok(read) => project_delivery_proximity_attention_source_from_read_v1(&read),
+                    Err(error) => {
+                        tracing::error!(
+                            event = "dashboard_delivery_proximity_payload_invalid",
+                            project_id = %project.project_id,
+                            error = %error,
+                            "canonical proximity evidence could not be decoded"
+                        );
+                        ProjectDeliveryProximityAttentionSourceV1::Unavailable
+                    }
                 }
             }
             Ok(_) | Err(_) => ProjectDeliveryProximityAttentionSourceV1::Unavailable,
