@@ -238,6 +238,193 @@ fn steering_doctor_judges_sentinels_and_bytes_not_prose() {
 }
 
 #[test]
+fn healthcheck_skips_steering_when_legacy_file_is_absent() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(
+        counters.issues, 0,
+        "MCP-only global install must not fail doctor for missing legacy steering"
+    );
+}
+
+#[test]
+fn healthcheck_flags_shipped_heading_steering_until_convergence() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
+    )
+    .unwrap();
+    let steering = steering_path(home.path());
+    std::fs::create_dir_all(steering.parent().unwrap()).unwrap();
+    std::fs::write(
+        &steering,
+        shipped_block(SHIPPED_HEADING, "You MUST use tracedecay."),
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(
+        counters.issues, 1,
+        "legacy heading-marked steering must surface as outdated until install converges it"
+    );
+
+    install_steering_rules(&steering).unwrap();
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+    assert_eq!(counters.issues, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn global_activate_converges_legacy_steering_so_doctor_clears() {
+    use crate::agents::host_bundle::HostBundleComponentV1;
+    use crate::agents::{AgentIntegration, InstallContext};
+
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    let kiro_cli = bin_dir.path().join("kiro-cli");
+    fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
+    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+
+    let steering = steering_path(home.path());
+    std::fs::create_dir_all(steering.parent().unwrap()).unwrap();
+    std::fs::write(
+        &steering,
+        shipped_block(SHIPPED_HEADING, "You MUST use tracedecay."),
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    // Pretend MCP is already installed so doctor reaches the steering check.
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
+    )
+    .unwrap();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+    assert_eq!(counters.issues, 1, "precondition: legacy steering is red");
+
+    KiroIntegration
+        .activate_deployed_host_component_registration(
+            &[HostBundleComponentV1::ContextMcp],
+            &InstallContext {
+                home: home.path().to_path_buf(),
+                tracedecay_bin: "/bin/tracedecay".to_string(),
+                tool_permissions: Vec::new(),
+                project_root: None,
+                dashboard: false,
+            },
+        )
+        .expect("global activate must converge leftover steering");
+
+    let converged = std::fs::read_to_string(&steering).unwrap();
+    assert!(
+        !converged.contains("You MUST use tracedecay."),
+        "activate must replace the shipped heading block"
+    );
+    assert!(
+        converged.contains("<!-- tracedecay:kiro:start -->")
+            && converged.contains("<!-- tracedecay:kiro:end -->"),
+        "activate must leave the current ownership sentinels"
+    );
+    assert_eq!(
+        owned_steering_ranges(&converged).len(),
+        1,
+        "activate must leave exactly one owned block"
+    );
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+    assert_eq!(
+        counters.issues, 0,
+        "install remedy must clear the doctor failure it reports"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn global_activate_does_not_create_missing_legacy_steering() {
+    use crate::agents::host_bundle::HostBundleComponentV1;
+    use crate::agents::{AgentIntegration, InstallContext};
+
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    let kiro_cli = bin_dir.path().join("kiro-cli");
+    fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
+    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+
+    let steering = steering_path(home.path());
+    assert!(!steering.exists());
+
+    KiroIntegration
+        .activate_deployed_host_component_registration(
+            &[HostBundleComponentV1::ContextMcp],
+            &InstallContext {
+                home: home.path().to_path_buf(),
+                tracedecay_bin: "/bin/tracedecay".to_string(),
+                tool_permissions: Vec::new(),
+                project_root: None,
+                dashboard: false,
+            },
+        )
+        .expect("MCP-only activate must succeed without a steering file");
+
+    assert!(
+        !steering.exists(),
+        "catalog-native global activate must not recreate retired steering"
+    );
+}
+
+#[test]
 fn every_steering_mutation_branch_refuses_a_stale_target() {
     for (case, original) in steering_mutation_cases() {
         let root = tempfile::tempdir().unwrap();

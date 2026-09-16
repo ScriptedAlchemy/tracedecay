@@ -2793,9 +2793,16 @@ mod tests {
         .unwrap();
 
         assert!(
+            !std::fs::read_to_string(&legacy_steering)
+                .unwrap()
+                .contains("old rules"),
+            "global install must converge leftover legacy steering"
+        );
+        assert!(
             std::fs::read_to_string(&legacy_steering)
                 .unwrap()
-                .contains("old rules")
+                .contains("<!-- tracedecay:kiro:start -->"),
+            "converged steering must carry the current ownership sentinel"
         );
         assert!(
             std::fs::read_to_string(&legacy_agent)
