@@ -1225,7 +1225,8 @@ async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Pa
                 .clone()
         };
         if text.is_none_or(|text| !text.text_projection_needs_work()) {
-            wait_for_quiescent_owner_pass(registry, path).await;
+            let admission = quiesced_background_reconcile_admission(registry, path).await;
+            drop(admission);
             return;
         }
         assert!(
