@@ -103,35 +103,30 @@ async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path)
     .await
 }
 /// One `tracedecay_search` read that consumes the executor's contract the way
-/// a production client does. Search admission is single-flight per project:
-/// a request arriving while another holds the execution permit is answered
-/// with the typed, retryable `search_capacity_unavailable` state rather than
-/// queued or served empty, so a concurrent reader retries it.
+/// a production client does. Search execution is single-flight per project,
+/// and every dispatched `tracedecay_search` carries the daemon's operation
+/// deadline, so a request arriving while another holds the execution permit
+/// queues for it under that deadline and is served once the holder finishes,
+/// or settles with the typed `timed_out` state if the deadline passes first.
+/// `search_capacity_unavailable` is reserved for a request with no wait budget
+/// at all and for a bounded read that genuinely exceeds its limits; a
+/// concurrent reader here must never see it, so one is a failure, not a retry.
 async fn search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     query: &str,
 ) -> Value {
-    let payload = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let payload = tool(
-                harness,
-                project,
-                "tracedecay_search",
-                json!({"query": query, "limit": 100, "format": "json"}),
-            )
-            .await;
-            if payload["status"] == "unavailable"
-                && payload["reason"] == "search_capacity_unavailable"
-            {
-                tokio::task::yield_now().await;
-                continue;
-            }
-            return payload;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("search {query:?} never acquired the execution permit"));
+    let payload = tool(
+        harness,
+        project,
+        "tracedecay_search",
+        json!({"query": query, "limit": 100, "format": "json"}),
+    )
+    .await;
+    assert_ne!(
+        payload["reason"], "search_capacity_unavailable",
+        "search {query:?} lost the execution permit race and was refused instead of queued: {payload}"
+    );
     resolve_truncated_tool_payload(harness, project, payload).await
 }
 
