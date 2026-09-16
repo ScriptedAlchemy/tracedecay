@@ -21,9 +21,9 @@ use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, tool_request_deadli
 #[cfg(unix)]
 use super::unavailable_error;
 use super::{
-    BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonHandshake, JsonRpcRequest,
-    JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
-    TraceDecayError, error_message_is_project_open_retryable,
+    BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonHandshake, JsonRpcError,
+    JsonRpcRequest, JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
+    TraceDecayError, error_is_project_open_retryable,
 };
 
 /// Bounded grace a client keeps reading for *after* the caller's request
@@ -411,9 +411,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
             continue;
         };
         if let Some(error) = response.error {
-            return Err(TraceDecayError::Config {
-                message: format!("daemon tool call failed: {}", error.message),
-            });
+            return Err(daemon_tool_call_error(error));
         }
         return response.result.ok_or_else(|| TraceDecayError::Config {
             message: "daemon tool call response did not include a result".to_string(),
@@ -465,7 +463,31 @@ pub async fn call_tool_within(
 }
 
 fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
-    error_message_is_project_open_retryable(&error.to_string())
+    error_is_project_open_retryable(error)
+}
+
+/// Reconstruct a typed daemon tool refusal from the JSON-RPC error frame.
+///
+/// Warming, deferred discovery, and response-revoked refusals carry
+/// `data.reason_code`; those must round-trip as [`TraceDecayError::ProjectRoute`]
+/// so journey/client retry keys on the code rather than English detail.
+fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
+    if let Some(data) = error.data.as_ref()
+        && let Some(reason_code) = data.get("reason_code").and_then(serde_json::Value::as_str)
+    {
+        let retryable = data
+            .get("retryable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let detail = data
+            .get("detail")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(error.message.as_str());
+        return TraceDecayError::project_route(reason_code, retryable, detail);
+    }
+    TraceDecayError::Config {
+        message: format!("daemon tool call failed: {}", error.message),
+    }
 }
 
 /// The delay a completed tool result directs before the same request is sent
@@ -639,4 +661,67 @@ pub fn tool_json_payload(
         });
     }
     Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::daemon_tool_call_error;
+    use super::super::{
+        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE, JsonRpcError,
+        tool_call_transport_error_is_retryable,
+    };
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_typed_warming_and_revoked() {
+        let warming = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "prose must not decide retry".to_owned(),
+            data: Some(json!({
+                "reason_code": PROJECT_WARMING_REASON_CODE,
+                "retryable": true,
+                "detail": "TraceDecay project '/tmp/fixture' is warming",
+            })),
+        });
+        assert_eq!(
+            warming.project_route_context(),
+            Some((
+                PROJECT_WARMING_REASON_CODE,
+                true,
+                "TraceDecay project '/tmp/fixture' is warming"
+            ))
+        );
+        assert!(tool_call_transport_error_is_retryable(&warming));
+
+        let revoked = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "the retained project server was retired before response completion".to_owned(),
+            data: Some(json!({
+                "reason_code": PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+                "retryable": true,
+                "detail": "the retained project server was retired before response completion",
+            })),
+        });
+        assert_eq!(
+            revoked.project_route_context(),
+            Some((
+                PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+                true,
+                "the retained project server was retired before response completion"
+            ))
+        );
+        assert!(tool_call_transport_error_is_retryable(&revoked));
+    }
+
+    #[test]
+    fn daemon_tool_call_error_without_reason_code_stays_untyped() {
+        let error = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "project is warming in the background; retry the same tool shortly".to_owned(),
+            data: None,
+        });
+        assert!(error.project_route_context().is_none());
+        assert!(!tool_call_transport_error_is_retryable(&error));
+    }
 }

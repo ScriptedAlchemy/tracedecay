@@ -37,12 +37,14 @@ pub(super) fn project_open_cancellation_checkpoint(cancellation: &CancellationTo
 }
 
 pub(super) fn project_warming_error(project_path: &Path) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
+    TraceDecayError::project_route(
+        PROJECT_WARMING_REASON_CODE,
+        true,
+        format!(
             "TraceDecay project '{}' {PROJECT_WARMING_RETRY_HINT}",
             project_path.display(),
         ),
-    }
+    )
 }
 
 /// After the foreground publication bound, prefer a terminal open failure
@@ -55,10 +57,7 @@ pub(super) fn prefer_recorded_open_failure<T>(
         Err(error) => error,
         other => return other,
     };
-    if !matches!(
-        &error,
-        TraceDecayError::Config { message } if error_message_is_project_warming(message)
-    ) {
+    if !error_is_project_warming(&error) {
         return Err(error);
     }
     match state.borrow().clone() {

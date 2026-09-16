@@ -177,14 +177,17 @@ async fn timed_out_repository_discovery_defers_the_route() {
     let Err(refusal) = route else {
         panic!("a discovery over budget must not resolve a route");
     };
+    assert!(
+        matches!(
+            refusal.project_route_context(),
+            Some((crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, _))
+        ),
+        "a deferred discovery must stay typed-retryable, got: {refusal}"
+    );
     let message = refusal.to_string();
     assert!(
         message.contains("repository discovery") && message.contains("deferred"),
         "expected a deferred-discovery refusal, got: {message}"
-    );
-    assert!(
-        message.contains(crate::daemon::PROJECT_WARMING_RETRY_HINT),
-        "a deferred discovery must stay retryable, got: {message}"
     );
     assert!(
         message.contains("retry after"),
