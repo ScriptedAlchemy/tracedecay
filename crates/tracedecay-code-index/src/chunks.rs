@@ -2031,6 +2031,30 @@ pub(crate) const CROSS_FILE_REFERENCE_BLOCKLIST: &[&str] = &[
     "try_lock",
 ];
 
+/// Whether a reference name can never bind cross-file because it is one of
+/// the ubiquitous names above.
+///
+/// A bare name is judged as is. A qualified path (`Type::member`,
+/// `krate::module::Type::member`) is judged by the segment that owns the
+/// member: `new`, `build`, or `default` behind a project type is a distinct
+/// path the resolver validates segment by segment, so the member itself is
+/// exempt; behind `Self` or a blocklisted std type it stays out, since those
+/// paths never lead to a project symbol. Retention cannot tell `std::fs`
+/// from a workspace module, so sealing re-applies the member's verdict when
+/// the owner is not attested by the referencing file's imports, crate roots,
+/// or modules.
+pub(crate) fn cross_file_reference_name_is_blocklisted(reference_name: &str) -> bool {
+    let Some((owner_path, member)) = reference_name.rsplit_once("::") else {
+        return reference_name.is_empty()
+            || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&reference_name);
+    };
+    let owner = owner_path.rsplit("::").next().unwrap_or(owner_path);
+    member.is_empty()
+        || owner.is_empty()
+        || owner == "Self"
+        || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&owner)
+}
+
 /// Resolve same-file symbol references (calls and other extractor reference
 /// kinds) into relation edges, and retain the references this file cannot
 /// bind as typed cross-file candidates. Only an UNAMBIGUOUS kind-compatible
@@ -2225,15 +2249,9 @@ fn cross_file_reference_candidate(
     reference: &UnresolvedRef,
     by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
-    if reference.reference_name.contains('.') {
-        return None;
-    }
-    let simple_name = reference
-        .reference_name
-        .rsplit("::")
-        .next()
-        .unwrap_or(reference.reference_name.as_str());
-    if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+    if reference.reference_name.contains('.')
+        || cross_file_reference_name_is_blocklisted(&reference.reference_name)
+    {
         return None;
     }
     let kind = canonical_relation_kind(&reference.reference_kind)?;

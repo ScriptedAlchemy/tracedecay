@@ -260,6 +260,283 @@ fn rust_cross_crate_impl_binds_through_public_reexport_chain() {
 }
 
 #[test]
+fn rust_constructor_and_typed_receiver_calls_bind_through_the_crate_path() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.builder.lib",
+            "crates/widgets/src/lib.rs",
+            "mod builder;\npub use crate::builder::{Builder, Widget};\n",
+        ),
+        (
+            "file.builder.impl",
+            "crates/widgets/src/builder.rs",
+            "pub struct Widget;\npub struct Builder;\nimpl Builder {\n    pub fn new() -> Builder { Builder }\n    pub fn build(&self) -> Widget { Widget }\n}\n",
+        ),
+        (
+            "file.builder.app",
+            "crates/app/src/main.rs",
+            "fn assemble() -> widgets::Widget {\n    let mut builder: widgets::Builder = widgets::Builder::new();\n    builder.build()\n}\nfn main() { assemble(); }\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let constructor = symbol_occurrence(&generation, "crates/widgets/src/builder.rs::Builder::new");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/builder.rs::Builder::build");
+
+    assert_resolved_edge(
+        &generation,
+        &caller,
+        &constructor,
+        RelationEdgeKindV1::Calls,
+    );
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_factory_new_style_receivers_do_not_fabricate_calls_edges() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.factory.lib",
+            "crates/widgets/src/lib.rs",
+            "pub struct Factory;\npub struct Product;\nimpl Factory {\n    pub fn new() -> Product { Product }\n    pub fn run(&self) {}\n}\nimpl Product {\n    pub fn run(&self) {}\n}\n",
+        ),
+        (
+            "file.factory.app",
+            "crates/app/src/main.rs",
+            "fn assemble() {\n    let p = widgets::Factory::new();\n    p.run();\n}\nfn main() { assemble(); }\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let factory_run = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Factory::run");
+    let product_run = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Product::run");
+    let factory_new = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Factory::new");
+
+    assert_resolved_edge(
+        &generation,
+        &caller,
+        &factory_new,
+        RelationEdgeKindV1::Calls,
+    );
+    assert!(
+        !generation.edges().iter().any(|edge| {
+            edge.from_occurrence == caller
+                && edge.to_occurrence == factory_run
+                && edge.kind == RelationEdgeKindV1::Calls
+        }),
+        "Factory::new() must not invent a Factory::run caller edge"
+    );
+    assert!(
+        !generation.edges().iter().any(|edge| {
+            edge.from_occurrence == caller
+                && edge.to_occurrence == product_run
+                && edge.kind == RelationEdgeKindV1::Calls
+        }),
+        "without an explicit type, abstain from a Product::run caller edge"
+    );
+}
+
+#[test]
+fn rust_inherent_impl_methods_resolve_when_type_and_impl_are_in_different_files() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.split.lib",
+            "crates/widgets/src/lib.rs",
+            "mod methods;\npub struct Builder;\n",
+        ),
+        (
+            "file.split.methods",
+            "crates/widgets/src/methods.rs",
+            "use super::Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.split.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/methods.rs::Builder::build");
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_inherent_method_does_not_bind_to_a_same_named_type_in_another_module() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.homonym.lib",
+            "crates/widgets/src/lib.rs",
+            "mod inner;\npub struct Builder;\nimpl Builder {\n    pub fn finish(&self) {}\n}\n",
+        ),
+        (
+            "file.homonym.inner",
+            "crates/widgets/src/inner.rs",
+            "pub struct Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.homonym.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n    builder.finish();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let finish = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Builder::finish");
+    let inner_build = symbol_occurrence(&generation, "crates/widgets/src/inner.rs::Builder::build");
+
+    assert_resolved_edge(&generation, &caller, &finish, RelationEdgeKindV1::Calls);
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != caller
+                || edge.to_occurrence != inner_build
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "`inner::Builder::build` belongs to a different type than `widgets::Builder`"
+    );
+}
+
+#[test]
+fn rust_inherent_impl_resolves_when_type_is_reexported_from_a_submodule() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.reexported-type.lib",
+            "crates/widgets/src/lib.rs",
+            "mod builder;\nmod methods;\nmod finish;\npub use crate::builder::Builder;\n",
+        ),
+        (
+            "file.reexported-type.builder",
+            "crates/widgets/src/builder.rs",
+            "pub struct Builder;\n",
+        ),
+        (
+            "file.reexported-type.methods",
+            "crates/widgets/src/methods.rs",
+            "use crate::builder::Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.reexported-type.finish",
+            "crates/widgets/src/finish.rs",
+            "use crate::Builder;\nimpl Builder {\n    pub fn finish(&self) {}\n}\n",
+        ),
+        (
+            "file.reexported-type.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n    builder.finish();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/methods.rs::Builder::build");
+    let finish = symbol_occurrence(&generation, "crates/widgets/src/finish.rs::Builder::finish");
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+    assert_resolved_edge(&generation, &caller, &finish, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_std_module_paths_do_not_bind_to_same_stem_project_files() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.std-stem.widgets-lib",
+            "crates/widgets/src/lib.rs",
+            "pub mod fs;\n",
+        ),
+        (
+            "file.std-stem.widgets-fs",
+            "crates/widgets/src/fs.rs",
+            "pub fn read(path: &str) -> Vec<u8> { path.as_bytes().to_vec() }\n",
+        ),
+        (
+            "file.std-stem.ignore-lib",
+            "crates/ignore/src/lib.rs",
+            "mod walk;\npub use walk::WalkBuilder;\n",
+        ),
+        (
+            "file.std-stem.ignore-walk",
+            "crates/ignore/src/walk.rs",
+            "pub struct WalkBuilder;\nimpl WalkBuilder {\n    pub fn new() -> WalkBuilder { WalkBuilder }\n}\n",
+        ),
+        (
+            "file.std-stem.app",
+            "crates/app/src/main.rs",
+            "use std::fs;\nfn load() {\n    fs::read(\"x\");\n}\nfn walk() {\n    ignore::WalkBuilder::new();\n}\nfn main() { load(); walk(); }\n",
+        ),
+    ]);
+    let load = symbol_occurrence(&generation, "crates/app/src/main.rs::load");
+    let project_read = symbol_occurrence(&generation, "crates/widgets/src/fs.rs::read");
+    let walk = symbol_occurrence(&generation, "crates/app/src/main.rs::walk");
+    let walk_builder_new =
+        symbol_occurrence(&generation, "crates/ignore/src/walk.rs::WalkBuilder::new");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != load
+                || edge.to_occurrence != project_read
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "`fs::read` through `use std::fs` must not bind to a project `fs.rs::read`"
+    );
+    assert_resolved_edge(
+        &generation,
+        &walk,
+        &walk_builder_new,
+        RelationEdgeKindV1::Calls,
+    );
+}
+
+#[test]
+fn rust_typed_parameter_method_call_binds_through_import_and_crate_reexport() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.hiargs.main",
+            "crates/core/src/main.rs",
+            "mod flags;\nuse crate::flags::HiArgs;\nfn search(args: &HiArgs) -> bool {\n    args.walk_builder();\n    true\n}\nfn main() {}\n",
+        ),
+        (
+            "file.hiargs.flags",
+            "crates/core/src/flags/mod.rs",
+            "mod hiargs;\npub(crate) use crate::flags::hiargs::HiArgs;\n",
+        ),
+        (
+            "file.hiargs.impl",
+            "crates/core/src/flags/hiargs.rs",
+            "pub(crate) struct HiArgs;\nimpl HiArgs {\n    pub(crate) fn walk_builder(&self) {}\n}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/core/src/main.rs::search");
+    let target = symbol_occurrence(
+        &generation,
+        "crates/core/src/flags/hiargs.rs::HiArgs::walk_builder",
+    );
+
+    assert_resolved_edge(&generation, &caller, &target, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_dotted_call_on_untyped_receiver_stays_unresolved() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.untyped.lib",
+            "crates/widgets/src/lib.rs",
+            "pub struct Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.untyped.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builders: Vec<widgets::Builder>) {\n    for builder in builders {\n        builder.build();\n    }\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Builder::build");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != caller
+                || edge.to_occurrence != build
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "a receiver bound by a `for` pattern has no stated type and must not bind"
+    );
+}
+
+#[test]
 fn rust_parent_glob_does_not_override_a_local_type_binding() {
     let generation = published_rust_workspace(&[
         (
