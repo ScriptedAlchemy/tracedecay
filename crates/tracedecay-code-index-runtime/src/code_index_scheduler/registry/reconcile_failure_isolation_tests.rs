@@ -473,7 +473,9 @@ async fn corrupt_publication_authority_stops_after_one_attempt_and_reports_termi
     );
     let parked = freshness.parked.expect("terminal convergence state");
     assert!(
-        parked.reason.contains("injected corrupt publication authority"),
+        parked
+            .reason
+            .contains("injected corrupt publication authority"),
         "terminal state must retain the exact cause: {parked:?}"
     );
     assert!(

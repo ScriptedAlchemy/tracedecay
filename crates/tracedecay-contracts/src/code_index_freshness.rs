@@ -35,6 +35,7 @@ pub enum CodeIndexBuildBlockedReasonV1 {
     SourceUnavailable,
     ArtifactStoreUnavailable,
     RetryBackoff,
+    PublicationAuthorityCorrupt,
 }
 
 /// The latest committed progress boundary for one active code-index generation.
