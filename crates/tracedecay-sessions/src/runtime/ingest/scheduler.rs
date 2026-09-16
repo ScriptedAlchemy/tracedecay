@@ -430,9 +430,18 @@ mod tests {
         let store = RestartableStore::default();
         store.fail_reads.store(true, Ordering::Relaxed);
 
-        let result = read_codex_discovery_frontier(&store).await;
-
-        assert!(result.is_err());
+        let error = read_codex_discovery_frontier(&store)
+            .await
+            .expect_err("a failed frontier read must not look complete");
+        assert!(matches!(
+            error,
+            crate::runtime::source::TranscriptIngestError::Store(
+                tracedecay_store::TranscriptStoreError::Storage {
+                    operation: "get_parse_offset",
+                    ..
+                }
+            )
+        ));
         assert_eq!(store.writes.load(Ordering::Relaxed), 0);
     }
 }

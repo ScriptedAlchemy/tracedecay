@@ -696,7 +696,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .await;
         }
         record_session_doctor_cache_miss();
-        let snapshot = match self.read_snapshot().await {
+        let snapshot = match self.health_read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return unavailable_report_with_detail(

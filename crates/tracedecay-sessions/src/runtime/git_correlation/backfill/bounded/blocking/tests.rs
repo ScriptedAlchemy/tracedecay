@@ -134,7 +134,7 @@ async fn detached_task_holds_capacity_until_its_closure_finishes() {
     assert_eq!(permits.available_permits(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "current_thread")]
 async fn deadline_detaches_without_leaking_the_permit() {
     let permits = Arc::new(Semaphore::new(1));
     let (started_tx, started_rx) = oneshot::channel();
