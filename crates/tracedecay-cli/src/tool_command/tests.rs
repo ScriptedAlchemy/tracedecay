@@ -389,7 +389,7 @@ fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
     let dispatch = DaemonToolDispatch::for_tool(
         None,
         "tracedecay_lcm_status",
-        &json!({
+        &mut json!({
             "provider": "hermes",
             "storage_scope": "user",
         }),
@@ -399,17 +399,28 @@ fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
     assert!(!dispatch.allow_init);
 }
 
+const REGISTRY_READ_TOOLS: [&str; 3] = [
+    "tracedecay_project_list",
+    "tracedecay_project_search",
+    "tracedecay_project_context",
+];
+
+fn mark_initialised_project(root: &Path) {
+    let store = root.join(".tracedecay");
+    std::fs::create_dir_all(&store).expect("create project store dir");
+    std::fs::write(store.join("tracedecay.db"), b"").expect("write project marker");
+}
+
 #[test]
 fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
     let uninitialised = tempfile::tempdir().expect("tempdir");
     let uninitialised_arg = uninitialised.path().to_string_lossy().into_owned();
-    for tool_name in [
-        "tracedecay_project_list",
-        "tracedecay_project_search",
-        "tracedecay_project_context",
-    ] {
-        let dispatch =
-            DaemonToolDispatch::for_tool(Some(uninitialised_arg.clone()), tool_name, &json!({}));
+    for tool_name in REGISTRY_READ_TOOLS {
+        let dispatch = DaemonToolDispatch::for_tool(
+            Some(uninitialised_arg.clone()),
+            tool_name,
+            &mut json!({}),
+        );
         assert_eq!(
             dispatch.project_path, None,
             "{tool_name}: an uninitialised --project must not become a project handshake"
@@ -426,7 +437,7 @@ fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
     let project_bound = DaemonToolDispatch::for_tool(
         Some(uninitialised_arg.clone()),
         "tracedecay_status",
-        &json!({}),
+        &mut json!({}),
     );
     assert_eq!(
         project_bound.project_path,
@@ -438,13 +449,11 @@ fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
     // An initialised explicit project still routes through that project so
     // the listing can mark it active.
     let initialised = tempfile::tempdir().expect("tempdir");
-    let store = initialised.path().join(".tracedecay");
-    std::fs::create_dir_all(&store).expect("create project store dir");
-    std::fs::write(store.join("tracedecay.db"), b"").expect("write project marker");
+    mark_initialised_project(initialised.path());
     let dispatch = DaemonToolDispatch::for_tool(
         Some(initialised.path().to_string_lossy().into_owned()),
         "tracedecay_project_list",
-        &json!({}),
+        &mut json!({}),
     );
     assert_eq!(
         dispatch.project_path.as_deref(),
@@ -452,6 +461,144 @@ fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
         "an initialised --project keeps the project route"
     );
     assert!(!dispatch.allow_init);
+}
+
+#[test]
+fn registry_read_dispatch_hands_a_missing_explicit_project_to_the_daemon() {
+    // (a) A `--project` that does not exist is not "no project": it travels
+    // verbatim so the daemon returns its typed project-route refusal, exactly
+    // as it does for every project-scoped tool.
+    let missing = tempfile::tempdir().expect("tempdir");
+    let missing_path = missing.path().join("does-not-exist");
+    let missing_arg = missing_path.to_string_lossy().into_owned();
+    for tool_name in REGISTRY_READ_TOOLS {
+        let mut args = json!({});
+        let dispatch =
+            DaemonToolDispatch::for_tool(Some(missing_arg.clone()), tool_name, &mut args);
+        assert_eq!(
+            dispatch.project_path,
+            Some(tracedecay_configuration::resolve_path(Some(
+                missing_arg.clone()
+            ))),
+            "{tool_name}: a missing --project must not be silently dropped"
+        );
+        assert!(!dispatch.allow_init, "{tool_name}");
+        assert_eq!(
+            args,
+            json!({}),
+            "{tool_name}: a missing --project must not be seeded as a registry selector"
+        );
+    }
+    let project_bound = DaemonToolDispatch::for_tool(
+        Some(missing_arg.clone()),
+        "tracedecay_status",
+        &mut json!({}),
+    );
+    assert_eq!(
+        project_bound.project_path,
+        DaemonToolDispatch::for_tool(Some(missing_arg), "tracedecay_project_list", &mut json!({}))
+            .project_path,
+        "registry reads and project-scoped tools must agree on a missing --project"
+    );
+}
+
+#[test]
+fn registry_read_dispatch_honours_an_explicit_ambient_root_verbatim() {
+    // (b) The ambient-root filter protects cwd discovery from walking into the
+    // user profile; it must not erase a project the caller named explicitly.
+    let _guard = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
+    let home = tempfile::tempdir().expect("tempdir");
+    mark_initialised_project(home.path());
+    let home_arg = home.path().to_string_lossy().into_owned();
+    let previous_home = std::env::var_os("HOME");
+    // SAFETY: the test env lock serialises every test that mutates
+    // process-wide profile discovery variables, and HOME is restored below.
+    unsafe { std::env::set_var("HOME", home.path()) };
+    assert!(
+        tracedecay::config::is_ambient_project_root(home.path()),
+        "fixture HOME must be an ambient root"
+    );
+    let discovered = tracedecay::config::discover_project_root(home.path());
+    let explicit =
+        DaemonToolDispatch::for_tool(Some(home_arg), "tracedecay_project_list", &mut json!({}));
+    match previous_home {
+        // SAFETY: still under the test env lock; restores the prior value.
+        Some(previous) => unsafe { std::env::set_var("HOME", previous) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+
+    assert_eq!(
+        discovered, None,
+        "cwd discovery keeps filtering the ambient user profile"
+    );
+    assert_eq!(
+        explicit.project_path.as_deref(),
+        Some(home.path()),
+        "an explicit initialised --project is the project connection even when ambient"
+    );
+    assert!(!explicit.allow_init);
+}
+
+#[test]
+fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project() {
+    // (c) `project_context --project <uninitialised dir>` names the project to
+    // describe: it becomes the `path` selector instead of a missing-parameter
+    // refusal. Callers who already chose a selector keep it.
+    let uninitialised = tempfile::tempdir().expect("tempdir");
+    let uninitialised_arg = uninitialised.path().to_string_lossy().into_owned();
+    let expected_path = tracedecay_configuration::resolve_path(Some(uninitialised_arg.clone()))
+        .to_string_lossy()
+        .into_owned();
+
+    let mut seeded = json!({});
+    let dispatch = DaemonToolDispatch::for_tool(
+        Some(uninitialised_arg.clone()),
+        "tracedecay_project_context",
+        &mut seeded,
+    );
+    assert_eq!(dispatch.project_path, None);
+    assert!(!dispatch.allow_init);
+    assert_eq!(seeded, json!({ "path": expected_path }));
+
+    let mut explicit_path = json!({ "path": "/srv/other" });
+    DaemonToolDispatch::for_tool(
+        Some(uninitialised_arg.clone()),
+        "tracedecay_project_context",
+        &mut explicit_path,
+    );
+    assert_eq!(explicit_path, json!({ "path": "/srv/other" }));
+
+    let mut explicit_selector = json!({ "project_selector": { "project_id": "p1" } });
+    DaemonToolDispatch::for_tool(
+        Some(uninitialised_arg.clone()),
+        "tracedecay_project_context",
+        &mut explicit_selector,
+    );
+    assert_eq!(
+        explicit_selector,
+        json!({ "project_selector": { "project_id": "p1" } })
+    );
+
+    // Only `project_context` reads a `path` selector; the listing tools stay
+    // untouched.
+    for tool_name in ["tracedecay_project_list", "tracedecay_project_search"] {
+        let mut args = json!({});
+        DaemonToolDispatch::for_tool(Some(uninitialised_arg.clone()), tool_name, &mut args);
+        assert_eq!(args, json!({}), "{tool_name}");
+    }
+
+    // An initialised explicit project connects through the project instead,
+    // and the daemon defaults `path` to the served root itself.
+    let initialised = tempfile::tempdir().expect("tempdir");
+    mark_initialised_project(initialised.path());
+    let mut args = json!({});
+    let dispatch = DaemonToolDispatch::for_tool(
+        Some(initialised.path().to_string_lossy().into_owned()),
+        "tracedecay_project_context",
+        &mut args,
+    );
+    assert_eq!(dispatch.project_path.as_deref(), Some(initialised.path()));
+    assert_eq!(args, json!({}));
 }
 
 #[test]
@@ -464,7 +611,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
         let dispatch = DaemonToolDispatch::for_tool(
             Some("/explicit/project".to_owned()),
             tool_name,
-            &json!({ "scope": { "kind": "profile" } }),
+            &mut json!({ "scope": { "kind": "profile" } }),
         );
         assert_eq!(dispatch.project_path, None, "{tool_name}");
         assert!(!dispatch.allow_init, "{tool_name}");
@@ -472,7 +619,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
         let project_scoped = DaemonToolDispatch::for_tool(
             Some("/explicit/project".to_owned()),
             tool_name,
-            &json!({ "scope": { "kind": "project" } }),
+            &mut json!({ "scope": { "kind": "project" } }),
         );
         assert_eq!(
             project_scoped.project_path,
@@ -487,7 +634,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
     let dispatch = DaemonToolDispatch::for_tool(
         Some("/explicit/project".to_owned()),
         "tracedecay_message_search",
-        &json!({ "scope": { "kind": "profile" } }),
+        &mut json!({ "scope": { "kind": "profile" } }),
     );
     assert_eq!(
         dispatch.project_path,

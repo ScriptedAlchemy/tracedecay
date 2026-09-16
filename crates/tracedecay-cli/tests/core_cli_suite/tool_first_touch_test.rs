@@ -200,6 +200,63 @@ fn project_list_answers_from_the_registry_without_an_initialised_project() {
     assert_eq!(projects["projects"], serde_json::json!([]));
 }
 
+/// `project_context --project <uninitialised dir>` with no `path` describes
+/// the directory the caller named: the typed `not_found` registry answer for
+/// an unregistered path, not a missing-parameter refusal.
+#[cfg(unix)]
+#[test]
+fn project_context_describes_an_uninitialised_explicit_project() {
+    let target = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    let target_path = canonical_temp_path(target.path());
+    let cwd_path = canonical_temp_path(cwd.path());
+    let home_path = canonical_temp_path(home.path());
+    let _daemon = common::spawn_tracedecay_daemon(&home_path);
+    let target_arg = target_path.to_string_lossy().to_string();
+
+    let output = run_tool(
+        &cwd_path,
+        &home_path,
+        &[
+            "--project",
+            &target_arg,
+            "project_context",
+            "--format",
+            "json",
+            "--json",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "project_context must describe the named --project\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("missing required parameter"),
+        "the named --project is the path selector:\n{stderr}"
+    );
+    let result: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("--json must print one JSON object ({error}):\n{stdout}"));
+    let text = result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing text content:\n{result}"));
+    let payload: serde_json::Value = serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("text is not JSON ({error}):\n{text}"));
+    assert_eq!(payload["status"], "not_found", "{payload}");
+    assert_eq!(payload["project"], serde_json::Value::Null, "{payload}");
+    assert_ne!(
+        result["isError"],
+        serde_json::json!(true),
+        "an unregistered path is a typed not_found, not a failure: {result}"
+    );
+    assert!(
+        !target_path.join(".tracedecay").exists(),
+        "registry reads must never create a project store"
+    );
+}
+
 #[test]
 fn code_graph_tools_do_not_first_touch_project_store() {
     let target = TempDir::new().unwrap();
