@@ -186,7 +186,13 @@ mod tests {
             ProviderScope::parse_optional(Some("vibe")),
             Ok(ProviderScope::One(SessionProvider::Vibe))
         );
-        assert!(ProviderScope::parse_optional(Some("unknown")).is_err());
+        assert_eq!(
+            ProviderScope::parse_optional(Some("unknown")),
+            Err(
+                "unknown session provider 'unknown' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes)"
+                    .to_owned()
+            )
+        );
     }
 
     #[test]
