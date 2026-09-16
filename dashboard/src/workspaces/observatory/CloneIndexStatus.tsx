@@ -131,9 +131,8 @@ function CloneIndexObservation({
         <Field label="rename-normalized">
           {ratio(coverage.rename_normalized_bodies, coverage.eligible_source_bodies)}
         </Field>
-        <Field label="payload reuse">
-          {figure(coverage.payloads_reused)} reused · {figure(coverage.unique_payloads)} unique
-        </Field>
+        <Field label="prior payload reuse">{figure(coverage.payloads_reused)} occurrences</Field>
+        <Field label="unique payloads">{figure(coverage.unique_payloads)}</Field>
         <Field label="exact postings">{figure(coverage.exact_postings)}</Field>
         <Field label="near fingerprints">
           {ratio(coverage.near_fingerprint_bodies, coverage.eligible_source_bodies)} ·{' '}
@@ -143,7 +142,8 @@ function CloneIndexObservation({
           {figure(coverage.hot_postings_skipped)} lists ·{' '}
           {figure(coverage.hot_posting_rows_skipped)} rows
         </Field>
-        <Field label="omitted bodies">{omissionSummary(coverage)}</Field>
+        <Field label="coverage exclusions">{coverageExclusionSummary(coverage)}</Field>
+        <Field label="rename limitations">{renameLimitationSummary(coverage)}</Field>
       </dl>
       <div className="mt-2 grid gap-2 text-3xs sm:grid-cols-2">
         <section className="rounded-[var(--radius-chip)] bg-surface-1 p-2">
@@ -157,6 +157,10 @@ function CloneIndexObservation({
           <p className="mt-1 text-text-muted">
             hot posting above {figure(observation.budgets.hot_posting_rows)} rows · minimum{' '}
             {figure(observation.budgets.minimum_body_tokens)} tokens
+          </p>
+          <p className="mt-1 text-text-muted">
+            minimum directional coverage ·{' '}
+            {formatMillionths(observation.budgets.minimum_directional_coverage_millionths)}
           </p>
         </section>
         <section className="rounded-[var(--radius-chip)] bg-surface-1 p-2">
@@ -197,12 +201,22 @@ function ratio(
   return `${figure(numerator)} / ${figure(denominator)}`;
 }
 
-function omissionSummary(coverage: CodeCloneIndexCoverageV1): string {
+function coverageExclusionSummary(coverage: CodeCloneIndexCoverageV1): string {
   const values = [
     ['too small', coverage.excluded_too_small_bodies],
     ['tokenization', coverage.excluded_incomplete_tokenization_bodies],
+  ] as const;
+  return values.map(([label, value]) => `${figure(value)} ${label}`).join(' · ');
+}
+
+function renameLimitationSummary(coverage: CodeCloneIndexCoverageV1): string {
+  const values = [
     ['rename partial', coverage.rename_partial_bodies],
     ['rename unsupported', coverage.rename_unsupported_bodies],
   ] as const;
   return values.map(([label, value]) => `${figure(value)} ${label}`).join(' · ');
+}
+
+function formatMillionths(value: number): string {
+  return `${(value / 10_000).toFixed(1)}%`;
 }

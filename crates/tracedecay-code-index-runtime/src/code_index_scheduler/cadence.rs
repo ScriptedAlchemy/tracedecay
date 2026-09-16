@@ -91,6 +91,7 @@ pub enum CodeIndexCadenceOutcomeV1 {
         reused_chunks: usize,
         clone_payloads_reused: Option<u64>,
         clone_stale_invalidations: Option<u64>,
+        clone_body_changes_observed: Option<bool>,
     },
     Noop {
         snapshot_content_identity: ContentDigest,
@@ -284,6 +285,7 @@ impl CodeIndexCadenceTelemetryV1 {
             generation_id,
             clone_payloads_reused,
             clone_stale_invalidations,
+            clone_body_changes_observed,
             ..
         } = &receipt.outcome
         {
@@ -301,9 +303,14 @@ impl CodeIndexCadenceTelemetryV1 {
                     CodeIndexCloneUpdateV1 {
                         payloads_reused: *clone_payloads_reused,
                         stale_invalidations: *clone_stale_invalidations,
-                        changed_symbol_update_micros: receipt
-                            .event_to_ready_micros()
-                            .and_then(|value| u64::try_from(value).ok()),
+                        changed_symbol_update_micros: if *clone_body_changes_observed == Some(true)
+                        {
+                            receipt
+                                .event_to_ready_micros()
+                                .and_then(|value| u64::try_from(value).ok())
+                        } else {
+                            None
+                        },
                     },
                 ),
             );

@@ -2163,6 +2163,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     reused_chunks: evidence.reused_chunks,
                     clone_payloads_reused: evidence.clone_payloads_reused,
                     clone_stale_invalidations: evidence.clone_stale_invalidations,
+                    clone_body_changes_observed: evidence.clone_body_changes_observed,
                 },
                 evidence.overflow_reconciled,
             ),

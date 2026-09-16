@@ -2514,7 +2514,7 @@
           ]
         },
         "peak_scratch_memory_bytes": {
-          "description": "Largest measured clone serialization scratch owned by one build page.",
+          "description": "Largest measured clone-row serialization scratch during the build.",
           "format": "uint64",
           "minimum": 0,
           "type": [

@@ -1,7 +1,5 @@
 //! Aggregate facts derived from immutable sealed code-index generations.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 use super::{CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1};
@@ -33,35 +31,12 @@ impl CodeIndexPublishedGenerationV1 {
         Ok(self.statistics.clone())
     }
 
-    /// Counts current payload reuse and prior payload bindings that no longer
-    /// occur in `current`, with duplicate payload digests matched as a multiset.
-    pub fn clone_payload_change_accounting(&self, current: &Self) -> (u64, u64) {
-        let mut prior_payloads = BTreeMap::<&str, u64>::new();
-        for file in &self.files {
-            for body in &file.artifacts.clone_bodies {
-                let count = prior_payloads
-                    .entry(body.payload.payload_digest.as_str())
-                    .or_default();
-                *count = count.saturating_add(1);
-            }
-        }
-        let mut reused = 0_u64;
-        for file in &current.files {
-            for body in &file.artifacts.clone_bodies {
-                let Some(count) = prior_payloads.get_mut(body.payload.payload_digest.as_str())
-                else {
-                    continue;
-                };
-                if *count > 0 {
-                    *count -= 1;
-                    reused = reused.saturating_add(1);
-                }
-            }
-        }
-        let invalidated = prior_payloads
-            .into_values()
-            .fold(0_u64, u64::saturating_add);
-        (reused, invalidated)
+    pub fn clone_update_statistics(&self) -> (u64, u64, bool) {
+        (
+            self.clone_payloads_reused,
+            self.clone_stale_invalidations,
+            self.clone_payloads_computed > 0 || self.clone_stale_invalidations > 0,
+        )
     }
 }
 

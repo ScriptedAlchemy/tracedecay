@@ -34,7 +34,7 @@ use super::{
         CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, DeterministicCodeChunker,
         ExactExtractionAuthorityV1, ExtractionAdmittedCodeSearchChunkV1, content_digest,
     },
-    clones::CodeIndexCloneBodyV1,
+    clones::{ClonePayloadBuildStatsV1, CodeIndexCloneBodyV1},
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1},
     incremental::{ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment},
@@ -401,12 +401,19 @@ impl AsRef<FileGenerationArtifactsV1> for FileGenerationArtifactsV1 {
 }
 
 enum IncrementFileMaterializationV1 {
-    CarryForward(Arc<FileGenerationArtifactsV1>),
+    CarryForward {
+        artifact: Arc<FileGenerationArtifactsV1>,
+        clone_stats: ClonePayloadBuildStatsV1,
+    },
     ReExtracted {
         reuse_key: ManifestDigest,
         artifact: Arc<FileGenerationArtifactsV1>,
+        clone_stats: ClonePayloadBuildStatsV1,
+        stale_invalidations: u64,
     },
-    Deleted,
+    Deleted {
+        stale_invalidations: u64,
+    },
 }
 
 const PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN: &str =
@@ -602,6 +609,40 @@ impl SharedPhysicalCodeArtifactPoolV1 {
 }
 
 impl FileGenerationArtifactsV1 {
+    fn stale_clone_bindings(&self, current: &Self) -> u64 {
+        let current = current
+            .artifacts
+            .clone_bodies
+            .iter()
+            .map(|body| {
+                (
+                    (
+                        body.occurrence.path.as_str(),
+                        body.occurrence.body_span.start_byte,
+                        body.occurrence.body_span.end_byte,
+                        body.payload.symbol_kind.as_str(),
+                    ),
+                    &body.payload.payload_digest,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        u64::try_from(
+            self.artifacts
+                .clone_bodies
+                .iter()
+                .filter(|body| {
+                    current.get(&(
+                        body.occurrence.path.as_str(),
+                        body.occurrence.body_span.start_byte,
+                        body.occurrence.body_span.end_byte,
+                        body.payload.symbol_kind.as_str(),
+                    )) != Some(&&body.payload.payload_digest)
+                })
+                .count(),
+        )
+        .unwrap_or(u64::MAX)
+    }
+
     fn rematerialize_for_file(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -708,6 +749,9 @@ pub struct CodeIndexPublishedGenerationV1 {
     edges: Vec<CanonicalRelationEdgeV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     statistics: CodeIndexGenerationStatisticsV1,
+    clone_payloads_reused: u64,
+    clone_payloads_computed: u64,
+    clone_stale_invalidations: u64,
     coverage: CoverageSummaryV1,
     capability: CodeIndexCapabilityManifestV1,
     projection: ProjectionPublicationHandoffV1,
@@ -1848,6 +1892,9 @@ where
                 edges,
                 edge_abstentions,
                 statistics,
+                clone_payloads_reused: staged.clone_payloads_reused,
+                clone_payloads_computed: staged.clone_payloads_computed,
+                clone_stale_invalidations: staged.clone_stale_invalidations,
                 coverage,
                 capability,
                 projection,
@@ -1944,7 +1991,14 @@ where
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
         worker: &crate::hotpath_observe::WorkerBusyGuard,
-    ) -> Result<(ManifestDigest, Arc<FileGenerationArtifactsV1>), CodeIndexProductionErrorV1> {
+    ) -> Result<
+        (
+            ManifestDigest,
+            Arc<FileGenerationArtifactsV1>,
+            ClonePayloadBuildStatsV1,
+        ),
+        CodeIndexProductionErrorV1,
+    > {
         crate::hotpath_observe::measure_hot_loop!("code_index.materialize.file", {
             Self::checkpoint(control)?;
             let captured = captured_files
@@ -1986,7 +2040,11 @@ where
                     0,
                 );
                 Self::checkpoint(control)?;
-                return Ok((physical_reuse_key, reused));
+                let clone_stats = ClonePayloadBuildStatsV1 {
+                    reused: u64::try_from(reused.artifacts.clone_bodies.len()).unwrap_or(u64::MAX),
+                    computed: 0,
+                };
+                return Ok((physical_reuse_key, reused, clone_stats));
             }
             let snapshot = &capability.snapshot().snapshot;
             let parser = extractor
@@ -2083,7 +2141,7 @@ where
                 artifacts,
                 exact_authority,
             });
-            Ok((physical_reuse_key, artifact))
+            Ok((physical_reuse_key, artifact, clone_stats))
         })
     }
 
@@ -2164,7 +2222,7 @@ where
         // Record artifacts in canonical snapshot order so bounded eviction and
         // subsequent physical reuse remain deterministic.
         let mut files = Vec::with_capacity(extracted.len());
-        for (reuse_key, artifact) in extracted {
+        for (reuse_key, artifact, _) in extracted {
             Self::checkpoint(control)?;
             physical_artifacts.insert(reuse_key, &artifact);
             files.push(artifact);
@@ -2285,20 +2343,23 @@ where
                         };
                         if let Ok(artifact) = carried {
                             crate::hotpath_observe::add_reused_parses(1);
-                            physical_artifacts.record_clone_payloads(
-                                u64::try_from(artifact.artifacts.clone_bodies.len())
+                            let clone_stats = ClonePayloadBuildStatsV1 {
+                                reused: u64::try_from(artifact.artifacts.clone_bodies.len())
                                     .unwrap_or(u64::MAX),
-                                0,
-                            );
-                            Ok(IncrementFileMaterializationV1::CarryForward(Arc::new(
-                                artifact,
-                            )))
+                                computed: 0,
+                            };
+                            physical_artifacts
+                                .record_clone_payloads(clone_stats.reused, clone_stats.computed);
+                            Ok(IncrementFileMaterializationV1::CarryForward {
+                                artifact: Arc::new(artifact),
+                                clone_stats,
+                            })
                         } else {
                             // Opaque exact evidence may refuse generation-local
                             // occurrence rebinding. Re-extract through the parser
                             // authority instead of rewriting that evidence.
                             let file = current_file;
-                            let (reuse_key, artifact) = Self::extract_file(
+                            let (reuse_key, artifact, clone_stats) = Self::extract_file(
                                 config,
                                 physical_artifacts,
                                 retained_parses,
@@ -2314,17 +2375,20 @@ where
                                 control,
                                 worker,
                             )?;
+                            let stale_invalidations = prior.stale_clone_bindings(&artifact);
                             Ok(IncrementFileMaterializationV1::ReExtracted {
                                 reuse_key,
                                 artifact,
+                                clone_stats,
+                                stale_invalidations,
                             })
                         }
                     }
                     FileExtractionActionV1::ReExtract { file } => {
-                        let prior_clone_bodies = prior_by_path
-                            .get(file.logical_path.as_str())
-                            .map(|prior| prior.artifacts.clone_bodies.as_slice());
-                        let (reuse_key, artifact) = Self::extract_file(
+                        let prior = prior_by_path.get(file.logical_path.as_str());
+                        let prior_clone_bodies =
+                            prior.map(|prior| prior.artifacts.clone_bodies.as_slice());
+                        let (reuse_key, artifact, clone_stats) = Self::extract_file(
                             config,
                             physical_artifacts,
                             retained_parses,
@@ -2340,13 +2404,27 @@ where
                             control,
                             worker,
                         )?;
+                        let stale_invalidations =
+                            prior.map_or(0, |prior| prior.stale_clone_bindings(&artifact));
                         Ok(IncrementFileMaterializationV1::ReExtracted {
                             reuse_key,
                             artifact,
+                            clone_stats,
+                            stale_invalidations,
                         })
                     }
-                    FileExtractionActionV1::Deleted { .. } => {
-                        Ok(IncrementFileMaterializationV1::Deleted)
+                    FileExtractionActionV1::Deleted {
+                        prior_file_occurrence_id,
+                    } => {
+                        let stale_invalidations = prior_by_occurrence
+                            .get(prior_file_occurrence_id)
+                            .map_or(0, |prior| {
+                                u64::try_from(prior.artifacts.clone_bodies.len())
+                                    .unwrap_or(u64::MAX)
+                            });
+                        Ok(IncrementFileMaterializationV1::Deleted {
+                            stale_invalidations,
+                        })
                     }
                 }
                 },
@@ -2354,24 +2432,52 @@ where
         )?;
 
         let mut files = Vec::new();
+        let mut clone_payloads_reused = 0_u64;
+        let mut clone_payloads_computed = 0_u64;
+        let mut clone_stale_invalidations = 0_u64;
 
         for materialization in file_materializations {
             Self::checkpoint(control)?;
             match materialization {
-                IncrementFileMaterializationV1::CarryForward(artifact) => files.push(artifact),
+                IncrementFileMaterializationV1::CarryForward {
+                    artifact,
+                    clone_stats,
+                } => {
+                    clone_payloads_reused =
+                        clone_payloads_reused.saturating_add(clone_stats.reused);
+                    clone_payloads_computed =
+                        clone_payloads_computed.saturating_add(clone_stats.computed);
+                    files.push(artifact);
+                }
                 IncrementFileMaterializationV1::ReExtracted {
                     reuse_key,
                     artifact,
+                    clone_stats,
+                    stale_invalidations,
                 } => {
+                    clone_payloads_reused =
+                        clone_payloads_reused.saturating_add(clone_stats.reused);
+                    clone_payloads_computed =
+                        clone_payloads_computed.saturating_add(clone_stats.computed);
+                    clone_stale_invalidations =
+                        clone_stale_invalidations.saturating_add(stale_invalidations);
                     physical_artifacts.insert(reuse_key, &artifact);
                     files.push(artifact);
                 }
-                IncrementFileMaterializationV1::Deleted => {}
+                IncrementFileMaterializationV1::Deleted {
+                    stale_invalidations,
+                } => {
+                    clone_stale_invalidations =
+                        clone_stale_invalidations.saturating_add(stale_invalidations);
+                }
             }
         }
         Self::checkpoint(control)?;
 
         let mut staged = staged_generation(manifest.generation_id.clone(), files, Vec::new())?;
+        staged.clone_payloads_reused = clone_payloads_reused;
+        staged.clone_payloads_computed = clone_payloads_computed;
+        staged.clone_stale_invalidations = clone_stale_invalidations;
         staged.lineage = SymbolLineageResolver::new()
             .resolve(&active.symbols, &staged.symbols)
             .map_err(CodeIndexProductionErrorV1::Lineage)?;

@@ -231,7 +231,7 @@ pub struct CodeCloneIndexBudgetsV1 {
 pub struct CodeCloneIndexResourcesV1 {
     /// Current durable artifact or staging-file bytes.
     pub bytes_on_disk: Option<u64>,
-    /// Largest measured clone serialization scratch owned by one build page.
+    /// Largest measured clone-row serialization scratch during the build.
     pub peak_scratch_memory_bytes: Option<u64>,
     /// Latest observed source-edit arrival through clone-ready publication.
     pub changed_symbol_update_micros: Option<u64>,

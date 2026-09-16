@@ -40,6 +40,7 @@ fn latest_clone_update_survives_cadence_receipt_rollover() {
             reused_chunks: 1,
             clone_payloads_reused: Some(1),
             clone_stale_invalidations: Some(1),
+            clone_body_changes_observed: Some(true),
         },
         false,
     );
@@ -56,5 +57,31 @@ fn latest_clone_update_survives_cadence_receipt_rollover() {
             stale_invalidations: Some(1),
             changed_symbol_update_micros: Some(500),
         })
+    );
+
+    let unchanged_generation =
+        CodeGenerationId::new("generation.clone.3").expect("generation identity");
+    telemetry.record(CodeIndexEventToReadyReceiptV1::new(
+        project_root.clone(),
+        CodeIndexCadenceTriggerV1::HookHint,
+        CodeIndexArrivalV1::Observed { wake_micros: 900 },
+        1_000,
+        1_400,
+        CodeIndexCadenceOutcomeV1::Published {
+            generation_id: unchanged_generation.clone(),
+            reextracted_files: 1,
+            changed_chunks: 0,
+            reused_chunks: 1,
+            clone_payloads_reused: Some(1),
+            clone_stale_invalidations: Some(0),
+            clone_body_changes_observed: Some(false),
+        },
+        false,
+    ));
+    assert_eq!(
+        telemetry
+            .latest_clone_update(&project_root, &unchanged_generation)
+            .and_then(|update| update.changed_symbol_update_micros),
+        None
     );
 }

@@ -311,6 +311,7 @@ pub(super) struct CodeIndexCommittedProgressSampleV1 {
     pub(super) observed_at: Instant,
     pub(super) completed_files: u64,
     pub(super) completed_lexical_units: u64,
+    pub(super) clone_peak_scratch_memory_bytes: Option<u64>,
 }
 
 pub(super) struct CodeIndexBuildProgressStateV1 {
@@ -323,6 +324,16 @@ impl CodeIndexBuildProgressStateV1 {
         Self {
             started_at: Instant::now(),
             committed_samples: VecDeque::with_capacity(2),
+        }
+    }
+
+    fn observe_clone_scratch(&mut self, bytes: u64) {
+        if let Some(sample) = self.committed_samples.back_mut() {
+            sample.clone_peak_scratch_memory_bytes = Some(
+                sample
+                    .clone_peak_scratch_memory_bytes
+                    .map_or(bytes, |peak| peak.max(bytes)),
+            );
         }
     }
 
@@ -1637,6 +1648,14 @@ fn clone_index_observation(
     bytes_on_disk: Option<u64>,
 ) -> CodeCloneIndexObservationV1 {
     let census = artifact.census.as_ref();
+    let peak_scratch_memory_bytes = text
+        .text_progress_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .committed_samples
+        .iter()
+        .filter_map(|sample| sample.clone_peak_scratch_memory_bytes)
+        .max();
     CodeCloneIndexObservationV1 {
         generation_id: text.metadata.manifest().generation_id.as_str().to_owned(),
         source_revision: text
@@ -1695,7 +1714,7 @@ fn clone_index_observation(
         },
         resources: CodeCloneIndexResourcesV1 {
             bytes_on_disk,
-            peak_scratch_memory_bytes: census.map(|census| census.peak_scratch_memory_bytes),
+            peak_scratch_memory_bytes,
             changed_symbol_update_micros: update
                 .and_then(|update| update.changed_symbol_update_micros),
             stale_invalidations: update.and_then(|update| update.stale_invalidations),
@@ -2090,6 +2109,7 @@ impl LatestCodeTextGenerationV1 {
                 observed_at,
                 completed_files,
                 completed_lexical_units,
+                clone_peak_scratch_memory_bytes: None,
             });
             #[cfg(feature = "hotpath")]
             {
@@ -3149,6 +3169,19 @@ impl LatestCodeTextGenerationV1 {
         page: &VerifiedSealedLexicalPageV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
+        let scratch_bytes = page.clone_bodies().iter().try_fold(0_u64, |peak, body| {
+            let payload = serde_json::to_vec(&body.payload)
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            let occurrence = serde_json::to_vec(&body.occurrence)
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            let bytes = u64::try_from(payload.len().saturating_add(occurrence.len()))
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            Ok::<_, RetrievalPortError>(peak.max(bytes))
+        })?;
+        self.text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe_clone_scratch(scratch_bytes);
         let CloneSuccessorSourcePositionV1::Revalidating(target) = &build.source_position else {
             build
                 .builder

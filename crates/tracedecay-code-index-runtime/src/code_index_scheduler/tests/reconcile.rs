@@ -1839,6 +1839,7 @@ fn one_symbol_unrelated_work_skip() {
         Some(1),
         "the changed symbol invalidates its prior clone payload binding"
     );
+    assert_eq!(changed.clone_body_changes_observed, Some(true));
     let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
     let rebuilt = published(clean.reconcile_now().expect("clean rebuild"));
     assert_eq!(

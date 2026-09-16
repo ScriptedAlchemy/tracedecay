@@ -22,7 +22,6 @@ pub struct CodeLexicalCloneIndexCensusV1 {
     pub excluded_incomplete_tokenization_bodies: u64,
     pub rename_partial_bodies: u64,
     pub rename_unsupported_bodies: u64,
-    pub peak_scratch_memory_bytes: u64,
 }
 
 pub(super) fn read_clone_index_census(
@@ -54,10 +53,6 @@ pub(super) fn read_clone_index_census(
             ));
         }
         census.source_bodies = census.source_bodies.saturating_add(1);
-        census.peak_scratch_memory_bytes = census.peak_scratch_memory_bytes.max(
-            u64::try_from(occurrence_bytes.len().saturating_add(payload_bytes.len()))
-                .unwrap_or(u64::MAX),
-        );
         match occurrence.eligibility {
             CloneBodyEligibilityV1::Eligible => {
                 census.eligible_source_bodies = census.eligible_source_bodies.saturating_add(1);

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
 
 use roaring::RoaringBitmap;
@@ -112,6 +112,7 @@ impl LexicalFieldTextV1 for ArtifactRowV1 {
 #[derive(Clone)]
 pub struct CodeLexicalArtifactReaderV1 {
     connection: Arc<ArtifactConnectionMutex<Connection>>,
+    path: Arc<PathBuf>,
     metadata: super::super::CodeLexicalProjectionMetadataV1,
     receipt: VerifiedCodeLexicalArtifactV1,
     layout: LexicalArtifactLayoutV1,
@@ -328,6 +329,7 @@ impl CodeLexicalArtifactReaderV1 {
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
+                path,
                 connection,
                 &receipt,
                 cache_budget_bytes,
@@ -377,6 +379,7 @@ impl CodeLexicalArtifactReaderV1 {
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
+                path,
                 connection,
                 expected,
                 cache_budget_bytes,
@@ -392,6 +395,7 @@ impl CodeLexicalArtifactReaderV1 {
     }
 
     fn open_connection_with_control(
+        path: &Path,
         connection: Connection,
         expected: &VerifiedCodeLexicalArtifactV1,
         cache_budget_bytes: usize,
@@ -550,6 +554,7 @@ impl CodeLexicalArtifactReaderV1 {
             // identity for the process lifetime, so this per-reader lock must
             // remain plain. Static query spans retain operation visibility.
             connection: Arc::new(StdMutex::new(connection)),
+            path: Arc::new(path.to_path_buf()),
             metadata,
             receipt: stored,
             layout,
@@ -582,14 +587,33 @@ impl CodeLexicalArtifactReaderV1 {
             return Ok(None);
         }
         let census = self.clone_index_census.get_or_init(|| {
-            let connection = self.lock_connection().map_err(|error| error.to_string())?;
-            read_clone_index_census(
+            let file = open_private_file(self.path.as_ref())
+                .map_err(map_private_artifact_file_error)
+                .map_err(|error| error.to_string())?;
+            verify_named_path_identity(self.path.as_ref(), &file)
+                .map_err(|error| error.to_string())?;
+            let connection = Connection::open_with_flags(
+                self.path.as_ref(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| map_reader_open_error(self.path.as_ref(), error))
+            .map_err(|error| error.to_string())?;
+            connection
+                .pragma_update(None, "query_only", true)
+                .map_err(sqlite_error)
+                .map_err(|error| error.to_string())?;
+            verify_named_path_identity(self.path.as_ref(), &file)
+                .map_err(|error| error.to_string())?;
+            let census = read_clone_index_census(
                 &connection,
                 self.layout.has_clone_fingerprints(),
                 CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
             )
             .map(Arc::new)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+            verify_named_path_identity(self.path.as_ref(), &file)
+                .map_err(|error| error.to_string())?;
+            Ok(census)
         });
         census
             .as_ref()

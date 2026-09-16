@@ -2573,6 +2573,7 @@ fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
         observed_at: first,
         completed_files: 20,
         completed_lexical_units: 4_000_000,
+        clone_peak_scratch_memory_bytes: None,
     });
     assert_eq!(state.rates_and_eta(29_000_000), (None, None, None));
 
@@ -2580,6 +2581,7 @@ fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
         observed_at: first + Duration::from_secs(2),
         completed_files: 21,
         completed_lexical_units: 14_000_000,
+        clone_peak_scratch_memory_bytes: None,
     });
     let (files_per_second, lexical_units_per_second, eta_seconds) = state.rates_and_eta(29_000_000);
     assert_eq!(files_per_second, Some(0.5));

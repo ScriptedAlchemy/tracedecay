@@ -255,7 +255,7 @@ describe('ObservatoryPage store telemetry', () => {
     ).toBeTruthy();
     // Nothing may announce a measured free-page share for pages nobody sampled.
     expect(screen.queryByRole('img', { name: /free pages/ })).toBeNull();
-    expect(screen.queryByText(/0\.0%/)).toBeNull();
+    expect(screen.queryByText(/^0\.0%$/)).toBeNull();
   });
 
   it('renders every finding producer source state without treating partial as clean', async () => {
@@ -322,14 +322,16 @@ describe('ObservatoryPage store telemetry', () => {
     });
     renderObservatory();
 
-    await screen.findByText('5 reused · 5 unique');
+    await screen.findByText('5 occurrences');
     const panel = await screen.findByLabelText('Clone index');
     expect(panel.textContent).toContain('6 / 8');
     expect(panel.textContent).toContain('6 / 6');
     expect(panel.textContent).toContain('4 / 6');
-    expect(panel.textContent).toContain('5 reused · 5 unique');
+    expect(panel.textContent).toContain('prior payload reuse5 occurrences');
+    expect(panel.textContent).toContain('unique payloads5');
     expect(panel.textContent).toContain('16,384 posting rows');
     expect(panel.textContent).toContain('64 body comparisons');
+    expect(panel.textContent).toContain('minimum directional coverage · 70.0%');
     expect(panel.textContent).toContain('2.0 MiB on disk');
     expect(panel.textContent).toContain('2.40ms');
     expect(panel.textContent).toContain('generation.empty');
@@ -347,6 +349,10 @@ describe('ObservatoryPage store telemetry', () => {
           {
             ...ready.payload.worktrees[0],
             worktree_root: '/worktrees/partial',
+            code_graph_serving: {
+              state: 'unavailable',
+              reason: 'graph artifact unreadable',
+            },
             clone_index: {
               state: 'partial',
               observation: {
@@ -406,6 +412,7 @@ describe('ObservatoryPage store telemetry', () => {
     expect(screen.getByText('positional fingerprint successor is missing')).toBeTruthy();
     expect(screen.getByText('2 / 5 sealed pages')).toBeTruthy();
     expect(screen.getByText('the sealed lexical artifact is unreadable')).toBeTruthy();
+    expect(screen.getByText('unavailable · graph artifact unreadable')).toBeTruthy();
   });
 });
 
@@ -565,6 +572,7 @@ function codeIndexWorktree() {
     source_reference: 'refs/heads/main',
     source_revision: null,
     latest_generation_id: 'generation.2f8c41ab',
+    code_graph_serving: { state: 'ready' },
     clone_index: { state: 'ready', observation: cloneIndexObservation() },
     snapshot_content_identity: 'sha256:9c1f4a2e7b05',
     sealed_at_micros: SAMPLE_CURRENT_MICROS - 214_000_000,
