@@ -6,6 +6,7 @@
 # continue-on-error or a forged dashboard app-dist seed. Dispatch or wait for
 # the weekly schedule until the Hawk backlog is clean enough to promote into
 # required CI without softening -D warnings.
+# Unarchive retrigger: keep Hawk optional until -D warnings is clean.
 name: Hawk
 
 on:
