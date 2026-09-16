@@ -894,7 +894,7 @@ fn publication_evidence(
             .collect(),
         reextracted_files,
         changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
-        reused_chunks: changes.reused.len(),
+        reused_chunks: changes.reused_count as usize,
         clone_payloads_reused: Some(clone_payloads_reused),
         clone_stale_invalidations: Some(clone_stale_invalidations),
         clone_body_changes_observed: Some(clone_body_changes_observed),

@@ -287,13 +287,8 @@ fn mixed_increment_preserves_sorted_change_partitions() {
     let changes = plan_chunk_increment(Some(&prior), &current).unwrap();
     assert_eq!(changes.added_or_changed.len(), 8);
     assert_eq!(changes.deleted.len(), 8);
-    assert_eq!(changes.reused.len(), 4);
-    for change in changes
-        .added_or_changed
-        .iter()
-        .chain(&changes.deleted)
-        .chain(&changes.reused)
-    {
+    assert_eq!(changes.reused_count, 4);
+    for change in changes.added_or_changed.iter().chain(&changes.deleted) {
         assert_eq!(
             change.prior_digest.as_ref(),
             prior
@@ -312,10 +307,10 @@ fn mixed_increment_preserves_sorted_change_partitions() {
     let empty = manifest(&current_generation, vec![]);
     let removed = plan_chunk_increment(Some(&prior), &empty).unwrap();
     assert_eq!(removed.deleted.len(), prior.chunks().len());
-    assert!(removed.added_or_changed.is_empty() && removed.reused.is_empty());
+    assert!(removed.added_or_changed.is_empty() && removed.reused_count == 0);
     let initial = plan_chunk_increment(None, &current).unwrap();
     assert_eq!(initial.added_or_changed.len(), current.chunks().len());
-    assert!(initial.deleted.is_empty() && initial.reused.is_empty());
+    assert!(initial.deleted.is_empty() && initial.reused_count == 0);
 }
 
 #[test]
