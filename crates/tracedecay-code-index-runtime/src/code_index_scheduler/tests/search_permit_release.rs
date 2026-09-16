@@ -16,10 +16,11 @@ use std::thread::ThreadId;
 use tracedecay_contracts::CancellationSignal;
 use tracedecay_query::code_search::{
     CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor, CodeIndexSearchOutcomeV1,
-    CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
+    CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1, CodeIndexSimilarOutcomeV1,
+    CodeIndexSimilarRequestV1, CodeIndexSimilarTargetV1,
 };
 
-use crate::code_index_executor::code_index_search_executor;
+use crate::code_index_executor::{code_index_search_executor, code_index_similar_executor};
 use crate::mcp_admission::{
     CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
     CodeIndexScopeResolverV1, CodeIndexScopeUnavailableV1,
@@ -464,6 +465,160 @@ async fn expired_request_parked_before_admission_reports_the_deadline() {
 
     drop(held_resolution);
     next_request_is_admitted(&executor, fixture.path()).await;
+
+    registry.shutdown().await;
+}
+
+/// The settled shape of a clone-family read: which terminal state it reached,
+/// with the unavailability reason when it reached none.
+#[derive(Debug, PartialEq, Eq)]
+enum SimilarSettlementV1 {
+    Complete,
+    NotFound,
+    Unavailable(CodeIndexSearchUnavailableReasonV1),
+}
+
+fn similar_settlement(outcome: &CodeIndexSimilarOutcomeV1) -> SimilarSettlementV1 {
+    match outcome {
+        CodeIndexSimilarOutcomeV1::Complete(_) => SimilarSettlementV1::Complete,
+        CodeIndexSimilarOutcomeV1::NotFound => SimilarSettlementV1::NotFound,
+        CodeIndexSimilarOutcomeV1::Unavailable(reason) => SimilarSettlementV1::Unavailable(*reason),
+    }
+}
+
+/// One family read for `source`, dispatched under a deadline `expires_in` from
+/// now — the shape every dashboard family read has.
+fn family_request(
+    project_root: &Path,
+    source: &tracedecay_domain::SymbolOccurrenceId,
+    expires_in: Duration,
+) -> CodeIndexSimilarRequestV1 {
+    let deadline = Deadline::new(UtcMicros(
+        tracedecay_contracts::clock::now_micros().0
+            + i64::try_from(expires_in.as_micros()).expect("deadline fits"),
+    ))
+    .expect("deadline");
+    CodeIndexSimilarRequestV1 {
+        project_root: project_root.to_path_buf(),
+        target: CodeIndexSimilarTargetV1::SymbolOccurrence(source.clone()),
+        match_classes: vec![
+            tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative,
+            tracedecay_code_index::clones::CloneNormalizationClassV1::Rename,
+        ],
+        result_limit: 8,
+        work_limit: 9,
+        cursor: None,
+        authority: None,
+        deadline: Some(deadline),
+        cancellation: None,
+    }
+}
+
+const SHARED_BODY_SOURCE: &str = "pub fn shared_body(input: u32) -> u32 {\n    let doubled = input * 2;\n    let shifted = doubled + 7;\n    let folded = shifted ^ (input >> 1);\n    folded % 13\n}\n";
+
+/// Two clone-family reads dispatched together — the Shared Code page fires
+/// one per match class — must both settle the way either settles alone.
+///
+/// The single execution permit bounds how many scans run at once. Its loser
+/// used to be refused outright with `CapacityUnavailable`, the reason a
+/// genuinely oversized bounded read is refused with, so the dashboard told the
+/// user a retained generation exceeded the bounded-read limits whenever two
+/// reads merely raced. A read that carries a deadline now waits for the permit
+/// up to that deadline; one whose deadline passes first reports the typed
+/// `TimedOut` state, not capacity.
+///
+/// The hold is deterministic: an admitted family read takes the permit and
+/// then parks on the scheduler's mounted map for its text-serving owner, so a
+/// map held before the first read is issued keeps the permit held until the
+/// test lets go of the map.
+#[tokio::test]
+async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
+    let fixture = GitFixture::new(&[
+        ("src/first.rs", SHARED_BODY_SOURCE),
+        ("src/second.rs", SHARED_BODY_SOURCE),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let source = crate::code_index_branch_diff::generation_symbols(
+        latest.generation(),
+        Some("src/first.rs"),
+        None,
+        &crate::code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        },
+    )
+    .expect("fixture symbols")
+    .into_iter()
+    .find(|symbol| symbol.name == "shared_body")
+    .expect("the fixture's shared body is indexed")
+    .symbol_occurrence_id;
+    let admitted = Arc::new(tokio::sync::Notify::new());
+    let executor = code_index_similar_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.family-permit.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.family-permit.fixture",
+            )
+            .expect("authorization revision"),
+        }),
+        AdmittingScopeResolver {
+            scope,
+            admitted: Arc::clone(&admitted),
+        },
+    );
+    let far = Duration::from_secs(30);
+
+    let held_map = registry.mounted.lock().await;
+    // Nothing between scope resolution and the permit awaits, so once the
+    // report lands the first read owns the permit and is parked on the map.
+    let first = tokio::spawn(executor(family_request(fixture.path(), &source, far)));
+    admitted.notified().await;
+    let second = tokio::spawn(executor(family_request(fixture.path(), &source, far)));
+    admitted.notified().await;
+
+    let expired = tokio::time::timeout(
+        Duration::from_secs(5),
+        executor(family_request(
+            fixture.path(),
+            &source,
+            Duration::from_millis(300),
+        )),
+    )
+    .await
+    .expect("a read whose deadline passes while the permit is held must settle on it");
+    assert_eq!(
+        similar_settlement(&expired),
+        SimilarSettlementV1::Unavailable(CodeIndexSearchUnavailableReasonV1::TimedOut),
+        "a read that runs out of deadline waiting for the permit reports the deadline"
+    );
+    assert!(
+        !second.is_finished(),
+        "a read with deadline left must wait for the permit, not settle without it"
+    );
+
+    drop(held_map);
+    let first = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .expect("the first read completes once the map is released")
+        .expect("first read task joins");
+    let second = tokio::time::timeout(Duration::from_secs(30), second)
+        .await
+        .expect("the second read completes once the permit is handed on")
+        .expect("second read task joins");
+    assert_eq!(
+        similar_settlement(&first),
+        SimilarSettlementV1::Complete,
+        "the fixture serves a verified family on its own: {first:?}"
+    );
+    assert_eq!(
+        similar_settlement(&second),
+        SimilarSettlementV1::Complete,
+        "the read that lost the permit race settles exactly as the winner did: {second:?}"
+    );
 
     registry.shutdown().await;
 }
