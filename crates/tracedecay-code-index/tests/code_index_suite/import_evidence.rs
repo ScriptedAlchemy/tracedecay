@@ -260,6 +260,93 @@ fn rust_cross_crate_impl_binds_through_public_reexport_chain() {
 }
 
 #[test]
+fn rust_constructor_and_typed_receiver_calls_bind_through_the_crate_path() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.builder.lib",
+            "crates/widgets/src/lib.rs",
+            "mod builder;\npub use crate::builder::{Builder, Widget};\n",
+        ),
+        (
+            "file.builder.impl",
+            "crates/widgets/src/builder.rs",
+            "pub struct Widget;\npub struct Builder;\nimpl Builder {\n    pub fn new() -> Builder { Builder }\n    pub fn build(&self) -> Widget { Widget }\n}\n",
+        ),
+        (
+            "file.builder.app",
+            "crates/app/src/main.rs",
+            "fn assemble() -> widgets::Widget {\n    let mut builder = widgets::Builder::new();\n    builder.build()\n}\nfn main() { assemble(); }\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let constructor = symbol_occurrence(&generation, "crates/widgets/src/builder.rs::Builder::new");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/builder.rs::Builder::build");
+
+    assert_resolved_edge(
+        &generation,
+        &caller,
+        &constructor,
+        RelationEdgeKindV1::Calls,
+    );
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_typed_parameter_method_call_binds_through_import_and_crate_reexport() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.hiargs.main",
+            "crates/core/src/main.rs",
+            "mod flags;\nuse crate::flags::HiArgs;\nfn search(args: &HiArgs) -> bool {\n    args.walk_builder();\n    true\n}\nfn main() {}\n",
+        ),
+        (
+            "file.hiargs.flags",
+            "crates/core/src/flags/mod.rs",
+            "mod hiargs;\npub(crate) use crate::flags::hiargs::HiArgs;\n",
+        ),
+        (
+            "file.hiargs.impl",
+            "crates/core/src/flags/hiargs.rs",
+            "pub(crate) struct HiArgs;\nimpl HiArgs {\n    pub(crate) fn walk_builder(&self) {}\n}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/core/src/main.rs::search");
+    let target = symbol_occurrence(
+        &generation,
+        "crates/core/src/flags/hiargs.rs::HiArgs::walk_builder",
+    );
+
+    assert_resolved_edge(&generation, &caller, &target, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_dotted_call_on_untyped_receiver_stays_unresolved() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.untyped.lib",
+            "crates/widgets/src/lib.rs",
+            "pub struct Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.untyped.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builders: Vec<widgets::Builder>) {\n    for builder in builders {\n        builder.build();\n    }\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Builder::build");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != caller
+                || edge.to_occurrence != build
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "a receiver bound by a `for` pattern has no stated type and must not bind"
+    );
+}
+
+#[test]
 fn rust_parent_glob_does_not_override_a_local_type_binding() {
     let generation = published_rust_workspace(&[
         (
