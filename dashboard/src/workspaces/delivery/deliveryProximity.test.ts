@@ -248,4 +248,35 @@ describe('applyProximityAttention', () => {
       expect(pr!.attention.find((entry) => entry.source === source)!.state).toBe('unavailable');
     }
   });
+
+  it('preserves partial coverage when the proximity read is partial', () => {
+    const complete = readyResult([encounter('overlapping_edit', MATCHED_HEAD)]);
+    const result: FeedbackProximityReadResultV1 = {
+      state: 'partial',
+      page: complete.page,
+      omissions: ['encounter_limit'],
+    };
+    const [pr] = applyProximityAttention(inbox([pullRequest(MATCHED_HEAD)]), result).pull_requests;
+    const overlap = pr!.attention.find((item) => item.source === 'overlapping_edit')!;
+    expect(overlap.state).toBe('active');
+    expect(overlap.coverage).toBe('partial');
+    const clear = pr!.attention.find((item) => item.source === 'confirmed_conflict')!;
+    expect(clear.state).toBe('clear');
+    expect(clear.coverage).toBe('partial');
+  });
+
+  it('preserves stale coverage when the proximity read is stale', () => {
+    const complete = readyResult([]);
+    const result: FeedbackProximityReadResultV1 = {
+      state: 'stale',
+      page: complete.page,
+      omissions: ['code_index_revision_mismatch'],
+    };
+    const [pr] = applyProximityAttention(inbox([pullRequest(MATCHED_HEAD)]), result).pull_requests;
+    for (const source of ['overlapping_edit', 'confirmed_conflict', 'divergent_shared_implementation']) {
+      const item = pr!.attention.find((entry) => entry.source === source)!;
+      expect(item.state).toBe('clear');
+      expect(item.coverage).toBe('stale');
+    }
+  });
 });
