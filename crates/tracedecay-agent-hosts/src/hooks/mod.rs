@@ -1041,9 +1041,7 @@ fn nearest_project_like_root_with_temp_root(
 ) -> Option<PathBuf> {
     // Fail closed when temp identity is unavailable: skipping the bound would
     // re-enroll ephemeral agent git worktrees (the opposite of #1376 / #1387).
-    let Some(temp_root) = temp_root.and_then(usable_absolute_temp_root_from) else {
-        return None;
-    };
+    let temp_root = temp_root.and_then(usable_absolute_temp_root_from)?;
     let start_id = tracedecay_runtime_core::path_safety::canonical_root_identity(start);
     if start_id.starts_with(&temp_root) {
         return None;
