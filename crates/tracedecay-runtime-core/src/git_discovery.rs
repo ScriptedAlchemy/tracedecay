@@ -18,8 +18,30 @@ use std::time::{Duration, Instant};
 
 use crate::cancellation::{CancellationToken, MonotonicDeadline};
 
-const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
-const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Modelled slow-volume in-process topology walk. Matches the injected delay
+/// used by the slow-volume discovery tests.
+const MODELLED_SLOW_AUTHORITY_WALK: Duration = Duration::from_millis(750);
+/// Reserved budget for the supported `git rev-parse` CLI fallback after an
+/// unreadable in-process authority.
+///
+/// Measured 2026-09-16 on this host for
+/// `git rev-parse --show-toplevel --git-dir --git-common-dir`:
+/// warm large-worktree p95 ≈ 8 ms (n=50), deep-nested p95 ≈ 4 ms (n=40),
+/// 8-way contended p95 ≈ 5 ms (n=40). Pad to 250 ms so a slow-volume authority
+/// walk that exhausts [`MODELLED_SLOW_AUTHORITY_WALK`] still leaves CLI
+/// headroom without restoring the old 2 s default.
+const CLI_FALLBACK_HEADROOM: Duration = Duration::from_millis(250);
+/// Default probe budget for synchronous discovery without an explicit deadline.
+///
+/// Authority and CLI fallback share one deadline. The total is the modelled
+/// first-phase cost plus reserved CLI headroom — not the first-phase cost
+/// alone — so a slow unreadable authority cannot starve the supported fallback.
+const DEFAULT_DISCOVERY_TIMEOUT: Duration =
+    MODELLED_SLOW_AUTHORITY_WALK.saturating_add(CLI_FALLBACK_HEADROOM);
+/// Upper bound between `try_wait` polls. Keep slices short enough that cancel
+/// and deadline still interrupt quickly, but avoid waking every 10 ms for the
+/// full discovery budget on a blocking pool worker.
+const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const REPOSITORY_IDENTITY_ARGS: [&str; 4] = [
     "rev-parse",
     "--show-toplevel",
@@ -546,6 +568,9 @@ fn capture_child(
             kill_and_reap(&mut child);
             return ChildCaptureOutcome::DeadlineExceeded;
         }
+        // Sleep at most CHILD_WAIT_POLL_INTERVAL, and never past the deadline.
+        // Larger slices cut blocking-pool wakeups vs a fixed 10 ms poll without
+        // losing cancel/deadline checks between waits.
         std::thread::sleep(
             deadline
                 .instant()
@@ -668,6 +693,28 @@ mod tests {
         run_git(&repository, &["init", "-b", "main", "--quiet"]);
         crate::git_repository::delay_repository_discovery_for_test(&repository, SLOW_WALK);
         repository
+    }
+
+    /// Default budget must still resolve when the in-process phase pays the
+    /// modelled slow walk, returns unreadable, and the Git CLI fallback has
+    /// to finish under the same deadline.
+    #[test]
+    fn default_budget_keeps_cli_fallback_after_slow_unreadable_authority() {
+        let tmp = tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main", "--quiet"]);
+        crate::git_repository::unreadable_repository_discovery_for_test(&repository, SLOW_WALK);
+
+        let outcome = discover_repository_identity_bounded(&repository);
+        crate::git_repository::reset_repository_discovery_for_test(&repository);
+
+        let GitRepositoryIdentityOutcome::Resolved(identity) = outcome else {
+            panic!(
+                "default discovery budget must leave CLI fallback headroom after a slow unreadable authority: {outcome:?}"
+            );
+        };
+        assert_eq!(identity.worktree_root, repository.canonicalize().unwrap());
     }
 
     /// Wait for whatever resolution is running for `directory` to retire its

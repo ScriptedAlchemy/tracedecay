@@ -1,3 +1,9 @@
+//! Durable host transcript discovery path queue in the global DB.
+//!
+//! Hosts (notably Kimi) enqueue session transcript paths for ordered
+//! admission scans. This is not workspace-root git membership discovery —
+//! that lives in `tracedecay_runtime_core::git_discovery`.
+
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
