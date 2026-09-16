@@ -9,10 +9,16 @@ pub struct CodeGenerationStoreLockV1 {
     file: File,
     store_root: PathBuf,
     generation_store: bool,
+    shared: bool,
 }
 
 impl CodeGenerationStoreLockV1 {
     pub(super) fn generation_store_root(&self) -> Result<&Path, CodeGenerationRetentionErrorV1> {
+        if self.shared {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "text-artifact attachment requires an exclusive generation-store lock".to_owned(),
+            ));
+        }
         if self.generation_store {
             Ok(&self.store_root)
         } else {
@@ -35,6 +41,25 @@ pub fn acquire_code_generation_store_lock(
     lock_file(store_root, STORE_LOCK_FILE, true)
 }
 
+/// Hold the generation store as a reader for one bounded read of immutable,
+/// content-addressed evidence. Readers share the hold with each other and
+/// wait for an exclusive writer (publication, retention) to finish instead of
+/// failing; writers in turn wait for in-flight reads. The hold is never an
+/// attachment authority.
+pub fn acquire_code_generation_store_read_lock(
+    store_root: &Path,
+) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+    let store_root = canonical_store_root(store_root)?;
+    let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
+    lock.lock_shared().map_err(storage)?;
+    Ok(CodeGenerationStoreLockV1 {
+        file: lock,
+        store_root,
+        generation_store: true,
+        shared: true,
+    })
+}
+
 pub fn try_acquire_code_generation_store_lock(
     store_root: &Path,
 ) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
@@ -45,6 +70,7 @@ pub fn try_acquire_code_generation_store_lock(
             file: lock,
             store_root,
             generation_store: true,
+            shared: false,
         })),
         // Windows LockFileEx reports ERROR_LOCK_VIOLATION (33) instead of
         // WouldBlock. AccessDenied and sharing violations stay Storage.
@@ -72,6 +98,7 @@ fn lock_file(
         file: lock,
         store_root,
         generation_store,
+        shared: false,
     })
 }
 
