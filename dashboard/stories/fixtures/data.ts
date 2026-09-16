@@ -4496,12 +4496,13 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   // and cursor, and each class is a separate digest group on the wire.
   if (pathname === '/api/plugins/graph/shared-code/family') {
     const params = new URLSearchParams(search);
-    return envelope(
-      sharedCodeFamilyPayload(
-        params.get('match_class') ?? 'conservative_exact',
-        params.get('cursor'),
-      ),
+    const payload = sharedCodeFamilyPayload(
+      params.get('match_class') ?? 'conservative_exact',
+      params.get('cursor'),
     );
+    // `family_response` answers `partial` whenever the result's coverage is.
+    const coverage = payload['coverage'] as { status: string };
+    return envelope(payload, coverage.status === 'partial' ? 'partial' : 'ready');
   }
   // Must precede the FIXTURE_PREFIXES sweep: `/api/plugins/graph` is a prefix
   // fixture, so without this branch every neighbors read would resolve to the

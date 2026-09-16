@@ -230,6 +230,7 @@ function FamilyPage({
                   <FamilyGroup
                     key={family.family_digest}
                     family={family}
+                    continuation={cursor !== null}
                     stitch={stitch}
                     onFocusMember={onFocusMember}
                     onTraceMember={onTraceMember}
@@ -286,12 +287,15 @@ function SourceIdentity({ result }: { result: SimilarResultV1 }) {
 
 function FamilyGroup({
   family,
+  continuation,
   stitch,
   onFocusMember,
   onTraceMember,
   onFollow,
 }: {
   family: SimilarFamilyV1;
+  /** This page was reached through a cursor: earlier pages listed other members. */
+  continuation: boolean;
   stitch: 'solid' | 'double';
   onFocusMember: (symbolOccurrenceId: string) => void;
   onTraceMember: (symbolOccurrenceId: string) => void;
@@ -303,6 +307,9 @@ function FamilyGroup({
   // page* (code_reads.rs sets it from the filtered page), not a family total.
   // `complete` is false either because a cursor continues the family or
   // because scope filtering omitted members; only the former offers a page.
+  // A continuation page's family can be `complete` (postings ended there) and
+  // is still only this page's slice, so the count stays qualified.
+  const pageOnly = !family.complete || continuation;
   return (
     <li
       className="td-raised flex flex-col border border-edge-subtle"
@@ -319,7 +326,7 @@ function FamilyGroup({
           {family.member_count.toLocaleString()}
           <span className="td-unit ml-1">
             {family.member_count === 1 ? 'member' : 'members'}
-            {family.complete ? '' : ' on this page'}
+            {pageOnly ? ' on this page' : ''}
           </span>
         </span>
         {family.complete ? null : (

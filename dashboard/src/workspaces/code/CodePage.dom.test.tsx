@@ -313,8 +313,9 @@ describe('Shared Code: verified exact families of the selected body', () => {
     // its own copy.
     // `member_count` is the page's authorized count, never a family total: an
     // incomplete family is counted "on this page" and says more follow, so a
-    // reader is never told "3 members" about a family the daemon has not
-    // finished listing. The source itself is counted but not listed as a copy.
+    // reader is never told a total about a family the daemon has not finished
+    // listing. The selected body is skipped by the serving read and is neither
+    // counted nor listed.
     expect(await within(conservative).findByText('2')).toBeTruthy();
     expect(within(conservative).getByText(/members on this page/i)).toBeTruthy();
     expect(within(conservative).getByText(/family incomplete · more members follow/i)).toBeTruthy();
@@ -342,6 +343,11 @@ describe('Shared Code: verified exact families of the selected body', () => {
       // First page: sym-7, sym-14. Cursor page: sym-21, sym-28.
       expect(conservative.querySelectorAll('[data-member]')).toHaveLength(4);
     });
+    // The continuation page's family is `complete` (postings ended there), yet
+    // its count is still one page's slice and stays qualified.
+    const continuation = screen.getByRole('region', { name: 'More members' });
+    expect(within(continuation).getByText(/members on this page/i)).toBeTruthy();
+    expect(within(continuation).queryByText(/family incomplete/i)).toBeNull();
     const cursorReads = fetchMock.mock.calls
       .map((call) => new URL(String(call[0]), 'http://localhost'))
       .filter((url) => url.pathname.endsWith('/shared-code/family') && url.searchParams.has('cursor'));
@@ -510,7 +516,7 @@ describe('Shared Code: verified exact families of the selected body', () => {
     await waitFor(() => {
       expect(screen.getAllByText('Coverage: partial')).toHaveLength(2);
     });
-    expect(screen.getAllByText(/stopped at its result budget/i)).toHaveLength(2);
+    expect(screen.getAllByText(/not every member of this body/i)).toHaveLength(2);
     expect(document.querySelectorAll('[data-member]').length).toBeGreaterThan(0);
   });
 });
