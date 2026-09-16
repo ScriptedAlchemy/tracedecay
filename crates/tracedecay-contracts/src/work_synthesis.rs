@@ -194,20 +194,24 @@ pub enum WorkSynthesisAttemptV1 {
 /// and atomically commits the product link, attempt, and synthesis record.
 /// Every source outcome is read from the attempt authority — never trusted
 /// from the caller — and preserved verbatim in the admission record.
+/// Provider instructions are prepared only after replay and source validation;
+/// their hydrated content is not part of the caller's immutable request identity.
 #[hotpath::measure(label = "application.work.synthesis.admit")]
-pub fn admit_work_synthesis_against_registered_topology<S>(
+pub fn admit_work_synthesis_against_registered_topology<S, F>(
     attempts: &WorkProductSynthesisAttemptServiceV1<S>,
     context: &RequestContext,
     product_binding: &WorkProductBindingV1,
     revisions: &WorkProductRevisionPinsV1,
     registered_topology: &tracedecay_domain::configuration::WorkTopologyPolicyV1,
-    command: AdmitWorkSynthesisCommand,
+    mut command: AdmitWorkSynthesisCommand,
+    prepare_instructions: F,
 ) -> Result<WorkSynthesisAttemptV1, ApplicationProblem>
 where
     S: WorkSynthesisAdmissionStoragePort
         + WorkGraphReadPortV1
         + WorkProductOwnerAuthorizationPortV1
         + WorkProductAttemptAdmissionPortV1,
+    F: FnOnce(&StartWorkAttemptCommand, &[WorkAttemptV1]) -> Result<String, ApplicationProblem>,
 {
     crate::require_registered_work_topology(
         &command.start.execution_snapshot,
@@ -244,6 +248,7 @@ where
     {
         return Ok(WorkSynthesisAttemptV1::Admitted(Box::new(replay)));
     }
+    let mut sources = Vec::with_capacity(command.sources.len());
     let mut envelopes = Vec::with_capacity(command.sources.len());
     for source in &command.sources {
         let attempt = attempts.status(context, source)?;
@@ -251,6 +256,7 @@ where
             source: source.clone(),
             outcome: source_outcome(&attempt)?,
         });
+        sources.push(attempt);
     }
     let cited_source_digests: BTreeSet<ManifestDigest> = envelopes
         .iter()
@@ -268,6 +274,9 @@ where
             refusal: WorkSynthesisRefusalV1::NoCitableSources,
         });
     }
+    // Hydration consumes the same source snapshot as the sealed citations. It
+    // runs only for a new admission; mutable sources cannot redefine a replay.
+    command.start.instructions = prepare_instructions(&command.start, &sources)?;
     let groups = evidence_groups(&source_set.sources);
     let uncited = source_set
         .sources
