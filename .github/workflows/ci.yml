@@ -1042,20 +1042,12 @@ jobs:
       - name: Check lean build
         run: cargo check -p tracedecay --no-default-features --locked
 
-  # Compile-only gate for the features the test lanes do not enable. Both are
-  # otherwise built for the first time at release (`--all-features`), so
-  # anything that breaks them merges green and is discovered at tag time.
-  # That is not hypothetical: `tests/mcp_suite/support.rs` called
-  # `fs::create_dir_all` without importing `std::fs`, which made ten
-  # `required-features = ["test-transport"]` targets unbuildable, and
-  # nothing reported it.
-  #
-  # `check --all-targets` rather than `nextest run`: the point is that the
-  # code still compiles, and the acceptance suites behind `test-transport`
-  # spawn daemons, so running them would change a test lane's cost and
-  # flakiness profile. Enable them as a real test lane separately once they
-  # are confirmed green (`dashboard_api_test`, green in CI since it had its
-  # own job, runs as the `root-dashboard-api` Linux partition).
+  # Compile-only gate for feature graphs beyond the default test-lane
+  # selections. `test-transport` acceptance suites (`mcp_suite`,
+  # `transport_acceptance_suite`, `host_journeys_suite`, `work_loop_journey`)
+  # now run as the `root-transport` Linux partition; this job still
+  # `cargo check`s the full `--features test-transport` / hotpath graphs so
+  # non-selected targets cannot rot until release `--all-features`.
   #
   # Its own job, not a tail on the Linux build: these are dev-profile check
   # builds, a graph the perf-profile test lanes share nothing with, so there
