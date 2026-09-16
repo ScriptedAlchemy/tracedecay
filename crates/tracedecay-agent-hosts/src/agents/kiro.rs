@@ -287,7 +287,7 @@ impl AgentIntegration for KiroIntegration {
     #[hotpath::measure(label = "kiro_project_install")]
     fn activate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -318,7 +318,7 @@ impl AgentIntegration for KiroIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -334,7 +334,7 @@ impl AgentIntegration for KiroIntegration {
     /// scope is file-written for the same working-directory reason.
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -423,12 +423,12 @@ impl AgentIntegration for KiroIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1 as State};
+        use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1 as State};
 
-        if component != HostBundleComponentV1::ContextMcp {
+        if component != HostComponentV1::ContextMcp {
             return State::Missing;
         }
         kiro_context_mcp_registration_state(&ctx.home)
@@ -454,10 +454,10 @@ impl AgentIntegration for KiroIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             let path = mcp_config_path(home);
             vec![path.clone(), config_backup_path(&path)]
         } else {
@@ -467,10 +467,10 @@ impl AgentIntegration for KiroIntegration {
 
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
             // Catalog-native global install stays MCP-only and does not create
@@ -485,10 +485,10 @@ impl AgentIntegration for KiroIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_remove_with(&kiro_cli, &ctx.home)?;
             // Canonical global install is MCP-only, but older releases left

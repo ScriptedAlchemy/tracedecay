@@ -32,7 +32,7 @@ fn manifest(host: HostKindV1, bytes: &[u8]) -> HostBundleManifestV1 {
     HostBundleManifestV1 {
         schema_version: HOST_BUNDLE_SCHEMA_VERSION,
         host,
-        component: HostBundleComponentV1::Core,
+        component: HostComponentV1::Core,
         integration_manifest_digest: identity,
         catalog_digest: identity,
         configuration_snapshot_id: "first-party.v1".to_string(),
@@ -43,7 +43,7 @@ fn manifest(host: HostKindV1, bytes: &[u8]) -> HostBundleManifestV1 {
         artifacts: vec![HostBundleArtifactV1 {
             relative_path: "plugins/tracedecay.json".to_string(),
             artifact_digest: Sha256::digest(bytes).into(),
-            ownership_marker: expected_ownership_marker(host, HostBundleComponentV1::Core),
+            ownership_marker: expected_ownership_marker(host, HostComponentV1::Core),
         }],
     }
 }
@@ -62,7 +62,7 @@ fn execution(
         lifecycle: HostBundleLifecycleRequestV1 {
             operation,
             expected_host: host,
-            expected_component: HostBundleComponentV1::Core,
+            expected_component: HostComponentV1::Core,
             explicit_confirmation: confirmed,
             hermes_profile_bindings: u8::from(host == HostKindV1::Hermes),
             adopt_receiptless: false,
@@ -92,7 +92,7 @@ fn content(bytes: &[u8]) -> Vec<HostBundleArtifactContentV1> {
 
 fn component_manifest(
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     relative_path: &str,
     bytes: &[u8],
 ) -> HostBundleManifestV1 {
@@ -133,7 +133,7 @@ fn component_set(host: HostKindV1, core_bytes: &[u8], agent_bytes: &[u8]) -> Hos
             component_entry(
                 component_manifest(
                     host,
-                    HostBundleComponentV1::Core,
+                    HostComponentV1::Core,
                     "plugins/core.json",
                     core_bytes,
                 ),
@@ -142,7 +142,7 @@ fn component_set(host: HostKindV1, core_bytes: &[u8], agent_bytes: &[u8]) -> Hos
             component_entry(
                 component_manifest(
                     host,
-                    HostBundleComponentV1::Agent,
+                    HostComponentV1::Agent,
                     "plugins/agent.json",
                     agent_bytes,
                 ),
@@ -161,7 +161,7 @@ fn component_set_request(
         lifecycle: HostComponentSetLifecycleRequestV1 {
             operation,
             expected_host: host,
-            expected_components: vec![HostBundleComponentV1::Core, HostBundleComponentV1::Agent],
+            expected_components: vec![HostComponentV1::Core, HostComponentV1::Agent],
             explicit_confirmation: true,
             hermes_profile_bindings: u8::from(host == HostKindV1::Hermes),
             explicit_adoption: false,
@@ -399,7 +399,7 @@ fn component_set_transaction_is_idempotent_and_rolls_back_every_component() {
     );
     assert_eq!(
         writer
-            .load_receipt(HostKindV1::OpenCode, HostBundleComponentV1::Core)
+            .load_receipt(HostKindV1::OpenCode, HostComponentV1::Core)
             .unwrap()
             .expect("previous core receipt remains published")
             .operation_id,
@@ -407,7 +407,7 @@ fn component_set_transaction_is_idempotent_and_rolls_back_every_component() {
     );
     assert_eq!(
         writer
-            .load_receipt(HostKindV1::OpenCode, HostBundleComponentV1::Agent)
+            .load_receipt(HostKindV1::OpenCode, HostComponentV1::Agent)
             .unwrap()
             .expect("previous agent receipt remains published")
             .operation_id,
@@ -449,7 +449,7 @@ fn component_set_transaction_is_idempotent_and_rolls_back_every_component() {
     assert!(
         doctor.components.iter().any(|component| {
             component.host == Some(HostKindV1::OpenCode)
-                && component.component == Some(HostBundleComponentV1::Core)
+                && component.component == Some(HostComponentV1::Core)
                 && component.state == HostBundleComponentDoctorStateV1::Repairable
         }),
         "Doctor keeps the component receipt API while surfacing the aggregate recovery boundary"
@@ -787,7 +787,7 @@ fn component_set_rollback_converges_when_a_second_writer_left_the_backup_bytes()
     );
     assert_eq!(
         writer
-            .load_receipt(HostKindV1::OpenCode, HostBundleComponentV1::Core)
+            .load_receipt(HostKindV1::OpenCode, HostComponentV1::Core)
             .unwrap()
             .expect("the pre-transaction receipt is restored")
             .operation_id,
@@ -890,11 +890,11 @@ fn host_scoped_component_set(host: HostKindV1, slug: &str, tag: &[u8]) -> HostCo
         host,
         components: vec![
             component_entry(
-                component_manifest(host, HostBundleComponentV1::Core, &core_path, tag),
+                component_manifest(host, HostComponentV1::Core, &core_path, tag),
                 tag,
             ),
             component_entry(
-                component_manifest(host, HostBundleComponentV1::Agent, &agent_path, tag),
+                component_manifest(host, HostComponentV1::Agent, &agent_path, tag),
                 tag,
             ),
         ],
@@ -1017,12 +1017,12 @@ fn unchanged_companion_receipt_keeps_original_operation_provenance() {
     let core = receipt
         .component_receipts
         .iter()
-        .find(|receipt| receipt.component == HostBundleComponentV1::Core)
+        .find(|receipt| receipt.component == HostComponentV1::Core)
         .unwrap();
     let companion = receipt
         .component_receipts
         .iter()
-        .find(|receipt| receipt.component == HostBundleComponentV1::Agent)
+        .find(|receipt| receipt.component == HostComponentV1::Agent)
         .unwrap();
     assert_eq!(core.operation_id, [82; 16]);
     assert_eq!(core.operation, HostBundleLifecycleOpV1::Update);
@@ -1054,7 +1054,7 @@ fn unchanged_companion_receipt_keeps_original_operation_provenance() {
     let metadata_updated = receipt
         .component_receipts
         .iter()
-        .find(|receipt| receipt.component == HostBundleComponentV1::Agent)
+        .find(|receipt| receipt.component == HostComponentV1::Agent)
         .unwrap();
     assert_eq!(metadata_updated.operation_id, [83; 16]);
     assert_eq!(
@@ -1139,7 +1139,7 @@ fn component_set_preflights_cross_component_path_conflicts_before_artifact_write
             component_entry(
                 component_manifest(
                     HostKindV1::OpenCode,
-                    HostBundleComponentV1::Core,
+                    HostComponentV1::Core,
                     "plugins/shared.json",
                     b"core",
                 ),
@@ -1148,7 +1148,7 @@ fn component_set_preflights_cross_component_path_conflicts_before_artifact_write
             component_entry(
                 component_manifest(
                     HostKindV1::OpenCode,
-                    HostBundleComponentV1::Agent,
+                    HostComponentV1::Agent,
                     "plugins/shared.json",
                     b"agent",
                 ),
@@ -1228,7 +1228,7 @@ fn confirmed_component_set_rejects_narrowed_plan_identity_without_writes() {
     };
     let narrowed_request = HostComponentSetExecutionRequestV1 {
         lifecycle: HostComponentSetLifecycleRequestV1 {
-            expected_components: vec![HostBundleComponentV1::Core],
+            expected_components: vec![HostComponentV1::Core],
             ..full_request.lifecycle.clone()
         },
         operation_id: full_request.operation_id,
@@ -1680,7 +1680,7 @@ fn receiptless_adoption_requires_provenance_or_explicit_authority() {
 fn repair_refuses_a_receiptless_artifact_whose_ownership_marker_does_not_match() {
     let bundle = manifest(HostKindV1::KimiCode, b"current");
     let artifact = &bundle.artifacts[0];
-    let foreign = expected_ownership_marker(HostKindV1::Hermes, HostBundleComponentV1::Core);
+    let foreign = expected_ownership_marker(HostKindV1::Hermes, HostComponentV1::Core);
     assert_ne!(foreign, artifact.ownership_marker);
 
     // A foreign marker on the same deploy path is still a conflict even
@@ -1725,7 +1725,7 @@ fn repair_refuses_a_receiptless_artifact_whose_ownership_marker_does_not_match()
     let mut claimed = pre_v2_artifact(artifact, b"pre-v2", Some(artifact.ownership_marker.clone()));
     claimed.ownership_marker = Some(expected_ownership_marker(
         HostKindV1::Kiro,
-        HostBundleComponentV1::Core,
+        HostComponentV1::Core,
     ));
     claimed.owned_artifact_digest = Some(Sha256::digest(b"pre-v2").into());
     let claimed_conflict = plan_artifact_action(
@@ -1766,7 +1766,7 @@ fn doctor_discovery_mirrors_the_repair_ownership_boundary() {
         let owned = Some(artifact.ownership_marker.clone());
         let foreign = Some(expected_ownership_marker(
             HostKindV1::Hermes,
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
         ));
 
         for (marker, bytes, expected) in [
@@ -1821,7 +1821,7 @@ impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
     fn inspect_registration(
         &self,
         _host: HostKindV1,
-        _component: HostBundleComponentV1,
+        _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Current
     }
@@ -1833,7 +1833,7 @@ impl HostBundleRegistrationInspectorV1 for MissingRegistration {
     fn inspect_registration(
         &self,
         _host: HostKindV1,
-        _component: HostBundleComponentV1,
+        _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Missing
     }
@@ -1911,7 +1911,7 @@ fn profile_owned_receipts_enumerate_only_installed_components_and_retire_backups
             .join(HOST_BUNDLE_CONTROL_DIR)
             .join(receipt_file(
                 HostKindV1::Hermes,
-                HostBundleComponentV1::Core
+                HostComponentV1::Core
             ))
             .is_file()
     );
@@ -1971,7 +1971,7 @@ fn profile_owned_receipts_enumerate_only_installed_components_and_retire_backups
     assert_eq!(report.components[0].host, Some(HostKindV1::Hermes));
     assert_eq!(
         report.components[0].component,
-        Some(HostBundleComponentV1::Core)
+        Some(HostComponentV1::Core)
     );
     let repairable = inspect_installed_host_bundle_components_at(
         artifacts.path(),
@@ -2131,7 +2131,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
         schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
         operation_id: [23; 16],
         host: HostKindV1::Hermes,
-        component: HostBundleComponentV1::Core,
+        component: HostComponentV1::Core,
         operation: HostBundleLifecycleOpV1::Install,
         manifest_digest: manifest(HostKindV1::Hermes, b"foreign")
             .canonical_digest()
@@ -2141,7 +2141,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
             artifact_digest: Sha256::digest(b"foreign").into(),
             ownership_marker: expected_ownership_marker(
                 HostKindV1::Hermes,
-                HostBundleComponentV1::Core,
+                HostComponentV1::Core,
             ),
         }],
         rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
@@ -2152,7 +2152,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
         .join(HOST_BUNDLE_CONTROL_DIR)
         .join(receipt_file(
             HostKindV1::Hermes,
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
         ));
     std::fs::write(
         &foreign_receipt_path,
@@ -2181,7 +2181,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
         .join(HOST_BUNDLE_CONTROL_DIR)
         .join(receipt_file(
             HostKindV1::OpenCode,
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
         ));
     std::fs::write(receipt_path, b"{").unwrap();
     let report = inspect_installed_host_bundle_components_at(
@@ -2209,7 +2209,7 @@ impl HostBundleRegistrationInspectorV1 for InteractiveActivationRegistration {
     fn inspect_registration(
         &self,
         _host: HostKindV1,
-        _component: HostBundleComponentV1,
+        _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         self.0
     }
@@ -2227,7 +2227,7 @@ impl HostBundleRegistrationInspectorV1 for NonInteractiveStagedRegistration {
     fn inspect_registration(
         &self,
         _host: HostKindV1,
-        _component: HostBundleComponentV1,
+        _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Repairable
     }
@@ -2240,7 +2240,7 @@ fn write_component_receipt(
     artifact_root: &Path,
     lifecycle_root: &Path,
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     artifacts: &[(&str, Option<&[u8]>)],
 ) {
     let receipt = HostBundleInstallReceiptV1 {
@@ -2292,7 +2292,7 @@ fn never_activated_interactive_host_component_defers_instead_of_failing() {
         artifacts.path(),
         lifecycle.path(),
         HostKindV1::Codex,
-        HostBundleComponentV1::ContextMcp,
+        HostComponentV1::ContextMcp,
         &[(".codex/plugins/tracedecay/.mcp.json", None)],
     );
 
@@ -2326,7 +2326,7 @@ fn partially_materialised_interactive_host_component_still_fails() {
         artifacts.path(),
         lifecycle.path(),
         HostKindV1::Codex,
-        HostBundleComponentV1::Core,
+        HostComponentV1::Core,
         &[
             (
                 ".codex/plugins/tracedecay/.codex-plugin/plugin.json",
@@ -2361,7 +2361,7 @@ fn unstaged_interactive_host_component_still_fails() {
         artifacts.path(),
         lifecycle.path(),
         HostKindV1::Codex,
-        HostBundleComponentV1::ContextMcp,
+        HostComponentV1::ContextMcp,
         &[(".codex/plugins/tracedecay/.mcp.json", None)],
     );
 
@@ -2391,7 +2391,7 @@ fn non_interactive_host_missing_artifacts_still_fail() {
         artifacts.path(),
         lifecycle.path(),
         HostKindV1::CursorDesktop,
-        HostBundleComponentV1::ContextMcp,
+        HostComponentV1::ContextMcp,
         &[(".cursor/plugins/local/tracedecay/mcp.json", None)],
     );
 
@@ -2441,7 +2441,7 @@ fn doctor_surfaces_restart_safe_feedback_rollback_state() {
     assert_eq!(report.components[0].host, Some(HostKindV1::KimiCode));
     assert_eq!(
         report.components[0].component,
-        Some(HostBundleComponentV1::Core)
+        Some(HostComponentV1::Core)
     );
     assert_eq!(
         report.components[0].state,

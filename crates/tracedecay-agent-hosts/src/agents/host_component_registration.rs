@@ -313,8 +313,8 @@ impl CatalogHostComponentRegistrationAuthority {
                 && component_set.components.iter().any(|component| {
                     matches!(
                         component.manifest.component,
-                        crate::agents::host_bundle::HostBundleComponentV1::Core
-                            | crate::agents::host_bundle::HostBundleComponentV1::ContextMcp
+                        crate::agents::host_bundle::HostComponentV1::Core
+                            | crate::agents::host_bundle::HostComponentV1::ContextMcp
                     )
                 }))
         {
@@ -344,7 +344,7 @@ impl CatalogHostComponentRegistrationAuthority {
         component_set.host == crate::agents::host_bundle::HostKindV1::OpenCode
             && component_set.components.iter().any(|component| {
                 component.manifest.component
-                    == crate::agents::host_bundle::HostBundleComponentV1::Core
+                    == crate::agents::host_bundle::HostComponentV1::Core
             })
     }
 
@@ -470,7 +470,7 @@ impl CatalogHostComponentRegistrationAuthority {
 
     fn registration_is_current(
         &self,
-        component: crate::agents::host_bundle::HostBundleComponentV1,
+        component: crate::agents::host_bundle::HostComponentV1,
     ) -> crate::agents::host_bundle::HostBundleRegistrationStateV1 {
         self.integration.host_component_registration_for_lifecycle(
             component,
@@ -1340,7 +1340,7 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
     /// requires the operator's explicit `--yes --adopt`.
     fn receiptless_component_provenance(
         &self,
-        component: crate::agents::host_bundle::HostBundleComponentV1,
+        component: crate::agents::host_bundle::HostComponentV1,
     ) -> bool {
         self.integration.id() == "cursor"
             && crate::agents::cursor::receiptless_component_provenance(

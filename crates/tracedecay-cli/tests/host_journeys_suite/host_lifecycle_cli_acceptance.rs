@@ -7,7 +7,7 @@ use std::process::{Command, Output, Stdio};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_agent_hosts::agents::host_bundle::{
-    HostBundleComponentV1, HostComponentSetReceiptV1, HostKindV1, latest_host_component_receipt_at,
+    HostComponentV1, HostComponentSetReceiptV1, HostKindV1, latest_host_component_receipt_at,
     latest_host_component_set_receipt_at,
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
@@ -1727,7 +1727,7 @@ fn killed_feedback_switch_recovers_from_durable_effect_identity() {
         &before_receipt
             .component_receipts
             .iter()
-            .find(|receipt| receipt.component == HostBundleComponentV1::Core)
+            .find(|receipt| receipt.component == HostComponentV1::Core)
             .unwrap()
             .artifacts[0]
             .relative_path,
@@ -1742,7 +1742,7 @@ fn killed_feedback_switch_recovers_from_durable_effect_identity() {
     let before_core = latest_host_component_receipt_at(
         &cli.lifecycle_root(),
         case.host,
-        HostBundleComponentV1::Core,
+        HostComponentV1::Core,
     )
     .unwrap()
     .unwrap();
@@ -1774,7 +1774,7 @@ fn killed_feedback_switch_recovers_from_durable_effect_identity() {
         latest_host_component_receipt_at(
             &cli.lifecycle_root(),
             case.host,
-            HostBundleComponentV1::Core
+            HostComponentV1::Core
         )
         .unwrap()
         .unwrap(),

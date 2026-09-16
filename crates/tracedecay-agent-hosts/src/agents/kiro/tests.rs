@@ -786,7 +786,7 @@ fn add_and_remove_preserve_an_operator_owned_peer_server() {
 fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1 {
     crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
         crate::agents::host_bundle::HostKindV1::Kiro,
-        &[crate::agents::host_bundle::HostBundleComponentV1::ContextMcp],
+        &[crate::agents::host_bundle::HostComponentV1::ContextMcp],
         0,
         "/bin/tracedecay",
         crate::agents::TEST_GENERATOR_COMMIT,
@@ -804,7 +804,7 @@ fn kiro_component_request(
             operation,
             expected_host: crate::agents::host_bundle::HostKindV1::Kiro,
             expected_components: vec![
-                crate::agents::host_bundle::HostBundleComponentV1::ContextMcp,
+                crate::agents::host_bundle::HostComponentV1::ContextMcp,
             ],
             explicit_confirmation: true,
             hermes_profile_bindings: 0,

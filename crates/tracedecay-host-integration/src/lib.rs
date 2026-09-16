@@ -9,7 +9,7 @@ use thiserror::Error;
 
 pub use tracedecay_domain::{
     HostCapabilityRecordV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1,
-    HostCapabilityV1, HostKindV1, stock_host_capabilities,
+    HostCapabilityV1, HostComponentV1, HostKindV1, stock_host_capabilities,
 };
 
 mod evidence;
@@ -37,10 +37,9 @@ pub use journal::{
 };
 pub use manifest::{
     HOST_BUNDLE_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleArtifactV1,
-    HostBundleComponentV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
-    HostBundleVerificationAdapterV1, MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS,
-    MAX_IDENTIFIER_BYTES, MAX_MANIFEST_ARTIFACTS, MAX_RELATIVE_PATH_BYTES, validate_identifier,
-    validate_relative_install_path,
+    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
+    MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS, MAX_IDENTIFIER_BYTES, MAX_MANIFEST_ARTIFACTS,
+    MAX_RELATIVE_PATH_BYTES, validate_identifier, validate_relative_install_path,
 };
 
 /// Builds a [`HostBundleError::StorageFailure`] tagged with the `file:line` of

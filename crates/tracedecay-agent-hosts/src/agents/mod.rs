@@ -377,7 +377,7 @@ pub trait AgentIntegration {
     /// receipts; implementations must not infer uninstalled catalog pairs.
     fn host_component_registration(
         &self,
-        _component: host_bundle::HostBundleComponentV1,
+        _component: host_bundle::HostComponentV1,
         _ctx: &HealthcheckContext,
     ) -> host_bundle::HostBundleRegistrationStateV1 {
         host_bundle::HostBundleRegistrationStateV1::Missing
@@ -388,7 +388,7 @@ pub trait AgentIntegration {
     /// dashboard-disabled registrations without weakening doctor readback.
     fn host_component_registration_for_lifecycle(
         &self,
-        component: host_bundle::HostBundleComponentV1,
+        component: host_bundle::HostComponentV1,
         health: &HealthcheckContext,
         _install: &InstallContext,
     ) -> host_bundle::HostBundleRegistrationStateV1 {
@@ -431,7 +431,7 @@ pub trait AgentIntegration {
     /// transaction never snapshots or restores another component's state.
     fn host_component_registration_paths(
         &self,
-        _components: &[host_bundle::HostBundleComponentV1],
+        _components: &[host_bundle::HostComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
         self.host_registration_paths(home)
@@ -443,7 +443,7 @@ pub trait AgentIntegration {
     /// than silently dropping files from rollback ownership.
     fn host_component_registration_paths_checked(
         &self,
-        components: &[host_bundle::HostBundleComponentV1],
+        components: &[host_bundle::HostComponentV1],
         home: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(self.host_component_registration_paths(components, home))
@@ -454,7 +454,7 @@ pub trait AgentIntegration {
     /// complete set before invoking the projection.
     fn project_host_component_registration_paths(
         &self,
-        _components: &[host_bundle::HostBundleComponentV1],
+        _components: &[host_bundle::HostComponentV1],
         _home: &Path,
         _project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -477,10 +477,10 @@ pub trait AgentIntegration {
     /// deployed registration boundary.
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[host_bundle::HostBundleComponentV1],
+        components: &[host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&host_bundle::HostBundleComponentV1::Core) {
+        if components.contains(&host_bundle::HostComponentV1::Core) {
             self.activate_deployed_host_registration(ctx)
         } else {
             Ok(())
@@ -498,10 +498,10 @@ pub trait AgentIntegration {
     /// receipt-backed components.
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[host_bundle::HostBundleComponentV1],
+        components: &[host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&host_bundle::HostBundleComponentV1::Core) {
+        if components.contains(&host_bundle::HostComponentV1::Core) {
             self.deactivate_deployed_host_registration(ctx)
         } else {
             Ok(())
@@ -515,7 +515,7 @@ pub trait AgentIntegration {
     /// project registration paths; they must not install global assets.
     fn activate_project_host_component_registration(
         &self,
-        _components: &[host_bundle::HostBundleComponentV1],
+        _components: &[host_bundle::HostComponentV1],
         _ctx: &InstallContext,
         _project_path: &Path,
     ) -> Result<()> {
@@ -530,7 +530,7 @@ pub trait AgentIntegration {
     /// Remove only this host's project-scoped registration projection.
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[host_bundle::HostBundleComponentV1],
+        _components: &[host_bundle::HostComponentV1],
         _ctx: &InstallContext,
         _project_path: &Path,
     ) -> Result<()> {
@@ -725,7 +725,7 @@ impl host_bundle::HostBundleRegistrationInspectorV1 for AgentRegistrationInspect
     fn inspect_registration(
         &self,
         host: host_bundle::HostKindV1,
-        component: host_bundle::HostBundleComponentV1,
+        component: host_bundle::HostComponentV1,
     ) -> host_bundle::HostBundleRegistrationStateV1 {
         get_integration(integration_id_for_host(host)).map_or(
             host_bundle::HostBundleRegistrationStateV1::Missing,

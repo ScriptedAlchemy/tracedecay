@@ -6,7 +6,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::agents::host_bundle::{
     ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
-    HostBundleComponentV1, HostBundleError, HostBundleExecutionRequestV1,
+    HostComponentV1, HostBundleError, HostBundleExecutionRequestV1,
     HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleLifecycleRequestV1,
     HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1,
     HostBundleRollbackBoundaryV1, HostBundleWriterV1, HostCapabilityStateV1,
@@ -44,7 +44,7 @@ impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
     fn inspect_registration(
         &self,
         _host: HostKindV1,
-        _component: HostBundleComponentV1,
+        _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Current
     }
@@ -58,7 +58,7 @@ impl HostBundleRegistrationInspectorV1 for MissingRegistration {
     fn inspect_registration(
         &self,
         _host: HostKindV1,
-        _component: HostBundleComponentV1,
+        _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Missing
     }
@@ -70,7 +70,7 @@ fn embedded_component_backup_restore_runs_through_the_real_lifecycle_writer() {
     let lifecycle = tempfile::tempdir().unwrap();
     let bundle = verified_embedded_host_bundle(
         HostKindV1::Codex,
-        HostBundleComponentV1::Core,
+        HostComponentV1::Core,
         0,
         GENERATOR_COMMIT,
     )
@@ -85,7 +85,7 @@ fn embedded_component_backup_restore_runs_through_the_real_lifecycle_writer() {
                 lifecycle: HostBundleLifecycleRequestV1 {
                     operation: HostBundleLifecycleOpV1::Install,
                     expected_host: HostKindV1::Codex,
-                    expected_component: HostBundleComponentV1::Core,
+                    expected_component: HostComponentV1::Core,
                     explicit_confirmation: true,
                     hermes_profile_bindings: 0,
                     adopt_receiptless: false,
@@ -128,7 +128,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
 
     let bundle = verified_embedded_host_bundle(
         HostKindV1::KimiCode,
-        HostBundleComponentV1::Core,
+        HostComponentV1::Core,
         0,
         GENERATOR_COMMIT,
     )
@@ -185,7 +185,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         schema_version: 1,
         operation_id: [7; 16],
         host: HostKindV1::KimiCode,
-        component: HostBundleComponentV1::Core,
+        component: HostComponentV1::Core,
         operation: HostBundleLifecycleOpV1::Install,
         manifest_digest: bundle.manifest.canonical_digest().unwrap(),
         artifacts: bundle
@@ -272,7 +272,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
     let lifecycle_root = tempfile::tempdir().unwrap();
     let bundle = verified_embedded_host_bundle(
         HostKindV1::CursorDesktop,
-        HostBundleComponentV1::Agent,
+        HostComponentV1::Agent,
         0,
         GENERATOR_COMMIT,
     )
@@ -286,7 +286,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
         schema_version: 1,
         operation_id: [8; 16],
         host: HostKindV1::CursorDesktop,
-        component: HostBundleComponentV1::Agent,
+        component: HostComponentV1::Agent,
         operation: HostBundleLifecycleOpV1::Install,
         manifest_digest: bundle.manifest.canonical_digest().unwrap(),
         artifacts: bundle
@@ -455,7 +455,7 @@ fn unsupported_host_components_are_not_advertised_or_constructible() {
         assert_eq!(
             verified_embedded_host_component_set(
                 host,
-                &[HostBundleComponentV1::Core],
+                &[HostComponentV1::Core],
                 0,
                 GENERATOR_COMMIT
             ),
@@ -471,7 +471,7 @@ fn unsupported_host_components_are_not_advertised_or_constructible() {
     for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
         assert_eq!(
             default_components(host),
-            vec![HostBundleComponentV1::ContextMcp]
+            vec![HostComponentV1::ContextMcp]
         );
         assert_eq!(unsupported_host_component_set_reason(host), None);
         assert!(
@@ -481,7 +481,7 @@ fn unsupported_host_components_are_not_advertised_or_constructible() {
         assert_eq!(
             verified_embedded_host_component_set(
                 host,
-                &[HostBundleComponentV1::Core],
+                &[HostComponentV1::Core],
                 0,
                 GENERATOR_COMMIT
             ),
@@ -629,7 +629,7 @@ fn cline_family_hook_evidence_stays_separate_from_mcp_lifecycle_support() {
         assert_eq!(unsupported_host_component_set_reason(host), None);
         assert_eq!(
             default_components(host),
-            vec![HostBundleComponentV1::ContextMcp]
+            vec![HostComponentV1::ContextMcp]
         );
         let routes = stock_host_registration_evidence(host);
         assert!(routes.iter().any(|route| {
@@ -1139,7 +1139,7 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
     let lifecycle = tempfile::tempdir().unwrap();
     let component_set = verified_embedded_host_component_set(
         HostKindV1::CursorDesktop,
-        &[HostBundleComponentV1::Core],
+        &[HostComponentV1::Core],
         0,
         GENERATOR_COMMIT,
     )
@@ -1148,7 +1148,7 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
         lifecycle: HostComponentSetLifecycleRequestV1 {
             operation,
             expected_host: HostKindV1::CursorDesktop,
-            expected_components: vec![HostBundleComponentV1::Core],
+            expected_components: vec![HostComponentV1::Core],
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
             explicit_adoption: false,

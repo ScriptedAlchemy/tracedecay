@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::common::host_sources;
 use tempfile::TempDir;
-use tracedecay_agent_hosts::agents::host_bundle::{HostBundleComponentV1, HostKindV1};
+use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
 use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
 use tracedecay_runtime_core::ast_grep::ast_grep_command;
 
@@ -141,7 +141,7 @@ fn render_install(home: &Path) -> std::io::Result<()> {
     });
     let component_set = verified_embedded_host_component_set_with_tracedecay_bin(
         HostKindV1::Hermes,
-        &[HostBundleComponentV1::Core],
+        &[HostComponentV1::Core],
         0,
         FIXTURE_TRACEDECAY_BIN,
         GENERATOR_COMMIT,

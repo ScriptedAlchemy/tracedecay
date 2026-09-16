@@ -496,7 +496,7 @@ fn read_feedback_repair_contents(
 fn snapshot_feedback_registration(
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
 ) -> tracedecay_domain::errors::Result<Vec<FeedbackRegistrationFileState>> {
     let paths = feedback_registration_paths(home, integration, component)?;
     paths
@@ -548,7 +548,7 @@ fn snapshot_feedback_registration(
 fn feedback_registration_paths_for_state(
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
     inventory_changed: &str,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
@@ -577,7 +577,7 @@ fn feedback_registration_path<'a>(
 fn capture_feedback_applied_registration(
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     registration_files: &mut [FeedbackRegistrationFileState],
 ) -> tracedecay_domain::errors::Result<()> {
     let paths = feedback_registration_paths_for_state(
@@ -602,7 +602,7 @@ fn capture_feedback_applied_registration(
 fn validate_feedback_registration_snapshot(
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
 ) -> tracedecay_domain::errors::Result<()> {
     let paths = feedback_registration_paths_for_state(
@@ -635,7 +635,7 @@ fn validate_feedback_registration_snapshot(
 fn validate_feedback_registration_restore(
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
     effect_started: bool,
     intent_root: Option<&Path>,
@@ -721,7 +721,7 @@ fn validate_feedback_registration_restore(
 fn restore_feedback_registration(
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
     effect_started: bool,
     intent_root: Option<&Path>,
@@ -826,7 +826,7 @@ fn validate_feedback_applied_artifacts(
 fn validate_feedback_active_receipts(
     lifecycle_root: &Path,
     switch_receipt: &tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRollbackReceiptV1,
-    selected_component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    selected_component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     expected_aggregates: &[tracedecay_agent_hosts::agents::host_bundle::HostComponentSetReceiptV1],
     previous_aggregate: Option<
         &tracedecay_agent_hosts::agents::host_bundle::HostComponentSetReceiptV1,
@@ -912,7 +912,7 @@ fn restore_feedback_artifact_permissions(
 fn feedback_registration_paths(
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
     let mut paths = integration.host_component_registration_paths_checked(&[component], home)?;
     if integration.id() == "claude" {

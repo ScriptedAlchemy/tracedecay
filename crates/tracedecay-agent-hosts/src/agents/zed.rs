@@ -20,7 +20,7 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, TextFileMutation, config_backup_path, load_jsonc_file,
@@ -76,10 +76,10 @@ impl AgentIntegration for ZedIntegration {
 
     fn host_component_registration(
         &self,
-        component: HostBundleComponentV1,
+        component: HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> HostBundleRegistrationStateV1 {
-        if component != HostBundleComponentV1::ContextMcp {
+        if component != HostComponentV1::ContextMcp {
             return HostBundleRegistrationStateV1::Missing;
         }
         zed_mcp_registration_state(&zed_settings_path(&ctx.home), None)
@@ -87,11 +87,11 @@ impl AgentIntegration for ZedIntegration {
 
     fn host_component_registration_for_lifecycle(
         &self,
-        component: HostBundleComponentV1,
+        component: HostComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
     ) -> HostBundleRegistrationStateV1 {
-        if component != HostBundleComponentV1::ContextMcp {
+        if component != HostComponentV1::ContextMcp {
             return HostBundleRegistrationStateV1::Missing;
         }
         zed_mcp_registration_state(&zed_settings_path(&ctx.home), Some(&install.tracedecay_bin))
@@ -107,10 +107,10 @@ impl AgentIntegration for ZedIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components != [HostBundleComponentV1::ContextMcp] {
+        if components != [HostComponentV1::ContextMcp] {
             return Vec::new();
         }
         zed_registration_paths(&zed_settings_path(home))
@@ -118,11 +118,11 @@ impl AgentIntegration for ZedIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
-        if components != [HostBundleComponentV1::ContextMcp] {
+        if components != [HostComponentV1::ContextMcp] {
             return Ok(Vec::new());
         }
         Ok(zed_registration_paths(&zed_project_settings_path(
@@ -133,7 +133,7 @@ impl AgentIntegration for ZedIntegration {
     #[hotpath::measure(label = "zed_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         install_mcp_if_selected(components, &zed_settings_path(&ctx.home), ctx)
@@ -141,7 +141,7 @@ impl AgentIntegration for ZedIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         uninstall_mcp_if_selected(components, &zed_settings_path(&ctx.home))
@@ -149,7 +149,7 @@ impl AgentIntegration for ZedIntegration {
 
     fn activate_project_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -161,7 +161,7 @@ impl AgentIntegration for ZedIntegration {
 
     fn deactivate_project_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         _ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -268,11 +268,11 @@ fn doctor_check_registration(
 }
 
 fn install_mcp_if_selected(
-    components: &[HostBundleComponentV1],
+    components: &[HostComponentV1],
     config: &Path,
     ctx: &InstallContext,
 ) -> Result<()> {
-    if !components.contains(&HostBundleComponentV1::ContextMcp) {
+    if !components.contains(&HostComponentV1::ContextMcp) {
         return Ok(());
     }
     let original = zed_original_config_path(config);
@@ -316,8 +316,8 @@ enum ZedMcpRemoval {
     Rewritten,
 }
 
-fn uninstall_mcp_if_selected(components: &[HostBundleComponentV1], config: &Path) -> Result<()> {
-    if !components.contains(&HostBundleComponentV1::ContextMcp) || !config.exists() {
+fn uninstall_mcp_if_selected(components: &[HostComponentV1], config: &Path) -> Result<()> {
+    if !components.contains(&HostComponentV1::ContextMcp) || !config.exists() {
         return Ok(());
     }
     let original = zed_original_config_path(config);
@@ -375,7 +375,7 @@ fn uninstall_mcp_if_selected(components: &[HostBundleComponentV1], config: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+    use crate::agents::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
 
     fn install_context(home: &Path, binary: &str) -> InstallContext {
         InstallContext {
@@ -401,7 +401,7 @@ mod tests {
 }
 "#;
         std::fs::write(&config, original).unwrap();
-        let components = [HostBundleComponentV1::ContextMcp];
+        let components = [HostComponentV1::ContextMcp];
         let install = install_context(home.path(), "/tmp/tracedecay");
 
         ZedIntegration
@@ -439,7 +439,7 @@ mod tests {
     fn zed_uninstall_removes_a_config_created_by_tracedecay() {
         let home = tempfile::tempdir().unwrap();
         let config = zed_settings_path(home.path());
-        let components = [HostBundleComponentV1::ContextMcp];
+        let components = [HostComponentV1::ContextMcp];
         let install = install_context(home.path(), "/tmp/tracedecay");
 
         ZedIntegration
