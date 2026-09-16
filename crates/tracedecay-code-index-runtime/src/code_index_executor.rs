@@ -1419,6 +1419,10 @@ where
                     return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             }
+            // Clone backfill is retained-worker work after the seat. Kick that
+            // wake before any inline slice so a quiet daemon does not strand
+            // the successor on this request thread.
+            let _ = schedulers.request_query_background_reconcile(&scope).await;
             match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -1585,6 +1589,7 @@ where
                     return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             }
+            let _ = schedulers.request_query_background_reconcile(&scope).await;
             match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
                 Ok(true) => {}
                 Ok(false) => {

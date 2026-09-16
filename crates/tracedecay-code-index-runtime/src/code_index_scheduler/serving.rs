@@ -121,6 +121,10 @@ pub(super) fn text_artifact_source_batch_limits(
 /// digest call that has not yet reached its own checkpoint.
 const TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1: Duration = Duration::from_millis(100);
 const TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1: usize = 10_000;
+/// Clone-fingerprint backfill slices a request may drive inline. The retained
+/// worker owns the rest after `request_query_background_reconcile`; more than
+/// one advance here re-owns the whole successor encode on a Tokio thread.
+const TEXT_ARTIFACT_MAXIMUM_CLONE_WARMUP_ADVANCES_V1: usize = 1;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
@@ -1841,7 +1845,9 @@ impl LatestCodeTextGenerationV1 {
     ///
     /// Lexical owners can be Ready while clone backfill is still background
     /// work. `tracedecay_similar` needs those postings; ordinary search does not
-    /// wait here.
+    /// wait here. Drive at most one bounded slice inline and leave the rest to
+    /// the retained worker wake the caller must have requested — owning the
+    /// whole successor on the request thread was the #1339 S1 regression.
     pub(crate) fn finish_clone_similarity_warmup_for_request(
         &self,
         request_control: &dyn CodeIndexExecutionControlV1,
@@ -1853,8 +1859,8 @@ impl LatestCodeTextGenerationV1 {
                 request_control,
             )?;
             advances += 1;
-            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
-                return Ok(false);
+            if advances >= TEXT_ARTIFACT_MAXIMUM_CLONE_WARMUP_ADVANCES_V1 {
+                return Ok(!self.text_projection_needs_work());
             }
         }
         Ok(true)
