@@ -447,6 +447,11 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
         let result = source.next_page(&UninterruptibleCodeIndexControlV1);
         sent.send((source, result)).expect("return lexical source");
     });
+    // An immutable segment read holds the store as a shared reader: while a
+    // publication or retention writer owns the exclusive lock the reader
+    // waits (bounded by that hold) instead of failing typed and abandoning
+    // the projection pass; once the writer releases, the same page is served
+    // from the unchanged cursor.
     let held = received.recv_timeout(Duration::from_millis(500));
     assert!(
         matches!(held, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),

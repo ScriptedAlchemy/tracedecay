@@ -25,7 +25,7 @@ use tracedecay_runtime_core::resident_memory::{
 use super::{
     ALPHA_LIB_V1, GitFixture, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
     advance_pointer_to_unseated_successor, application_context, committed_capture_corpus_files,
-    core_search_request, git, git_stdout, mounted_core_query_worktree,
+    core_search_request, drain_clone_backfill, git, git_stdout, mounted_core_query_worktree,
     mounted_core_query_worktree_with_one_permit, published, query_authority, query_meta,
     quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
     replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
@@ -4026,6 +4026,9 @@ async fn a_fresh_seat_declines_query_admission_during_source_verification() {
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    // Pending clone work is a reason to admit a background pass; settle it so
+    // the freshness gate alone decides this admission.
+    drain_clone_backfill(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
 
     let pass = registry
@@ -5409,6 +5412,9 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    // A query over pending clone work is admitted for that work and never
+    // reaches the claim gate under test; settle the backfill first.
+    drain_clone_backfill(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
     registry.install_query_claim_gate(&scope);
