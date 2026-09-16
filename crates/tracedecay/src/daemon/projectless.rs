@@ -293,6 +293,11 @@ async fn projectless_tools_call_response_with_connection(
                 connection,
                 store_administration,
             )),
+            tool_name @ ("tracedecay_project_list"
+            | "tracedecay_project_search"
+            | "tracedecay_project_context") => boxed_projectless_phase(
+                projectless_registry_response(id, tool_name, arguments, connection),
+            ),
             _ => {
                 if let Some(operation) =
                     tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
@@ -315,6 +320,51 @@ async fn projectless_tools_call_response_with_connection(
             }
         };
     response.await
+}
+
+async fn projectless_registry_response(
+    id: serde_json::Value,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    connection: &ProjectlessConnectionStateV1,
+) -> tracedecay_mcp::JsonRpcResponse {
+    let result = match tool_name {
+        "tracedecay_project_list" => {
+            tracedecay_mcp::handlers::info::handle_project_list(
+                &connection.client_identity.profile_root,
+                arguments,
+                None,
+            )
+            .await
+        }
+        "tracedecay_project_search" => {
+            tracedecay_mcp::handlers::info::handle_project_search(
+                &connection.client_identity.profile_root,
+                arguments,
+                None,
+            )
+            .await
+        }
+        "tracedecay_project_context" => {
+            tracedecay_mcp::handlers::info::handle_project_context(
+                &connection.client_identity.profile_root,
+                arguments,
+                None,
+            )
+            .await
+        }
+        _ => {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::MethodNotFound,
+                format!("unknown projectless registry tool: {tool_name}"),
+            );
+        }
+    };
+    match result {
+        Ok(result) => JsonRpcResponse::success(id, result.value),
+        Err(error) => tool_error_response(id, tool_name, &error),
+    }
 }
 
 async fn projectless_admin_project_response(
