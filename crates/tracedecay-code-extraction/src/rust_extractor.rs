@@ -227,7 +227,16 @@ impl RustExtractor {
         } else {
             NodeKind::Function
         };
-        let visibility = Self::extract_visibility(node, state);
+        let visibility = if is_inside_trait {
+            state
+                .parent_node_id()
+                .and_then(|parent_id| state.nodes.iter().rev().find(|node| node.id == parent_id))
+                .filter(|parent| parent.kind == NodeKind::Trait)
+                .map(|parent| parent.visibility.clone())
+                .unwrap_or_else(|| Self::extract_visibility(node, state))
+        } else {
+            Self::extract_visibility(node, state)
+        };
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let is_async = Self::detect_async(state, node);
