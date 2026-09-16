@@ -174,7 +174,8 @@ pub(crate) fn projection_request(
     active: Option<&CodeIndexPublishedGenerationV1>,
     increment: Option<&crate::generations::GenerationIncrementPlanV1>,
     target_projection_key: ProjectionKeyV1,
-    changes: tracedecay_domain::ChangedCodeChunkSetV1,
+    mut changes: tracedecay_domain::ChangedCodeChunkSetV1,
+    current_chunks: &GenerationChunkManifestV1,
 ) -> Result<ProjectionBatchRequestV1, CodeIndexProductionErrorV1> {
     let previous_projection_key =
         active.map(|active| active.projection.request().target_projection_key.clone());
@@ -188,6 +189,37 @@ pub(crate) fn projection_request(
         }
         _ => ProjectionReplayReasonV1::SourceEdit,
     };
+    if replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange {
+        // Expand while the current corpus is still available.
+        let mut added_or_changed = current_chunks
+            .chunks()
+            .iter()
+            .map(|chunk| tracedecay_domain::ChangedCodeChunkV1 {
+                chunk_id: chunk.id.clone(),
+                prior_digest: None,
+                current_digest: Some(chunk.content_digest.clone()),
+            })
+            .collect::<Vec<_>>();
+        added_or_changed.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+        let (reused_count, reused_digest) =
+            tracedecay_domain::ChangedCodeChunkSetV1::seal_reused_partition(&[])
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        changes = tracedecay_domain::ChangedCodeChunkSetV1 {
+            from_generation: changes.from_generation,
+            to_generation: changes.to_generation,
+            manifest_digest: changes.manifest_digest,
+            added_or_changed,
+            deleted: Vec::new(),
+            reused_count,
+            reused_digest,
+        };
+        changes.manifest_digest = changes
+            .compute_digest()
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        changes
+            .validate()
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    }
     let mut request = ProjectionBatchRequestV1 {
         request_digest: changes.manifest_digest.clone(),
         changes,

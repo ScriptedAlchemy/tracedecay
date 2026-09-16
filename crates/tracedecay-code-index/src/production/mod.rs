@@ -1327,6 +1327,11 @@ impl CodeIndexPublishedGenerationV1 {
             .iter()
             .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
             .collect::<Vec<_>>();
+        self.projection
+            .request()
+            .changes
+            .validate_reused_complement(None, &full_source)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         commitments
             .validate_for_source(&full_source)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1832,6 +1837,14 @@ where
                 plan_chunk_increment(active.as_ref().map(|active| &active.chunks), &staged.chunks)
                     .map_err(CodeIndexProductionErrorV1::Increment)?;
             hotpath::measure_block!("code_index.build.assemble.source_commitments", {
+                let prior_source = active.as_ref().map(|active| {
+                    active
+                        .chunks
+                        .chunks()
+                        .iter()
+                        .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+                        .collect::<Vec<_>>()
+                });
                 let full_source = staged
                     .chunks
                     .chunks()
@@ -1839,8 +1852,12 @@ where
                     .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
                     .collect::<Vec<_>>();
                 manifest.source_commitments = Some(
-                    CodeGenerationSourceCommitmentsV1::from_changed_chunks(&changes, &full_source)
-                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
+                    CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+                        &changes,
+                        prior_source.as_deref(),
+                        &full_source,
+                    )
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
                 );
                 manifest.seal.expected_digest = expected_seal_digest(&manifest)
                     .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1860,6 +1877,7 @@ where
                 increment.as_ref(),
                 request.target_projection_key,
                 changes,
+                &staged.chunks,
             )?;
             Self::checkpoint(control)?;
             let projection = project_for_publication(&mut self.projection, projection_request)

@@ -185,20 +185,6 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                     output_digest: None,
                 }),
         );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        );
         receipt_builder
             .build(&decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
@@ -1266,7 +1252,7 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
             .is_empty()
     );
     assert!(second.projection().request().changes.deleted.is_empty());
-    assert!(!second.projection().request().changes.reused.is_empty());
+    assert!(second.projection().request().changes.reused_count > 0);
     let second_commitments = second
         .manifest()
         .source_commitments
@@ -2712,7 +2698,7 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
             .is_empty()
     );
     assert!(second.projection().request().changes.deleted.is_empty());
-    assert!(!second.projection().request().changes.reused.is_empty());
+    assert!(second.projection().request().changes.reused_count > 0);
     assert_eq!(store.scope_count(), 1);
 }
 
@@ -3253,7 +3239,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:c485ddd12f49f3650c861ec7d6767861a084514b09c380b69c5e186312e88952";
+    "sha256:798ee2279fb0b7036f7bf08389d25c1a76689075b1ff06dd470da860e800a894";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:0a8f5f5c66ac3bc2bf830d1316f1bcdf2568344c0dffb8e408f89dc36e7d66d9",
@@ -3268,8 +3254,8 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         6_278,
     ),
     (
-        "sha256:7ed328d4b75bd34fa4bf49c40d65b1c200daef3ad985c763d2182ab59fcf936b",
-        8_949,
+        "sha256:645c3089b82cab871ee86cff603b38478b58e2440629ea4214ddefbae587909a",
+        6_837,
     ),
 ];
 

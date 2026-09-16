@@ -183,20 +183,6 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                     output_digest: None,
                 }),
         );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        );
         decisions.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
         receipt_builder
             .build(&decisions)

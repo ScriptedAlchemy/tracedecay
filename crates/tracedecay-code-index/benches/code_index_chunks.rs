@@ -768,7 +768,7 @@ fn execute_case(
         files_parsed,
         chunks_added_or_changed: changes.added_or_changed.len() as u64,
         chunks_deleted: changes.deleted.len() as u64,
-        chunks_reused: changes.reused.len() as u64,
+        chunks_reused: changes.reused_count,
         projection_calls: sink.calls,
         corpus_files: current.artifacts.len() as u64,
         corpus_bytes,
@@ -1056,19 +1056,6 @@ fn projection_decisions(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionD
                     current_chunk_digest: None,
                     operation: ProjectionOperationV1::Deleted,
                     outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        )
-        .chain(
-            changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
                     output_digest: None,
                 }),
         )

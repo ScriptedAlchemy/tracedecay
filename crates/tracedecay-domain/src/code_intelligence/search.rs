@@ -8,7 +8,7 @@
 //! contribution, candidate, cursor, or hydration types here; those live in
 //! `crate::retrieval`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -31,8 +31,9 @@ pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
 /// Maximum sanitized query bytes held in one request-local query view.
 pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 
-const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v1";
+const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v2";
 const CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN: &str = "tracedecay.code-source-full-replay.v1";
+const CODE_REUSED_PARTITION_DIGEST_DOMAIN: &str = "tracedecay.code-reused-partition.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
 pub const PROJECTION_PUBLICATION_SEPARATOR: &str = "tracedecay.projection-batch-receipt.v1";
 
@@ -774,10 +775,13 @@ pub struct ChangedCodeChunkV1 {
     pub current_digest: Option<ContentDigest>,
 }
 
-/// Ordered changed/reused/deleted chunk manifest between two generations.
-/// Downstream projectors prove exactly which generation-bound chunks they
-/// consumed, skipped, replaced, or removed. A no-op generation
-/// emits empty `added_or_changed` and `deleted` sets plus explicit `reused`.
+/// Ordered changed/deleted chunk manifest between two generations.
+///
+/// Unchanged chunks are a complement of the prior generation, not a list:
+/// `reused_count` plus `reused_digest` authenticate the ordered reused
+/// partition without enumerating it (plan 40 §6 / parent-delta). A no-op
+/// generation emits empty `added_or_changed` and `deleted` sets with a
+/// non-zero `reused_count`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChangedCodeChunkSetV1 {
@@ -786,7 +790,10 @@ pub struct ChangedCodeChunkSetV1 {
     pub manifest_digest: ManifestDigest,
     pub added_or_changed: Vec<ChangedCodeChunkV1>,
     pub deleted: Vec<ChangedCodeChunkV1>,
-    pub reused: Vec<ChangedCodeChunkV1>,
+    /// Request-authenticated unchanged chunks that required no projector work.
+    pub reused_count: u64,
+    /// Canonical digest over the ordered reused `(chunk_id, content_digest)` pairs.
+    pub reused_digest: ManifestDigest,
 }
 
 #[derive(Serialize)]
@@ -796,7 +803,33 @@ struct ChangedCodeChunkSetDigestInput<'a> {
     to_generation: &'a CodeGenerationId,
     added_or_changed: &'a [ChangedCodeChunkV1],
     deleted: &'a [ChangedCodeChunkV1],
-    reused: &'a [ChangedCodeChunkV1],
+    reused_count: u64,
+    reused_digest: &'a ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct CodeReusedPartitionDigestInput<'a> {
+    domain: &'static str,
+    chunks: &'a [(CodeSearchChunkId, ContentDigest)],
+}
+
+/// Digest an ordered reused partition without retaining the rows.
+pub fn code_reused_partition_digest(
+    chunks: &[(CodeSearchChunkId, ContentDigest)],
+) -> Result<ManifestDigest, DomainError> {
+    for (chunk, digest) in chunks {
+        chunk.validate()?;
+        digest.validate()?;
+    }
+    if chunks.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(DomainError::NonCanonical {
+            field: "reused partition chunk order",
+        });
+    }
+    canonical_sha256(&CodeReusedPartitionDigestInput {
+        domain: CODE_REUSED_PARTITION_DIGEST_DOMAIN,
+        chunks,
+    })
 }
 
 /// The two source identities sealed by one code generation.
@@ -840,9 +873,10 @@ pub fn code_source_full_replay_digest(
 impl CodeGenerationSourceCommitmentsV1 {
     pub fn from_changed_chunks(
         changes: &ChangedCodeChunkSetV1,
+        prior: Option<&[(CodeSearchChunkId, ContentDigest)]>,
         full_source: &[(CodeSearchChunkId, ContentDigest)],
     ) -> Result<Self, DomainError> {
-        changes.validate()?;
+        changes.validate_reused_complement(prior, full_source)?;
         Ok(Self {
             incremental_manifest_digest: changes.manifest_digest.clone(),
             full_replay_digest: code_source_full_replay_digest(full_source)?,
@@ -874,10 +908,24 @@ impl ChangedCodeChunkSetV1 {
             to_generation: &self.to_generation,
             added_or_changed: &self.added_or_changed,
             deleted: &self.deleted,
-            reused: &self.reused,
+            reused_count: self.reused_count,
+            reused_digest: &self.reused_digest,
         })
     }
 
+    /// Seal the reused complement from an ordered `(chunk_id, content_digest)`
+    /// stream without retaining the rows.
+    pub fn seal_reused_partition(
+        reused: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        let reused_digest = code_reused_partition_digest(reused)?;
+        Ok((reused.len() as u64, reused_digest))
+    }
+
+    /// Structural request checks only. `reused_count` / `reused_digest` are
+    /// sealed into `manifest_digest`, but this does not reconstruct the
+    /// complement — call [`Self::validate_reused_complement`] at the
+    /// publication or restore boundary that holds the current corpus.
     pub fn validate(&self) -> Result<(), DomainError> {
         self.to_generation.validate()?;
         if let Some(from_generation) = &self.from_generation {
@@ -900,17 +948,10 @@ impl ChangedCodeChunkSetV1 {
         validate_changed_partition(&self.deleted, "deleted chunk order", |change| {
             change.prior_digest.is_some() && change.current_digest.is_none()
         })?;
-        validate_changed_partition(&self.reused, "reused chunk order", |change| {
-            change.prior_digest.is_some() && change.prior_digest == change.current_digest
-        })?;
+        self.reused_digest.validate()?;
 
         let mut seen = BTreeSet::new();
-        for change in self
-            .added_or_changed
-            .iter()
-            .chain(&self.deleted)
-            .chain(&self.reused)
-        {
+        for change in self.added_or_changed.iter().chain(&self.deleted) {
             if !seen.insert(&change.chunk_id) {
                 return Err(DomainError::DuplicateId {
                     field: "changed chunk partitions",
@@ -919,6 +960,101 @@ impl ChangedCodeChunkSetV1 {
         }
         self.manifest_digest.validate()?;
         if self.compute_digest()? != self.manifest_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    /// Prove `reused_count` / `reused_digest` against the current corpus.
+    ///
+    /// Always reconstructs the unchanged partition as the ordered complement of
+    /// `added_or_changed` inside `current` (and refuses deleted ids that are
+    /// still present). When `prior` is supplied, also recomputes the transition
+    /// complement from both manifests independently and requires the same seal.
+    /// The supplied seal is not self-authenticating: a producer that forges
+    /// count+digest and recomputes public digests still fails here.
+    pub fn validate_reused_complement(
+        &self,
+        prior: Option<&[(CodeSearchChunkId, ContentDigest)]>,
+        current: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        for (chunk_id, digest) in current {
+            chunk_id.validate()?;
+            digest.validate()?;
+        }
+        if current.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(DomainError::NonCanonical {
+                field: "reused complement current chunk order",
+            });
+        }
+        if let Some(prior) = prior {
+            for (chunk_id, digest) in prior {
+                chunk_id.validate()?;
+                digest.validate()?;
+            }
+            if prior.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+                return Err(DomainError::NonCanonical {
+                    field: "reused complement prior chunk order",
+                });
+            }
+            let mut previous = prior.iter().peekable();
+            let mut expected = Vec::new();
+            for (chunk_id, digest) in current {
+                while previous.next_if(|prior| prior.0 < *chunk_id).is_some() {}
+                let prior_digest = previous
+                    .next_if(|prior| prior.0 == *chunk_id)
+                    .map(|prior| &prior.1);
+                if prior_digest == Some(digest) {
+                    expected.push((chunk_id.clone(), digest.clone()));
+                }
+            }
+            let (reused_count, reused_digest) = Self::seal_reused_partition(&expected)?;
+            if reused_count != self.reused_count || reused_digest != self.reused_digest {
+                return Err(DomainError::DigestMismatch);
+            }
+        }
+
+        let mut added = BTreeMap::new();
+        for change in &self.added_or_changed {
+            let Some(current_digest) = change.current_digest.as_ref() else {
+                return Err(DomainError::NonCanonical {
+                    field: "added or changed current digest",
+                });
+            };
+            if added.insert(&change.chunk_id, current_digest).is_some() {
+                return Err(DomainError::DuplicateId {
+                    field: "added or changed chunk partitions",
+                });
+            }
+        }
+        let deleted = self
+            .deleted
+            .iter()
+            .map(|change| &change.chunk_id)
+            .collect::<BTreeSet<_>>();
+
+        let mut reused = Vec::with_capacity(current.len().saturating_sub(added.len()));
+        for (chunk_id, digest) in current {
+            if deleted.contains(chunk_id) {
+                return Err(DomainError::NonCanonical {
+                    field: "deleted chunk still present in current corpus",
+                });
+            }
+            match added.remove(chunk_id) {
+                Some(expected) if expected == digest => {}
+                Some(_) => return Err(DomainError::DigestMismatch),
+                None => reused.push((chunk_id.clone(), digest.clone())),
+            }
+        }
+        if !added.is_empty() {
+            return Err(DomainError::NonCanonical {
+                field: "added or changed chunk missing from current corpus",
+            });
+        }
+
+        let (reused_count, reused_digest) = Self::seal_reused_partition(&reused)?;
+        if reused_count != self.reused_count || reused_digest != self.reused_digest {
             return Err(DomainError::DigestMismatch);
         }
         Ok(())
@@ -1234,13 +1370,20 @@ mod tests {
     }
 
     fn changed_set() -> ChangedCodeChunkSetV1 {
+        let reused = [(
+            id::<CodeSearchChunkId>("chunk.reused"),
+            id::<ContentDigest>(&digest('c')),
+        )];
+        let (reused_count, reused_digest) =
+            ChangedCodeChunkSetV1::seal_reused_partition(&reused).expect("reused seal");
         let mut changes = ChangedCodeChunkSetV1 {
             from_generation: Some(id("generation.1")),
             to_generation: id("generation.2"),
             manifest_digest: id(&digest('0')),
             added_or_changed: vec![change("chunk.added", None, Some('a'))],
             deleted: vec![change("chunk.deleted", Some('b'), None)],
-            reused: vec![change("chunk.reused", Some('c'), Some('c'))],
+            reused_count,
+            reused_digest,
         };
         changes.manifest_digest = changes.compute_digest().expect("digest computable");
         changes
@@ -1547,9 +1690,39 @@ mod tests {
         assert!(duplicate.validate().is_err());
 
         let mut malformed_reuse = valid.clone();
-        malformed_reuse.reused[0].current_digest = Some(id(&digest('d')));
+        malformed_reuse.reused_digest = id(&digest('d'));
         malformed_reuse.manifest_digest = malformed_reuse.compute_digest().unwrap();
-        assert!(malformed_reuse.validate().is_err());
+        // Structural validate only seals the supplied fields; it does not
+        // reconstruct the complement. A forged seal that recomputes the public
+        // digest still looks well-formed until the current corpus proves it.
+        assert!(malformed_reuse.validate().is_ok());
+        let current = [
+            (id("chunk.added"), id(&digest('a'))),
+            (id("chunk.reused"), id(&digest('c'))),
+        ];
+        assert!(valid.validate_reused_complement(None, &current).is_ok());
+        assert!(matches!(
+            malformed_reuse.validate_reused_complement(None, &current),
+            Err(DomainError::DigestMismatch)
+        ));
+
+        let mut wrong_count = valid.clone();
+        wrong_count.reused_count = 0;
+        wrong_count.reused_digest =
+            ChangedCodeChunkSetV1::seal_reused_partition(&[]).unwrap().1;
+        wrong_count.manifest_digest = wrong_count.compute_digest().unwrap();
+        assert!(wrong_count.validate().is_ok());
+        assert!(matches!(
+            wrong_count.validate_reused_complement(None, &current),
+            Err(DomainError::DigestMismatch)
+        ));
+
+        let prior = [(id("chunk.deleted"), id(&digest('b'))), (id("chunk.reused"), id(&digest('c')))];
+        assert!(valid.validate_reused_complement(Some(&prior), &current).is_ok());
+        assert!(matches!(
+            malformed_reuse.validate_reused_complement(Some(&prior), &current),
+            Err(DomainError::DigestMismatch)
+        ));
 
         let mut mixed_generation = valid.clone();
         mixed_generation.from_generation = Some(mixed_generation.to_generation.clone());
@@ -1583,7 +1756,7 @@ mod tests {
             (id("chunk.reused"), id(&digest('c'))),
         ];
         let first =
-            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&incremental, &full_source)
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&incremental, None, &full_source)
                 .expect("source commitments");
 
         assert_eq!(
@@ -1600,7 +1773,7 @@ mod tests {
         republished.to_generation = id("generation.9");
         republished.manifest_digest = republished.compute_digest().expect("republished digest");
         let second =
-            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&republished, &full_source)
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&republished, None, &full_source)
                 .expect("republished source commitments");
 
         assert_ne!(
