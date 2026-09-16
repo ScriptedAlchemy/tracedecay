@@ -22,7 +22,7 @@ use std::sync::Condvar;
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId, host_cpu_target,
@@ -1199,6 +1199,17 @@ type ReadyProbeServingPartsV1 = (
     Arc<PendingWakeV1>,
     Arc<AtomicUsize>,
 );
+
+/// Typed verdict from a demand-driven reconcile wake (hooks, overflow, query
+/// admission). Callers must match this — especially
+/// [`Self::PublicationAuthorityCorrupt`] — instead of swallowing a bool and
+/// driving inline work against a terminal park.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexReconcileAdmissionV1 {
+    Accepted,
+    PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
+    Unavailable,
+}
 
 #[derive(Clone)]
 pub struct CodeIndexSchedulerRegistryV1 {
@@ -2393,6 +2404,34 @@ impl CodeIndexSchedulerRegistryV1 {
             return false;
         };
         self.mounted.lock().await.contains_key(&project_root)
+    }
+
+    fn publication_authority_requires_reset(worktree: &MountedCodeIndexWorktreeV1) -> bool {
+        let progress = worktree
+            .build_progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            progress
+                .snapshot()
+                .as_deref()
+                .and_then(|snapshot| snapshot.blocked_reason),
+            Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
+        )
+    }
+
+    fn publication_authority_corrupt_admission(
+        worktree: &MountedCodeIndexWorktreeV1,
+    ) -> CodeIndexReconcileAdmissionV1 {
+        worktree
+            .convergence_park
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map_or(
+                CodeIndexReconcileAdmissionV1::Unavailable,
+                CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt,
+            )
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
