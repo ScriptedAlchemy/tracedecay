@@ -359,7 +359,6 @@ pub async fn execute_application_surface(
                     deadline,
                     cancellation_context,
                 )
-                .with_resolved_scope(resolved_scope)
             }
             ApplicationSurfaceRequest::Configuration(request) => {
                 tracedecay_daemon_protocol::DaemonInvocationRequest::configuration(
@@ -391,8 +390,11 @@ pub async fn execute_application_surface(
                 )
             }
         }
-        .with_delivery_route(delivery_route)
     });
+    let request = request
+        .with_resolved_scope(resolved_scope)
+        .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+        .with_delivery_route(delivery_route);
     let Some(executor) = executor else {
         return Ok(ApplicationSurfaceInvocationResult {
             operation,

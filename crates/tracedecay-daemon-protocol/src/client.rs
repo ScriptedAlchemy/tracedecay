@@ -1077,6 +1077,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                                 cancellation_context,
                             )
                             .with_resolved_scope(scope)
+                            .map_err(|_| InvocationError::InvalidRequest)?
                         }
                         ApplicationSurfaceOperation::FeedbackGet => {
                             let request = feedback_handle_from_surface_payload(payload)?;
@@ -1089,6 +1090,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                                 cancellation_context,
                             )
                             .with_resolved_scope(scope)
+                            .map_err(|_| InvocationError::InvalidRequest)?
                         }
                         ApplicationSurfaceOperation::FeedbackProximity => {
                             let request = serde_json::from_value(payload)

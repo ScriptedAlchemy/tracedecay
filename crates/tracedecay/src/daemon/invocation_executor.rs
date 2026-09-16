@@ -356,6 +356,9 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvo
                                 cancellation_context,
                             )
                             .with_resolved_scope(scope)
+                            .map_err(|_| {
+                                tracedecay_contracts::InvocationError::InvalidRequest
+                            })?
                         }
                         ApplicationSurfaceOperation::FeedbackGet => {
                             let typed = tracedecay_daemon_protocol::parse_application_surface_request(
@@ -381,6 +384,9 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvo
                                 cancellation_context,
                             )
                             .with_resolved_scope(scope)
+                            .map_err(|_| {
+                                tracedecay_contracts::InvocationError::InvalidRequest
+                            })?
                         }
                         _ => {
                             return Err(
