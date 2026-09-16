@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Extension, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -24,7 +24,7 @@ use super::read_model::{
     DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, query_rows};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
 use tracedecay_code_index::graph_projection::{
@@ -276,7 +276,7 @@ contracted_graph_routes! {
 /// `GET /api/plugins/graph/call-chain`
 async fn call_chain(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<CallChainParamsV1>,
 ) -> Response {
     hotpath::future!(
@@ -295,10 +295,6 @@ async fn call_chain(
                 .max_depth
                 .unwrap_or(MAX_CALL_CHAIN_DEPTH)
                 .clamp(1, MAX_CALL_CHAIN_DEPTH);
-            let control = match graph_control::<CallChainMeasurementV1>(&state, control) {
-                Ok(control) => control,
-                Err(response) => return *response,
-            };
             let graph = match admitted_graph::<CallChainMeasurementV1>(
                 &state,
                 &control,
@@ -405,14 +401,10 @@ async fn call_chain(
 /// `GET /api/plugins/graph/strata`
 async fn strata(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Response {
     hotpath::future!(
         async move {
-            let control = match graph_control::<StrataMeasurementV1>(&state, control) {
-                Ok(control) => control,
-                Err(response) => return *response,
-            };
             let graph = match admitted_graph::<StrataMeasurementV1>(
                 &state,
                 &control,
@@ -564,15 +556,11 @@ async fn strata(
 /// `GET /api/plugins/graph/node/{node_id}/facts`
 async fn node_facts(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
     hotpath::future!(
         async move {
-            let control = match graph_control::<FactMatchesMeasurementV1>(&state, control) {
-                Ok(control) => control,
-                Err(response) => return *response,
-            };
             let graph = match admitted_graph::<FactMatchesMeasurementV1>(
                 &state,
                 &control,
@@ -676,15 +664,11 @@ async fn node_facts(
 /// `GET /api/plugins/graph/node/{node_id}/tests`
 async fn node_tests(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
     hotpath::future!(
         async move {
-            let control = match graph_control::<TestMapMeasurementV1>(&state, control) {
-                Ok(control) => control,
-                Err(response) => return *response,
-            };
             let graph = match admitted_graph::<TestMapMeasurementV1>(
                 &state,
                 &control,
@@ -858,15 +842,11 @@ async fn node_tests(
 /// `GET /api/plugins/graph/node/{node_id}/sessions`
 async fn node_sessions(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
     hotpath::future!(
         async move {
-        let control = match graph_control::<NodeSessionsMeasurementV1>(&state, control) {
-            Ok(control) => control,
-            Err(response) => return *response,
-        };
         let graph = match admitted_graph::<NodeSessionsMeasurementV1>(
             &state,
             &control,
@@ -954,20 +934,6 @@ struct AdmittedGraphReadV1 {
     reader: CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
     freshness: crate::graph::CodeGraphReadFreshnessV1,
-}
-
-fn graph_control<T: Serialize>(
-    state: &DashboardState,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
-) -> std::result::Result<DashboardHttpRequestControlV1, Box<Response>> {
-    control.map(|Extension(control)| control).ok_or_else(|| {
-        Box::new(unmeasured_response::<T>(
-            state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_request_admission_unavailable",
-            "dashboard HTTP request admission is unavailable",
-        ))
-    })
 }
 
 #[hotpath::measure(label = "dashboard_api.graph_structure.admitted_read", future = true)]

@@ -196,7 +196,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Extension, Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -1184,6 +1184,52 @@ pub(crate) const DASHBOARD_REQUEST_CONTROL_MISSING_CODE: &str =
 pub(crate) const DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL: &str =
     "dashboard HTTP request admission is unavailable";
 
+/// The admitted request's control, required by every canonical read.
+///
+/// [`with_dashboard_http_admission`] inserts [`DashboardHttpRequestControlV1`]
+/// on every served request, so a missing control means a router was mounted
+/// without that layer. That wiring fault is answered here, once, as a 503
+/// problem; handlers never observe the missing case and never invent a
+/// response for it.
+#[derive(Clone, Debug)]
+pub struct RequestControl(pub DashboardHttpRequestControlV1);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for RequestControl {
+    type Rejection = RequestControlMissing;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<DashboardHttpRequestControlV1>()
+            .cloned()
+            .map(Self)
+            .ok_or(RequestControlMissing)
+    }
+}
+
+/// Rejection of [`RequestControl`]: the one response for a read served
+/// outside the admission layer.
+#[derive(Debug)]
+pub struct RequestControlMissing;
+
+impl IntoResponse for RequestControlMissing {
+    fn into_response(self) -> Response {
+        crate::observe::record_error_class("admission_unavailable");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "unavailable",
+                "error": DASHBOARD_REQUEST_CONTROL_MISSING_CODE,
+                "detail": DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL,
+            })),
+        )
+            .into_response()
+    }
+}
+
 impl DashboardHttpRequestControlV1 {
     #[cfg(feature = "test-transport")]
     pub fn from_parts_for_test(
@@ -2029,7 +2075,7 @@ async fn forward_project_request(
 #[hotpath::measure(label = "dashboard_api.http.capabilities", future = true)]
 async fn capabilities(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<Value> {
     let has_lcm = state.lcm_read_authority.is_some();
     let automation = automation_config_api::effective_automation_config(&state);
@@ -2075,12 +2121,7 @@ async fn capabilities(
     // no-collection state, and `/api/multi-root/collection` resolves explicit
     // targets through the same authority.
     let multi_root_resolver_mounted = state.application_invocation_executor.is_some();
-    let multi_root = multi_root_api::resolve_collection_capability(
-        &state,
-        control.map(|Extension(control)| control),
-        None,
-    )
-    .await;
+    let multi_root = multi_root_api::resolve_collection_capability(&state, control, None).await;
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": state.build_version,
@@ -3002,7 +3043,8 @@ mod authority_tests {
             "scope-set.dashboard-capabilities",
         )));
 
-        let Json(capabilities) = capabilities(State(state), None).await;
+        let Json(capabilities) =
+            capabilities(State(state), RequestControl(dashboard_lcm_test_control())).await;
 
         assert_eq!(capabilities["features"]["multi_root"], true);
         assert_eq!(capabilities["multi_root"]["status"], "unavailable");
@@ -3022,7 +3064,7 @@ mod authority_tests {
 
         let mounted = multi_root_api::resolve_collection_capability(
             &state,
-            Some(dashboard_lcm_test_control()),
+            dashboard_lcm_test_control(),
             Some(tracedecay_domain::ScopeSetId::new("scope-set.dashboard-resolve").unwrap()),
         )
         .await;
@@ -3044,7 +3086,7 @@ mod authority_tests {
         // not-persisted state, never a silent fallback to another scope set.
         let missing = multi_root_api::resolve_collection_capability(
             &state,
-            Some(dashboard_lcm_test_control()),
+            dashboard_lcm_test_control(),
             Some(tracedecay_domain::ScopeSetId::new("scope-set.dashboard-missing").unwrap()),
         )
         .await;
@@ -3074,7 +3116,7 @@ mod authority_tests {
 
         let response = native_integration_api::status(
             State(fixture.state),
-            Some(Extension(dashboard_lcm_test_control())),
+            RequestControl(dashboard_lcm_test_control()),
             axum::extract::Query(native_integration_api::NativeIntegrationStatusQueryV1 {
                 transaction_id: "transaction.dashboard.native".to_owned(),
             }),

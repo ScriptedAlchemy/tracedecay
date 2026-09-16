@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
-use axum::extract::{Extension, Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use super::util::{JsonError, http_detail, internal_error};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
@@ -53,9 +53,8 @@ enum CommandOverridePatch {
 #[hotpath::measure(label = "dashboard_api.diagnostics.overview", future = true)]
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> ApiResult {
-    let control = request_control(control)?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
         .overview(request)
@@ -67,13 +66,12 @@ pub async fn overview(
 #[hotpath::measure(label = "dashboard_api.diagnostics.patch", future = true)]
 pub async fn patch_settings(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = serde_json::from_value::<SettingsPatch>(patch).map_err(|error| {
         bad_request(&format!("invalid code diagnostics settings patch: {error}"))
     })?;
-    let control = request_control(control)?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
         .update_settings(&request, &patch.expected_revision, |settings| {
@@ -105,9 +103,8 @@ pub async fn patch_settings(
 #[hotpath::measure(label = "dashboard_api.diagnostics.refresh", future = true)]
 pub async fn refresh_all(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> ApiResult {
-    let control = request_control(control)?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
         .refresh_all(&request)
@@ -119,10 +116,9 @@ pub async fn refresh_all(
 #[hotpath::measure(label = "dashboard_api.diagnostics.refresh_language", future = true)]
 pub async fn refresh_language(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {
-    let control = request_control(control)?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
         .refresh_language(&request, &language)
@@ -171,19 +167,6 @@ fn diagnostics_request(
             control.observed_at(),
         ),
     )
-}
-
-fn request_control(
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
-) -> std::result::Result<DashboardHttpRequestControlV1, JsonError> {
-    control.map(|Extension(control)| control).ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(http_detail(
-                "dashboard HTTP request admission is unavailable",
-            )),
-        )
-    })
 }
 
 fn deserialize_command_override_patch<'de, D>(
@@ -339,7 +322,7 @@ mod tests {
 
         let (status, Json(body)) = patch_settings(
             State(state),
-            Some(Extension(request_control())),
+            RequestControl(request_control()),
             Json(json!({
                 "expected_revision": format!("sha256:{}", "0".repeat(64)),
                 "idle_backfill": "off",
@@ -364,7 +347,7 @@ mod tests {
 
         let (status, Json(body)) = patch_settings(
             State(state),
-            Some(Extension(request_control())),
+            RequestControl(request_control()),
             Json(json!({ "idle_backfill": "off" })),
         )
         .await
@@ -384,7 +367,7 @@ mod tests {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state) = state_for_test().await;
 
-        let (status, Json(body)) = overview(State(state), Some(Extension(request_control())))
+        let (status, Json(body)) = overview(State(state), RequestControl(request_control()))
             .await
             .expect_err("unmounted authority must fail closed");
 

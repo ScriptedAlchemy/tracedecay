@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use axum::extract::{Extension, State};
+use axum::extract::State;
 use axum::response::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ use super::read_model::{
     DashboardEnvelopeV1, DashboardFreshnessV1, DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonQuery, coerce_limit};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 
 const DEFAULT_FAMILY_LIMIT: i64 = 100;
 const MAX_FAMILY_LIMIT: i64 = 1_000;
@@ -220,11 +220,10 @@ pub struct RevisionPairParamsV1 {
 /// `GET /api/plugins/graph/shared-code/family`
 pub async fn shared_family(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SharedFamilyParamsV1>,
 ) -> Json<DashboardEnvelopeV1<Option<SimilarResultV1>>> {
-    let (Some(authority), Some(Extension(control))) = (state.code_read_authority.as_ref(), control)
-    else {
+    let Some(authority) = state.code_read_authority.as_ref() else {
         return code_read_unavailable(&state);
     };
     let limit = match usize::try_from(coerce_limit(
@@ -253,11 +252,10 @@ pub async fn shared_family(
 /// `GET /api/plugins/graph/compare/union-layout`
 pub async fn revision_pair(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<RevisionPairParamsV1>,
 ) -> Json<DashboardEnvelopeV1<Option<RevisionPairUnionLayoutV1>>> {
-    let (Some(authority), Some(Extension(control))) = (state.code_read_authority.as_ref(), control)
-    else {
+    let Some(authority) = state.code_read_authority.as_ref() else {
         return code_read_unavailable(&state);
     };
     let request = revision_pair_request(params, &control);
