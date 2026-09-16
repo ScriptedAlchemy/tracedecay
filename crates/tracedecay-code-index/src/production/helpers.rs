@@ -1155,14 +1155,12 @@ where
     let Some(scope_module) = rust_file_module(relative_scope) else {
         return false;
     };
-    let qualified = if scope_module.is_empty() {
-        format!("{exported_name}{member}")
+    let scope_qualified_type = if scope_module.is_empty() {
+        exported_name.to_owned()
     } else {
-        format!(
-            "{}::{exported_name}{member}",
-            scope_module.replace('/', "::")
-        )
+        format!("{}::{exported_name}", scope_module.replace('/', "::"))
     };
+    let qualified = format!("{scope_qualified_type}{member}");
     let target_path = &files[target.index].as_ref().authority.logical_path;
     let resolves = if (target.index == scope_index
         && rust_crate_qualified_name_matches(
@@ -1176,6 +1174,7 @@ where
             rust,
             origin_index,
             scope_index,
+            &scope_qualified_type,
             exported_name,
             member,
             target,
@@ -1410,17 +1409,20 @@ fn file_qualified_name_matches(
 }
 
 /// An inherent `Type::method` whose owning type is defined in `scope_index`
-/// may live in any other file of the same crate. Validate the type at scope,
-/// match the method by its file-relative `Type::method` path, and require
-/// the `impl` file to bind `Type` to that same definition: it is the
-/// defining file, or it defines no `Type` of its own and imports the type,
-/// by name or through a glob of a module that exports it. A same-named type
-/// in another module therefore never lends its methods to the scope's type.
+/// (as `scope_qualified_type`, the type's crate-relative path) may live in
+/// any other file of the same crate. Validate the type at scope, match the
+/// method by its file-relative `Type::method` path, and require the `impl`
+/// file to bind `Type` to that same definition: it is the defining file, or
+/// it defines no `Type` of its own and imports the type, by name or through
+/// a glob of a module that exports it. A same-named type in another module
+/// therefore never lends its methods to the scope's type.
+#[allow(clippy::too_many_arguments)]
 fn rust_inherent_method_owned_by_scope_type<T>(
     files: &[T],
     rust: &mut RustResolutionContextV1<'_>,
     origin_index: usize,
     scope_index: usize,
+    scope_qualified_type: &str,
     exported_name: &str,
     member: &str,
     target: RustSymbolTargetV1<'_>,
@@ -1436,7 +1438,7 @@ where
     let Some(scope_type) = scope.artifacts.symbols.iter().find(|symbol| {
         relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
             && rust_crate_qualified_name_matches(
-                exported_name,
+                scope_qualified_type,
                 root_path,
                 &scope.authority.logical_path,
                 &symbol.qualified_name,

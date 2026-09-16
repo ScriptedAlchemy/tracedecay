@@ -394,6 +394,43 @@ fn rust_inherent_method_does_not_bind_to_a_same_named_type_in_another_module() {
 }
 
 #[test]
+fn rust_inherent_impl_resolves_when_type_is_reexported_from_a_submodule() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.reexported-type.lib",
+            "crates/widgets/src/lib.rs",
+            "mod builder;\nmod methods;\nmod finish;\npub use crate::builder::Builder;\n",
+        ),
+        (
+            "file.reexported-type.builder",
+            "crates/widgets/src/builder.rs",
+            "pub struct Builder;\n",
+        ),
+        (
+            "file.reexported-type.methods",
+            "crates/widgets/src/methods.rs",
+            "use crate::builder::Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.reexported-type.finish",
+            "crates/widgets/src/finish.rs",
+            "use crate::Builder;\nimpl Builder {\n    pub fn finish(&self) {}\n}\n",
+        ),
+        (
+            "file.reexported-type.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n    builder.finish();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/methods.rs::Builder::build");
+    let finish = symbol_occurrence(&generation, "crates/widgets/src/finish.rs::Builder::finish");
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+    assert_resolved_edge(&generation, &caller, &finish, RelationEdgeKindV1::Calls);
+}
+
+#[test]
 fn rust_typed_parameter_method_call_binds_through_import_and_crate_reexport() {
     let generation = published_rust_workspace(&[
         (
