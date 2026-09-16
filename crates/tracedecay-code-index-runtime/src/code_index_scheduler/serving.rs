@@ -121,11 +121,17 @@ pub(super) fn text_artifact_source_batch_limits(
 
 /// Clone-successor page-batch bounds from the 128 MiB reservation ledger.
 ///
-/// `open_builder_connection` grants the full SQLite cache. `append_clone_rows`
+/// `open_builder_connection` grants the full `SQLite` cache. `append_clone_rows`
 /// then serializes payload/occurrence, reads the stored payload, and compares
 /// a second serialization while the batch's pages stay live, and the builder
 /// retains metadata. The batch byte ceiling is the remainder after those
 /// charges so resident-memory admission is not filled to the last byte.
+///
+/// The ceiling is capped at the scale-1 first-pass batch (64 MiB), while
+/// the first pass itself scales up to 8x, so a single page retained above
+/// this ceiling would be admitted there and refused here as a `Contract`
+/// error. That is unreachable in practice only because the sealed source
+/// caps every page at `TEXT_ARTIFACT_PAGE_BYTES_V1` (4 MiB) serialized.
 pub(super) fn clone_successor_source_batch_limits(
     metadata: &CodeLexicalProjectionMetadataV1,
 ) -> Result<(usize, usize), RetrievalPortError> {
@@ -3170,19 +3176,17 @@ impl LatestCodeTextGenerationV1 {
         )?;
         let mut remaining = maximum_work.max(1);
         while remaining > 0 && build.source_receipt.is_none() {
-            if matches!(
-                build.source_position,
-                CloneSuccessorSourcePositionV1::Revalidating(_)
-            ) {
+            if let CloneSuccessorSourcePositionV1::Revalidating(target) = &build.source_position {
                 // Resume revalidation replays already-committed pages one at a
                 // time until the persisted successor cursor is reached.
+                let target = target.clone();
                 let read = build
                     .source
                     .next_page(control)
                     .map_err(map_sealed_page_source_error)?;
                 match read {
                     VerifiedSealedLexicalPageReadV1::Page(page) => {
-                        if !self.advance_clone_successor_page(build, &page, control)? {
+                        if !self.revalidate_clone_successor_page(build, target, &page, control)? {
                             return Ok(false);
                         }
                         remaining -= 1;
@@ -3201,7 +3205,12 @@ impl LatestCodeTextGenerationV1 {
             .map_err(map_sealed_page_source_error)?;
             match self.append_clone_successor_batch(build, bounds, control)? {
                 VerifiedSealedLexicalPageBatchReadV1::Pages(batch) => {
-                    remaining = remaining.saturating_sub(batch.len());
+                    remaining = remaining.checked_sub(batch.len()).ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "clone-successor batch delivered more pages than the remaining work bound"
+                                .to_owned(),
+                        )
+                    })?;
                 }
                 VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
                     build.source_receipt = Some(receipt);
@@ -3302,25 +3311,17 @@ impl LatestCodeTextGenerationV1 {
         Ok(())
     }
 
-    fn advance_clone_successor_page(
+    /// Replay one already-committed page against the resumed successor while
+    /// it is `Revalidating` toward `target`. Returns `false` when the
+    /// successor had to be rebuilt and the slice must stop.
+    fn revalidate_clone_successor_page(
         &self,
         build: &mut CodeTextCloneSuccessorBuildV1,
+        target: VerifiedSealedLexicalCursorV1,
         page: &VerifiedSealedLexicalPageV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
         self.observe_clone_page_scratch(page)?;
-        let CloneSuccessorSourcePositionV1::Revalidating(target) = &build.source_position else {
-            build
-                .builder
-                .as_mut()
-                .ok_or_else(|| {
-                    RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
-                })?
-                .append_page(page, control)
-                .map_err(map_text_artifact_error)?;
-            return Ok(true);
-        };
-        let target = target.clone();
         let verification = build
             .builder
             .as_ref()
