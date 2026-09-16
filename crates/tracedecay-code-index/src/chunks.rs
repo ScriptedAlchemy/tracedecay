@@ -2021,7 +2021,10 @@ pub(crate) const CROSS_FILE_REFERENCE_BLOCKLIST: &[&str] = &[
 /// member: `new`, `build`, or `default` behind a project type is a distinct
 /// path the resolver validates segment by segment, so the member itself is
 /// exempt; behind `Self` or a blocklisted std type it stays out, since those
-/// paths never lead to a project symbol.
+/// paths never lead to a project symbol. Retention cannot tell `std::fs`
+/// from a workspace module, so sealing re-applies the member's verdict when
+/// the owner is not attested by the referencing file's imports, crate roots,
+/// or modules.
 pub(crate) fn cross_file_reference_name_is_blocklisted(reference_name: &str) -> bool {
     let Some((owner_path, member)) = reference_name.rsplit_once("::") else {
         return reference_name.is_empty()
