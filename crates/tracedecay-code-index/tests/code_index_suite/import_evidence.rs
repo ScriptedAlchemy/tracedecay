@@ -360,6 +360,34 @@ fn rust_inherent_impl_methods_resolve_when_type_and_impl_are_in_different_files(
 }
 
 #[test]
+fn rust_generic_inherent_impl_matches_a_nominal_typed_receiver() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.generic.lib",
+            "crates/widgets/src/lib.rs",
+            "mod methods;\npub struct Builder<T>(pub T);\n",
+        ),
+        (
+            "file.generic.methods",
+            "crates/widgets/src/methods.rs",
+            "use super::Builder;\nimpl<T> Builder<T> {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.generic.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder<u8>) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/methods.rs::Builder<T>::build",
+    );
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
 fn rust_inherent_method_does_not_bind_to_a_same_named_type_in_another_module() {
     let generation = published_rust_workspace(&[
         (

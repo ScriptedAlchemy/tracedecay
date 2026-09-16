@@ -1611,7 +1611,22 @@ fn rust_inherent_method_matches(
     else {
         return false;
     };
-    symbol_path == format!("{type_name}{member}")
+    let Some((target_owner, target_member)) = symbol_path.rsplit_once("::") else {
+        return false;
+    };
+    let Some(member) = member.strip_prefix("::") else {
+        return false;
+    };
+    target_member == member
+        && nominal_rust_impl_owner(target_owner).is_some_and(|owner| owner == type_name)
+}
+
+fn nominal_rust_impl_owner(owner: &str) -> Option<&str> {
+    match owner.find('<') {
+        Some(generic_start) if owner.ends_with('>') => Some(&owner[..generic_start]),
+        Some(_) => None,
+        None => Some(owner),
+    }
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`
