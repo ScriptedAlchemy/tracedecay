@@ -76,6 +76,26 @@ impl CodeIndexSearchUnavailableReasonV1 {
             Self::Internal => "search_failed",
         }
     }
+
+    /// Whether the same request can succeed later without the caller changing
+    /// it. The enum owns the answer so every surface that renders a lane
+    /// failure reports one retry story.
+    #[hotpath::skip]
+    pub const fn is_retryable(self) -> bool {
+        match self {
+            Self::Cancelled
+            | Self::TimedOut
+            | Self::CapacityUnavailable
+            | Self::GenerationUnavailable
+            | Self::GenerationUnverified => true,
+            Self::CapabilityUnavailable
+            | Self::AuthorityUnavailable
+            | Self::LinkedWorktreeDisabled
+            | Self::InvalidRequest
+            | Self::CorruptionResetRequired
+            | Self::Internal => false,
+        }
+    }
 }
 
 /// Stable machine tokens for why one retrieval lane could not serve.
