@@ -52,12 +52,7 @@ pub(crate) enum WriterCommand {
     },
 }
 
-/// Pause between busy-begin attempts so the idle deadline is the real bound.
-///
-/// A yield-only loop with a small attempt count burned through in tens of
-/// microseconds while the lock holder was still scheduled, so IMMEDIATE begin
-/// failed closed under ordinary CI contention instead of waiting for the lock.
-const BEGIN_BUSY_RETRY_PAUSE: Duration = Duration::from_millis(1);
+const BEGIN_BUSY_ATTEMPT_BUDGET: u8 = 64;
 
 /// Takes SQLite's write lock on the worker thread, retrying while it is busy.
 ///
@@ -88,6 +83,7 @@ pub(super) fn retry_busy_begin<T>(
     shutdown_requested: &AtomicBool,
 ) -> rusqlite::Result<T> {
     let deadline = Instant::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+    let mut attempts_remaining = BEGIN_BUSY_ATTEMPT_BUDGET;
     let mut original_busy_error = None;
     loop {
         if shutdown_requested.load(Ordering::Acquire)
@@ -105,7 +101,9 @@ pub(super) fn retry_busy_begin<T>(
                 return Ok(value);
             }
             Err(error) if sqlite_busy_or_locked(&error) => {
-                let exhausted = shutdown_requested.load(Ordering::Acquire)
+                attempts_remaining = attempts_remaining.saturating_sub(1);
+                let exhausted = attempts_remaining == 0
+                    || shutdown_requested.load(Ordering::Acquire)
                     || Instant::now() >= deadline;
                 match original_busy_error.take() {
                     Some(original) if exhausted => return Err(original),
@@ -113,9 +111,7 @@ pub(super) fn retry_busy_begin<T>(
                     None if exhausted => return Err(error),
                     None => original_busy_error = Some(error),
                 }
-                if !exhausted {
-                    std::thread::sleep(BEGIN_BUSY_RETRY_PAUSE);
-                }
+                std::thread::yield_now();
             }
             Err(error) => return Err(error),
         }
