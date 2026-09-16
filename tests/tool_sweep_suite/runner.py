@@ -1907,8 +1907,8 @@ CODE_NAVIGATION_INPUT_PRODUCERS = {
 # - feedback_* reads and affected_tests consume daemon-minted request handles
 #   produced only by live LSP context projections or durable advisory cycles
 #   with findings; clients cannot reconstruct them by design.
-# - automation_run_artifact_view and skill_view read durable artifacts that
-#   only real automation runs / skill installs create; the isolated profile
+# - automation_run_artifact_view reads durable artifacts that
+#   only real automation runs create; the isolated profile
 #   has none, so an unknown identity must stay a typed not-found.
 # - test_results reads daemon-retained managed test results that only a
 #   covered run_affected_tests execution retains; the fixture has no covered
@@ -1925,7 +1925,6 @@ EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
     "tracedecay_feedback_impact": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_feedback_list": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_automation_run_artifact_view": ("failed", "not_found"),
-    "tracedecay_skill_view": ("failed", "not_found"),
     "tracedecay_test_results": ("unavailable", "application.retrieval.unavailable"),
 
 }
@@ -1962,9 +1961,41 @@ def git_preview_arguments(fixture: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def prime_managed_skill(fixture: dict[str, Any]) -> None:
+    """Create an active skill through the public CLI in the isolated profile."""
+    binary, project = fixture["binary"], Path(fixture["root"])
+    created = _run_checked(
+        [binary, "automation", "skills", "create",
+         "--id", f"tool-sweep-skill-{time.monotonic_ns()}",
+         "--title", "Inspect automation artifacts",
+         "--summary", "Verify durable automation output against its producing run.",
+         "--routing-description", "Use when inspecting TraceDecay automation run artifacts.",
+         "--category", "code-review",
+         "--body", "Read the exact run first. View only its advertised artifact kinds and preserve its run identity."],
+        project, "managed skill producer",
+    )
+    skill = json.loads(created.stdout)["skill"]
+    if skill["metadata"]["state"] != "active" or not skill["body_markdown"]:
+        raise SweepError("managed skill producer returned no active content")
+    viewed = _run_checked(
+        [binary, "automation", "skills", "view", skill["metadata"]["id"], "--json"],
+        project, "managed skill CLI readback",
+    )
+    if json.loads(viewed.stdout) != skill:
+        raise SweepError("managed skill CLI readback differs from its producer")
+    fixture["managed_skill"] = skill
+
+
+def validate_managed_skill_read(response: dict[str, Any], fixture: dict[str, Any]) -> None:
+    if not any(value.get("skill") == fixture["managed_skill"] for value in _objects(response)):
+        raise SweepError("managed skill MCP readback differs from its producer")
+
+
 def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, Any]) -> dict[str, Any]:
     """Produce valid ordinary inputs from the negotiated schema; opaque values are never invented."""
     name = definition.get("name")
+    if name == "tracedecay_skill_view":
+        return {"id": fixture["managed_skill"]["metadata"]["id"], "include_support_files": True, "format": "json"}
     if name in {
         "tracedecay_context_scout_status",
         "tracedecay_context_scout_capability",
@@ -2604,6 +2635,8 @@ def _read_tool_row(
     policies: dict[str, ToolPolicy] | None = None,
 ) -> dict[str, Any]:
     try:
+        if policy.name == "tracedecay_skill_view" and "managed_skill" not in fixture:
+            prime_managed_skill(fixture)
         if policy.name in CODE_NAVIGATION_INPUT_PRODUCERS:
             mint_code_navigation_input(
                 client,
@@ -2703,6 +2736,11 @@ def _read_tool_row(
                     "note": str(error),
                 }
             )
+    if row["verdict"] == "PASS" and policy.name == "tracedecay_skill_view":
+        try:
+            validate_managed_skill_read(response, fixture)
+        except SweepError as error:
+            row.update({"verdict": "FAIL", "problem_code": "tool_sweep.consumer_unverified", "note": str(error)})
     return row
 
 
