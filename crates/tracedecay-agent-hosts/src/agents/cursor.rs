@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     JsonConfigMutation, McpUninstallPolicy, UpdatePluginOutcome, load_json_file,
@@ -118,10 +118,10 @@ impl AgentIntegration for CursorIntegration {
 
     fn host_component_registration(
         &self,
-        component: HostBundleComponentV1,
+        component: HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> HostBundleRegistrationStateV1 {
-        if component == HostBundleComponentV1::Agent {
+        if component == HostComponentV1::Agent {
             return cursor_native_extension_registration(&ctx.home);
         }
         let plugin_dir = cursor_plugin_install_dir(&ctx.home);
@@ -141,7 +141,7 @@ impl AgentIntegration for CursorIntegration {
             .is_some_and(Value::is_object);
         if matches!(
             component,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
+            HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         ) {
             return if mcp_current {
                 HostBundleRegistrationStateV1::Current
@@ -535,9 +535,9 @@ fn remove_cursor_managed_skill_overlay(install_dir: &Path) -> Result<()> {
 /// stay refused without the operator's explicit `--yes --adopt`.
 pub(crate) fn receiptless_component_provenance(
     home: &Path,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
 ) -> bool {
-    if component == HostBundleComponentV1::Agent {
+    if component == HostComponentV1::Agent {
         return matches!(
             cursor_native_extension_registration(home),
             HostBundleRegistrationStateV1::Current | HostBundleRegistrationStateV1::Repairable
@@ -1549,9 +1549,9 @@ mod tests {
             "Doctor must report exactly the Cursor Desktop component set: {report:#?}"
         );
         for expected_component in [
-            HostBundleComponentV1::Core,
-            HostBundleComponentV1::Agent,
-            HostBundleComponentV1::ContextMcp,
+            HostComponentV1::Core,
+            HostComponentV1::Agent,
+            HostComponentV1::ContextMcp,
         ] {
             let component = report
                 .components
@@ -1785,9 +1785,9 @@ mod tests {
     fn receiptless_provenance_requires_a_first_party_anchor() {
         let home = TempDir::new().unwrap();
         for component in [
-            HostBundleComponentV1::Core,
-            HostBundleComponentV1::ContextMcp,
-            HostBundleComponentV1::Agent,
+            HostComponentV1::Core,
+            HostComponentV1::ContextMcp,
+            HostComponentV1::Agent,
         ] {
             assert!(
                 !receiptless_component_provenance(home.path(), component),
@@ -1800,7 +1800,7 @@ mod tests {
         std::fs::write(&manifest_path, b"not a tracedecay manifest").unwrap();
         assert!(!receiptless_component_provenance(
             home.path(),
-            HostBundleComponentV1::Core
+            HostComponentV1::Core
         ));
 
         std::fs::write(
@@ -1811,16 +1811,16 @@ mod tests {
         .unwrap();
         assert!(receiptless_component_provenance(
             home.path(),
-            HostBundleComponentV1::Core
+            HostComponentV1::Core
         ));
         assert!(receiptless_component_provenance(
             home.path(),
-            HostBundleComponentV1::ContextMcp
+            HostComponentV1::ContextMcp
         ));
         // The plugin anchor says nothing about the native extension.
         assert!(!receiptless_component_provenance(
             home.path(),
-            HostBundleComponentV1::Agent
+            HostComponentV1::Agent
         ));
 
         let extension_dir = home.path().join(cursor_native_extension_relative_dir());
@@ -1832,7 +1832,7 @@ mod tests {
         .unwrap();
         assert!(receiptless_component_provenance(
             home.path(),
-            HostBundleComponentV1::Agent
+            HostComponentV1::Agent
         ));
     }
 

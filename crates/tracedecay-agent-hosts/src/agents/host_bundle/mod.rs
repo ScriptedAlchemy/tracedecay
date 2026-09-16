@@ -19,7 +19,7 @@ pub use tracedecay_host_integration::{
     EmbeddedHostIntegrationEvidenceV1, EmbeddedNativeHostFixtureV1,
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HOST_BUNDLE_SCHEMA_VERSION, HostBundleArtifactContentV1,
     HostBundleArtifactV1, HostBundleBackupArtifactV1, HostBundleBackupReceiptV1,
-    HostBundleComponentV1, HostBundleError, HostBundleInstallReceiptV1, HostBundleJournalEntryV1,
+    HostComponentV1, HostBundleError, HostBundleInstallReceiptV1, HostBundleJournalEntryV1,
     HostBundleJournalStateV1, HostBundleJournalV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
     HostBundleReceiptArtifactV1, HostBundleRestoreReceiptV1, HostBundleRollbackBoundaryV1,
     HostBundleVerificationAdapterV1, HostCapabilityRecordV1, HostCapabilityStateV1,

@@ -27,7 +27,7 @@ use tracedecay_automation_runtime::automation::skill_targets::{
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, TextFileMutation,
@@ -99,7 +99,7 @@ impl AgentIntegration for VibeIntegration {
 
     fn host_component_registration(
         &self,
-        component: HostBundleComponentV1,
+        component: HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> HostBundleRegistrationStateV1 {
         component_registration_state(
@@ -112,7 +112,7 @@ impl AgentIntegration for VibeIntegration {
 
     fn host_component_registration_for_lifecycle(
         &self,
-        component: HostBundleComponentV1,
+        component: HostComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
     ) -> HostBundleRegistrationStateV1 {
@@ -138,7 +138,7 @@ impl AgentIntegration for VibeIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
         registration_paths(components, &vibe_config_path(home), &vibe_prompt_path(home))
@@ -146,7 +146,7 @@ impl AgentIntegration for VibeIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -161,7 +161,7 @@ impl AgentIntegration for VibeIntegration {
     #[hotpath::measure(label = "vibe_component_install")]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         activate_components(
@@ -174,7 +174,7 @@ impl AgentIntegration for VibeIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         deactivate_components(
@@ -187,7 +187,7 @@ impl AgentIntegration for VibeIntegration {
 
     fn activate_project_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -204,7 +204,7 @@ impl AgentIntegration for VibeIntegration {
 
     fn deactivate_project_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -263,32 +263,32 @@ impl AgentIntegration for VibeIntegration {
 }
 
 fn registration_paths(
-    components: &[HostBundleComponentV1],
+    components: &[HostComponentV1],
     config: &Path,
     prompt: &Path,
 ) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if components.contains(&HostBundleComponentV1::ContextMcp) {
+    if components.contains(&HostComponentV1::ContextMcp) {
         paths.push(config.to_path_buf());
         paths.push(config_backup_path(config));
         paths.push(original_config_path(config));
     }
-    if components.contains(&HostBundleComponentV1::Core) {
+    if components.contains(&HostComponentV1::Core) {
         paths.push(prompt.to_path_buf());
     }
     paths
 }
 
 fn component_registration_state(
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     config: &Path,
     prompt: &Path,
     expected_binary: Option<&str>,
 ) -> HostBundleRegistrationStateV1 {
     match component {
-        HostBundleComponentV1::ContextMcp => mcp_registration_state(config, expected_binary),
-        HostBundleComponentV1::Core => prompt_registration_state(prompt),
-        HostBundleComponentV1::Agent | HostBundleComponentV1::OperatorMcp => {
+        HostComponentV1::ContextMcp => mcp_registration_state(config, expected_binary),
+        HostComponentV1::Core => prompt_registration_state(prompt),
+        HostComponentV1::Agent | HostComponentV1::OperatorMcp => {
             HostBundleRegistrationStateV1::Missing
         }
     }
@@ -496,30 +496,30 @@ fn uninstall_prompt(prompt: &Path, profile_home: &Path) -> Result<()> {
 }
 
 fn activate_components(
-    components: &[HostBundleComponentV1],
+    components: &[HostComponentV1],
     config: &Path,
     prompt: &Path,
     ctx: &InstallContext,
 ) -> Result<()> {
-    if components.contains(&HostBundleComponentV1::ContextMcp) {
+    if components.contains(&HostComponentV1::ContextMcp) {
         install_mcp(config, &ctx.tracedecay_bin)?;
     }
-    if components.contains(&HostBundleComponentV1::Core) {
+    if components.contains(&HostComponentV1::Core) {
         install_prompt(prompt, &ctx.home)?;
     }
     Ok(())
 }
 
 fn deactivate_components(
-    components: &[HostBundleComponentV1],
+    components: &[HostComponentV1],
     config: &Path,
     prompt: &Path,
     profile_home: &Path,
 ) -> Result<()> {
-    if components.contains(&HostBundleComponentV1::Core) {
+    if components.contains(&HostComponentV1::Core) {
         uninstall_prompt(prompt, profile_home)?;
     }
-    if components.contains(&HostBundleComponentV1::ContextMcp) {
+    if components.contains(&HostComponentV1::ContextMcp) {
         uninstall_mcp(config)?;
     }
     Ok(())
@@ -552,7 +552,7 @@ mod tests {
 
         VibeIntegration
             .activate_deployed_host_component_registration(
-                &[HostBundleComponentV1::ContextMcp],
+                &[HostComponentV1::ContextMcp],
                 &install,
             )
             .unwrap();
@@ -567,7 +567,7 @@ mod tests {
 
         VibeIntegration
             .deactivate_deployed_host_component_registration(
-                &[HostBundleComponentV1::ContextMcp],
+                &[HostComponentV1::ContextMcp],
                 &install,
             )
             .unwrap();
@@ -582,7 +582,7 @@ mod tests {
         let prompt = vibe_prompt_path(home.path());
         let install = install_context(home.path(), "/tmp/tracedecay");
 
-        activate_components(&[HostBundleComponentV1::Core], &config, &prompt, &install).unwrap();
+        activate_components(&[HostComponentV1::Core], &config, &prompt, &install).unwrap();
         assert_eq!(
             prompt_registration_state(&prompt),
             HostBundleRegistrationStateV1::Current
@@ -590,14 +590,14 @@ mod tests {
         assert!(!config.exists());
 
         deactivate_components(
-            &[HostBundleComponentV1::Core],
+            &[HostComponentV1::Core],
             &config,
             &prompt,
             home.path(),
         )
         .unwrap();
         activate_components(
-            &[HostBundleComponentV1::ContextMcp],
+            &[HostComponentV1::ContextMcp],
             &config,
             &prompt,
             &install,
@@ -617,8 +617,8 @@ mod tests {
         let prompt = vibe_prompt_path(home.path());
         let install = install_context(home.path(), "/tmp/tracedecay");
         let components = [
-            HostBundleComponentV1::ContextMcp,
-            HostBundleComponentV1::Core,
+            HostComponentV1::ContextMcp,
+            HostComponentV1::Core,
         ];
 
         activate_components(&components, &config, &prompt, &install).unwrap();

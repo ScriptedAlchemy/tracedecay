@@ -105,7 +105,7 @@ impl AgentIntegration for KimiIntegration {
     #[hotpath::measure(label = "hosts.agent.kimi.project_install")]
     fn activate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -136,7 +136,7 @@ impl AgentIntegration for KimiIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -148,7 +148,7 @@ impl AgentIntegration for KimiIntegration {
 
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -191,10 +191,10 @@ impl AgentIntegration for KimiIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1 as State};
+        use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1 as State};
 
         let code_home = kimi_code_home(&ctx.home);
         let installed_path = kimi_installed_json_path(&code_home);
@@ -228,7 +228,7 @@ impl AgentIntegration for KimiIntegration {
         let mcp_current = kimi_user_mcp_is_current(&code_home);
         if matches!(
             component,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
+            HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         ) {
             return State::Missing;
         }
@@ -706,7 +706,7 @@ mod tests {
         };
         assert_eq!(
             KimiIntegration.host_component_registration(
-                super::super::host_bundle::HostBundleComponentV1::Core,
+                super::super::host_bundle::HostComponentV1::Core,
                 &health_ctx,
             ),
             super::super::host_bundle::HostBundleRegistrationStateV1::Repairable
@@ -724,7 +724,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             KimiIntegration.host_component_registration(
-                super::super::host_bundle::HostBundleComponentV1::Core,
+                super::super::host_bundle::HostComponentV1::Core,
                 &health_ctx,
             ),
             super::super::host_bundle::HostBundleRegistrationStateV1::Current
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn catalog_install_activates_user_mcp_after_native_plugin_is_ready() {
         use crate::agents::host_bundle::{
-            HostBundleComponentV1, HostBundleLifecycleOpV1, HostComponentSetExecutionRequestV1,
+            HostComponentV1, HostBundleLifecycleOpV1, HostComponentSetExecutionRequestV1,
             HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1, HostKindV1,
         };
 
@@ -842,7 +842,7 @@ mod tests {
         let component_set =
             crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
                 HostKindV1::KimiCode,
-                &[HostBundleComponentV1::Core],
+                &[HostComponentV1::Core],
                 0,
                 tracedecay_bin,
                 crate::agents::TEST_GENERATOR_COMMIT,
@@ -852,7 +852,7 @@ mod tests {
             lifecycle: HostComponentSetLifecycleRequestV1 {
                 operation: HostBundleLifecycleOpV1::Install,
                 expected_host: HostKindV1::KimiCode,
-                expected_components: vec![HostBundleComponentV1::Core],
+                expected_components: vec![HostComponentV1::Core],
                 explicit_confirmation: true,
                 hermes_profile_bindings: 0,
                 explicit_adoption: false,
@@ -899,7 +899,7 @@ mod tests {
             lifecycle: HostComponentSetLifecycleRequestV1 {
                 operation: HostBundleLifecycleOpV1::Uninstall,
                 expected_host: HostKindV1::KimiCode,
-                expected_components: vec![HostBundleComponentV1::Core],
+                expected_components: vec![HostComponentV1::Core],
                 explicit_confirmation: true,
                 hermes_profile_bindings: 0,
                 explicit_adoption: false,

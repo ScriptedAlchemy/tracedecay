@@ -26,7 +26,7 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, TextFileMutation, config_backup_path, report_mcp_registration,
@@ -78,10 +78,10 @@ impl AgentIntegration for AntigravityIntegration {
 
     fn host_component_registration(
         &self,
-        component: HostBundleComponentV1,
+        component: HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> HostBundleRegistrationStateV1 {
-        if component != HostBundleComponentV1::ContextMcp {
+        if component != HostComponentV1::ContextMcp {
             return HostBundleRegistrationStateV1::Missing;
         }
         antigravity_registration_state(&ctx.home, None)
@@ -89,11 +89,11 @@ impl AgentIntegration for AntigravityIntegration {
 
     fn host_component_registration_for_lifecycle(
         &self,
-        component: HostBundleComponentV1,
+        component: HostComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
     ) -> HostBundleRegistrationStateV1 {
-        if component != HostBundleComponentV1::ContextMcp {
+        if component != HostComponentV1::ContextMcp {
             return HostBundleRegistrationStateV1::Missing;
         }
         antigravity_registration_state(&ctx.home, Some(&install.tracedecay_bin))
@@ -109,10 +109,10 @@ impl AgentIntegration for AntigravityIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components != [HostBundleComponentV1::ContextMcp] {
+        if components != [HostComponentV1::ContextMcp] {
             return Vec::new();
         }
         registration_paths(home)
@@ -121,7 +121,7 @@ impl AgentIntegration for AntigravityIntegration {
     #[hotpath::measure(label = "antigravity_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         install_mcp_if_selected(components, ctx)
@@ -129,7 +129,7 @@ impl AgentIntegration for AntigravityIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[HostBundleComponentV1],
+        components: &[HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         uninstall_mcp_if_selected(components, &ctx.home)
@@ -288,10 +288,10 @@ fn save_original_if_needed(config: &Path, existing: &str) -> Result<()> {
 }
 
 fn install_mcp_if_selected(
-    components: &[HostBundleComponentV1],
+    components: &[HostComponentV1],
     ctx: &InstallContext,
 ) -> Result<()> {
-    if !components.contains(&HostBundleComponentV1::ContextMcp) {
+    if !components.contains(&HostComponentV1::ContextMcp) {
         return Ok(());
     }
     let ide = mcp_config_path(&ctx.home);
@@ -381,8 +381,8 @@ fn remove_registration(
     ))
 }
 
-fn uninstall_mcp_if_selected(components: &[HostBundleComponentV1], home: &Path) -> Result<()> {
-    if !components.contains(&HostBundleComponentV1::ContextMcp) {
+fn uninstall_mcp_if_selected(components: &[HostComponentV1], home: &Path) -> Result<()> {
+    if !components.contains(&HostComponentV1::ContextMcp) {
         return Ok(());
     }
     let ide = mcp_config_path(home);
@@ -437,7 +437,7 @@ mod tests {
         let cli_original = br#"{"enabled":true,"mcpServers":{"other":{"command":"peer"}}}"#;
         write_parent(&ide, ide_original);
         write_parent(&cli, cli_original);
-        let components = [HostBundleComponentV1::ContextMcp];
+        let components = [HostComponentV1::ContextMcp];
         let install = install_context(home.path(), "/tmp/tracedecay");
 
         AntigravityIntegration
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn antigravity_uninstall_removes_both_documents_created_by_tracedecay() {
         let home = tempfile::tempdir().unwrap();
-        let components = [HostBundleComponentV1::ContextMcp];
+        let components = [HostComponentV1::ContextMcp];
         let install = install_context(home.path(), "/tmp/tracedecay");
 
         AntigravityIntegration
@@ -511,7 +511,7 @@ mod tests {
         let worker_install = Arc::clone(&install);
         let worker = std::thread::spawn(move || {
             AntigravityIntegration.activate_deployed_host_component_registration(
-                &[HostBundleComponentV1::ContextMcp],
+                &[HostComponentV1::ContextMcp],
                 &worker_install,
             )
         });

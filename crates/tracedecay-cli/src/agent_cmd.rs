@@ -515,7 +515,7 @@ fn dry_run_canonical_component_set(
 fn receipt_owned_paths(
     lifecycle_root: &Path,
     host: tracedecay_agent_hosts::agents::host_bundle::HostKindV1,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
 ) -> std::collections::BTreeSet<String> {
     tracedecay_agent_hosts::agents::host_bundle::latest_host_component_receipt_at(
         lifecycle_root,
@@ -935,19 +935,19 @@ fn project_local_host_lifecycle_unavailable() -> tracedecay_domain::errors::Trac
 
 fn host_bundle_component(
     component: crate::cli::HostBundleComponentArg,
-) -> tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1 {
+) -> tracedecay_agent_hosts::agents::host_bundle::HostComponentV1 {
     match component {
         crate::cli::HostBundleComponentArg::Core => {
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core
+            tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::Core
         }
         crate::cli::HostBundleComponentArg::Agent => {
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Agent
+            tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::Agent
         }
         crate::cli::HostBundleComponentArg::ContextMcp => {
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::ContextMcp
+            tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::ContextMcp
         }
         crate::cli::HostBundleComponentArg::OperatorMcp => {
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::OperatorMcp
+            tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::OperatorMcp
         }
     }
 }
@@ -2478,7 +2478,7 @@ mod tests {
         assert_eq!(explicit.component_set.components.len(), 1);
         assert_eq!(
             explicit.component_set.components[0].manifest.component,
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::ContextMcp
+            tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::ContextMcp
         );
         let hermes = canonical_host_component_set("hermes", None, 0)
             .unwrap()
@@ -2486,7 +2486,7 @@ mod tests {
         assert_eq!(hermes.component_set.components.len(), 1);
         assert_eq!(
             hermes.component_set.components[0].manifest.component,
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core
+            tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::Core
         );
         // Kiro's supported route is its MCP registration alone; the degraded
         // hook route lives in Core and stays out of the default set.
@@ -2499,7 +2499,7 @@ mod tests {
                 .iter()
                 .map(|component| component.manifest.component)
                 .collect::<Vec<_>>(),
-            vec![tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::ContextMcp]
+            vec![tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::ContextMcp]
         );
         // Gemini's extension carries the MCP server and declares no hook, so
         // its default set is the separable MCP route and Core is a typed
@@ -2514,7 +2514,7 @@ mod tests {
                 .iter()
                 .map(|component| component.manifest.component)
                 .collect::<Vec<_>>(),
-            vec![tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::ContextMcp]
+            vec![tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::ContextMcp]
         );
         assert!(
             canonical_host_component_set(
@@ -3309,13 +3309,13 @@ mod tests {
 
         integration
             .activate_deployed_host_component_registration(
-                &[tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::OperatorMcp],
+                &[tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::OperatorMcp],
                 &context,
             )
             .unwrap();
         integration
             .deactivate_deployed_host_component_registration(
-                &[tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::OperatorMcp],
+                &[tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::OperatorMcp],
                 &context,
             )
             .unwrap();
@@ -4015,7 +4015,7 @@ mod tests {
     #[tokio::test]
     async fn kimi_native_activated_retry_tracks_staged_source() {
         use tracedecay_agent_hosts::agents::host_bundle::{
-            HostBundleComponentV1, HostKindV1, latest_host_component_receipt_at,
+            HostComponentV1, HostKindV1, latest_host_component_receipt_at,
             resolved_host_bundle_lifecycle_root,
         };
 
@@ -4081,7 +4081,7 @@ mod tests {
             latest_host_component_receipt_at(
                 &lifecycle_root,
                 HostKindV1::KimiCode,
-                HostBundleComponentV1::Core,
+                HostComponentV1::Core,
             )
             .unwrap()
             .is_some()
@@ -4092,7 +4092,7 @@ mod tests {
     #[tokio::test]
     async fn codex_native_activated_retry_tracks_component_set() {
         use tracedecay_agent_hosts::agents::host_bundle::{
-            HostBundleComponentV1, HostKindV1, latest_host_component_receipt_at,
+            HostComponentV1, HostKindV1, latest_host_component_receipt_at,
             resolved_host_bundle_lifecycle_root,
         };
 
@@ -4162,7 +4162,7 @@ mod tests {
             latest_host_component_receipt_at(
                 &lifecycle_root,
                 HostKindV1::Codex,
-                HostBundleComponentV1::Core,
+                HostComponentV1::Core,
             )
             .unwrap()
             .is_some()
@@ -4440,7 +4440,7 @@ mod tests {
                 .iter()
                 .map(|component| component.manifest.component)
                 .collect::<Vec<_>>(),
-            vec![tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::ContextMcp]
+            vec![tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::ContextMcp]
         );
         assert!(
             canonical_host_component_set(

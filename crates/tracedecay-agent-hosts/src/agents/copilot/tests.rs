@@ -280,7 +280,7 @@ fn component_registration_reads_the_cli_owned_mcp_state() {
 
     assert_eq!(
         CopilotIntegration.host_component_registration(
-            super::super::host_bundle::HostBundleComponentV1::ContextMcp,
+            super::super::host_bundle::HostComponentV1::ContextMcp,
             &health,
         ),
         super::super::host_bundle::HostBundleRegistrationStateV1::Current,

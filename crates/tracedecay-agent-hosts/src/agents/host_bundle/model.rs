@@ -9,7 +9,7 @@ use tracedecay_host_integration::host_bundle_stale_preview;
 
 use super::planner::{HostBundleLifecycleRequestV1, HostBundleMutationPlanV1};
 use super::{
-    HostBundleArtifactContentV1, HostBundleComponentV1, HostBundleError,
+    HostBundleArtifactContentV1, HostComponentV1, HostBundleError,
     HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
     HostBundleVerificationAdapterV1, HostCapabilityV1, HostKindV1,
 };
@@ -45,7 +45,7 @@ pub struct HostComponentSetV1 {
 pub struct HostComponentSetLifecycleRequestV1 {
     pub operation: HostBundleLifecycleOpV1,
     pub expected_host: HostKindV1,
-    pub expected_components: Vec<HostBundleComponentV1>,
+    pub expected_components: Vec<HostComponentV1>,
     pub explicit_confirmation: bool,
     pub hermes_profile_bindings: u8,
     /// Operator-confirmed authority (`--yes --adopt`) to take ownership of
@@ -95,7 +95,7 @@ pub struct CompetingHostExtensionClaimV1 {
 pub struct HostBundleRollbackSeamV1 {
     pub operation_id: [u8; 16],
     pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
+    pub component: HostComponentV1,
     pub backup_relative_paths: Vec<String>,
     pub interrupted_recovery_required: bool,
 }
@@ -150,7 +150,7 @@ pub trait HostComponentSetRegistrationV1 {
     /// host state (for example a bundle's own manifest naming tracedecay)
     /// and fail closed: the default recognizes nothing, so adoption then
     /// requires the operator's explicit `--yes --adopt`.
-    fn receiptless_component_provenance(&self, _component: HostBundleComponentV1) -> bool {
+    fn receiptless_component_provenance(&self, _component: HostComponentV1) -> bool {
         false
     }
 
