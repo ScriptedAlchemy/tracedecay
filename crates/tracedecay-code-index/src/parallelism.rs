@@ -614,6 +614,9 @@ pub fn with_yielded_background_cpu_permits<R>(operation: impl FnOnce() -> R) -> 
 /// CPU admission happens inside each active parallel work unit through
 /// [`with_background_cpu_permit`] or [`with_background_cpu_permits`], allowing
 /// indexing, semantic inference, and session preparation to share idle width.
+/// The caller's own units are yielded for the duration; a bare `par_iter`
+/// fan-out issued while already holding a leaf permit must wrap itself in
+/// [`with_yielded_background_cpu_permits`] to get the same guarantee.
 /// A standalone caller without registration shares one process-wide automatic
 /// pool. Building one all-core pool per request oversubscribes concurrent
 /// tests and profiling harnesses, which can turn bounded parser work into
