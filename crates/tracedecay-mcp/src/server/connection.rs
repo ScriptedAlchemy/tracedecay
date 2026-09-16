@@ -60,8 +60,17 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     fn max_concurrent_reads(&self) -> usize;
     fn tool_is_read_only(&self, tool_name: &str) -> bool;
     fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool;
-    /// The token is sticky across asynchronous route resolution and must be
-    /// sampled immediately before dispatch admission.
+    /// The token is sticky: once cancelled it stays cancelled, so the sample
+    /// taken immediately before dispatch admission cannot miss a cancel that
+    /// arrived while the route was still resolving.
+    ///
+    /// Sticky is not interruptible, and deliberately so. The selected target
+    /// owns a request's cancelled terminal and its request/error accounting,
+    /// and the target is not known until the route resolves, so an
+    /// implementation must finish route resolution and let the target settle
+    /// the cancel rather than abandoning the route and answering from the
+    /// caller. A cancel during a long route is therefore visible only once
+    /// routing completes.
     fn dispatch<'a>(
         &'a self,
         request: McpDispatchRequest<'a>,
