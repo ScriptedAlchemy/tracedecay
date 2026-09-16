@@ -338,20 +338,14 @@ fn guidance_result(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookFeedbackDeliveryRouteV1 {
-    HookV2,
-    Legacy,
-}
-
-/// Daemon configuration owns this rollback switch. Host lifecycle code may
-/// publish a new revision, while hook code can only dispatch through it.
+/// Daemon configuration owns this delivery switch. Host lifecycle code may
+/// publish a new revision; hook code only dispatches Hook V2 through it. The
+/// retired Legacy route is gone — every production constructor already chose
+/// Hook V2, and every `deliver_legacy` impl was an Unavailable stub.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookFeedbackRollbackSwitchV1 {
     pub configuration_revision: u64,
-    pub route: HookFeedbackDeliveryRouteV1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,16 +359,15 @@ pub enum HookFeedbackDeliveryOutcomeV1 {
 /// payload remains the owning application's typed feedback value.
 pub trait HookFeedbackDeliveryPortV1<T> {
     fn deliver_hook_v2(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
-    fn deliver_legacy(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
 }
 
-const fn route_for_rollback(
+const fn admit_rollback_revision(
     rollback: HookFeedbackRollbackSwitchV1,
-) -> Result<HookFeedbackDeliveryRouteV1, HookRuntimeErrorV1> {
+) -> Result<(), HookRuntimeErrorV1> {
     if rollback.configuration_revision == 0 {
         return Err(HookRuntimeErrorV1::InvalidControl);
     }
-    Ok(rollback.route)
+    Ok(())
 }
 
 #[cfg(feature = "hotpath")]
@@ -396,10 +389,8 @@ pub fn deliver_feedback_with_rollback<T, P>(
 where
     P: HookFeedbackDeliveryPortV1<T> + ?Sized,
 {
-    let outcome = match route_for_rollback(rollback)? {
-        HookFeedbackDeliveryRouteV1::HookV2 => port.deliver_hook_v2(feedback),
-        HookFeedbackDeliveryRouteV1::Legacy => port.deliver_legacy(feedback),
-    };
+    admit_rollback_revision(rollback)?;
+    let outcome = port.deliver_hook_v2(feedback);
     #[cfg(feature = "hotpath")]
     record_feedback_outcome(outcome);
     Ok(outcome)
@@ -421,13 +412,6 @@ pub trait AsyncHookFeedbackDeliveryPortV1<T> {
         feedback: &'a T,
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a>;
-
-    fn deliver_legacy<'a>(
-        &'a self,
-        envelope: &'a HookEventEnvelopeV2,
-        feedback: &'a T,
-        deadline: HookSynchronousDeadlineV1,
-    ) -> HookDeliveryFutureV1<'a>;
 }
 
 pub async fn deliver_feedback_with_rollback_async<T, P>(
@@ -440,14 +424,8 @@ pub async fn deliver_feedback_with_rollback_async<T, P>(
 where
     P: AsyncHookFeedbackDeliveryPortV1<T> + ?Sized,
 {
-    let outcome = match route_for_rollback(rollback)? {
-        HookFeedbackDeliveryRouteV1::HookV2 => {
-            port.deliver_hook_v2(envelope, feedback, deadline).await
-        }
-        HookFeedbackDeliveryRouteV1::Legacy => {
-            port.deliver_legacy(envelope, feedback, deadline).await
-        }
-    };
+    admit_rollback_revision(rollback)?;
+    let outcome = port.deliver_hook_v2(envelope, feedback, deadline).await;
     #[cfg(feature = "hotpath")]
     record_feedback_outcome(outcome);
     Ok(outcome)
@@ -525,4 +503,55 @@ pub enum HookRuntimeErrorV1 {
     InvalidAdmission,
     #[error("hook envelope does not satisfy the daemon-issued binding")]
     EnvelopeRejected(HookContractError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingHookV2Port {
+        hook_v2_calls: AtomicUsize,
+    }
+
+    impl HookFeedbackDeliveryPortV1<()> for CountingHookV2Port {
+        fn deliver_hook_v2(&self, _feedback: &()) -> HookFeedbackDeliveryOutcomeV1 {
+            self.hook_v2_calls.fetch_add(1, Ordering::SeqCst);
+            HookFeedbackDeliveryOutcomeV1::Delivered
+        }
+    }
+
+    #[test]
+    fn rollback_delivery_dispatches_only_through_hook_v2() {
+        let port = CountingHookV2Port {
+            hook_v2_calls: AtomicUsize::new(0),
+        };
+        let outcome = deliver_feedback_with_rollback(
+            HookFeedbackRollbackSwitchV1 {
+                configuration_revision: 1,
+            },
+            &(),
+            &port,
+        )
+        .expect("valid revision admits delivery");
+        assert_eq!(outcome, HookFeedbackDeliveryOutcomeV1::Delivered);
+        assert_eq!(port.hook_v2_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn zero_revision_still_refuses_before_delivery() {
+        let port = CountingHookV2Port {
+            hook_v2_calls: AtomicUsize::new(0),
+        };
+        let error = deliver_feedback_with_rollback(
+            HookFeedbackRollbackSwitchV1 {
+                configuration_revision: 0,
+            },
+            &(),
+            &port,
+        )
+        .expect_err("revision 0 is invalid control");
+        assert_eq!(error, HookRuntimeErrorV1::InvalidControl);
+        assert_eq!(port.hook_v2_calls.load(Ordering::SeqCst), 0);
+    }
 }

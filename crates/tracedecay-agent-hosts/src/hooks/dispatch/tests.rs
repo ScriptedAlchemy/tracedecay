@@ -286,15 +286,6 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryH
             HookFeedbackDeliveryOutcomeV1::Delivered
         })
     }
-
-    fn deliver_legacy<'a>(
-        &'a self,
-        _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
-        _deadline: HookSynchronousDeadlineV1,
-    ) -> HookDeliveryFutureV1<'a> {
-        Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
-    }
 }
 
 fn sample_notice() -> tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
@@ -362,7 +353,6 @@ async fn feedback_notice_never_delivers_after_deadline_or_failed_admission() {
     };
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: 1,
-        route: HookFeedbackDeliveryRouteV1::HookV2,
     };
     let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
 
@@ -515,7 +505,6 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
     let port = DaemonDeliveryReceiptPort::new(&runtime, project.path());
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: 1,
-        route: HookFeedbackDeliveryRouteV1::HookV2,
     };
     let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
     let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
