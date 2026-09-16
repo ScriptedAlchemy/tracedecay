@@ -998,7 +998,8 @@ where
         ))
         || rust_inherent_method_owned_by_scope_type(
             files,
-            root_path,
+            rust,
+            origin_index,
             scope_index,
             exported_name,
             member,
@@ -1019,48 +1020,73 @@ where
                 ImportModuleKindV1::BareModule => {
                     rust_bare_import_matches(files, rust, binding, target, member)
                 }
-                ImportModuleKindV1::ProjectRelative => {
-                    let Some(imported_name) = binding.imported_name.as_deref() else {
-                        return false;
-                    };
-                    let Some(qualified) = rust_import_qualified_name(
-                        &binding.module_specifier,
-                        imported_name,
-                        scope_path,
-                    ) else {
-                        return false;
-                    };
-                    if rust_crate_qualified_name_matches(
-                        &format!("{qualified}{member}"),
-                        root_path,
-                        target_path,
-                        &target.symbol.qualified_name,
-                    ) {
-                        true
-                    } else if let Some((module, imported_name)) = qualified.rsplit_once("::")
-                        && let Some(next_scope) =
-                            rust.files.module(scope_path, &module.replace("::", "/"))
-                    {
-                        rust_export_resolves_to_target(
-                            files,
-                            rust,
-                            origin_index,
-                            next_scope,
-                            imported_name,
-                            target,
-                            member,
-                            visited,
-                        )
-                    } else {
-                        false
-                    }
-                }
+                ImportModuleKindV1::ProjectRelative => rust_project_import_resolves_to_target(
+                    files,
+                    rust,
+                    origin_index,
+                    scope_path,
+                    binding,
+                    target,
+                    member,
+                    visited,
+                ),
             },
             _ => false,
         }
     };
     rust.reexports.insert(cache_key, resolves);
     resolves
+}
+
+/// Whether the `crate::`/`self::`/`super::` import `binding`, read from the
+/// file at `scope_path`, names `target` (with `member` appended): directly
+/// by the imported path, or through the public re-exports of the module the
+/// path leads into.
+#[allow(clippy::too_many_arguments)]
+fn rust_project_import_resolves_to_target<T>(
+    files: &[T],
+    rust: &mut RustResolutionContextV1<'_>,
+    origin_index: usize,
+    scope_path: &str,
+    binding: &CodeIndexImportEvidenceV1,
+    target: RustSymbolTargetV1<'_>,
+    member: &str,
+    visited: &mut BTreeSet<(usize, String)>,
+) -> bool
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let Some(imported_name) = binding.imported_name.as_deref() else {
+        return false;
+    };
+    let Some(qualified) =
+        rust_import_qualified_name(&binding.module_specifier, imported_name, scope_path)
+    else {
+        return false;
+    };
+    let root_path = &files[origin_index].as_ref().authority.logical_path;
+    if rust_crate_qualified_name_matches(
+        &format!("{qualified}{member}"),
+        root_path,
+        &files[target.index].as_ref().authority.logical_path,
+        &target.symbol.qualified_name,
+    ) {
+        return true;
+    }
+    let (module, imported_name) = qualified.rsplit_once("::").unwrap_or(("", &qualified));
+    let Some(next_scope) = rust.files.module(scope_path, &module.replace("::", "/")) else {
+        return false;
+    };
+    rust_export_resolves_to_target(
+        files,
+        rust,
+        origin_index,
+        next_scope,
+        imported_name,
+        target,
+        member,
+        visited,
+    )
 }
 
 fn project_import_matches(
@@ -1210,11 +1236,15 @@ fn file_qualified_name_matches(
 
 /// An inherent `Type::method` whose owning type is defined in `scope_index`
 /// may live in any other file of the same crate. Validate the type at scope,
-/// then match the method by its file-relative `Type::method` path without
-/// requiring `target.index == scope_index`.
+/// match the method by its file-relative `Type::method` path, and require
+/// the `impl` file to bind `Type` to that same definition: it is the
+/// defining file, or it defines no `Type` of its own and imports the type,
+/// by name or through a glob of a module that exports it. A same-named type
+/// in another module therefore never lends its methods to the scope's type.
 fn rust_inherent_method_owned_by_scope_type<T>(
     files: &[T],
-    root_path: &str,
+    rust: &mut RustResolutionContextV1<'_>,
+    origin_index: usize,
     scope_index: usize,
     exported_name: &str,
     member: &str,
@@ -1226,33 +1256,89 @@ where
     if member.is_empty() {
         return false;
     }
-    let scope_path = &files[scope_index].as_ref().authority.logical_path;
-    let type_defined = files[scope_index]
-        .as_ref()
+    let root_path = &files[origin_index].as_ref().authority.logical_path;
+    let scope = files[scope_index].as_ref();
+    let Some(scope_type) = scope.artifacts.symbols.iter().find(|symbol| {
+        relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
+            && rust_crate_qualified_name_matches(
+                exported_name,
+                root_path,
+                &scope.authority.logical_path,
+                &symbol.qualified_name,
+            )
+    }) else {
+        return false;
+    };
+    let impl_file = files[target.index].as_ref();
+    if !rust_inherent_method_matches(
+        exported_name,
+        member,
+        root_path,
+        &impl_file.authority.logical_path,
+        &target.symbol.qualified_name,
+    ) {
+        return false;
+    }
+    if target.index == scope_index {
+        return true;
+    }
+    let shadowed = impl_file.artifacts.symbols.iter().any(|symbol| {
+        symbol.simple_name == exported_name
+            && relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
+    });
+    if shadowed {
+        return false;
+    }
+    let type_target = RustSymbolTargetV1 {
+        index: scope_index,
+        symbol: scope_type,
+    };
+    let impl_path = impl_file.authority.logical_path.as_str();
+    if let Some(binding) = unique_named_import(impl_file, exported_name) {
+        return binding.module_kind == ImportModuleKindV1::ProjectRelative
+            && rust_project_import_resolves_to_target(
+                files,
+                rust,
+                origin_index,
+                impl_path,
+                binding,
+                type_target,
+                "",
+                &mut BTreeSet::new(),
+            );
+    }
+    let glob_modules = impl_file
         .artifacts
-        .symbols
+        .imports
         .iter()
-        .any(|symbol| {
-            relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
-                && rust_crate_qualified_name_matches(
+        .filter(|binding| {
+            binding.is_glob && binding.module_kind == ImportModuleKindV1::ProjectRelative
+        })
+        .filter_map(|binding| rust_relative_module(&binding.module_specifier, impl_path))
+        .collect::<Vec<_>>();
+    glob_modules.iter().any(|module| {
+        rust.files
+            .module(impl_path, module)
+            .is_some_and(|glob_scope| {
+                rust_export_resolves_to_target(
+                    files,
+                    rust,
+                    origin_index,
+                    glob_scope,
                     exported_name,
-                    root_path,
-                    scope_path,
-                    &symbol.qualified_name,
+                    type_target,
+                    "",
+                    &mut BTreeSet::new(),
                 )
-        });
-    type_defined
-        && rust_inherent_method_matches(
-            exported_name,
-            member,
-            root_path,
-            &files[target.index].as_ref().authority.logical_path,
-            &target.symbol.qualified_name,
-        )
+            })
+    })
 }
 
-/// File-relative inherent method identity: `Type::method`, same crate as
-/// `source_path`, ignoring which module file holds the `impl` block.
+/// File-relative inherent method identity: a top-level `impl Type` block's
+/// `Type::method`, same crate as `source_path`, in whichever module file
+/// holds the `impl`. Methods of an `impl` nested in an inline module are not
+/// matched: their `Type` is bound by that module's own imports, which file
+/// import rows do not attest.
 fn rust_inherent_method_matches(
     type_name: &str,
     member: &str,
@@ -1293,8 +1379,7 @@ fn rust_inherent_method_matches(
     else {
         return false;
     };
-    let expected = format!("{type_name}{member}");
-    symbol_path == expected || symbol_path.ends_with(&format!("::{expected}"))
+    symbol_path == format!("{type_name}{member}")
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`
