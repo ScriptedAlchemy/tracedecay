@@ -194,10 +194,10 @@ fn duplicate_and_mixed_steering_blocks_converge_deterministically() {
 }
 
 #[test]
-fn steering_doctor_judges_sentinels_and_bytes_not_prose() {
-    fn doctor(home: &Path) -> DoctorCounters {
+fn steering_doctor_emits_migration_advisory_for_retired_owned_blocks() {
+    fn advise(home: &Path) -> DoctorCounters {
         let mut counters = DoctorCounters::new();
-        doctor_check_steering(&mut counters, home);
+        doctor_advise_retired_steering(&mut counters, home);
         counters
     }
     let home = tempfile::tempdir().unwrap();
@@ -209,31 +209,34 @@ fn steering_doctor_judges_sentinels_and_bytes_not_prose() {
         "tracedecay MCP tools are great, use tracedecay_grep\n",
     )
     .unwrap();
+    let prose = advise(home.path());
     assert_eq!(
-        doctor(home.path()).issues,
-        1,
-        "prose mentioning tracedecay without the ownership sentinel is not an install"
+        (prose.issues, prose.warnings),
+        (0, 0),
+        "prose without ownership sentinels is not a retired TraceDecay artifact"
     );
 
     std::fs::write(&steering, shipped_block(SHIPPED_HEADING, "stale mandate")).unwrap();
+    let historical = advise(home.path());
+    assert_eq!(historical.issues, 0);
     assert_eq!(
-        doctor(home.path()).issues,
-        1,
-        "a shipped historical block is outdated until update converges it"
+        historical.warnings, 1,
+        "owned historical steering must surface a migration advisory"
     );
 
     install_steering_rules(&steering).unwrap();
-    let healthy = doctor(home.path());
-    assert_eq!((healthy.issues, healthy.warnings), (0, 0));
-
-    let edited = std::fs::read_to_string(&steering)
-        .unwrap()
-        .replace("tracedecay_grep", "rg");
-    std::fs::write(&steering, edited).unwrap();
+    let current_block = advise(home.path());
+    assert_eq!(current_block.issues, 0);
     assert_eq!(
-        doctor(home.path()).issues,
-        1,
-        "an edited owned block is stale even though its sentinels are intact"
+        current_block.warnings, 1,
+        "current owned steering is still retired globally and must advise migration"
+    );
+
+    std::fs::remove_file(&steering).unwrap();
+    assert_eq!(
+        (advise(home.path()).issues, advise(home.path()).warnings),
+        (0, 0),
+        "absent retired steering emits no advisory"
     );
 }
 
@@ -264,7 +267,7 @@ fn healthcheck_skips_steering_when_legacy_file_is_absent() {
 }
 
 #[test]
-fn healthcheck_flags_shipped_heading_steering_until_convergence() {
+fn healthcheck_advises_shipped_heading_steering_as_retired() {
     let home = tempfile::tempdir().unwrap();
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
@@ -290,9 +293,10 @@ fn healthcheck_flags_shipped_heading_steering_until_convergence() {
         },
     );
 
+    assert_eq!(counters.issues, 0);
     assert_eq!(
-        counters.issues, 1,
-        "legacy heading-marked steering must surface as outdated until install converges it"
+        counters.warnings, 1,
+        "legacy heading-marked steering must surface as a migration advisory"
     );
 
     install_steering_rules(&steering).unwrap();
@@ -305,11 +309,15 @@ fn healthcheck_flags_shipped_heading_steering_until_convergence() {
         },
     );
     assert_eq!(counters.issues, 0);
+    assert_eq!(
+        counters.warnings, 1,
+        "converged owned steering is still retired globally and must keep advising migration"
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn global_activate_converges_legacy_steering_so_doctor_clears() {
+fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
     use crate::agents::host_bundle::HostBundleComponentV1;
     use crate::agents::{AgentIntegration, InstallContext};
 
@@ -329,7 +337,7 @@ fn global_activate_converges_legacy_steering_so_doctor_clears() {
     .unwrap();
 
     let mut counters = DoctorCounters::new();
-    // Pretend MCP is already installed so doctor reaches the steering check.
+    // Pretend MCP is already installed so doctor reaches retired-artifact advisories.
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -344,7 +352,11 @@ fn global_activate_converges_legacy_steering_so_doctor_clears() {
             project_path: home.path().to_path_buf(),
         },
     );
-    assert_eq!(counters.issues, 1, "precondition: legacy steering is red");
+    assert_eq!(counters.issues, 0);
+    assert_eq!(
+        counters.warnings, 1,
+        "precondition: legacy steering emits a migration advisory"
+    );
 
     KiroIntegration
         .activate_deployed_host_component_registration(
@@ -383,9 +395,10 @@ fn global_activate_converges_legacy_steering_so_doctor_clears() {
             project_path: home.path().to_path_buf(),
         },
     );
+    assert_eq!(counters.issues, 0);
     assert_eq!(
-        counters.issues, 0,
-        "install remedy must clear the doctor failure it reports"
+        counters.warnings, 1,
+        "converged leftover steering remains a retired global artifact until uninstall sweeps it"
     );
 }
 
