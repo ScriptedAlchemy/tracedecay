@@ -66,6 +66,22 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     /// the whole route window uncancellable, so the token must be raced
     /// *around* asynchronous route resolution as well as sampled before
     /// dispatch admission.
+    ///
+    /// Sticky is not interruptible, and that is the contract, not an
+    /// oversight: once a request is admitted, its selected target owns the
+    /// cancelled terminal and the request/error accounting, and the target is
+    /// not known until the route resolves. An implementation must therefore
+    /// finish route resolution and let the target settle the cancel rather
+    /// than abandoning the dispatch and answering from the caller, so a cancel
+    /// arriving during a long route becomes visible only once routing
+    /// completes.
+    ///
+    /// A cancel that [`Self::cancel_request`] reports as unregistered is not
+    /// automatically "never registerable": route resolution has not yet called
+    /// `prepare_dispatch_control`. Transports must wait on
+    /// [`Self::cancellation_registered`] (as the legacy connection does) so
+    /// the sticky sample and selected target still settle. Abandon only when
+    /// the cancel can never register — no registration wait channel.
     fn dispatch<'a>(
         &'a self,
         request: McpDispatchRequest<'a>,
