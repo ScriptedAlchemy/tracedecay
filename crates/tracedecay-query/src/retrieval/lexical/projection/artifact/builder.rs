@@ -40,7 +40,8 @@ use super::format::{
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::{
-    PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1, prepare_page as prepare_page_values,
+    PreparedCloneBodyV1, PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1,
+    prepare_page as prepare_page_values,
 };
 use super::schema::{
     CodeLexicalArtifactWriterRevisionV1, LexicalArtifactLayoutV1, derive_row_dictionary,
@@ -3655,6 +3656,7 @@ struct MultiRowInsertV1<'transaction, 'row> {
     transaction: &'transaction Transaction<'transaction>,
     table_columns: &'static str,
     columns: usize,
+    conflict_clause: &'static str,
     full_statement: rusqlite::CachedStatement<'transaction>,
     buffer: Vec<ToSqlOutput<'row>>,
     map_error: fn(rusqlite::Error) -> CodeLexicalArtifactErrorV1,
@@ -3667,17 +3669,34 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
         columns: usize,
         map_error: fn(rusqlite::Error) -> CodeLexicalArtifactErrorV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::new_with_conflict_clause(transaction, table_columns, columns, "", map_error)
+    }
+
+    /// Same as [`Self::new`], but every flushed statement carries
+    /// `conflict_clause` (e.g. `" ON CONFLICT(payload_digest) DO NOTHING"`)
+    /// after its `VALUES (...)` tuples, for tables whose rows may
+    /// legitimately repeat an existing key (content-addressed dedup) rather
+    /// than signal a bug.
+    fn new_with_conflict_clause(
+        transaction: &'transaction Transaction<'transaction>,
+        table_columns: &'static str,
+        columns: usize,
+        conflict_clause: &'static str,
+        map_error: fn(rusqlite::Error) -> CodeLexicalArtifactErrorV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         let full_statement = transaction
             .prepare_cached(&multi_row_insert_sql(
                 table_columns,
                 columns,
                 INSERT_ROWS_PER_STATEMENT,
+                conflict_clause,
             ))
             .map_err(map_error)?;
         Ok(Self {
             transaction,
             table_columns,
             columns,
+            conflict_clause,
             full_statement,
             buffer: Vec::with_capacity(columns * INSERT_ROWS_PER_STATEMENT),
             map_error,
@@ -3715,6 +3734,7 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
                 self.table_columns,
                 self.columns,
                 rows,
+                self.conflict_clause,
             ))
             .map_err(self.map_error)?;
         tail.execute(rusqlite::params_from_iter(self.buffer.iter()))
@@ -3724,7 +3744,12 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
     }
 }
 
-fn multi_row_insert_sql(table_columns: &str, columns: usize, rows: usize) -> String {
+fn multi_row_insert_sql(
+    table_columns: &str,
+    columns: usize,
+    rows: usize,
+    conflict_clause: &str,
+) -> String {
     let tuple = format!(
         "({})",
         std::iter::repeat_n("?", columns)
@@ -3732,7 +3757,7 @@ fn multi_row_insert_sql(table_columns: &str, columns: usize, rows: usize) -> Str
             .join(", ")
     );
     format!(
-        "INSERT INTO {table_columns} VALUES {}",
+        "INSERT INTO {table_columns} VALUES {}{conflict_clause}",
         std::iter::repeat_n(tuple.as_str(), rows)
             .collect::<Vec<_>>()
             .join(", ")
@@ -3751,65 +3776,123 @@ fn sql_blob(value: &[u8]) -> ToSqlOutput<'_> {
     ToSqlOutput::Borrowed(ValueRef::Blob(value))
 }
 
+/// Digests checked against on-disk `clone_body_payloads` content in one
+/// `IN (...)` query per chunk, instead of one `SELECT` per body. Five
+/// columns of overhead at [`INSERT_ROWS_PER_STATEMENT`] rows stays well
+/// clear of SQLite's 999-parameter floor for a single-column `IN` list too.
+const PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK: usize = 512;
+
+/// Verify that every payload digest about to be staged in this batch
+/// agrees, byte for byte, with the payload already recorded under that
+/// digest — either earlier in this same batch (checked in memory, no I/O)
+/// or in a prior batch already committed to `clone_body_payloads` (checked
+/// with one batched `SELECT ... WHERE payload_digest IN (...)` per chunk of
+/// unique digests, rather than a `SELECT` after every single insert). A
+/// fresh digest with no prior occurrence anywhere needs no read at all: it
+/// cannot conflict with content that was never stored.
+fn verify_clone_payload_digests<'body>(
+    transaction: &Transaction<'_>,
+    bodies: &[&'body PreparedCloneBodyV1],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut staged: HashMap<&'body str, &'body [u8]> = HashMap::with_capacity(bodies.len());
+    for body in bodies {
+        checkpoint(control)?;
+        match staged.entry(body.payload_digest.as_str()) {
+            std::collections::hash_map::Entry::Occupied(existing) => {
+                if *existing.get() != body.payload.as_slice() {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "clone payload digest collision".to_owned(),
+                    ));
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(body.payload.as_slice());
+            }
+        }
+    }
+    let digests: Vec<&str> = staged.keys().copied().collect();
+    for chunk in digests.chunks(PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK) {
+        checkpoint(control)?;
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT payload_digest, payload FROM clone_body_payloads WHERE payload_digest IN ({placeholders})"
+        );
+        let mut statement = transaction.prepare_cached(&sql).map_err(sqlite_error)?;
+        let mut rows = statement
+            .query(rusqlite::params_from_iter(chunk.iter()))
+            .map_err(sqlite_error)?;
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            let digest: String = row.get(0).map_err(sqlite_error)?;
+            let stored: Vec<u8> = row.get(1).map_err(sqlite_error)?;
+            if let Some(expected) = staged.get(digest.as_str())
+                && *expected != stored.as_slice()
+            {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "clone payload digest collision".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn append_prepared_clone_bodies(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mut insert_payload = transaction
-        .prepare_cached(
-            "INSERT INTO clone_body_payloads(payload_digest, payload) VALUES (?1, ?2) ON CONFLICT(payload_digest) DO NOTHING",
-        )
-        .map_err(sqlite_error)?;
-    let mut read_payload = transaction
-        .prepare_cached("SELECT payload FROM clone_body_payloads WHERE payload_digest = ?1")
-        .map_err(sqlite_error)?;
-    let mut insert_occurrence = transaction
-        .prepare_cached(
-            "INSERT INTO clone_occurrences(symbol_occurrence_id, payload_digest, path, body_start, body_end, occurrence) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .map_err(sqlite_error)?;
-    let mut insert_posting = transaction
-        .prepare_cached(
-            "INSERT INTO clone_exact_postings(class, normalization_revision, digest, symbol_occurrence_id, payload_digest) VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .map_err(sqlite_error)?;
-    for page in pages {
-        for body in &page.clone_bodies {
+    let bodies: Vec<_> = pages
+        .iter()
+        .flat_map(|page| page.clone_bodies.iter())
+        .collect();
+    if !bodies.is_empty() {
+        verify_clone_payload_digests(transaction, &bodies, control)?;
+        let mut payload_insert = MultiRowInsertV1::new_with_conflict_clause(
+            transaction,
+            "clone_body_payloads(payload_digest, payload)",
+            2,
+            " ON CONFLICT(payload_digest) DO NOTHING",
+            sqlite_error,
+        )?;
+        let mut occurrence_insert = MultiRowInsertV1::new(
+            transaction,
+            "clone_occurrences(symbol_occurrence_id, payload_digest, path, body_start, body_end, occurrence)",
+            6,
+            sqlite_error,
+        )?;
+        let mut posting_insert = MultiRowInsertV1::new(
+            transaction,
+            "clone_exact_postings(class, normalization_revision, digest, symbol_occurrence_id, payload_digest)",
+            5,
+            sqlite_error,
+        )?;
+        for body in &bodies {
             checkpoint(control)?;
-            insert_payload
-                .execute(params![body.payload_digest, body.payload])
-                .map_err(sqlite_error)?;
-            let stored: Vec<u8> = read_payload
-                .query_row(params![body.payload_digest], |row| row.get(0))
-                .map_err(sqlite_error)?;
-            if stored != body.payload {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "clone payload digest collision".to_owned(),
-                ));
-            }
-            insert_occurrence
-                .execute(params![
-                    body.symbol_occurrence_id,
-                    body.payload_digest,
-                    body.path,
-                    i64::try_from(body.body_start).map_err(contract_number)?,
-                    i64::try_from(body.body_end).map_err(contract_number)?,
-                    body.occurrence,
-                ])
-                .map_err(sqlite_error)?;
+            payload_insert.push([sql_text(&body.payload_digest), sql_blob(&body.payload)])?;
+            occurrence_insert.push([
+                sql_text(&body.symbol_occurrence_id),
+                sql_text(&body.payload_digest),
+                sql_text(&body.path),
+                sql_integer(i64::try_from(body.body_start).map_err(contract_number)?),
+                sql_integer(i64::try_from(body.body_end).map_err(contract_number)?),
+                sql_blob(&body.occurrence),
+            ])?;
             for key in &body.exact_keys {
-                insert_posting
-                    .execute(params![
-                        i64::from(key.class as u8),
-                        i64::from(key.normalization_revision),
-                        key.digest.as_str(),
-                        body.symbol_occurrence_id,
-                        body.payload_digest,
-                    ])
-                    .map_err(sqlite_error)?;
+                posting_insert.push([
+                    sql_integer(i64::from(key.class as u8)),
+                    sql_integer(i64::from(key.normalization_revision)),
+                    sql_text(key.digest.as_str()),
+                    sql_text(&body.symbol_occurrence_id),
+                    sql_text(&body.payload_digest),
+                ])?;
             }
         }
+        payload_insert.finish()?;
+        occurrence_insert.finish()?;
+        posting_insert.finish()?;
     }
     append_prepared_clone_fingerprints(transaction, pages, control)
 }
