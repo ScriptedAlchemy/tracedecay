@@ -255,6 +255,26 @@ pub(crate) mod fake_rustup {
         dir
     }
 
+    /// `rustup which` answers from the working directory, as rustup resolves
+    /// a toolchain override from where it is run: it prints the contents of
+    /// `PER_ROOT_ANALYZER_FILE` in `$PWD` when that file exists and otherwise
+    /// fails like rustup does for an uninstalled toolchain.
+    pub(crate) const PER_ROOT_ANALYZER_FILE: &str = ".analyzer-for-toolchain";
+
+    pub(crate) fn install_per_root() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("invocations.log");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" \"AUTO_INSTALL=${{RUSTUP_AUTO_INSTALL-unset}}\" \"PWD=$PWD\" >> '{}'\nif [ -f \"$PWD/{PER_ROOT_ANALYZER_FILE}\" ]; then cat \"$PWD/{PER_ROOT_ANALYZER_FILE}\"; exit 0; fi\necho \"error: toolchain '1.95.0' is not installed\" >&2\nexit 1\n",
+            record.display()
+        );
+        let rustup = dir.path().join("rustup");
+        std::fs::write(&rustup, body).unwrap();
+        std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&rustup, dir.path().join("rust-analyzer")).unwrap();
+        dir
+    }
+
     pub(crate) fn invocations(dir: &Path) -> String {
         std::fs::read_to_string(dir.join("invocations.log")).unwrap_or_default()
     }

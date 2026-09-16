@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +13,10 @@ use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
     pub(crate) workspace_root: PathBuf,
+    /// Resolved from this batch's own workspace root: nested roots may pin
+    /// different toolchains, so each batch spawns the binary rustup reports
+    /// for its root rather than the one the project root resolved to.
+    pub(crate) launch: AnalyzerLaunch,
     pub(crate) documents: Vec<LspDocument>,
     pub(crate) client: Arc<SharedAnalyzerClient>,
 }
@@ -66,13 +70,12 @@ impl PreparedRefreshReservation {
     }
 }
 
-/// What every batch of a refresh spawns: the configured command (for
-/// operator-facing messages), the launch it resolved to, and the adapter's
-/// arguments.
+/// What every batch of a refresh shares: the configured command (for
+/// operator-facing messages) and the adapter's arguments. The program each
+/// batch runs is its own [`RefreshBatch::launch`].
 #[derive(Clone)]
 pub(crate) struct AnalyzerSpawn {
     pub(crate) command: String,
-    pub(crate) launch: AnalyzerLaunch,
     pub(crate) args: Vec<String>,
 }
 
@@ -117,9 +120,13 @@ impl PreparedRefresh {
         }
     }
 
-    /// The exact program and environment every batch of this refresh spawns.
-    pub fn launch(&self) -> &AnalyzerLaunch {
-        &self.spawn.launch
+    /// The exact program and environment each workspace-root batch of this
+    /// refresh spawns, in batch order.
+    pub fn batch_launches(&self) -> Vec<(&Path, &AnalyzerLaunch)> {
+        self.batches
+            .iter()
+            .map(|batch| (batch.workspace_root.as_path(), &batch.launch))
+            .collect()
     }
 
     pub async fn collect_diagnostics(
@@ -212,11 +219,8 @@ async fn collect_refresh_batch(
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
 ) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
-    let AnalyzerSpawn {
-        command,
-        launch,
-        args,
-    } = spawn;
+    let AnalyzerSpawn { command, args } = spawn;
+    let launch = batch.launch;
     let shared = batch.client;
     let mut client_slot = shared
         .client()

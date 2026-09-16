@@ -201,6 +201,11 @@ pub struct DiagnosticBroker {
     settings: CodeDiagnosticsSettings,
     diagnostics: Vec<CodeDiagnostic>,
     clients: BTreeMap<LspSessionKey, Arc<SharedAnalyzerClient>>,
+    /// Launches already resolved, keyed by configured command and the
+    /// workspace root the probe ran from. Only successes are retained: a
+    /// refused root is probed again so an operator's `rustup component add`
+    /// is seen without a restart.
+    launches: BTreeMap<(String, PathBuf), AnalyzerLaunch>,
     engine_overrides: BTreeMap<String, EngineState>,
     engine_errors: BTreeMap<String, String>,
     refresh_epochs: BTreeMap<String, u64>,
@@ -230,6 +235,7 @@ impl DiagnosticBroker {
             settings,
             diagnostics: Vec::new(),
             clients: BTreeMap::new(),
+            launches: BTreeMap::new(),
             engine_overrides: BTreeMap::new(),
             engine_errors: BTreeMap::new(),
             refresh_epochs: BTreeMap::new(),
@@ -383,7 +389,7 @@ impl DiagnosticBroker {
                 message: format!("no LSP adapter registered for language '{language}'"),
             })?;
         let command = self.settings.command_for(language, &adapter.command);
-        let Ok(launch) = self.resolve_launch(language, &command) else {
+        let Ok(launch) = self.resolve_launch(language, &command, &workspace_root) else {
             return Ok(None);
         };
         let key = LspSessionKey {
@@ -412,6 +418,7 @@ impl DiagnosticBroker {
     pub fn update_adapters(&mut self, adapters: Vec<LspAdapterDefinition>) {
         self.adapters = adapters;
         self.clients.clear();
+        self.launches.clear();
     }
 
     pub fn update_project_languages(&mut self, languages: BTreeSet<String>) {
@@ -534,12 +541,6 @@ impl DiagnosticBroker {
             })?;
 
         let command = self.settings.command_for(language, &adapter.command);
-        let launch =
-            self.resolve_launch(language, &command)
-                .map_err(|error| TraceDecayError::Config {
-                    message: error.engine_error(),
-                })?;
-
         let project_root = self.project_root.clone();
         let canonical_project_root = canonicalize_project_root(&project_root).map_err(|error| {
             let message = format!("failed to resolve admitted project root: {error}");
@@ -550,9 +551,6 @@ impl DiagnosticBroker {
             self.remove_language_clients(language);
             TraceDecayError::Config { message }
         })?;
-        self.engine_overrides
-            .insert(language.to_string(), EngineState::Refreshing);
-        let epoch = self.next_refresh_epoch(language);
         let mut documents_by_root: BTreeMap<PathBuf, Vec<LspDocument>> = BTreeMap::new();
         for document in documents {
             let workspace_root = adapter_workspace_root_from_canonical_root(
@@ -577,22 +575,38 @@ impl DiagnosticBroker {
                 .insert(language.to_string(), EngineState::Unavailable);
             return Err(TraceDecayError::Config { message });
         }
+        // Each root resolves its own binary: rustup reads the toolchain
+        // override from the directory the analyzer starts in, and nested
+        // roots may pin a toolchain the project root does not. A refusal for
+        // any root is the language's typed `Unavailable` state; nothing spawns.
+        let mut resolved_roots = Vec::with_capacity(documents_by_root.len());
+        for (workspace_root, documents) in documents_by_root {
+            let launch = self
+                .resolve_launch(language, &command, &workspace_root)
+                .map_err(|error| TraceDecayError::Config {
+                    message: error.engine_error(),
+                })?;
+            resolved_roots.push((workspace_root, launch, documents));
+        }
+        self.engine_overrides
+            .insert(language.to_string(), EngineState::Refreshing);
+        let epoch = self.next_refresh_epoch(language);
         let reservation = self
             .refresh_capacity
-            .reserve(documents_by_root.len())
+            .reserve(resolved_roots.len())
             .ok_or_else(|| {
                 let message = format!(
                     "analyzer root queue saturated: {} batches exceed the {MAX_ANALYZER_QUEUED_ROOT_BATCHES} limit",
-                    documents_by_root.len()
+                    resolved_roots.len()
                 );
                 self.engine_errors.insert(language.to_string(), message.clone());
                 self.engine_overrides
                     .insert(language.to_string(), EngineState::Unavailable);
                 TraceDecayError::Config { message }
             })?;
-        let batches = documents_by_root
+        let batches = resolved_roots
             .into_iter()
-            .map(|(workspace_root, documents)| {
+            .map(|(workspace_root, launch, documents)| {
                 let session_key = LspSessionKey {
                     language: language.to_string(),
                     command: command.clone(),
@@ -607,6 +621,7 @@ impl DiagnosticBroker {
                     .clone();
                 RefreshBatch {
                     workspace_root,
+                    launch,
                     documents,
                     client,
                 }
@@ -617,7 +632,6 @@ impl DiagnosticBroker {
             canonical_project_root,
             AnalyzerSpawn {
                 command,
-                launch,
                 args: adapter.args,
             },
             epoch,
@@ -626,22 +640,32 @@ impl DiagnosticBroker {
         )))
     }
 
-    /// Resolves the executable for `command` in this project, recording a
-    /// refusal as the language's typed `Unavailable` state so the snapshot
-    /// reports why no analyzer runs instead of an `Available` engine that
-    /// `TraceDecay` will never start.
+    /// Resolves the executable for `command` as started from `workspace_root`,
+    /// recording a refusal as the language's typed `Unavailable` state so the
+    /// snapshot reports why no analyzer runs instead of an `Available` engine
+    /// that `TraceDecay` will never start. Successful resolutions are retained
+    /// per root.
     fn resolve_launch(
         &mut self,
         language: &str,
         command: &str,
+        workspace_root: &Path,
     ) -> std::result::Result<AnalyzerLaunch, AnalyzerLaunchError> {
-        resolve_analyzer_launch(command, &self.project_root).inspect_err(|error| {
-            self.engine_errors
-                .insert(language.to_string(), error.engine_error());
-            self.engine_overrides
-                .insert(language.to_string(), EngineState::Unavailable);
-            self.remove_language_clients(language);
-        })
+        let key = (command.to_owned(), workspace_root.to_path_buf());
+        if let Some(launch) = self.launches.get(&key) {
+            return Ok(launch.clone());
+        }
+        resolve_analyzer_launch(command, workspace_root)
+            .inspect(|launch| {
+                self.launches.insert(key, launch.clone());
+            })
+            .inspect_err(|error| {
+                self.engine_errors
+                    .insert(language.to_string(), error.engine_error());
+                self.engine_overrides
+                    .insert(language.to_string(), EngineState::Unavailable);
+                self.remove_language_clients(language);
+            })
     }
 
     pub async fn refresh_documents(
@@ -725,6 +749,7 @@ impl DiagnosticBroker {
         // read at mount time is no longer what it is serving.
         self.settings_unavailable = None;
         self.clients.clear();
+        self.launches.clear();
         self.engine_overrides.clear();
         let disabled_languages: Vec<String> = self
             .settings

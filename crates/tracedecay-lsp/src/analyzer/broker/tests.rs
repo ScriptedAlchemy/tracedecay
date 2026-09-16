@@ -308,12 +308,114 @@ mod rustup_proxy {
             .prepare_refresh("rust", vec![rust_document()])
             .expect("installed component prepares")
             .expect("active language prepares");
-        assert_eq!(prepared.launch().program, real_binary);
+        let launches = prepared.batch_launches();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].1.program, real_binary);
         assert_eq!(
-            prepared.launch().env,
+            launches[0].1.env,
             vec![(RUSTUP_AUTO_INSTALL_ENV.to_owned(), "0".to_owned())]
         );
         assert_eq!(broker.snapshot().engines[0].state, EngineState::Refreshing);
+    }
+
+    /// Nested analyzer roots may pin different toolchains. rustup resolves the
+    /// override from the directory it runs in, so the launch must be resolved
+    /// from each batch's own workspace root — never the project root's
+    /// answer reused for every batch — and retained per root.
+    #[test]
+    fn nested_root_with_its_own_toolchain_override_launches_its_own_binary() {
+        let rustup = fake_rustup::install_per_root();
+        let project = rust_project();
+        let member = project.path().join("member");
+        std::fs::create_dir_all(member.join("src")).expect("member src");
+        std::fs::write(member.join("Cargo.toml"), "").expect("member root marker");
+        std::fs::write(member.join("src/lib.rs"), "pub fn member() {}").expect("member lib.rs");
+        let binaries = tempfile::tempdir().expect("toolchain binaries");
+        let root_binary = binaries.path().join("stable/rust-analyzer");
+        let member_binary = binaries.path().join("nightly/rust-analyzer");
+        for binary in [&root_binary, &member_binary] {
+            std::fs::create_dir_all(binary.parent().expect("toolchain dir")).expect("toolchain");
+            std::fs::write(binary, "").expect("toolchain analyzer");
+        }
+        std::fs::write(
+            project.path().join(fake_rustup::PER_ROOT_ANALYZER_FILE),
+            format!("{}\n", root_binary.display()),
+        )
+        .expect("root override");
+        std::fs::write(
+            member.join(fake_rustup::PER_ROOT_ANALYZER_FILE),
+            format!("{}\n", member_binary.display()),
+        )
+        .expect("member override");
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+        let documents = || {
+            vec![
+                rust_document(),
+                LspDocument {
+                    language: "rust".to_owned(),
+                    language_id: "rust".to_owned(),
+                    relative_path: "member/src/lib.rs".to_owned(),
+                    text: "pub fn member() {}".to_owned(),
+                },
+            ]
+        };
+        let canonical_root = project.path().canonicalize().expect("canonical project");
+        let canonical_member = member.canonicalize().expect("canonical member");
+
+        let prepared = broker
+            .prepare_refresh("rust", documents())
+            .expect("both toolchains have the component")
+            .expect("active language prepares");
+
+        let launches = prepared.batch_launches();
+        assert_eq!(
+            launches
+                .iter()
+                .map(|(root, launch)| (root.to_path_buf(), launch.program.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (canonical_root.clone(), root_binary.clone()),
+                (canonical_member.clone(), member_binary.clone()),
+            ],
+            "each batch launches the binary its own root resolves to"
+        );
+        assert!(
+            launches.iter().all(|(_, launch)| {
+                launch.env == vec![(RUSTUP_AUTO_INSTALL_ENV.to_owned(), "0".to_owned())]
+            }),
+            "every batch carries the no-install environment"
+        );
+        let invocations = fake_rustup::invocations(rustup.path());
+        for root in [&canonical_root, &canonical_member] {
+            assert!(
+                invocations.contains(&format!("PWD={}", root.display())),
+                "rustup which must run from {}: {invocations}",
+                root.display()
+            );
+        }
+        assert!(!invocations.contains("AUTO_INSTALL=unset"), "{invocations}");
+        let probes = |log: &str| log.lines().filter(|line| line.contains(" which ")).count();
+        assert_eq!(probes(&invocations), 2, "one probe per root: {invocations}");
+        drop(prepared);
+
+        broker
+            .prepare_refresh("rust", documents())
+            .expect("retained launches prepare")
+            .expect("active language prepares");
+        assert_eq!(
+            probes(&fake_rustup::invocations(rustup.path())),
+            2,
+            "a resolved root is retained, not probed again"
+        );
     }
 }
 
