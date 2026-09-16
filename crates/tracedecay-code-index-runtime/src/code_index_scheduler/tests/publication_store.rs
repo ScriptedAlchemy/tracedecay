@@ -447,24 +447,21 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
         let result = source.next_page(&UninterruptibleCodeIndexControlV1);
         sent.send((source, result)).expect("return lexical source");
     });
-    let response = received.recv_timeout(Duration::from_secs(2));
+    let held = received.recv_timeout(Duration::from_millis(500));
+    assert!(
+        matches!(held, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "an exclusive publication hold must park the lexical reader, not fail it"
+    );
     drop(lock);
     reader.join().expect("lexical reader exits");
-    let (mut source, result) =
-        response.expect("busy publication must not block the lexical reader");
+    let (mut source, result) = received
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the lexical reader resumes once the publication hold is released");
     assert!(matches!(
-        result,
-        Err(CodeIndexProductionErrorV1::Publication(
-            CodeIndexPublicationStoreErrorV1::Unavailable(_)
-        ))
-    ));
-    assert_eq!(source.cursor(), &initial_cursor);
-    assert!(matches!(
-        source
-            .next_page(&UninterruptibleCodeIndexControlV1)
-            .expect("retry after publication unlock"),
+        result.expect("read after publication unlock"),
         VerifiedSealedLexicalPageReadV1::Page(_)
     ));
+    assert_ne!(source.cursor(), &initial_cursor);
     source
         .rewind()
         .expect("rewind before retiring unread source");
