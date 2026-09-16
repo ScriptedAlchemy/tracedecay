@@ -6,7 +6,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use thiserror::Error;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
@@ -86,13 +85,12 @@ pub enum DeferredMountAttemptV1 {
 /// The open-time mount runs before code-index activation, so the first ready
 /// check usually misses. Wake sources are event-driven only:
 /// - a matching `Published` broadcast on a fresh build;
+/// - registry-wide root-mounted watches so a pre-activation subscribe can
+///   re-attach the per-worktree serving-generation watch after mount;
 /// - serving-slot / serving-generation watches for a restart `Noop` restore
 ///   that never rebroadcasts (partitioned recovery may leave the decoded seat
 ///   empty and only flip the generation watch);
-/// - on `Lagged`, one short settle then an immediate retry — never a standing
-///   1 Hz ready poll.
-const DEFERRED_MOUNT_LAGGED_SETTLE: Duration = Duration::from_millis(50);
-
+/// - on `Lagged`, retry immediately. Never a standing 1 Hz ready poll.
 pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
@@ -103,6 +101,7 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
 {
     let mut publications = registry.subscribe_generation_publications();
     let mut serving_seats = registry.subscribe_serving_seats();
+    let mut root_mounted = registry.subscribe_root_mounted();
     let mut serving_changes = None;
     loop {
         // Subscribe before probing so a seat that lands between subscribe and
@@ -132,11 +131,9 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
                 // which is what the previous per-root filter also paid.
                 Ok(_) => {}
                 // A lagged receiver dropped publications; one of them may have
-                // been this project's. Settle briefly so seating can finish,
-                // then retry — do not install a standing timer.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    tokio::time::sleep(DEFERRED_MOUNT_LAGGED_SETTLE).await;
-                }
+                // been this project's. Retry immediately; do not install a
+                // standing timer.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             },
             serving = async {
@@ -151,6 +148,11 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
             }
             seat = serving_seats.changed() => {
                 if seat.is_err() {
+                    return;
+                }
+            }
+            mounted = root_mounted.changed() => {
+                if mounted.is_err() {
                     return;
                 }
             }
