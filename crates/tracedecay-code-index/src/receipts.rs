@@ -743,11 +743,7 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            vec![
-                "chunk.v1.added",
-                "chunk.v1.deleted",
-                "chunk.v1.updated"
-            ]
+            vec!["chunk.v1.added", "chunk.v1.deleted", "chunk.v1.updated"]
         );
 
         // The publication digest recomputes, and verification passes.
@@ -852,10 +848,12 @@ mod tests {
             .collect();
         let compact = build_batch_receipt(&request, &without_reused).expect("reused needs no row");
         assert_eq!(compact.reused_count, 1);
-        assert!(!compact
-            .receipts
-            .iter()
-            .any(|receipt| receipt.chunk_id == chunk("reused")));
+        assert!(
+            !compact
+                .receipts
+                .iter()
+                .any(|receipt| receipt.chunk_id == chunk("reused"))
+        );
 
         // Extra: a decision for a chunk the request does not name.
         let mut extra = mixed_decisions();

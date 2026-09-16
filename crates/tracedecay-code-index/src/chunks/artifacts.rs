@@ -383,7 +383,7 @@ impl CodeFileIndexArtifactsV1 {
         if let Some(pair) = self.clone_bodies.windows(2).find(|pair| {
             pair[0].occurrence.symbol_occurrence_id >= pair[1].occurrence.symbol_occurrence_id
         }) {
-            return Err(ChunkingFailureV1::NonCanonicalCloneBodyOrder(
+            return Err(ChunkingFailureV1::NonCanonicalCloneBodyOrder(Box::new(
                 NonCanonicalCloneBodyOrderV1 {
                     path: pair[0].occurrence.path.clone(),
                     file_occurrence_id: self.chunks.document.file_occurrence_id.clone(),
@@ -396,7 +396,7 @@ impl CodeFileIndexArtifactsV1 {
                     right_bound_to_symbol: occurrences
                         .contains(&pair[1].occurrence.symbol_occurrence_id),
                 },
-            ));
+            )));
         }
         for body in &self.clone_bodies {
             if body.occurrence.path.is_empty() {
@@ -414,9 +414,7 @@ impl CodeFileIndexArtifactsV1 {
                     "clone body evidence payload digest does not match its payload".to_owned(),
                 ));
             }
-            if validate_payloads
-                && let Err(detail) = body.payload.validate()
-            {
+            if validate_payloads && let Err(detail) = body.payload.validate() {
                 return Err(ChunkingFailureV1::NonCanonicalIdentity(format!(
                     "clone body evidence payload is not canonical: {detail}"
                 )));
@@ -734,8 +732,7 @@ mod schema_evidence_tests {
             right_symbol_occurrence_id: symbol("right"),
             right_bound_to_symbol: false,
         };
-        let message =
-            ChunkingFailureV1::NonCanonicalCloneBodyOrder(detail).to_string();
+        let message = ChunkingFailureV1::NonCanonicalCloneBodyOrder(Box::new(detail)).to_string();
         assert!(message.contains("symbol-occurrence order"));
         assert!(!message.contains("sha256:"));
         assert!(!message.contains("symbol.v1.left"));

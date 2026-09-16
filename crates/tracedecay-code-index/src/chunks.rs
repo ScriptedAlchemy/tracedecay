@@ -22,7 +22,7 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CodeSearchChunkV1, ComplexityAnalysisV1, ContentDigest, Edge, EdgeAuthorityV1, EdgeKind,
     ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest,
-    FileOccurrenceId, LanguageDescriptorV1, ManifestDigest, MAX_CHUNK_TEXT_BYTES, Node, NodeKind,
+    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, ManifestDigest, Node, NodeKind,
     PolicyRevisionId, RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision,
     SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef,
     ValidatedCodeFileV1, canonical_sha256, classify_technical_token, split_subtokens,
@@ -102,8 +102,10 @@ pub enum ChunkingFailureV1 {
     Cancelled,
     #[error("chunk identity inputs are not canonical: {0}")]
     NonCanonicalIdentity(String),
+    /// Boxed: the detail is several identities wide and this is the cold
+    /// contract-violation path, so it must not size every chunking `Result`.
     #[error("clone body evidence is not in strict symbol-occurrence order")]
-    NonCanonicalCloneBodyOrder(NonCanonicalCloneBodyOrderV1),
+    NonCanonicalCloneBodyOrder(Box<NonCanonicalCloneBodyOrderV1>),
 }
 
 /// The deterministic chunker contract (Plan 25: `src/code_index/chunks.rs`
