@@ -23,7 +23,7 @@ use tracedecay_session_memory::session::{
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
     SessionTemporalExecutionError, SessionTemporalQuery,
 };
-use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
+use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServingStatusPort};
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 
 use crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
@@ -494,27 +494,35 @@ pub struct DaemonSessionRetrievalService {
     database: RegisteredGlobalDbLeaseV1,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
-    refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
+    /// Where the projection's currency is read from. A service mounted with no
+    /// refresh worker carries [`RefreshWorkerMissing`], so `RequireFresh` is
+    /// refused with that reason instead of being served as fresh.
+    refresh_status: Arc<dyn SessionProjectionServingStatusPort>,
 }
 
 impl DaemonSessionRetrievalService {
     pub fn new(
         database: RegisteredGlobalDbLeaseV1,
         root: DaemonSessionRetrievalRoot,
-        refresh_status: Option<SessionTemporalRefreshWake>,
+        refresh_status: SessionTemporalRefreshWake,
     ) -> Option<Self> {
-        Self::new_with_serving_port(
-            database,
-            root,
-            refresh_status
-                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
-        )
+        Self::new_with_serving_port(database, root, Arc::new(refresh_status))
+    }
+
+    /// A service for a store that has no refresh worker mounted. Reads that
+    /// accept stored data are served; `RequireFresh` is refused as
+    /// `RefreshWorkerMissing`.
+    pub fn new_without_refresh_worker(
+        database: RegisteredGlobalDbLeaseV1,
+        root: DaemonSessionRetrievalRoot,
+    ) -> Option<Self> {
+        Self::new_with_serving_port(database, root, Arc::new(RefreshWorkerMissing))
     }
 
     pub fn new_with_serving_port(
         database: RegisteredGlobalDbLeaseV1,
         mut root: DaemonSessionRetrievalRoot,
-        refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
+        refresh_status: Arc<dyn SessionProjectionServingStatusPort>,
     ) -> Option<Self> {
         if !root.bind_runtime_shard(&database.binding().shard_id) {
             return None;
@@ -532,7 +540,7 @@ impl DaemonSessionRetrievalService {
     }
 
     fn refresh_not_current(&self) -> Option<SessionRetrievalUnavailable> {
-        serving_status::not_current_unavailable(self.refresh_status.as_deref()?)
+        serving_status::not_current_unavailable(self.refresh_status.as_ref())
     }
 
     fn registered_execution(

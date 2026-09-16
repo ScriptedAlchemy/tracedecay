@@ -105,12 +105,9 @@ impl RetiredRefreshFixture {
         let session_store_id = identity.store_id().clone();
         let session_root_id = identity.root_id().clone();
         let configuration_digest = ManifestDigest::new(DIGEST).expect("configuration digest");
-        let retrieval = DaemonSessionRetrievalService::new(
-            database.clone(),
-            retrieval_root,
-            Some(wake.clone()),
-        )
-        .expect("project retrieval service");
+        let retrieval =
+            DaemonSessionRetrievalService::new(database.clone(), retrieval_root, wake.clone())
+                .expect("project retrieval service");
         let refresh = Arc::new(DaemonSessionRefreshService::new(
             database.clone(),
             Arc::new(wake),

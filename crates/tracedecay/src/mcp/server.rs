@@ -941,10 +941,14 @@ impl McpServer {
             .zip(project_session_retrieval_root.clone())
             .and_then(|(database, root)| {
                 let identity = root.identity().clone();
+                // A direct or core server mounts no project refresh worker;
+                // its retrieval says so instead of serving `RequireFresh`.
                 let service = DaemonSessionRetrievalService::new_with_serving_port(
                     database.clone(),
                     root,
-                    project_session_refresh_serving.clone(),
+                    project_session_refresh_serving.clone().unwrap_or_else(|| {
+                        Arc::new(tracedecay_sessions::serving::RefreshWorkerMissing)
+                    }),
                 )?;
                 Some(MountedProjectApplicationRetrievalV1 {
                     identity,

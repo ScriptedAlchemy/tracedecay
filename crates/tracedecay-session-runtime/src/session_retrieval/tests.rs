@@ -336,10 +336,9 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
     for rank in 0..RESULTS {
         fixtures.push(seed_real_page_fixture(harness.registered.as_ref(), &root, rank).await);
     }
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
     let before = harness
@@ -492,10 +491,9 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("page-scope").await;
     let root = real_page_root("root.page");
     let fixture = seed_real_page_fixture(harness.registered.as_ref(), &root, 0).await;
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
     let hydrated = || {
@@ -685,7 +683,10 @@ async fn service_rejects_foreign_shard_before_read_admission() {
     )
     .expect("foreign profile retrieval root");
 
-    assert!(DaemonSessionRetrievalService::new(harness.registered.clone(), root, None).is_none());
+    assert!(
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .is_none()
+    );
     assert_eq!(
         harness
             .registered
@@ -888,10 +889,9 @@ fn cursor_stale_lcm_retrieval_requires_cursorless_restart() {
 async fn cursor_stale_session_retrieval_remains_typed_at_daemon_boundary() {
     let harness =
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("cursor-stale").await;
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
 
@@ -1038,7 +1038,7 @@ async fn admitted_session_lookup(
         .session_request_scope()
         .expect("profile session scope");
     let service: Arc<dyn SessionApplicationRetrievalPortV1> = Arc::new(
-        DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
             .expect("registered retrieval service"),
     );
     let context = admitted_lookup_context(scope);
@@ -1137,8 +1137,9 @@ async fn require_fresh_without_a_refresh_worker_is_refused_as_worker_missing() {
         .identity()
         .session_request_scope()
         .expect("profile session scope");
-    let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
-        .expect("registered retrieval service");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
     let query = SessionTemporalQuery::new(
         SessionId::new(&session_id).expect("session identity"),
@@ -1200,8 +1201,9 @@ async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
         .identity()
         .session_request_scope()
         .expect("profile session scope");
-    let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
-        .expect("registered retrieval service");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
     let session = SessionId::new(session_id).expect("large session identity");
     let page_query = |limit: usize, cursor: Option<String>| {
@@ -1356,8 +1358,9 @@ async fn session_lookup_cursor_walk_is_exact_at_the_page_boundaries() {
         .identity()
         .session_request_scope()
         .expect("profile session scope");
-    let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
-        .expect("registered retrieval service");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
     let session = SessionId::new(session_id).expect("walked session identity");
 
@@ -1515,7 +1518,10 @@ async fn project_retrieval_mounts_each_branch_of_a_shared_graph_store() {
             )
             .is_some()
         );
-        assert!(DaemonSessionRetrievalService::new(database.clone(), root, None).is_some());
+        assert!(
+            DaemonSessionRetrievalService::new_without_refresh_worker(database.clone(), root)
+                .is_some()
+        );
     }
     assert_ne!(
         roots[0], roots[1],

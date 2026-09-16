@@ -59,7 +59,7 @@ impl DaemonSessionRetrievalService {
             return None;
         }
         let expected_runtime_shard = database.binding().shard_id.clone();
-        Self::new(
+        Self::new_without_refresh_worker(
             database,
             DaemonSessionRetrievalRoot {
                 store_scope: SessionRetrievalStoreScope::Profile,
@@ -68,7 +68,6 @@ impl DaemonSessionRetrievalService {
                 authorized_root: None,
                 expected_runtime_shard: Some(expected_runtime_shard),
             },
-            None,
         )
     }
 }
@@ -241,9 +240,7 @@ impl Drop for SessionRetrievalInFlightObservation {
 
 impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
     fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
-        self.refresh_status
-            .as_deref()
-            .map(|status| status.serving_status())
+        Some(self.refresh_status.serving_status())
     }
 
     fn retrieve_admitted<'a>(
