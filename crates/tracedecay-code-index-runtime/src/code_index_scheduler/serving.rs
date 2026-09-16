@@ -6,7 +6,7 @@ use std::{
     collections::VecDeque,
     fs::File,
     io::Read,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock,
@@ -96,6 +96,12 @@ const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
 const CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1: usize = 128 * 1024 * 1024;
 const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
 const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
+/// Clone-successor page batches share one durable commit. The bounds equal
+/// the floor (scale 1) text-artifact batch, so every page the first-pass
+/// builder admitted also fits one successor batch, and the retained pages plus
+/// the builder's SQLite page cache stay inside the successor reservation.
+const CLONE_SUCCESSOR_BATCH_PAGES_V1: usize = TEXT_ARTIFACT_BASE_BATCH_PAGES_V1;
+const CLONE_SUCCESSOR_BATCH_BYTES_V1: usize = TEXT_ARTIFACT_BASE_BATCH_BYTES_V1;
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
@@ -3108,25 +3114,40 @@ impl LatestCodeTextGenerationV1 {
         }
         let mut remaining = maximum_work.max(1);
         while remaining > 0 && build.source_receipt.is_none() {
-            match build
-                .source
-                .next_page(control)
-                .map_err(map_sealed_page_source_error)?
-            {
-                VerifiedSealedLexicalPageReadV1::Page(page) => {
-                    if !self.advance_clone_successor_page(build, &page, control)? {
-                        return Ok(false);
+            if matches!(
+                build.source_position,
+                CloneSuccessorSourcePositionV1::Revalidating(_)
+            ) {
+                // Resume revalidation replays already-committed pages one at a
+                // time until the persisted successor cursor is reached.
+                let read = build
+                    .source
+                    .next_page(control)
+                    .map_err(map_sealed_page_source_error)?;
+                match read {
+                    VerifiedSealedLexicalPageReadV1::Page(page) => {
+                        if !self.advance_clone_successor_page(build, &page, control)? {
+                            return Ok(false);
+                        }
+                        remaining -= 1;
                     }
-                    remaining -= 1;
-                }
-                VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
-                    if matches!(
-                        build.source_position,
-                        CloneSuccessorSourcePositionV1::Revalidating(_)
-                    ) {
+                    VerifiedSealedLexicalPageReadV1::Complete(_) => {
                         self.rebuild_clone_successor(build, control)?;
                         return Ok(false);
                     }
+                }
+                continue;
+            }
+            let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
+                remaining.clamp(1, CLONE_SUCCESSOR_BATCH_PAGES_V1),
+                CLONE_SUCCESSOR_BATCH_BYTES_V1,
+            )
+            .map_err(map_sealed_page_source_error)?;
+            match self.append_clone_successor_batch(build, bounds, control)? {
+                VerifiedSealedLexicalPageBatchReadV1::Pages(batch) => {
+                    remaining = remaining.saturating_sub(batch.len());
+                }
+                VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
                     build.source_receipt = Some(receipt);
                 }
             }
@@ -3174,12 +3195,41 @@ impl LatestCodeTextGenerationV1 {
         Ok(true)
     }
 
-    fn advance_clone_successor_page(
+    /// Stage one bounded ordered page batch from the sealed source and append
+    /// it to the clone successor under one durable commit. The source cursor
+    /// only advances through pages the successor accepted, so a failed batch
+    /// leaves both authorities at their pre-batch position.
+    fn append_clone_successor_batch(
         &self,
         build: &mut CodeTextCloneSuccessorBuildV1,
-        page: &VerifiedSealedLexicalPageV1,
+        bounds: VerifiedSealedLexicalPageBatchBoundsV1,
         control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<bool, RetrievalPortError> {
+    ) -> Result<VerifiedSealedLexicalPageBatchReadV1, RetrievalPortError> {
+        let (source, builder) = (&mut build.source, &mut build.builder);
+        let builder = builder.as_mut().ok_or_else(|| {
+            RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
+        })?;
+        source
+            .next_page_batch_if(control, bounds, |pages| {
+                for page in pages {
+                    self.observe_clone_page_scratch(page)?;
+                }
+                builder
+                    .append_pages(pages, control)
+                    .map_err(map_text_artifact_error)?;
+                NonZeroUsize::new(pages.len()).ok_or_else(|| {
+                    RetrievalPortError::Contract(
+                        "sealed lexical source staged an empty clone-successor batch".to_owned(),
+                    )
+                })
+            })
+            .map_err(map_sealed_page_source_error)?
+    }
+
+    fn observe_clone_page_scratch(
+        &self,
+        page: &VerifiedSealedLexicalPageV1,
+    ) -> Result<(), RetrievalPortError> {
         let scratch_bytes = page.clone_bodies().iter().try_fold(0_u64, |peak, body| {
             let payload = serde_json::to_vec(&body.payload)
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
@@ -3193,6 +3243,16 @@ impl LatestCodeTextGenerationV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .observe_clone_scratch(scratch_bytes);
+        Ok(())
+    }
+
+    fn advance_clone_successor_page(
+        &self,
+        build: &mut CodeTextCloneSuccessorBuildV1,
+        page: &VerifiedSealedLexicalPageV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        self.observe_clone_page_scratch(page)?;
         let CloneSuccessorSourcePositionV1::Revalidating(target) = &build.source_position else {
             build
                 .builder
