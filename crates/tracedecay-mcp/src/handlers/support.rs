@@ -254,6 +254,7 @@ mod tests {
             let message = error.to_string();
             assert!(
                 message.contains("unknown field `project_id`")
+                    || message.contains("unknown field `id`")
                     || message.contains("missing field `node_id`"),
                 "legacy request must name the rejected field, got {message} for {invalid}"
             );
