@@ -105,8 +105,8 @@ pub(super) fn retry_busy_begin<T>(
                 return Ok(value);
             }
             Err(error) if sqlite_busy_or_locked(&error) => {
-                let exhausted = shutdown_requested.load(Ordering::Acquire)
-                    || Instant::now() >= deadline;
+                let exhausted =
+                    shutdown_requested.load(Ordering::Acquire) || Instant::now() >= deadline;
                 match original_busy_error.take() {
                     Some(original) if exhausted => return Err(original),
                     Some(original) => original_busy_error = Some(original),
