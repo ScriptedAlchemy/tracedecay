@@ -594,6 +594,28 @@ async fn park_visible_before_progress_reason_returns_terminal_admission() {
     fixture.registry.shutdown().await;
 }
 
+/// An ordinary read's freshness probe is the quietest path to the scheduler,
+/// and the one most likely to be treated as retryable. A cold terminal park
+/// must reach it as `Terminal` so a read never reports a resettable index as
+/// merely stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cold_terminal_park_makes_the_freshness_probe_terminal() {
+    let fixture = Fixture::mount("project.reconcile-park-freshness-probe").await;
+    fixture
+        .plant_terminal_publication_park("parked before any freshness probe")
+        .await;
+    fixture.clear_build_progress().await;
+
+    assert!(matches!(
+        fixture
+            .registry
+            .probe_freshness_admission(&fixture.project)
+            .await,
+        CodeIndexDemandAdmissionV1::Terminal(_)
+    ));
+    fixture.registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retire_and_remount_clears_terminal_publication_park_for_new_admission() {
     let fixture = Fixture::mount("project.reconcile-publication-remount").await;
