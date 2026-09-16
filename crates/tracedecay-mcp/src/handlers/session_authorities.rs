@@ -34,6 +34,10 @@ pub struct SessionAuthorities<'a> {
     /// `tracedecay_session_refresh_*` calls on this connection.
     pub profile_session_refresh:
         Option<&'a dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
+    /// Serving-status port of the mounted profile refresh worker; profile
+    /// message search / LCM retrieval with catch-up reads this.
+    pub profile_session_refresh_serving:
+        Option<&'a std::sync::Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -51,6 +55,7 @@ impl<'a> SessionAuthorities<'a> {
             project_lcm: None,
             profile_lcm: None,
             profile_session_refresh: None,
+            profile_session_refresh_serving: None,
         }
     }
 
@@ -103,6 +108,18 @@ impl<'a> SessionAuthorities<'a> {
         refresh: Option<&'a dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
     ) -> Self {
         self.profile_session_refresh = refresh;
+        self
+    }
+
+    #[must_use]
+    #[hotpath::skip]
+    pub const fn with_profile_session_refresh_serving(
+        mut self,
+        serving: Option<
+            &'a std::sync::Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+        >,
+    ) -> Self {
+        self.profile_session_refresh_serving = serving;
         self
     }
 }

@@ -22,7 +22,9 @@ use tracedecay_session_memory::session::{
     TaskSessionRetrievalOutcomeV1,
 };
 use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
-use tracedecay_sessions::serving::SessionProjectionServingStatus;
+use tracedecay_sessions::serving::{
+    RefreshWorkerMissing, SessionProjectionServingStatus, SessionProjectionServingStatusPort,
+};
 use tracedecay_store::StoreShardScopeV1;
 
 use super::contract::{
@@ -44,10 +46,13 @@ const APPLICATION_RETRIEVAL_MAX_WORK_UNITS: u64 = 100_000;
 impl DaemonSessionRetrievalService {
     /// Mount the canonical profile-session retrieval service over the exact
     /// registered profile shard and retained session identity supplied by the
-    /// daemon composition root.
+    /// daemon composition root. `refresh_status` is the profile refresh
+    /// worker's serving-status port when one is mounted; absent means
+    /// [`RefreshWorkerMissing`].
     pub fn new_admitted_profile(
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         identity: ResolvedSessionIdentity,
+        refresh_status: Option<std::sync::Arc<dyn SessionProjectionServingStatusPort>>,
     ) -> Option<Self> {
         if identity.project_id().is_some()
             || database.binding().shard_id.profile_id.as_str() != identity.profile_id().as_str()
@@ -59,7 +64,7 @@ impl DaemonSessionRetrievalService {
             return None;
         }
         let expected_runtime_shard = database.binding().shard_id.clone();
-        Self::new_without_refresh_worker(
+        Self::new_with_serving_port(
             database,
             DaemonSessionRetrievalRoot {
                 store_scope: SessionRetrievalStoreScope::Profile,
@@ -68,6 +73,7 @@ impl DaemonSessionRetrievalService {
                 authorized_root: None,
                 expected_runtime_shard: Some(expected_runtime_shard),
             },
+            refresh_status.unwrap_or_else(|| std::sync::Arc::new(RefreshWorkerMissing)),
         )
     }
 }
