@@ -382,9 +382,9 @@ impl CodeLexicalProjectionBuildV1 {
                             "raw exact terms require parser-backed extraction admission".to_owned(),
                         ));
                     }
-                    if chunk.anchor.generation_id != self.metadata.generation {
-                        return Err(RetrievalPortError::GenerationMismatch);
-                    }
+                    // Serving generation is metadata.generation. Chunk anchors may
+                    // retain extraction provenance from Arc-shared parent pages;
+                    // stamp the projected row with the serving id (same as artifact prepare).
                     let logical_path = self
                         .metadata
                         .logical_paths
@@ -401,8 +401,9 @@ impl CodeLexicalProjectionBuildV1 {
                         .symbol_occurrence_id
                         .as_ref()
                         .and_then(|symbol| self.symbol_displays.get(symbol));
-                    let (row, fields) =
+                    let (mut row, fields) =
                         ProjectedChunkV1::from_ref(&chunk, logical_path, symbol_display);
+                    row.anchor.generation_id = self.metadata.generation.clone();
                     self.raw_matches_normalized &=
                         row.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes();
                     self.postings
@@ -1379,6 +1380,68 @@ mod deadline_budget_tests {
         assert!(
             matches!(error, RetrievalPortError::BudgetExceeded),
             "Some(0) is a set deadline, not the crate fallback: {error:?}"
+        );
+    }
+
+    #[test]
+    fn projected_rows_stamp_serving_generation_over_extraction_provenance() {
+        use tracedecay_domain::{
+            BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
+            CodeSearchChunkId, ContentDigest, FileOccurrenceId, LanguageDescriptorRevision,
+            PolicyRevisionId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+            SourceSpan,
+        };
+
+        let serving = CodeGenerationId::new("generation.serving.v1").expect("serving");
+        let parent = CodeGenerationId::new("generation.parent.v1").expect("parent");
+        let file = FileOccurrenceId::new("file.carry.v1").expect("file");
+        let mut metadata = dummy_metadata();
+        metadata.generation = serving.clone();
+        metadata.logical_paths.insert(file.clone(), "src/carry.rs".to_owned());
+
+        let digest = |byte: char| {
+            ContentDigest::try_from(format!("sha256:{}", byte.to_string().repeat(64)))
+                .expect("digest")
+        };
+        let chunk = CodeSearchChunkV1 {
+            id: CodeSearchChunkId::new("chunk.carry.v1").expect("chunk"),
+            anchor: CodeSearchChunkAnchorV1 {
+                generation_id: parent,
+                file_occurrence_id: file,
+                symbol_occurrence_id: None,
+                parent_chunk_id: None,
+                source_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 4,
+                },
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                ordinal: 0,
+            },
+            content_digest: digest('c'),
+            language_descriptor_revision: LanguageDescriptorRevision::new("language.rust.v1")
+                .expect("language"),
+            chunker_revision: ChunkerRevision::new("chunker.v1").expect("chunker"),
+            sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("sanitizer"),
+            sensitivity: SensitivityDecision {
+                level: SensitivityLevelV1::Public,
+                policy_revision: PolicyRevisionId::new("policy.v1").expect("policy"),
+            },
+            exact_terms: Vec::new(),
+            subtokens: Vec::new(),
+            sanitized_text: BoundedSanitizedText::new("code").expect("text"),
+        };
+
+        let adapter = CodeLexicalProjectionAdapterV1::new_inner(
+            Arc::new(metadata),
+            vec![chunk],
+            Arc::new(BTreeMap::new()),
+            true,
+            None,
+        )
+        .expect("project carried chunk");
+        assert_eq!(
+            adapter.rows[0].anchor.generation_id, serving,
+            "in-memory projection must stamp serving generation like artifact prepare"
         );
     }
 

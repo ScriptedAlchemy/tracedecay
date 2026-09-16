@@ -32,8 +32,10 @@ pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v2";
-const CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN: &str = "tracedecay.code-source-full-replay.v1";
+const CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN: &str = "tracedecay.code-source-parent-delta.v1";
 const CODE_REUSED_PARTITION_DIGEST_DOMAIN: &str = "tracedecay.code-reused-partition.v1";
+const CODE_REUSED_PARTITION_ARC_SHARE_DIGEST_DOMAIN: &str =
+    "tracedecay.code-reused-partition.arc-share.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
 pub const PROJECTION_PUBLICATION_SEPARATOR: &str = "tracedecay.projection-batch-receipt.v1";
 
@@ -813,6 +815,12 @@ struct CodeReusedPartitionDigestInput<'a> {
     chunks: &'a [(CodeSearchChunkId, ContentDigest)],
 }
 
+#[derive(Serialize)]
+struct CodeReusedPartitionDigestInputRefs<'a> {
+    domain: &'static str,
+    chunks: &'a [(&'a CodeSearchChunkId, &'a ContentDigest)],
+}
+
 /// Digest an ordered reused partition without retaining the rows.
 pub fn code_reused_partition_digest(
     chunks: &[(CodeSearchChunkId, ContentDigest)],
@@ -832,68 +840,181 @@ pub fn code_reused_partition_digest(
     })
 }
 
-/// The two source identities sealed by one code generation.
+/// Digest an ordered reused partition from borrowed ids/digests.
 ///
-/// The incremental digest authenticates the physical generation transition
-/// and all three change partitions. The full-replay digest authenticates only
-/// the complete ordered chunk corpus, so byte-identical source remains the
-/// same across generation-id churn.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeGenerationSourceCommitmentsV1 {
-    pub incremental_manifest_digest: ManifestDigest,
-    pub full_replay_digest: ManifestDigest,
-}
-
-#[derive(Serialize)]
-struct CodeSourceFullReplayDigestInput<'a> {
-    domain: &'static str,
-    chunks: &'a [(CodeSearchChunkId, ContentDigest)],
-}
-
-/// Digest a complete source corpus in canonical chunk-identity order.
-pub fn code_source_full_replay_digest(
-    chunks: &[(CodeSearchChunkId, ContentDigest)],
+/// Serialization matches [`code_reused_partition_digest`] so Arc-shared
+/// publish paths can seal without cloning the complement.
+pub fn code_reused_partition_digest_refs(
+    chunks: &[(&CodeSearchChunkId, &ContentDigest)],
 ) -> Result<ManifestDigest, DomainError> {
     for (chunk, digest) in chunks {
         chunk.validate()?;
         digest.validate()?;
     }
+    code_reused_partition_digest_refs_trusted(chunks)
+}
+
+/// Digest borrowed reused rows without re-validating each identity.
+pub fn code_reused_partition_digest_refs_trusted(
+    chunks: &[(&CodeSearchChunkId, &ContentDigest)],
+) -> Result<ManifestDigest, DomainError> {
     if chunks.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
         return Err(DomainError::NonCanonical {
-            field: "full replay source chunk order",
+            field: "reused partition chunk order",
         });
     }
-    canonical_sha256(&CodeSourceFullReplayDigestInput {
-        domain: CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN,
+    canonical_sha256(&CodeReusedPartitionDigestInputRefs {
+        domain: CODE_REUSED_PARTITION_DIGEST_DOMAIN,
         chunks,
     })
 }
 
+#[derive(Serialize)]
+struct CodeReusedPartitionArcShareDigestInput<'a> {
+    domain: &'static str,
+    parent_full_replay_digest: &'a ManifestDigest,
+    prior_generation: &'a CodeGenerationId,
+    current_generation: &'a CodeGenerationId,
+    reused_count: u64,
+}
+
+/// Seal Arc-shared reuse without enumerating the complement.
+///
+/// Parent `full_replay_digest` already authenticated the corpus at parent
+/// publish. Shared file pages stay byte-identical by Arc pointer identity, so
+/// child publish binds that parent seal plus reused cardinality instead of
+/// re-hashing every unchanged `(chunk_id, content_digest)` pair.
+///
+/// `shared_file_count` is a publish-time gate only (must be non-zero when
+/// reuse is claimed). It is not hashed so parentless restore can recompute
+/// this seal from persisted source commitments without live parent pages.
+pub fn code_reused_partition_arc_share_digest(
+    parent_full_replay_digest: &ManifestDigest,
+    prior_generation: &CodeGenerationId,
+    current_generation: &CodeGenerationId,
+    reused_count: u64,
+) -> Result<ManifestDigest, DomainError> {
+    parent_full_replay_digest.validate()?;
+    prior_generation.validate()?;
+    current_generation.validate()?;
+    canonical_sha256(&CodeReusedPartitionArcShareDigestInput {
+        domain: CODE_REUSED_PARTITION_ARC_SHARE_DIGEST_DOMAIN,
+        parent_full_replay_digest,
+        prior_generation,
+        current_generation,
+        reused_count,
+    })
+}
+
+/// The two source identities sealed by one code generation.
+///
+/// The incremental digest authenticates the physical generation transition
+/// and all three change partitions. The full-replay digest authenticates the
+/// ordered source as a parent-delta: genesis seals `parent_full_replay_digest =
+/// None` over the changed-set partitions alone; successors bind the parent's
+/// full-replay digest plus the affected partitions and reused complement seal.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeGenerationSourceCommitmentsV1 {
+    pub incremental_manifest_digest: ManifestDigest,
+    /// Parent-delta source seal (`CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN` /
+    /// `tracedecay.code-source-parent-delta.v1`). Field name is historical; it
+    /// is not a generation-independent full-corpus replay hash.
+    pub full_replay_digest: ManifestDigest,
+    /// Parent generation's `full_replay_digest` when this commitment was sealed
+    /// as a successor. `None` for genesis.
+    pub parent_full_replay_digest: Option<ManifestDigest>,
+}
+
+#[derive(Serialize)]
+struct CodeSourceParentDeltaDigestInput<'a> {
+    domain: &'static str,
+    parent_full_replay_digest: Option<&'a ManifestDigest>,
+    added_or_changed: &'a [ChangedCodeChunkV1],
+    deleted: &'a [ChangedCodeChunkV1],
+    reused_count: u64,
+    reused_digest: &'a ManifestDigest,
+}
+
+/// Digest source identity from an optional parent full-replay digest plus the
+/// changed-set partitions (without enumerating the reused complement).
+pub fn code_source_parent_delta_digest(
+    parent_full_replay: Option<&ManifestDigest>,
+    changes: &ChangedCodeChunkSetV1,
+) -> Result<ManifestDigest, DomainError> {
+    if let Some(parent) = parent_full_replay {
+        parent.validate()?;
+    }
+    changes.reused_digest.validate()?;
+    for change in changes.added_or_changed.iter().chain(&changes.deleted) {
+        change.chunk_id.validate()?;
+        if let Some(digest) = &change.prior_digest {
+            digest.validate()?;
+        }
+        if let Some(digest) = &change.current_digest {
+            digest.validate()?;
+        }
+    }
+    canonical_sha256(&CodeSourceParentDeltaDigestInput {
+        domain: CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN,
+        parent_full_replay_digest: parent_full_replay,
+        added_or_changed: &changes.added_or_changed,
+        deleted: &changes.deleted,
+        reused_count: changes.reused_count,
+        reused_digest: &changes.reused_digest,
+    })
+}
+
 impl CodeGenerationSourceCommitmentsV1 {
+    /// Seal source commitments from the changed-set and an optional parent
+    /// full-replay digest. Callers must not rebuild the full chunk corpus.
     pub fn from_changed_chunks(
+        parent_full_replay: Option<&ManifestDigest>,
         changes: &ChangedCodeChunkSetV1,
-        prior: Option<&[(CodeSearchChunkId, ContentDigest)]>,
-        full_source: &[(CodeSearchChunkId, ContentDigest)],
     ) -> Result<Self, DomainError> {
-        changes.validate_reused_complement(prior, full_source)?;
+        changes.validate()?;
+        match (parent_full_replay, changes.from_generation.as_ref()) {
+            (None, None) | (Some(_), Some(_)) => {}
+            _ => {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "source commitment parent binding",
+                });
+            }
+        }
         Ok(Self {
             incremental_manifest_digest: changes.manifest_digest.clone(),
-            full_replay_digest: code_source_full_replay_digest(full_source)?,
+            parent_full_replay_digest: parent_full_replay.cloned(),
+            full_replay_digest: code_source_parent_delta_digest(parent_full_replay, changes)?,
         })
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.incremental_manifest_digest.validate()?;
-        self.full_replay_digest.validate()
+        self.full_replay_digest.validate()?;
+        if let Some(parent) = &self.parent_full_replay_digest {
+            parent.validate()?;
+        }
+        Ok(())
     }
 
-    pub fn validate_for_source(
-        &self,
-        full_source: &[(CodeSearchChunkId, ContentDigest)],
-    ) -> Result<(), DomainError> {
+    /// Recompute the parent-delta full-replay digest from the sealed parent
+    /// binding and the projection changed-set.
+    pub fn validate_for_changes(&self, changes: &ChangedCodeChunkSetV1) -> Result<(), DomainError> {
         self.validate()?;
-        if self.full_replay_digest != code_source_full_replay_digest(full_source)? {
+        changes.validate()?;
+        if self.incremental_manifest_digest != changes.manifest_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        match (
+            self.parent_full_replay_digest.as_ref(),
+            changes.from_generation.as_ref(),
+        ) {
+            (None, None) | (Some(_), Some(_)) => {}
+            _ => return Err(DomainError::DigestMismatch),
+        }
+        if self.full_replay_digest
+            != code_source_parent_delta_digest(self.parent_full_replay_digest.as_ref(), changes)?
+        {
             return Err(DomainError::DigestMismatch);
         }
         Ok(())
@@ -920,6 +1041,51 @@ impl ChangedCodeChunkSetV1 {
     ) -> Result<(u64, ManifestDigest), DomainError> {
         let reused_digest = code_reused_partition_digest(reused)?;
         Ok((reused.len() as u64, reused_digest))
+    }
+
+    /// Seal the reused complement from borrowed `(chunk_id, content_digest)`
+    /// pairs without cloning the rows.
+    pub fn seal_reused_partition_refs(
+        reused: &[(&CodeSearchChunkId, &ContentDigest)],
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        let reused_digest = code_reused_partition_digest_refs(reused)?;
+        Ok((reused.len() as u64, reused_digest))
+    }
+
+    /// Like [`Self::seal_reused_partition_refs`], but skips per-row identity
+    /// validation. Callers must pass already-validated manifest rows.
+    pub fn seal_reused_partition_refs_trusted(
+        reused: &[(&CodeSearchChunkId, &ContentDigest)],
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        let reused_digest = code_reused_partition_digest_refs_trusted(reused)?;
+        Ok((reused.len() as u64, reused_digest))
+    }
+
+    /// Seal Arc-shared reuse from the parent full-replay commitment.
+    ///
+    /// Use at Arc-share publish only. Pair-list sealing stays on the mixed /
+    /// non-shared path. See [`code_reused_partition_arc_share_digest`].
+    /// `shared_file_count` must be non-zero when `reused_count > 0`; it gates
+    /// publish authenticity and is not part of the digest.
+    pub fn seal_arc_shared_reused_partition(
+        parent_full_replay_digest: &ManifestDigest,
+        prior_generation: &CodeGenerationId,
+        current_generation: &CodeGenerationId,
+        reused_count: u64,
+        shared_file_count: u64,
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        if shared_file_count == 0 && reused_count > 0 {
+            return Err(DomainError::NonCanonical {
+                field: "arc-share reused partition without shared files",
+            });
+        }
+        let reused_digest = code_reused_partition_arc_share_digest(
+            parent_full_replay_digest,
+            prior_generation,
+            current_generation,
+            reused_count,
+        )?;
+        Ok((reused_count, reused_digest))
     }
 
     /// Structural request checks only. `reused_count` / `reused_digest` are
@@ -1055,6 +1221,93 @@ impl ChangedCodeChunkSetV1 {
 
         let (reused_count, reused_digest) = Self::seal_reused_partition(&reused)?;
         if reused_count != self.reused_count || reused_digest != self.reused_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    /// Prove `reused_count` / `reused_digest` on a parentless restore path.
+    ///
+    /// When the persisted seal matches the Arc-share domain under
+    /// `parent_full_replay`, authenticate cardinality and the changed
+    /// partitions against `current` without rehashing a pair-list complement
+    /// (live parent pages are unavailable after restart). Otherwise fall
+    /// through to [`Self::validate_reused_complement`].
+    pub fn validate_reused_complement_for_restore(
+        &self,
+        parent_full_replay: Option<&ManifestDigest>,
+        current: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        if let (Some(parent), Some(from_generation)) =
+            (parent_full_replay, self.from_generation.as_ref())
+        {
+            let arc_share = code_reused_partition_arc_share_digest(
+                parent,
+                from_generation,
+                &self.to_generation,
+                self.reused_count,
+            )?;
+            if arc_share == self.reused_digest {
+                return self.validate_arc_shared_reused_corpus(current);
+            }
+        }
+        self.validate_reused_complement(None, current)
+    }
+
+    /// Corpus membership proof for an Arc-share reused seal (no pair-list).
+    fn validate_arc_shared_reused_corpus(
+        &self,
+        current: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        for (chunk_id, digest) in current {
+            chunk_id.validate()?;
+            digest.validate()?;
+        }
+        if current.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(DomainError::NonCanonical {
+                field: "reused complement current chunk order",
+            });
+        }
+
+        let mut added = BTreeMap::new();
+        for change in &self.added_or_changed {
+            let Some(current_digest) = change.current_digest.as_ref() else {
+                return Err(DomainError::NonCanonical {
+                    field: "added or changed current digest",
+                });
+            };
+            if added.insert(&change.chunk_id, current_digest).is_some() {
+                return Err(DomainError::DuplicateId {
+                    field: "added or changed chunk partitions",
+                });
+            }
+        }
+        let deleted = self
+            .deleted
+            .iter()
+            .map(|change| &change.chunk_id)
+            .collect::<BTreeSet<_>>();
+
+        let mut reused = 0_u64;
+        for (chunk_id, digest) in current {
+            if deleted.contains(chunk_id) {
+                return Err(DomainError::NonCanonical {
+                    field: "deleted chunk still present in current corpus",
+                });
+            }
+            match added.remove(chunk_id) {
+                Some(expected) if expected == digest => {}
+                Some(_) => return Err(DomainError::DigestMismatch),
+                None => reused = reused.saturating_add(1),
+            }
+        }
+        if !added.is_empty() {
+            return Err(DomainError::NonCanonical {
+                field: "added or changed chunk missing from current corpus",
+            });
+        }
+        if reused != self.reused_count {
             return Err(DomainError::DigestMismatch);
         }
         Ok(())
@@ -1367,6 +1620,92 @@ mod tests {
             prior_digest: prior.map(|byte| id(&digest(byte))),
             current_digest: current.map(|byte| id(&digest(byte))),
         }
+    }
+
+    #[test]
+    fn reused_partition_digest_refs_match_owned_pairs() {
+        let owned = [(
+            id::<CodeSearchChunkId>("chunk.reused"),
+            id::<ContentDigest>(&digest('c')),
+        )];
+        let refs: Vec<_> = owned.iter().map(|(id, digest)| (id, digest)).collect();
+        let owned_digest = code_reused_partition_digest(&owned).expect("owned");
+        let refs_digest = code_reused_partition_digest_refs(&refs).expect("refs");
+        assert_eq!(owned_digest, refs_digest);
+    }
+
+    #[test]
+    fn arc_share_reused_digest_binds_parent_seal_not_pair_list() {
+        let parent = id::<ManifestDigest>(&digest('a'));
+        let prior = id::<CodeGenerationId>("generation.1");
+        let current = id::<CodeGenerationId>("generation.2");
+        let (count, sealed) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+            &parent, &prior, &current, 9, 3,
+        )
+        .expect("arc-share seal");
+        assert_eq!(count, 9);
+        let again = code_reused_partition_arc_share_digest(&parent, &prior, &current, 9)
+            .expect("again");
+        assert_eq!(sealed, again);
+        let pair_list = code_reused_partition_digest(&[(
+            id::<CodeSearchChunkId>("chunk.reused"),
+            id::<ContentDigest>(&digest('c')),
+        )])
+        .expect("pair list");
+        assert_ne!(
+            sealed, pair_list,
+            "arc-share attestation must not collide with pair-list reused seals"
+        );
+        assert!(
+            ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+                &parent, &prior, &current, 9, 0,
+            )
+            .is_err(),
+            "reuse without shared files must fail closed"
+        );
+        // Shared-file count is a publish gate only; digest ignores it.
+        let same_digest = code_reused_partition_arc_share_digest(&parent, &prior, &current, 9)
+            .expect("digest without shared count");
+        assert_eq!(sealed, same_digest);
+    }
+
+    #[test]
+    fn arc_share_reused_complement_restores_without_pair_list() {
+        let parent = id::<ManifestDigest>(&digest('a'));
+        let prior = id::<CodeGenerationId>("generation.1");
+        let current_gen = id::<CodeGenerationId>("generation.2");
+        let reused_chunk = id::<CodeSearchChunkId>("chunk.reused");
+        let reused_digest_content = id::<ContentDigest>(&digest('c'));
+        let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+            &parent, &prior, &current_gen, 1, 1,
+        )
+        .expect("arc-share seal");
+        let mut changes = ChangedCodeChunkSetV1 {
+            from_generation: Some(prior),
+            to_generation: current_gen,
+            manifest_digest: id(&digest('0')),
+            added_or_changed: vec![change("chunk.added", None, Some('a'))],
+            deleted: Vec::new(),
+            reused_count,
+            reused_digest,
+        };
+        changes.manifest_digest = changes.compute_digest().expect("digest");
+        let current = [
+            (
+                id::<CodeSearchChunkId>("chunk.added"),
+                id::<ContentDigest>(&digest('a')),
+            ),
+            (reused_chunk, reused_digest_content),
+        ];
+        changes
+            .validate_reused_complement_for_restore(Some(&parent), &current)
+            .expect("arc-share restore proves corpus without pair-list");
+        assert!(
+            changes
+                .validate_reused_complement(None, &current)
+                .is_err(),
+            "pair-list path must still reject an arc-share seal"
+        );
     }
 
     fn changed_set() -> ChangedCodeChunkSetV1 {
@@ -1749,32 +2088,40 @@ mod tests {
     }
 
     #[test]
-    fn source_commitments_preserve_incremental_and_full_replay_identities() {
+    fn source_commitments_bind_parent_delta_without_full_corpus_hash() {
         let incremental = changed_set();
-        let full_source = vec![
-            (id("chunk.added"), id(&digest('a'))),
-            (id("chunk.reused"), id(&digest('c'))),
-        ];
-        let first =
-            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&incremental, None, &full_source)
-                .expect("source commitments");
+        let parent_replay = id::<ManifestDigest>(&digest('e'));
+        let first = CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+            Some(&parent_replay),
+            &incremental,
+        )
+        .expect("source commitments");
 
         assert_eq!(
             first.incremental_manifest_digest,
             incremental.compute_digest().expect("incremental digest")
         );
+        assert_eq!(
+            first.parent_full_replay_digest.as_ref(),
+            Some(&parent_replay)
+        );
         assert_ne!(
             first.incremental_manifest_digest, first.full_replay_digest,
-            "the generation-bound changed-set digest is not a full replay identity"
+            "the generation-bound changed-set digest is not a parent-delta identity"
         );
+        first
+            .validate_for_changes(&incremental)
+            .expect("parent-delta commitments validate");
 
-        let mut republished = incremental;
+        let mut republished = incremental.clone();
         republished.from_generation = Some(id("generation.8"));
         republished.to_generation = id("generation.9");
         republished.manifest_digest = republished.compute_digest().expect("republished digest");
-        let second =
-            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&republished, None, &full_source)
-                .expect("republished source commitments");
+        let second = CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+            Some(&parent_replay),
+            &republished,
+        )
+        .expect("republished source commitments");
 
         assert_ne!(
             first.incremental_manifest_digest, second.incremental_manifest_digest,
@@ -1782,12 +2129,47 @@ mod tests {
         );
         assert_eq!(
             first.full_replay_digest, second.full_replay_digest,
-            "full replay identity must survive generation-id churn over identical source"
+            "parent-delta full replay ignores generation watermarks and seals partitions only"
         );
 
-        let mut tampered = first;
+        let mut tampered = first.clone();
         tampered.full_replay_digest = id(&digest('f'));
-        assert!(tampered.validate_for_source(&full_source).is_err());
+        assert!(tampered.validate_for_changes(&incremental).is_err());
+
+        let mut wrong_parent = first;
+        wrong_parent.parent_full_replay_digest = Some(id(&digest('d')));
+        assert!(wrong_parent.validate_for_changes(&incremental).is_err());
+
+        let genesis_changes = {
+            let (reused_count, reused_digest) =
+                ChangedCodeChunkSetV1::seal_reused_partition(&[]).expect("empty reused");
+            let mut changes = ChangedCodeChunkSetV1 {
+                from_generation: None,
+                to_generation: id("generation.1"),
+                manifest_digest: id(&digest('0')),
+                added_or_changed: vec![change("chunk.added", None, Some('a'))],
+                deleted: vec![],
+                reused_count,
+                reused_digest,
+            };
+            changes.manifest_digest = changes.compute_digest().expect("genesis digest");
+            changes
+        };
+        let genesis =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(None, &genesis_changes)
+                .expect("genesis commitments");
+        assert!(genesis.parent_full_replay_digest.is_none());
+        genesis
+            .validate_for_changes(&genesis_changes)
+            .expect("genesis parent-delta validates");
+        assert!(
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+                Some(&parent_replay),
+                &genesis_changes
+            )
+            .is_err(),
+            "genesis changes cannot bind a parent full-replay digest"
+        );
     }
 
     #[test]
