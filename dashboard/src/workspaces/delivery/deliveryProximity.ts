@@ -2,6 +2,7 @@ import type {
   DeliveryAttentionEvidenceV1,
   DeliveryAttentionItemV1,
   DeliveryAttentionSourceV1,
+  DeliveryInboxCoverageV1,
   DeliveryInboxPullRequestV1,
   DeliveryInboxV1,
 } from '../../contracts/generated.ts';
@@ -86,6 +87,7 @@ function applyEncountersToPullRequest(
   pullRequest: DeliveryInboxPullRequestV1,
   encounters: readonly FeedbackProximityEncounterV1[],
   observedAtMicros: number,
+  coverage: DeliveryInboxCoverageV1,
 ): DeliveryInboxPullRequestV1 {
   const matched = matchedEncountersBySource(encounters, pullRequest.indexed_head_commit_id);
   return {
@@ -97,20 +99,44 @@ function applyEncountersToPullRequest(
           ? {
               ...item,
               state: 'clear',
-              coverage: 'complete',
+              coverage,
               evidence: [],
               observed_at_micros: observedAtMicros,
             }
           : {
               ...item,
               state: 'active',
-              coverage: 'complete',
+              coverage,
               evidence: [proximityEvidence(encounter)],
               observed_at_micros: encounter.observed_at,
             };
       }),
     ),
   };
+}
+
+/** Preserve the proximity read's typed coverage on Delivery attention items.
+ * `partial`/`stale` mean the authority answered with omissions — never collapse
+ * those into `complete` or a Clear finding will read as fully measured. */
+function coverageForProximityState(
+  state: Extract<
+    FeedbackProximityReadResultV1,
+    { state: 'complete' | 'complete_zero' | 'partial' | 'stale' }
+  >['state'],
+): DeliveryInboxCoverageV1 {
+  switch (state) {
+    case 'complete':
+    case 'complete_zero':
+      return 'complete';
+    case 'partial':
+      return 'partial';
+    case 'stale':
+      return 'stale';
+    default: {
+      const unhandled: never = state;
+      return unhandled;
+    }
+  }
 }
 
 function applyUnavailableToPullRequest(
@@ -169,6 +195,7 @@ export function applyProximityAttention(
             pullRequest,
             proximity.page.encounters,
             proximity.page.observed_at,
+            coverageForProximityState(proximity.state),
           ),
         ),
       };
