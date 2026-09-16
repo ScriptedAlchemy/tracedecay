@@ -162,6 +162,7 @@ pub mod branch_generations;
 pub mod branch_publication;
 mod cadence;
 mod classification;
+mod demand_admission;
 mod freshness_witness;
 mod git_tree_capture;
 pub use git_tree_capture::{
@@ -195,13 +196,16 @@ pub use cadence::{
     CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, newly_eligible_percentile,
 };
+pub use demand_admission::{
+    CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
+};
 pub use graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1};
 pub use ignored_dependencies::{
     CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexIgnoredDependencyRefusalV1,
     CodeIndexIgnoredDependencyRequestV1,
 };
+pub use registry::CodeIndexSchedulerRegistryV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
-pub use registry::{CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1};
 pub use registry::{
     ScopedFeedbackDocumentIdentityV1, ServingGenerationInstallationOutcomeV1,
     ServingGenerationRollbackOutcomeV1, feedback_document_identity_from_generation,

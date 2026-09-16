@@ -13,6 +13,9 @@ use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
 use crate::project::TraceDecay;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexDemandAdmissionV1, CodeIndexDemandV1,
+};
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT, CodeIndexConvergenceParkedV1,
 };
@@ -120,15 +123,6 @@ impl ServerStats {
     }
 }
 
-/// Admission preserves policy refusal separately from scheduler availability.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CodeIndexAdmission {
-    Accepted,
-    LinkedWorktreeDisabled,
-    PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
-    Unavailable,
-}
-
 pub(crate) const CODE_INDEX_LINKED_WORKTREE_DISABLED: &str = "linked_worktree_disabled";
 
 pub(crate) const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
@@ -151,38 +145,32 @@ pub(crate) fn code_index_linked_worktree_disabled() -> TraceDecayError {
     )
 }
 
-impl CodeIndexAdmission {
-    /// Map one scheduler reconcile admission into the MCP/host admission enum.
-    pub(crate) fn from_reconcile(
-        admission: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1,
-    ) -> Self {
-        use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1 as R;
-        match admission {
-            R::Accepted => Self::Accepted,
-            R::PublicationAuthorityCorrupt(parked) => Self::PublicationAuthorityCorrupt(parked),
-            R::Unavailable => Self::Unavailable,
+/// Report one code-index demand verdict to the host-admission boundary.
+///
+/// The mapping is the whole reason the verdict is typed: a terminal park is
+/// unavailable and non-retryable, a watcher-policy refusal is a decision (not
+/// pressure), and only genuine unavailability invites a retry.
+pub(crate) fn code_index_host_outcome(
+    admission: &CodeIndexDemandAdmissionV1,
+) -> HostAdmissionOutcome {
+    match admission {
+        CodeIndexDemandAdmissionV1::Queued => HostAdmissionOutcome::replay_completed(true, false),
+        CodeIndexDemandAdmissionV1::RefusedByPolicy => {
+            HostAdmissionOutcome::degraded(CODE_INDEX_LINKED_WORKTREE_DISABLED)
         }
-    }
-
-    pub(crate) fn host_outcome(self) -> HostAdmissionOutcome {
-        match self {
-            Self::Accepted => HostAdmissionOutcome::replay_completed(true, false),
-            Self::LinkedWorktreeDisabled => {
-                HostAdmissionOutcome::degraded(CODE_INDEX_LINKED_WORKTREE_DISABLED)
-            }
-            Self::PublicationAuthorityCorrupt(_) => {
-                HostAdmissionOutcome::terminal_unavailable(CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT)
-            }
-            Self::Unavailable => {
-                HostAdmissionOutcome::retained_unavailable(CODE_INDEX_SCHEDULER_UNAVAILABLE)
-            }
+        CodeIndexDemandAdmissionV1::Terminal(_) => {
+            HostAdmissionOutcome::terminal_unavailable(CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT)
+        }
+        CodeIndexDemandAdmissionV1::Unavailable(_) => {
+            HostAdmissionOutcome::retained_unavailable(CODE_INDEX_SCHEDULER_UNAVAILABLE)
         }
     }
 }
 
 /// Future returned by a [`CodeIndexHookSink`] invocation.
-pub(crate) type CodeIndexHookNotifyFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = CodeIndexAdmission> + Send + 'static>>;
+pub(crate) type CodeIndexHookNotifyFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = CodeIndexDemandAdmissionV1> + Send + 'static>,
+>;
 
 /// Type-erased bridge from the MCP hook boundary to the daemon-owned code-index
 /// scheduler registry. The daemon constructs this closing over its cloneable
@@ -193,33 +181,12 @@ pub(crate) type CodeIndexHookNotifyFuture =
 pub(crate) type CodeIndexHookSink =
     Arc<dyn Fn(PathBuf, Vec<String>) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
-/// Who is asking for a whole-worktree reconciliation through a
-/// [`CodeIndexReconcileSink`].
-///
-/// `sync.watch_linked_worktrees` (default off) decides whether the daemon may
-/// start indexing a linked worktree *on its own*. Everything the daemon does
-/// without an operator naming the route is `Automatic` and stays behind that
-/// gate: host lifecycle hooks (`workspaceOpen`, `sessionStart`, debounced
-/// incremental syncs) and the server's own startup catch-up. Only a
-/// reconciliation the operator asked for by name — `tracedecay init` /
-/// `tracedecay sync` through `tracedecay_admin_sync` — is `Explicit` and may
-/// index a route the watcher policy keeps quiet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CodeIndexReconcileDemandV1 {
-    Automatic,
-    Explicit,
-}
-
 /// Non-blocking bridge for hook/admin requests that require one authoritative
 /// worktree reconciliation but do not carry exact touched paths. A successful
 /// future means the bounded daemon scheduler accepted the overflow signal; it
 /// never means indexing has completed.
-pub(crate) type CodeIndexReconcileSink = Arc<
-    dyn Fn(PathBuf, CodeIndexReconcileDemandV1) -> CodeIndexHookNotifyFuture
-        + Send
-        + Sync
-        + 'static,
->;
+pub(crate) type CodeIndexReconcileSink =
+    Arc<dyn Fn(PathBuf, CodeIndexDemandV1) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
 /// Non-blocking bridge for ordinary reads to run the scheduler's cheap
 /// Git/stat freshness ladder. A successful future means the mounted scheduler

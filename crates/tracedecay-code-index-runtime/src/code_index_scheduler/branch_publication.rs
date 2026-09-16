@@ -21,7 +21,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::registry::{CodeIndexServingScopeV1, ServingGenerationInstallationV1};
 use super::{
-    CodeIndexPublishedGenerationV1, CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexDemandAdmissionV1, CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
 };
 
@@ -448,15 +448,16 @@ impl BranchPublicationContextV1 {
             .notify_hook_overflow(canonical_worktree_root)
             .await
         {
-            CodeIndexReconcileAdmissionV1::Accepted => {}
-            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) => {
+            CodeIndexDemandAdmissionV1::Queued => {}
+            CodeIndexDemandAdmissionV1::Terminal(parked) => {
                 return Err(TraceDecayError::project_route(
                     CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
                     false,
                     format!("{}; {}", parked.reason, parked.remediation),
                 ));
             }
-            CodeIndexReconcileAdmissionV1::Unavailable => {
+            CodeIndexDemandAdmissionV1::RefusedByPolicy
+            | CodeIndexDemandAdmissionV1::Unavailable(_) => {
                 return Err(TraceDecayError::project_route(
                     CODE_INDEX_SCHEDULER_UNAVAILABLE,
                     true,

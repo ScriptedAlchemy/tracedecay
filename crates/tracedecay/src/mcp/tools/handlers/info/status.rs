@@ -1,6 +1,9 @@
 //! Daemon-only `tracedecay_admin_sync` — still needs the code-index reconcile sink.
 
 use super::*;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexDemandAdmissionV1, CodeIndexDemandV1,
+};
 
 /// Daemon-only sync entry point used by the first-party CLI. It is deliberately
 /// not advertised in the MCP catalog: external agents should rely on the
@@ -15,7 +18,7 @@ pub(crate) async fn handle_admin_sync(
     let project_root = cg.project_root().to_path_buf();
     let reconcile_sink = reconcile_sink.ok_or_else(|| {
         TraceDecayError::project_route(
-            "code_index_scheduler_unavailable",
+            crate::mcp::server::CODE_INDEX_SCHEDULER_UNAVAILABLE,
             true,
             "admin sync requires the daemon code-index scheduler",
         )
@@ -23,22 +26,19 @@ pub(crate) async fn handle_admin_sync(
     // The operator named this route (`tracedecay init` / `tracedecay sync`):
     // the one demand that may index a route the watcher policy keeps quiet.
     let admission = hotpath::future!(
-        reconcile_sink(
-            project_root.clone(),
-            crate::mcp::server::CodeIndexReconcileDemandV1::Explicit,
-        ),
+        reconcile_sink(project_root.clone(), CodeIndexDemandV1::OperatorReconcile,),
         label = "mcp.info.admin_sync.reconcile"
     )
     .await;
     match admission {
-        crate::mcp::server::CodeIndexAdmission::Accepted => {}
-        crate::mcp::server::CodeIndexAdmission::PublicationAuthorityCorrupt(parked) => {
+        CodeIndexDemandAdmissionV1::Queued => {}
+        CodeIndexDemandAdmissionV1::Terminal(parked) => {
             return Err(crate::mcp::server::code_index_publication_corrupt(parked));
         }
-        crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled => {
+        CodeIndexDemandAdmissionV1::RefusedByPolicy => {
             return Err(crate::mcp::server::code_index_linked_worktree_disabled());
         }
-        crate::mcp::server::CodeIndexAdmission::Unavailable => {
+        CodeIndexDemandAdmissionV1::Unavailable(_) => {
             return Err(TraceDecayError::project_route(
                 crate::mcp::server::CODE_INDEX_SCHEDULER_UNAVAILABLE,
                 true,

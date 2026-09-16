@@ -408,9 +408,7 @@ impl CodeFileIndexArtifactsV1 {
                     "clone body evidence payload digest does not match its payload".to_owned(),
                 ));
             }
-            if validate_payloads
-                && let Err(detail) = body.payload.validate()
-            {
+            if validate_payloads && let Err(detail) = body.payload.validate() {
                 return Err(ChunkingFailureV1::NonCanonicalIdentity(format!(
                     "clone body evidence payload is not canonical: {detail}"
                 )));

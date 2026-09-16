@@ -16,8 +16,10 @@ use tracedecay_contracts::ResolvedScope;
 
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
+use super::demand_admission::{
+    CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
+};
 use super::identity::IndexingIdentityV1;
-use super::registry::CodeIndexReconcileAdmissionV1;
 
 const ACTIVATION_IDLE: u8 = 0;
 const ACTIVATION_MOUNTING: u8 = 1;
@@ -29,7 +31,7 @@ pub type CodeIndexActivationMountFutureV1 =
 pub type CodeIndexActivationMountV1 =
     Arc<dyn Fn() -> CodeIndexActivationMountFutureV1 + Send + Sync + 'static>;
 pub type CodeIndexActivationHintFutureV1 =
-    Pin<Box<dyn Future<Output = CodeIndexReconcileAdmissionV1> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = CodeIndexDemandAdmissionV1> + Send + 'static>>;
 pub type CodeIndexActivationHintSinkV1 =
     Arc<dyn Fn(CodeIndexActivationHookBatchV1) -> CodeIndexActivationHintFutureV1 + Send + Sync>;
 
@@ -235,6 +237,13 @@ impl CodeIndexActivationV1 {
         self.activate_with_demand(ActivationDemandV1::Automatic)
     }
 
+    /// Start the mount for a demand `admit` already cleared: the watcher policy
+    /// question was answered there, and asking it again would refuse an
+    /// operator-named reconcile on a linked worktree.
+    fn activate_for_demand(&self) -> bool {
+        self.activate_with_demand(ActivationDemandV1::Explicit)
+    }
+
     /// Start the demand-driven mount for a reconciliation an operator asked
     /// for by name (`tracedecay init`, `tracedecay sync`, the daemon-only
     /// `tracedecay_admin_sync` entry point).
@@ -341,22 +350,45 @@ impl CodeIndexActivationV1 {
         true
     }
 
-    /// Accept exact after-edit hints immediately, even while the background
-    /// mount is still opening. Returns typed admission for this exact live
-    /// route (Accepted when queued or delivered; Corrupt / Unavailable when
-    /// refused).
-    #[hotpath::measure(
-        label = "daemon.code_index.activation.notify_hook_paths",
-        future = true
-    )]
-    pub async fn notify_hook_paths(
+    /// The one front door for code-index demand.
+    ///
+    /// Every caller above — MCP after-edit hooks, `tracedecay sync`, the
+    /// server's startup catch-up, host admission — asks here and reports the
+    /// verdict it gets. The watcher policy, route liveness, the exact-root
+    /// check, and the choice between the mounted scheduler and the bounded
+    /// pre-mount queue all live in this one place, so no layer above can
+    /// rebuild a reason the front door did not mint.
+    #[hotpath::measure(label = "daemon.code_index.activation.admit", future = true)]
+    pub async fn admit(
         &self,
         project_root: &Path,
-        rel_paths: Vec<String>,
-    ) -> CodeIndexReconcileAdmissionV1 {
-        if rel_paths.is_empty() || !self.route_is_live() || !self.accepts_root(project_root) {
-            return CodeIndexReconcileAdmissionV1::Unavailable;
+        demand: CodeIndexDemandV1,
+    ) -> CodeIndexDemandAdmissionV1 {
+        if demand.is_watcher_policy_governed()
+            && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
+        {
+            return CodeIndexDemandAdmissionV1::RefusedByPolicy;
         }
+        if !self.route_is_live() {
+            return CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::RouteRetired,
+            );
+        }
+        if !self.accepts_root(project_root) {
+            return CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::ForeignRoot,
+            );
+        }
+        let overflow = !matches!(demand, CodeIndexDemandV1::HookPaths(_));
+        let rel_paths = match demand {
+            CodeIndexDemandV1::HookPaths(rel_paths) => {
+                if rel_paths.is_empty() {
+                    return CodeIndexDemandAdmissionV1::Queued;
+                }
+                rel_paths
+            }
+            CodeIndexDemandV1::Reconcile | CodeIndexDemandV1::OperatorReconcile => Vec::new(),
+        };
         let direct = {
             let mut pending = self
                 .pending_hooks
@@ -365,91 +397,27 @@ impl CodeIndexActivationV1 {
             if self.state.load(Ordering::Acquire) == ACTIVATION_MOUNTED {
                 Some(CodeIndexActivationHookBatchV1 {
                     paths: rel_paths,
-                    overflow: false,
+                    overflow,
                 })
             } else {
                 pending.extend(rel_paths);
+                pending.overflow |= overflow;
                 None
             }
         };
         match direct {
+            // A mounted route forwards to the scheduler, which owns the only
+            // verdict this activation cannot know: the terminal park.
             Some(batch) if self.route_is_live() => (self.hint_sink)(batch).await,
-            Some(_) => CodeIndexReconcileAdmissionV1::Unavailable,
-            None => {
-                if self.activate() {
-                    CodeIndexReconcileAdmissionV1::Accepted
-                } else {
-                    CodeIndexReconcileAdmissionV1::Unavailable
-                }
+            Some(_) => {
+                CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::RouteRetired)
             }
-        }
-    }
-
-    /// Request one authoritative worktree reconciliation without waiting for
-    /// indexing. The bounded pre-mount queue collapses repeated overflow
-    /// requests into one bit, while a mounted route forwards the same signal
-    /// to the retained scheduler owner.
-    #[hotpath::measure(
-        label = "daemon.code_index.activation.notify_hook_overflow",
-        future = true
-    )]
-    pub async fn notify_hook_overflow(&self, project_root: &Path) -> CodeIndexReconcileAdmissionV1 {
-        self.request_reconciliation(project_root, ActivationDemandV1::Automatic)
-            .await
-    }
-
-    /// Explicit operator demand for one authoritative worktree reconciliation.
-    ///
-    /// Same bounded pre-mount queue and same forwarding to a mounted scheduler
-    /// owner as [`Self::notify_hook_overflow`]; the only difference is that a
-    /// route the watcher is not allowed to index automatically (a linked
-    /// worktree under `sync.watch_linked_worktrees = false`) still honours a
-    /// reconciliation the operator asked for by name.
-    #[hotpath::measure(
-        label = "daemon.code_index.activation.notify_explicit_reconciliation",
-        future = true
-    )]
-    pub async fn notify_explicit_reconciliation(
-        &self,
-        project_root: &Path,
-    ) -> CodeIndexReconcileAdmissionV1 {
-        self.request_reconciliation(project_root, ActivationDemandV1::Explicit)
-            .await
-    }
-
-    async fn request_reconciliation(
-        &self,
-        project_root: &Path,
-        demand: ActivationDemandV1,
-    ) -> CodeIndexReconcileAdmissionV1 {
-        if !self.route_is_live() || !self.accepts_root(project_root) {
-            return CodeIndexReconcileAdmissionV1::Unavailable;
-        }
-        let direct = {
-            let mut pending = self
-                .pending_hooks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.state.load(Ordering::Acquire) == ACTIVATION_MOUNTED {
-                Some(CodeIndexActivationHookBatchV1 {
-                    paths: Vec::new(),
-                    overflow: true,
-                })
-            } else {
-                pending.overflow = true;
-                None
-            }
-        };
-        match direct {
-            Some(batch) if self.route_is_live() => (self.hint_sink)(batch).await,
-            Some(_) => CodeIndexReconcileAdmissionV1::Unavailable,
-            None => {
-                if self.activate_with_demand(demand) {
-                    CodeIndexReconcileAdmissionV1::Accepted
-                } else {
-                    CodeIndexReconcileAdmissionV1::Unavailable
-                }
-            }
+            // The bounded queue holds the demand; the mount it starts delivers
+            // it. Nothing terminal is knowable before a scheduler is mounted.
+            None if self.activate_for_demand() => CodeIndexDemandAdmissionV1::Queued,
+            None => CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+            ),
         }
     }
 
@@ -536,7 +504,7 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(batch);
-                CodeIndexReconcileAdmissionV1::Accepted
+                CodeIndexDemandAdmissionV1::Accepted
             })
         });
         CodeIndexActivationV1::new(
@@ -605,7 +573,7 @@ mod tests {
 
         assert!(matches!(
             activation.notify_hook_paths(repository.path(), paths).await,
-            CodeIndexReconcileAdmissionV1::Accepted
+            CodeIndexDemandAdmissionV1::Accepted
         ));
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         gate.notify_waiters();
@@ -683,7 +651,7 @@ mod tests {
                     Ok(())
                 })
             }),
-            Arc::new(|_| Box::pin(async { CodeIndexReconcileAdmissionV1::Accepted })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Accepted })),
         );
 
         assert_eq!(
@@ -723,7 +691,7 @@ mod tests {
             CancellationToken::new(),
             CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
             Arc::new(|| Box::pin(async { Ok(()) })),
-            Arc::new(|_| Box::pin(async { CodeIndexReconcileAdmissionV1::Accepted })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Accepted })),
         ));
         assert!(registry.register_activation(&scope, &disabled));
         assert_eq!(
@@ -755,7 +723,7 @@ mod tests {
             CancellationToken::new(),
             CodeIndexAutomaticAdmissionV1::Admitted,
             Arc::new(|| Box::pin(async { Ok(()) })),
-            Arc::new(|_| Box::pin(async { CodeIndexReconcileAdmissionV1::Accepted })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Accepted })),
         ));
         assert!(registry.register_activation(&scope, &enabled));
         assert_eq!(
@@ -836,7 +804,7 @@ mod tests {
             Arc::clone(&route_registered),
             CancellationToken::new(),
             mount,
-            Arc::new(|_| Box::pin(async { CodeIndexReconcileAdmissionV1::Accepted })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Accepted })),
         );
 
         assert!(activation.activate());

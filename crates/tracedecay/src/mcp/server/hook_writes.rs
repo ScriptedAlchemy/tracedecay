@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::project::TraceDecay;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Complete detached reconciliation admission requested by the MCP server.
@@ -73,10 +74,10 @@ pub(crate) async fn execute_background_refresh_direct(
         // on its own; they never widen a route past its watch policy.
         BackgroundRefreshModeV1::ForceReconcile => request
             .reconcile_sink
-            .map(|sink| sink(canonical_root, super::CodeIndexReconcileDemandV1::Automatic))
+            .map(|sink| sink(canonical_root, super::CodeIndexDemandV1::Reconcile))
             .ok_or_else(|| {
                 TraceDecayError::project_route(
-                    "code_index_scheduler_unavailable",
+                    super::CODE_INDEX_SCHEDULER_UNAVAILABLE,
                     true,
                     "background refresh requires the daemon code-index scheduler",
                 )
@@ -86,22 +87,22 @@ pub(crate) async fn execute_background_refresh_direct(
             .map(|sink| sink(canonical_root))
             .ok_or_else(|| {
                 TraceDecayError::project_route(
-                    "code_index_scheduler_unavailable",
+                    super::CODE_INDEX_SCHEDULER_UNAVAILABLE,
                     true,
                     "background freshness probing requires the daemon code-index scheduler",
                 )
             })?,
     };
     match accepted.await {
-        super::CodeIndexAdmission::Accepted => Ok(BackgroundRefreshOutcome::Admitted(None)),
-        super::CodeIndexAdmission::LinkedWorktreeDisabled => {
+        CodeIndexDemandAdmissionV1::Queued => Ok(BackgroundRefreshOutcome::Admitted(None)),
+        CodeIndexDemandAdmissionV1::RefusedByPolicy => {
             Ok(BackgroundRefreshOutcome::LinkedWorktreeDisabled)
         }
-        super::CodeIndexAdmission::PublicationAuthorityCorrupt(parked) => {
+        CodeIndexDemandAdmissionV1::Terminal(parked) => {
             Err(super::code_index_publication_corrupt(parked))
         }
-        super::CodeIndexAdmission::Unavailable => Err(TraceDecayError::project_route(
-            "code_index_scheduler_unavailable",
+        CodeIndexDemandAdmissionV1::Unavailable(_) => Err(TraceDecayError::project_route(
+            super::CODE_INDEX_SCHEDULER_UNAVAILABLE,
             true,
             "background refresh was not accepted by the code-index scheduler",
         )),
