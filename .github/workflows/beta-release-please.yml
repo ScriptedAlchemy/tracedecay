@@ -1,6 +1,7 @@
 # Beta prerelease channel for the codex/tracedecay-total-redesign-plan-reopened branch.
 #
 # Tip-child evidence: this workflow must track the live campaign base branch.
+# Actions re-enable: keep target-branch on the live -reopened tip.
 #
 # Every push to the branch opens or updates a release PR proposing the next
 # vX.Y.Z-beta.N version (release-please versioning strategy "prerelease",
