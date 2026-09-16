@@ -3242,7 +3242,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:08d98f8b5ab9a10e9ce05f5b99e58bee44dc5e107047b308afcf63840a674a85";
+    "sha256:3f27d7456d0656b3da2c4e30da6d816525135bde26748fcc7b66a2281505ab6c";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:0a8f5f5c66ac3bc2bf830d1316f1bcdf2568344c0dffb8e408f89dc36e7d66d9",
@@ -3257,7 +3257,7 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         6_278,
     ),
     (
-        "sha256:9aacc4645ff8e7c898401e5ded39b158fef6770ff90987f9471518f661a8f281",
+        "sha256:796a0cd142f14e2fd3f86ffd489ecd2fd82079278be94066effac8f6ee052cfa",
         10_133,
     ),
 ];
@@ -3899,6 +3899,39 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
     }
 }
 
+/// Revision 10 stored generation-bound symbol occurrence lists on each file
+/// segment descriptor. The current writer emits generation-independent
+/// symbol identities (revision 11), so a revision-10 carrier must be refused
+/// before its payload is parsed — never migrated in place.
+#[test]
+fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
+    let (_, manifest, _) = partitioned_codec_fixture();
+    let mut retired: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    let payload = retired["generation"]
+        .as_object_mut()
+        .expect("generation payload");
+    payload.insert("format_revision".to_owned(), serde_json::json!(10));
+    retired["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&retired["generation"]).expect("retired payload bytes")
+        ))
+    ));
+    let retired = serde_json::to_vec(&retired).expect("retired manifest bytes");
+
+    let Err(error) = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&retired) else {
+        panic!("a prior partitioned revision must be refused, never migrated")
+    };
+    assert!(
+        matches!(
+            error,
+            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(10)
+        ),
+        "revision-10 reached the wrong rejection: {error}"
+    );
+}
+
 /// Both public descriptor readers share one layout validator, so every
 /// malformed descriptor mutation must be refused by both, while the supported
 /// historical unpaged descriptor is accepted by both. Only the outer
@@ -4098,6 +4131,30 @@ fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
     );
 }
 
+fn assert_reused_segment_descriptors_stable(parent_manifest: &[u8], child_manifest: &[u8]) {
+    let parent: serde_json::Value =
+        serde_json::from_slice(parent_manifest).expect("parent manifest JSON");
+    let child: serde_json::Value =
+        serde_json::from_slice(child_manifest).expect("child manifest JSON");
+    let parent_segments = parent["generation"]["file_segments"]
+        .as_array()
+        .expect("parent file segments");
+    let child_segments = child["generation"]["file_segments"]
+        .as_array()
+        .expect("child file segments");
+    for child_segment in child_segments {
+        let Some(parent_segment) = parent_segments.iter().find(|parent_segment| {
+            parent_segment["segment_digest"] == child_segment["segment_digest"]
+        }) else {
+            continue;
+        };
+        assert_eq!(
+            child_segment, parent_segment,
+            "a reused content-addressed segment must keep a generation-independent descriptor"
+        );
+    }
+}
+
 #[test]
 fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let store = SharedPublicationStore::default();
@@ -4169,6 +4226,8 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         child.snapshot().files.len() - 1,
         "every unchanged file must keep the parent generation's content address"
     );
+
+    assert_reused_segment_descriptors_stable(&parent_manifest, &child_manifest);
 }
 
 // ---------------------------------------------------------------------------

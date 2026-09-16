@@ -437,13 +437,12 @@ impl CodeFileChunksV1 {
     }
 
     /// Rebind carried-forward chunks to their next generation without
-    /// changing logical chunk identity or content evidence. Symbol occurrence
-    /// IDs are rematerialized from the prior exact occurrence so they cannot
-    /// cross the generation boundary.
-    pub fn rematerialize_for_generation(
+    /// changing logical chunk identity or content evidence.
+    pub(crate) fn rematerialize_for_generation(
         &self,
         generation_id: CodeGenerationId,
         file_occurrence_id: FileOccurrenceId,
+        occurrences: &BTreeMap<SymbolOccurrenceId, SymbolOccurrenceId>,
     ) -> Result<Self, ChunkingFailureV1> {
         self.validate()?;
         if self.document.generation_id == generation_id
@@ -456,7 +455,6 @@ impl CodeFileChunksV1 {
         rematerialized.document.generation_id = generation_id.clone();
         rematerialized.document.file_occurrence_id = file_occurrence_id.clone();
 
-        let mut occurrences: BTreeMap<SymbolOccurrenceId, SymbolOccurrenceId> = BTreeMap::new();
         for chunk in &mut rematerialized.chunks {
             // Carried rows are shared with the prior generation; rebinding
             // writes into this generation's own copy.
@@ -464,17 +462,12 @@ impl CodeFileChunksV1 {
             chunk.anchor.generation_id = generation_id.clone();
             chunk.anchor.file_occurrence_id = file_occurrence_id.clone();
             if let Some(prior_occurrence) = chunk.anchor.symbol_occurrence_id.clone() {
-                let current_occurrence = if let Some(current) = occurrences.get(&prior_occurrence) {
-                    current.clone()
-                } else {
-                    let current = rematerialized_symbol_occurrence_id(
-                        &generation_id,
-                        &file_occurrence_id,
-                        &prior_occurrence,
-                    )?;
-                    occurrences.insert(prior_occurrence, current.clone());
-                    current
-                };
+                let current_occurrence =
+                    occurrences.get(&prior_occurrence).cloned().ok_or_else(|| {
+                        ChunkingFailureV1::NonCanonicalIdentity(
+                            "carried chunk occurrence has no logical symbol binding".to_owned(),
+                        )
+                    })?;
                 chunk.anchor.symbol_occurrence_id = Some(current_occurrence.clone());
                 for term in &mut chunk.exact_terms {
                     if term.kind() == ExactTechnicalTermKindV1::WholeSymbol {
@@ -512,10 +505,6 @@ pub const SYMBOL_IDENTITY_SEPARATOR: &str = "tracedecay.code-symbol-identity.v1"
 
 /// Domain separator for symbol occurrence identity digests.
 pub const SYMBOL_OCCURRENCE_SEPARATOR: &str = "tracedecay.code-symbol-occurrence.v1";
-
-/// Domain separator for carried symbol-occurrence rematerialization.
-pub const SYMBOL_OCCURRENCE_REMATERIALIZATION_SEPARATOR: &str =
-    "tracedecay.code-symbol-occurrence-rematerialization.v1";
 
 /// Domain separator for parser-backed exact extraction authority.
 pub const EXACT_EXTRACTION_AUTHORITY_SEPARATOR: &str = "tracedecay.exact-extraction-authority.v1";
@@ -742,7 +731,7 @@ fn canonical_digest<T: serde::Serialize>(
         .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
 }
 
-fn symbol_occurrence_id(
+pub(crate) fn symbol_occurrence_id(
     generation_id: &CodeGenerationId,
     file_occurrence_id: &FileOccurrenceId,
     identity: &SymbolIdentityDigest,
@@ -753,25 +742,6 @@ fn symbol_occurrence_id(
             generation_id.as_str(),
             file_occurrence_id.as_str(),
             identity.as_str(),
-        ),
-    )
-    .and_then(|digest| {
-        SymbolOccurrenceId::new(format!("symbol.v1.{digest}"))
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
-    })
-}
-
-pub(crate) fn rematerialized_symbol_occurrence_id(
-    generation_id: &CodeGenerationId,
-    file_occurrence_id: &FileOccurrenceId,
-    prior_occurrence: &SymbolOccurrenceId,
-) -> Result<SymbolOccurrenceId, ChunkingFailureV1> {
-    canonical_digest(
-        SYMBOL_OCCURRENCE_REMATERIALIZATION_SEPARATOR,
-        &(
-            generation_id.as_str(),
-            file_occurrence_id.as_str(),
-            prior_occurrence.as_str(),
         ),
     )
     .and_then(|digest| {

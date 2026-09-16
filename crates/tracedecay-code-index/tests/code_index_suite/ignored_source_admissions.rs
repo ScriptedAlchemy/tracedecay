@@ -451,7 +451,7 @@ fn sealed_state_digest_changes_when_ignored_source_roster_changes() {
 
 #[test]
 fn sealed_format_refuses_superseded_revisions_beside_the_partitioned_revision() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 10);
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 11);
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
@@ -479,7 +479,7 @@ fn sealed_format_refuses_superseded_revisions_beside_the_partitioned_revision() 
         "superseded revision reached the wrong rejection: {error}"
     );
 
-    for incompatible_revision in [4, 11] {
+    for incompatible_revision in [4, 12] {
         let mut incompatible = sealed_envelope(&generation);
         incompatible["generation"]["format_revision"] = Value::from(incompatible_revision);
         let incompatible =

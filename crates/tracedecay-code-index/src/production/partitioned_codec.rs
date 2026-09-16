@@ -34,8 +34,9 @@
 //! restored by substituting identities back into the stored bytes and
 //! deserializing them directly.
 
-use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::io::{Read, Seek, Write as IoWrite};
 use std::sync::{Mutex, PoisonError};
@@ -45,7 +46,8 @@ use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CodeChunkProjectionReceiptV1, CodeSearchChunkId, ContentDigest, FileOccurrenceId,
-    ManifestDigest, ProjectionOperationV1, ProjectionOutcomeV1, SymbolOccurrenceId,
+    ManifestDigest, ProjectionOperationV1, ProjectionOutcomeV1, SymbolIdentityDigest,
+    SymbolOccurrenceId,
 };
 
 use super::canonical_json::{
@@ -86,6 +88,8 @@ struct PartitionedFileSegmentDescriptorV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
     file_occurrence_id: FileOccurrenceId,
+    symbol_identities: Vec<SymbolIdentityDigest>,
+    #[serde(skip)]
     symbol_occurrences: Vec<SymbolOccurrenceId>,
 }
 
@@ -516,27 +520,6 @@ enum IdentityFieldV1 {
     SymbolOccurrence,
 }
 
-/// The shipped symbol-key assignment: stable symbols order by
-/// `(identity, occurrence)` ahead of every remaining serialized occurrence,
-/// which orders by occurrence alone.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum SymbolOccurrenceOrderV1<'a> {
-    Stable {
-        identity: &'a str,
-        occurrence: &'a str,
-    },
-    Remaining(Cow<'a, str>),
-}
-
-impl SymbolOccurrenceOrderV1<'_> {
-    fn occurrence(&self) -> &str {
-        match self {
-            Self::Stable { occurrence, .. } => occurrence,
-            Self::Remaining(occurrence) => occurrence.as_ref(),
-        }
-    }
-}
-
 fn identity_field(key: &str) -> IdentityFieldV1 {
     match key {
         "generation_id" | "source_generation" => IdentityFieldV1::Generation,
@@ -560,7 +543,8 @@ struct FileSegmentEncodePolicyV1<'a> {
     generation_id: &'a str,
     snapshot_digest: Option<&'a str>,
     file_occurrence_id: &'a str,
-    symbol_keys: HashMap<&'a str, u32>,
+    occurrence_identities: &'a HashMap<&'a str, &'a SymbolIdentityDigest>,
+    identity_keys: HashMap<&'a str, u32>,
     marker: String,
 }
 
@@ -595,9 +579,18 @@ impl CanonicalPolicyV1 for FileSegmentEncodePolicyV1<'_> {
                 Ok(true)
             }
             IdentityFieldV1::SymbolOccurrence => {
-                let Some(key) = self.symbol_keys.get(value).copied() else {
+                let Some(identity) = self.occurrence_identities.get(value) else {
                     return Ok(false);
                 };
+                let key = self
+                    .identity_keys
+                    .get(identity.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed file segment symbol identity has no descriptor key".to_owned(),
+                        )
+                    })?;
                 self.marker.clear();
                 self.marker.push_str(SYMBOL_OCCURRENCE_ID_MARKER_PREFIX);
                 write!(self.marker, "{key}")
@@ -1159,19 +1152,22 @@ impl PartitionedSegmentEncoderV1 {
                 "sealed file segment serialization failed: {error}"
             ))
         })?;
+        let occurrence_identities = file
+            .artifacts
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.occurrence.as_str(), &symbol.identity))
+            .collect::<HashMap<_, _>>();
         self.encode_serialized_file_segment(
             FILE_SEGMENT_FORMAT_REVISION_V3,
-            generation_id.as_str(),
+            generation_id,
             file.artifacts
                 .clone_bodies
                 .first()
                 .map(|body| body.occurrence.snapshot_digest.as_str()),
             file.extraction.file_occurrence_id.clone(),
-            file.artifacts
-                .symbols
-                .iter()
-                .map(|symbol| (symbol.identity.as_str(), symbol.occurrence.as_str())),
             file_key,
+            &occurrence_identities,
         )
     }
 
@@ -1182,54 +1178,41 @@ impl PartitionedSegmentEncoderV1 {
     fn encode_serialized_file_segment<'s>(
         &mut self,
         format_revision: u32,
-        generation_id: &str,
+        generation_id: &CodeGenerationId,
         snapshot_digest: Option<&str>,
         file_occurrence_id: FileOccurrenceId,
-        stable_symbols: impl Iterator<Item = (&'s str, &'s str)>,
         file_key: u32,
+        occurrence_identities: &HashMap<&'s str, &'s SymbolIdentityDigest>,
     ) -> Result<PartitionedFileSegmentDescriptorV1, CodeIndexProductionErrorV1> {
         let Self { payload, segment } = self;
-        // One borrowed ordering authority preserves the shipped assignment:
-        // stable symbols sort by (identity, occurrence) first, then every
-        // remaining serialized occurrence sorts by occurrence. Deduplication
-        // happens before the final identities become the O(1) lookup authority.
-        let mut ordered_occurrences = BTreeSet::new();
-        ordered_occurrences.extend(stable_symbols.map(|(identity, occurrence)| {
-            SymbolOccurrenceOrderV1::Stable {
-                identity,
-                occurrence,
-            }
-        }));
+        let mut ordered_identities = BTreeSet::new();
         visit_json_strings(
             payload,
             IdentityFieldV1::Other,
             &identity_field,
             &mut |field, value| {
-                if matches!(field, IdentityFieldV1::SymbolOccurrence) {
-                    ordered_occurrences.insert(SymbolOccurrenceOrderV1::Remaining(value));
+                if matches!(field, IdentityFieldV1::SymbolOccurrence)
+                    && let Some(identity) = occurrence_identities.get(value.as_ref())
+                {
+                    ordered_identities.insert(*identity);
                 }
                 Ok(())
             },
         )?;
-        let mut symbol_occurrences = Vec::with_capacity(ordered_occurrences.len());
-        let mut known_occurrences = HashSet::with_capacity(ordered_occurrences.len());
-        for ordered in &ordered_occurrences {
-            let occurrence = ordered.occurrence();
-            if !known_occurrences.insert(occurrence) {
-                continue;
-            }
-            let identity = SymbolOccurrenceId::new(occurrence.to_owned())
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            symbol_occurrences.push(identity);
-        }
-        drop(known_occurrences);
-        drop(ordered_occurrences);
-        let symbol_keys = symbol_occurrences
+        let symbol_identities = ordered_identities.into_iter().cloned().collect::<Vec<_>>();
+        let symbol_occurrences = symbol_identities
+            .iter()
+            .map(|identity| {
+                crate::chunks::symbol_occurrence_id(generation_id, &file_occurrence_id, identity)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let identity_keys = symbol_identities
             .iter()
             .enumerate()
-            .map(|(key, occurrence)| {
+            .map(|(key, identity)| {
                 u32::try_from(key)
-                    .map(|key| (occurrence.as_str(), key))
+                    .map(|key| (identity.as_str(), key))
                     .map_err(|_| {
                         CodeIndexProductionErrorV1::Contract(
                             "sealed file segment symbol key exceeds u32".to_owned(),
@@ -1238,10 +1221,11 @@ impl PartitionedSegmentEncoderV1 {
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
         let mut policy = FileSegmentEncodePolicyV1 {
-            generation_id,
+            generation_id: generation_id.as_str(),
             snapshot_digest,
             file_occurrence_id: file_occurrence_id.as_str(),
-            symbol_keys,
+            occurrence_identities,
+            identity_keys,
             marker: String::new(),
         };
         segment.clear();
@@ -1266,6 +1250,7 @@ impl PartitionedSegmentEncoderV1 {
             segment_digest,
             segment_size_bytes,
             file_occurrence_id,
+            symbol_identities,
             symbol_occurrences,
         })
     }
@@ -2514,6 +2499,27 @@ fn parse_partitioned_manifest(
     Ok(Some(generation))
 }
 
+fn bind_file_segment_occurrences(
+    generation_id: &CodeGenerationId,
+    descriptors: &mut [PartitionedFileSegmentDescriptorV1],
+) -> Result<(), CodeIndexProductionErrorV1> {
+    for descriptor in descriptors {
+        descriptor.symbol_occurrences = descriptor
+            .symbol_identities
+            .iter()
+            .map(|identity| {
+                crate::chunks::symbol_occurrence_id(
+                    generation_id,
+                    &descriptor.file_occurrence_id,
+                    identity,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    }
+    Ok(())
+}
+
 fn snapshot_file_keys<'a>(
     file_occurrences: impl Iterator<Item = &'a FileOccurrenceId>,
 ) -> Result<HashMap<&'a FileOccurrenceId, u32>, CodeIndexProductionErrorV1> {
@@ -2594,6 +2600,19 @@ impl PartitionedLexicalFileSourceV1 {
                 bytes
                     .saturating_add(descriptor.segment_digest.as_str().len())
                     .saturating_add(descriptor.file_occurrence_id.as_str().len())
+                    .saturating_add(
+                        descriptor
+                            .symbol_identities
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<SymbolIdentityDigest>()),
+                    )
+                    .saturating_add(
+                        descriptor
+                            .symbol_identities
+                            .iter()
+                            .map(|id| id.as_str().len())
+                            .sum::<usize>(),
+                    )
                     .saturating_add(
                         descriptor
                             .symbol_occurrences
@@ -2734,9 +2753,13 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         maximum_page_chunks: usize,
         maximum_page_bytes: usize,
     ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
-        let Some(generation) = parse_partitioned_manifest(manifest_bytes)? else {
+        let Some(mut generation) = parse_partitioned_manifest(manifest_bytes)? else {
             return Ok(None);
         };
+        bind_file_segment_occurrences(
+            &generation.manifest.generation_id,
+            &mut generation.file_segments,
+        )?;
         let source = PartitionedLexicalFileSourceV1 {
             generation_id: generation.manifest.generation_id.clone(),
             snapshot_digest: generation.manifest.snapshot_digest.clone(),
@@ -2855,48 +2878,21 @@ impl CodeIndexPublishedGenerationV1 {
                         .find(|(candidate, _)| candidate == language)
                         .map(|(_, revision)| revision)?;
                     (prior_extractor_revision == current_extractor_revision).then_some(())?;
-                    // The reuse gate is fail-closed: the prior descriptor's
-                    // occurrences, rebound to this generation, must still open
-                    // with exactly the symbols this build produced. The
-                    // comparison borrows those symbols instead of cloning two
-                    // `String`s each, because on a one-file sync this runs for
-                    // every unchanged file in the repository.
-                    let mut current_symbol_occurrences = file
+                    let mut current_identities = file
                         .artifacts
                         .symbols
                         .iter()
-                        .map(|symbol| (symbol.identity.as_str(), symbol.occurrence.as_str()))
+                        .map(|symbol| symbol.identity.clone())
                         .collect::<Vec<_>>();
-                    current_symbol_occurrences.sort_unstable();
-                    if prior_descriptor.symbol_occurrences.len() < current_symbol_occurrences.len()
+                    current_identities.sort();
+                    current_identities.dedup();
+                    if current_identities.as_slice() != prior_descriptor.symbol_identities.as_slice()
                     {
                         return None;
                     }
-                    let mut symbol_occurrences =
-                        Vec::with_capacity(prior_descriptor.symbol_occurrences.len());
-                    for (index, occurrence) in
-                        prior_descriptor.symbol_occurrences.iter().enumerate()
-                    {
-                        let rebound = crate::chunks::rematerialized_symbol_occurrence_id(
-                            &self.manifest.generation_id,
-                            &file.extraction.file_occurrence_id,
-                            occurrence,
-                        )
-                        .ok()?;
-                        if let Some((_, expected)) = current_symbol_occurrences.get(index)
-                            && rebound.as_str() != *expected
-                        {
-                            return None;
-                        }
-                        symbol_occurrences.push(rebound);
-                    }
-                    Some(PartitionedFileSegmentDescriptorV1 {
-                        file_key: key,
-                        segment_digest: prior_descriptor.segment_digest.clone(),
-                        segment_size_bytes: prior_descriptor.segment_size_bytes,
-                        file_occurrence_id: file.extraction.file_occurrence_id.clone(),
-                        symbol_occurrences,
-                    })
+                    let mut descriptor = (*prior_descriptor).clone();
+                    descriptor.file_key = key;
+                    Some(descriptor)
                 });
             if let Some(descriptor) = reused {
                 return Ok(FileSegmentPlanV1::Reused(descriptor));
@@ -2905,7 +2901,8 @@ impl CodeIndexPublishedGenerationV1 {
                 payload: buffers.take(),
                 segment: buffers.take(),
             };
-            let descriptor = encoder.encode_file_segment(&self.manifest.generation_id, file, key)?;
+            let descriptor =
+                encoder.encode_file_segment(&self.manifest.generation_id, file, key)?;
             buffers.give(std::mem::take(&mut encoder.payload));
             Ok(FileSegmentPlanV1::Encoded(descriptor, encoder.segment))
         };
@@ -3007,13 +3004,17 @@ impl CodeIndexPublishedGenerationV1 {
             &mut Vec<u8>,
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
-        let Some(generation) = hotpath::measure_block!(
+        let Some(mut generation) = hotpath::measure_block!(
             "code_index.restore.manifest",
             parse_partitioned_manifest(bytes)
         )?
         else {
             return Ok(None);
         };
+        bind_file_segment_occurrences(
+            &generation.manifest.generation_id,
+            &mut generation.file_segments,
+        )?;
         let mut files = Vec::with_capacity(generation.file_segments.len());
         // One segment buffer per window slot, reused across windows: the
         // decode holds at most `partitioned_decode_window_files()` segments,
@@ -3409,29 +3410,6 @@ mod tests {
             pub(super) file: Value,
         }
 
-        fn collect_symbol_occurrences<'a>(
-            value: &'a Value,
-            field: IdentityFieldV1,
-            occurrences: &mut BTreeSet<SymbolOccurrenceOrderV1<'a>>,
-        ) {
-            match value {
-                Value::String(value) if matches!(field, IdentityFieldV1::SymbolOccurrence) => {
-                    occurrences.insert(SymbolOccurrenceOrderV1::Remaining(Cow::Borrowed(value)));
-                }
-                Value::Array(values) => {
-                    for value in values {
-                        collect_symbol_occurrences(value, field, occurrences);
-                    }
-                }
-                Value::Object(values) => {
-                    for (key, value) in values {
-                        collect_symbol_occurrences(value, identity_field(key), occurrences);
-                    }
-                }
-                _ => {}
-            }
-        }
-
         fn normalize_identity_fields(
             value: &mut Value,
             field: IdentityFieldV1,
@@ -3492,25 +3470,14 @@ mod tests {
             stable_symbols: &[(String, String)],
         ) -> (Vec<u8>, Vec<String>) {
             let mut value = serde_json::to_value(payload).expect("reference payload value");
-            let mut ordered_occurrences = BTreeSet::new();
-            ordered_occurrences.extend(stable_symbols.iter().map(|(identity, occurrence)| {
-                SymbolOccurrenceOrderV1::Stable {
-                    identity: identity.as_str(),
-                    occurrence: occurrence.as_str(),
-                }
-            }));
-            collect_symbol_occurrences(&value, IdentityFieldV1::Other, &mut ordered_occurrences);
-            let mut symbol_occurrences = Vec::new();
-            let mut known_occurrences = HashSet::new();
-            for ordered in &ordered_occurrences {
-                let occurrence = ordered.occurrence();
-                if !known_occurrences.insert(occurrence.to_owned()) {
-                    continue;
-                }
-                symbol_occurrences.push(occurrence.to_owned());
-            }
-            drop(known_occurrences);
-            drop(ordered_occurrences);
+            let ordered_symbols = stable_symbols
+                .iter()
+                .map(|(identity, occurrence)| (identity.as_str(), occurrence.as_str()))
+                .collect::<BTreeMap<_, _>>();
+            let symbol_occurrences = ordered_symbols
+                .values()
+                .map(|occurrence| (*occurrence).to_owned())
+                .collect::<Vec<_>>();
             let symbol_keys = symbol_occurrences
                 .iter()
                 .enumerate()
@@ -3554,6 +3521,23 @@ mod tests {
                 file: value,
             })
             .expect("reference segment bytes");
+            let generation_id =
+                CodeGenerationId::new(generation_id).expect("reference generation identity");
+            let file_occurrence_id =
+                FileOccurrenceId::new(file_occurrence_id).expect("reference file identity");
+            let symbol_occurrences = ordered_symbols
+                .keys()
+                .map(|identity| {
+                    crate::chunks::symbol_occurrence_id(
+                        &generation_id,
+                        &file_occurrence_id,
+                        &SymbolIdentityDigest::new(*identity).expect("reference symbol identity"),
+                    )
+                    .expect("reference symbol occurrence")
+                    .as_str()
+                    .to_owned()
+                })
+                .collect();
             (bytes, symbol_occurrences)
         }
     }
@@ -3721,25 +3705,43 @@ mod tests {
             .artifacts
             .symbols
             .iter()
-            .map(|symbol| (symbol.identity.clone(), symbol.occurrence.clone()))
+            .map(|symbol| {
+                let identity = format!("{}:{}", symbol.identity, symbol.occurrence);
+                (
+                    ManifestDigest::from_sha256_bytes(&Sha256::digest(identity.as_bytes()))
+                        .expect("fixture symbol digest")
+                        .as_str()
+                        .to_owned(),
+                    symbol.occurrence.clone(),
+                )
+            })
             .collect()
     }
 
     fn streamed_file_segment() -> (Vec<u8>, PartitionedFileSegmentDescriptorV1) {
         let payload = fixture_payload();
         let stable = fixture_stable_symbols();
+        let identities = stable
+            .iter()
+            .map(|(identity, _)| {
+                SymbolIdentityDigest::new(identity.clone()).expect("fixture symbol identity")
+            })
+            .collect::<Vec<_>>();
+        let occurrence_identities = stable
+            .iter()
+            .zip(&identities)
+            .map(|((_, occurrence), identity)| (occurrence.as_str(), identity))
+            .collect::<HashMap<_, _>>();
         let mut encoder = PartitionedSegmentEncoderV1::default();
         serde_json::to_writer(&mut encoder.payload, &payload).expect("streamed payload");
         let descriptor = encoder
             .encode_serialized_file_segment(
                 FILE_SEGMENT_FORMAT_REVISION_V1,
-                FIXTURE_GENERATION,
+                &CodeGenerationId::new(FIXTURE_GENERATION).expect("fixture generation identity"),
                 None,
                 FileOccurrenceId::new(FIXTURE_FILE).expect("fixture file identity"),
-                stable
-                    .iter()
-                    .map(|(identity, occurrence)| (identity.as_str(), occurrence.as_str())),
                 7,
+                &occurrence_identities,
             )
             .expect("streamed file segment");
         (encoder.segment_bytes().to_vec(), descriptor)
@@ -4234,10 +4236,24 @@ mod tests {
     /// to admit a shape this build no longer writes.
     #[derive(Deserialize)]
     struct ArchivalSegmentCarrierV1 {
-        generation: ArchivalSegmentCarrierGenerationV1,
+        generation: ArchivalSegmentCarrierWireGenerationV1,
     }
 
     #[derive(Deserialize)]
+    struct ArchivalSegmentCarrierWireGenerationV1 {
+        manifest: CodeGenerationManifestV1,
+        file_segments: Vec<ArchivalFileSegmentDescriptorV1>,
+    }
+
+    #[derive(Deserialize)]
+    struct ArchivalFileSegmentDescriptorV1 {
+        file_key: u32,
+        segment_digest: ManifestDigest,
+        segment_size_bytes: u64,
+        file_occurrence_id: FileOccurrenceId,
+        symbol_occurrences: Vec<SymbolOccurrenceId>,
+    }
+
     struct ArchivalSegmentCarrierGenerationV1 {
         manifest: CodeGenerationManifestV1,
         file_segments: Vec<PartitionedFileSegmentDescriptorV1>,
@@ -4246,9 +4262,24 @@ mod tests {
     fn archival_segment_carrier() -> ArchivalSegmentCarrierGenerationV1 {
         let manifest = std::fs::read(historical_fixture_root().join("manifest.json"))
             .expect("historical manifest");
-        serde_json::from_slice::<ArchivalSegmentCarrierV1>(&manifest)
+        let carrier = serde_json::from_slice::<ArchivalSegmentCarrierV1>(&manifest)
             .expect("archival carrier segment descriptors")
-            .generation
+            .generation;
+        ArchivalSegmentCarrierGenerationV1 {
+            manifest: carrier.manifest,
+            file_segments: carrier
+                .file_segments
+                .into_iter()
+                .map(|descriptor| PartitionedFileSegmentDescriptorV1 {
+                    file_key: descriptor.file_key,
+                    segment_digest: descriptor.segment_digest,
+                    segment_size_bytes: descriptor.segment_size_bytes,
+                    file_occurrence_id: descriptor.file_occurrence_id,
+                    symbol_identities: Vec::new(),
+                    symbol_occurrences: descriptor.symbol_occurrences,
+                })
+                .collect(),
+        }
     }
 
     /// The archival carrier was sealed at revision seven, which named a
@@ -4327,7 +4358,8 @@ mod tests {
                 .expect("segment digest"),
             segment_size_bytes: u64::try_from(bytes.len()).expect("segment size"),
             file_occurrence_id: prior.file_occurrence_id.clone(),
-            symbol_occurrences: prior.symbol_occurrences.clone(),
+            symbol_identities: prior.symbol_identities.clone(),
+            symbol_occurrences: Vec::new(),
         };
         let mut restored = Vec::new();
         let error = decode_file_segment(
