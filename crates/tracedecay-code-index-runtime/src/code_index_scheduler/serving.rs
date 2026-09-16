@@ -74,7 +74,8 @@ use crate::{
             CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
             CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1, CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1, CodeExactLexicalArtifactReaderV1,
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
             CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
             CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
@@ -96,12 +97,9 @@ const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
 const CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1: usize = 128 * 1024 * 1024;
 const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
 const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
-/// Clone-successor page batches share one durable commit. The bounds equal
-/// the floor (scale 1) text-artifact batch, so every page the first-pass
-/// builder admitted also fits one successor batch, and the retained pages plus
-/// the builder's `SQLite` page cache stay inside the successor reservation.
-const CLONE_SUCCESSOR_BATCH_PAGES_V1: usize = TEXT_ARTIFACT_BASE_BATCH_PAGES_V1;
-const CLONE_SUCCESSOR_BATCH_BYTES_V1: usize = TEXT_ARTIFACT_BASE_BATCH_BYTES_V1;
+/// Live JSON copies `append_clone_rows` holds for one clone body while the
+/// staged pages remain live: payload, occurrence, stored payload, comparison.
+const CLONE_SUCCESSOR_APPEND_LIVE_COPIES_V1: usize = 4;
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
@@ -120,6 +118,55 @@ pub(super) fn text_artifact_source_batch_limits(
     let bytes = TEXT_ARTIFACT_BASE_BATCH_BYTES_V1 * scale;
     (pages, bytes, pages * 2)
 }
+
+/// Clone-successor page-batch bounds from the 128 MiB reservation ledger.
+///
+/// `open_builder_connection` grants the full SQLite cache. `append_clone_rows`
+/// then serializes payload/occurrence, reads the stored payload, and compares
+/// a second serialization while the batch's pages stay live, and the builder
+/// retains metadata. The batch byte ceiling is the remainder after those
+/// charges so resident-memory admission is not filled to the last byte.
+pub(super) fn clone_successor_source_batch_limits(
+    metadata: &CodeLexicalProjectionMetadataV1,
+) -> Result<(usize, usize), RetrievalPortError> {
+    clone_successor_source_batch_limits_from_charges(metadata.retained_owned_bytes())
+}
+
+pub(super) fn clone_successor_source_batch_limits_from_charges(
+    metadata_bytes: usize,
+) -> Result<(usize, usize), RetrievalPortError> {
+    let scratch = CLONE_SUCCESSOR_APPEND_LIVE_COPIES_V1
+        .checked_mul(TEXT_ARTIFACT_PAGE_BYTES_V1)
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "clone-successor append-scratch ledger overflowed".to_owned(),
+            )
+        })?;
+    let fixed = CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1
+        .checked_add(metadata_bytes)
+        .and_then(|bytes| bytes.checked_add(scratch))
+        .ok_or_else(|| {
+            RetrievalPortError::Contract("clone-successor fixed ledger overflowed".to_owned())
+        })?;
+    if fixed >= CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1 {
+        return Err(RetrievalPortError::Contract(format!(
+            "clone-successor SQLite cache, metadata, and append scratch exhaust the {CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1}-byte reservation"
+        )));
+    }
+    let remaining = CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1 - fixed;
+    if remaining < TEXT_ARTIFACT_PAGE_BYTES_V1 {
+        return Err(RetrievalPortError::Contract(format!(
+            "clone-successor reservation leaves {remaining} bytes for pages, under the {TEXT_ARTIFACT_PAGE_BYTES_V1}-byte source page bound"
+        )));
+    }
+    let bytes = remaining.min(TEXT_ARTIFACT_BASE_BATCH_BYTES_V1);
+    let slot = std::mem::size_of::<VerifiedSealedLexicalPageV1>();
+    let pages = TEXT_ARTIFACT_BASE_BATCH_PAGES_V1
+        .min(bytes / slot.max(1))
+        .max(1);
+    Ok((pages, bytes))
+}
+
 /// Cancellation-checkpoint cadence for a wake parked behind another wake's
 /// corpus-sized verified head open. The parked wake re-checks its typed
 /// cancellation state at this interval, so shutdown or supersession surfaces
@@ -3112,6 +3159,15 @@ impl LatestCodeTextGenerationV1 {
         if build.builder.is_none() {
             self.rebuild_clone_successor(build, control)?;
         }
+        let (batch_pages, batch_bytes) = clone_successor_source_batch_limits(
+            build
+                .builder
+                .as_ref()
+                .ok_or_else(|| {
+                    RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
+                })?
+                .projection_metadata(),
+        )?;
         let mut remaining = maximum_work.max(1);
         while remaining > 0 && build.source_receipt.is_none() {
             if matches!(
@@ -3139,8 +3195,8 @@ impl LatestCodeTextGenerationV1 {
                 continue;
             }
             let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
-                remaining.clamp(1, CLONE_SUCCESSOR_BATCH_PAGES_V1),
-                CLONE_SUCCESSOR_BATCH_BYTES_V1,
+                remaining.clamp(1, batch_pages),
+                batch_bytes,
             )
             .map_err(map_sealed_page_source_error)?;
             match self.append_clone_successor_batch(build, bounds, control)? {

@@ -116,6 +116,10 @@ impl CodeLexicalCloneSuccessorV1 {
         Ok(cursor)
     }
 
+    pub fn projection_metadata(&self) -> &CodeLexicalProjectionMetadataV1 {
+        &self.metadata
+    }
+
     /// Append one page through the atomic batch path.
     pub fn append_page(
         &mut self,

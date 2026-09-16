@@ -108,7 +108,8 @@ pub enum CodeLexicalArtifactBatchLimitV1 {
 /// builder connections never grant an mmap window (rollback-journal
 /// durability + WAL-coherence). Sealed read-only readers mmap the
 /// content-addressed file so serving does not re-pread the same pages.
-const ARTIFACT_SQLITE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub const CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1: usize = 64 * 1024 * 1024;
+const ARTIFACT_SQLITE_CACHE_BYTES: usize = CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1;
 /// The kernel SQLite window's page-cache floor.
 const ARTIFACT_SQLITE_CACHE_FLOOR_BYTES: usize = 2 * 1024 * 1024;
 const ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES: usize = 64 * 1024 * 1024;
