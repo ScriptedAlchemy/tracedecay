@@ -74,6 +74,35 @@ describe("SSE query invalidation", () => {
     ).toEqual([["code-index", "freshness", "project:project.beta"]]);
   });
 
+  it("invalidates the all-projects freshness key when the event is the active project", () => {
+    expect(
+      targetedInvalidationKeys(
+        {
+          events: [event("code_index_activity", "project.alpha")],
+          refetch: false,
+          stale: false,
+        },
+        "project.alpha",
+      ),
+    ).toEqual([
+      ["code-index", "freshness", "project:project.alpha"],
+      ["code-index", "freshness", "all"],
+    ]);
+  });
+
+  it("does not invalidate all-projects freshness for a foreign project's activity", () => {
+    expect(
+      targetedInvalidationKeys(
+        {
+          events: [event("code_index_activity", "project.beta")],
+          refetch: false,
+          stale: false,
+        },
+        "project.alpha",
+      ),
+    ).toEqual([["code-index", "freshness", "project:project.beta"]]);
+  });
+
   it("does not invent a code-index target for activity without a project", () => {
     expect(
       targetedInvalidationKeys({
