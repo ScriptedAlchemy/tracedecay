@@ -7680,7 +7680,7 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         "mounted worktree admits complete-generation demand"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let current = loop {
         if let Some((current, true)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
@@ -7689,11 +7689,10 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         {
             break current;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "reopened text generation did not become current"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout_at(deadline, serving_changes.changed())
+            .await
+            .expect("the current retained text owner wakes deferred consumers")
+            .expect("the serving-change channel stays open while mounted");
     };
     assert!(
         current.uses_partitioned_manifest(),
@@ -7706,10 +7705,6 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
             .is_none(),
         "configured graph refusal must leave the full generation unavailable"
     );
-    tokio::time::timeout(Duration::from_secs(5), serving_changes.changed())
-        .await
-        .expect("the current retained text owner wakes deferred consumers")
-        .expect("the serving-change channel stays open while mounted");
     let selected = registry
         .latest_feedback_generation_for_scope(fixture.path(), &scope)
         .await
