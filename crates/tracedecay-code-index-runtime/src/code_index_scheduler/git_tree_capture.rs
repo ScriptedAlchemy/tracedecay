@@ -1273,6 +1273,11 @@ mod tests {
             project.path(),
             &["config", "user.email", "tracedecay@example.invalid"],
         );
+        // Native integration refuses repositories that require signed commits.
+        // Pin the fixture's own write configuration so eligibility does not
+        // inherit the host's global `commit.gpgsign` / `merge.gpgsign`.
+        git(project.path(), &["config", "commit.gpgsign", "false"]);
+        git(project.path(), &["config", "merge.gpgsign", "false"]);
         std::fs::create_dir_all(project.path().join("src")).expect("source directory");
         std::fs::write(
             project.path().join("src/base.rs"),
@@ -1389,7 +1394,12 @@ mod tests {
                 },
             )
             .expect("native preflight");
-        let bindings = bindings.expect("eligible candidate bindings");
+        let bindings = bindings.unwrap_or_else(|| {
+            panic!(
+                "eligible candidate bindings: preflight disposition was {:?}",
+                preflight.disposition
+            )
+        });
 
         let candidate = bindings.candidate.generation();
         assert_eq!(
