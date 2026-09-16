@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router';
 import type { DeliveryInboxV1 } from '../../contracts/generated.ts';
+import type { FeedbackProximityReadResultV1 } from '../../contracts/index.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { DeliveryPage } from './DeliveryPage.tsx';
 
@@ -106,15 +107,57 @@ function LocationProbe() {
   return <output data-testid="location">{useLocation().search}</output>;
 }
 
-function renderDelivery(payload: DeliveryInboxV1, domainState = 'ready', route = '/delivery') {
+/** Wraps a Work-route payload in the application envelope `callWork` walks
+ * (`crates/tracedecay-api/src/lib.rs`'s `HttpJsonEnvelope`), the same shape
+ * `LoomPage.dom.test.tsx` uses for `/api/feedback/proximity`. */
+function applicationEnvelope(payload: unknown) {
+  return {
+    kind: 'success',
+    value: {
+      binding_id: 'binding.dashboard.feedback_proximity.v1',
+      contract: { schema_id: 'schema.application.feedback.proximity.result', schema_revision: 1 },
+      request_id: 'request-proximity',
+      scope: {
+        project_id: 'project.alpha',
+        repository_id: 'repository.alpha',
+        worktree_id: 'worktree.alpha',
+        reference: 'refs/heads/feature/delivery',
+        scope_digest: 'sha256:scope',
+      },
+      outcome: { outcome: 'evidence', value: { payload } },
+    },
+  };
+}
+
+const PROXIMITY_UNAVAILABLE_BODY = applicationEnvelope({
+  state: 'unavailable',
+  observed_at: 1_700_000_000_000_000,
+} satisfies FeedbackProximityReadResultV1);
+
+function serveRoutes(routes: Record<string, { status: number; body: unknown }>) {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const hit = Object.entries(routes).find(([path]) => url.includes(path));
+    const { status, body } = hit?.[1] ?? { status: 404, body: { status: 'not_found' } };
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    } as Response;
+  });
+}
+
+function renderDelivery(
+  payload: DeliveryInboxV1,
+  domainState = 'ready',
+  route = '/delivery',
+  proximityBody: unknown = PROXIMITY_UNAVAILABLE_BODY,
+) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => fixtureEnvelope(payload, domainState),
-      } as Response;
+    serveRoutes({
+      '/api/delivery/inbox': { status: 200, body: fixtureEnvelope(payload, domainState) },
+      '/api/feedback/proximity': { status: 200, body: proximityBody },
     }),
   );
   const client = new QueryClient({
@@ -199,5 +242,60 @@ describe('DeliveryPage', () => {
 
     expect(await screen.findByText('Project registry unavailable')).toBeTruthy();
     expect(screen.queryByText('No admitted pull requests')).toBeNull();
+  });
+
+  it('activates overlapping_edit with proximity evidence for a head-matched encounter', async () => {
+    const indexedHead = INBOX.pull_requests[0]!.indexed_head_commit_id;
+    const scope = {
+      project_id: 'project.alpha',
+      repository_id: 'repository.alpha',
+      worktree_id: 'worktree.alpha',
+      branch_ref: 'refs/heads/feature/delivery',
+      head_commit_id: indexedHead,
+    };
+    const proximity = {
+      state: 'complete',
+      page: {
+        scope,
+        source_generation: 'generation.proximity.1',
+        observed_at: 1_700_000_200_000_000,
+        expires_at: 1_700_000_500_000_000,
+        encounters: [
+          {
+            encounter_id: 'sha256:overlap',
+            scope,
+            interval: { start: 1_700_000_000_000_000, end: 1_700_000_100_000_000 },
+            participants: [
+              {
+                source: { provider: 'cursor', session_id: 'sess-a', source_key: null },
+                agent_id: 'agent-a',
+                worktree_id: 'worktree.alpha',
+                worktree_root: '/tmp/alpha',
+                branch_ref: 'refs/heads/feature/delivery',
+                head_revision: indexedHead,
+                access: 'write',
+                activity: { start: 1_700_000_000_000_000, end: 1_700_000_050_000_000 },
+                address: {
+                  scope,
+                  file: 'src/lib.rs',
+                  span: { start_byte: 0, end_byte: 10 },
+                  symbol: 'symbol',
+                },
+              },
+            ],
+            relation: { relation_kind: 'overlapping_edit', warning_class: 'same_file' },
+            observed_at: 1_700_000_100_000_000,
+            expires_at: 1_700_000_400_000_000,
+            coverage: 'complete',
+          },
+        ],
+      },
+    } satisfies FeedbackProximityReadResultV1;
+
+    renderDelivery(INBOX, 'ready', '/delivery', applicationEnvelope(proximity));
+
+    const detail = await screen.findByRole('region', { name: 'Pull request detail' });
+    expect(await within(detail).findByText('sha256:overlap:overlapping_edit')).toBeTruthy();
+    expect(within(detail).queryByText('This source has no mounted Delivery authority.')).toBeNull();
   });
 });
