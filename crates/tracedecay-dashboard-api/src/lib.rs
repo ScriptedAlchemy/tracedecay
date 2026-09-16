@@ -135,6 +135,7 @@ pub mod contract_schema;
 mod delivery_api;
 pub use delivery_api::{
     DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
+    DashboardProximityAttentionReadFutureV1, DashboardProximityAttentionReadPortV1,
 };
 mod doctor_findings_api;
 mod events_api;
@@ -335,6 +336,9 @@ pub struct DashboardStateCompositionV1 {
     /// The adapter owns application admission and provider/store access; HTTP
     /// receives only bounded typed source outcomes.
     pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
+    /// Canonical feedback-proximity read folded into Delivery inbox attention.
+    /// Absent mount leaves proximity sources Unsupported (never Clear).
+    pub proximity_attention_read_authority: Option<Arc<dyn DashboardProximityAttentionReadPortV1>>,
     pub registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Exact daemon-selected profile plus its canonical automation run and
     /// managed-skill materialization capabilities. Standalone states leave it
@@ -458,6 +462,8 @@ pub struct DashboardState {
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     /// Daemon-wide Delivery projection over exact registered project targets.
     pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
+    /// Canonical feedback-proximity read folded into Delivery inbox attention.
+    pub proximity_attention_read_authority: Option<Arc<dyn DashboardProximityAttentionReadPortV1>>,
     /// Global accounting DB for the savings ledger and lifetime counters used
     /// by the Savings & Cost tab. Provider usage lives in the retained project
     /// session store exposed separately through `lcm_db`.
@@ -541,6 +547,8 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     code_read_authority: Option<code_read_api::DashboardCodeReadAuthorityV1>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
+    proximity_attention_read_authority: Option<Arc<dyn DashboardProximityAttentionReadPortV1>>,
+    code_index_freshness_reader: Option<CodeIndexFreshnessReader>,
     profile_code_index_worker_settings:
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
@@ -569,6 +577,8 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             code_read_authority: None,
             git_correlation_read_authority: None,
             delivery_read_authority: None,
+            proximity_attention_read_authority: None,
+            code_index_freshness_reader: None,
             profile_code_index_worker_settings: None,
             application_invocation_executor: None,
             pr_autotrack_reader: None,
@@ -646,6 +656,41 @@ impl DashboardHostAdmissionTestAuthorityV1 {
         git_correlation_read_authority: Arc<dyn DashboardGitCorrelationReadPortV1>,
     ) -> Self {
         self.git_correlation_read_authority = Some(git_correlation_read_authority);
+        self
+    }
+
+    /// Attaches the daemon-owned Delivery read authority so the test
+    /// transport serves the same `/api/delivery/*` provider reads production
+    /// mounts.
+    #[must_use]
+    pub fn with_delivery_read_authority(
+        mut self,
+        delivery_read_authority: Arc<dyn DashboardDeliveryReadPortV1>,
+    ) -> Self {
+        self.delivery_read_authority = Some(delivery_read_authority);
+        self
+    }
+
+    /// Attaches the daemon-owned proximity attention read so Delivery inbox
+    /// HTTP serves the same join production mounts (never a client re-join).
+    #[must_use]
+    pub fn with_proximity_attention_read_authority(
+        mut self,
+        proximity_attention_read_authority: Arc<dyn DashboardProximityAttentionReadPortV1>,
+    ) -> Self {
+        self.proximity_attention_read_authority = Some(proximity_attention_read_authority);
+        self
+    }
+
+    /// Attaches a code-index freshness reader so the test transport can
+    /// join provider reads against an indexed head, the same admission gate
+    /// production's Delivery inbox requires before mounting a provider read.
+    #[must_use]
+    pub fn with_code_index_freshness_reader(
+        mut self,
+        code_index_freshness_reader: CodeIndexFreshnessReader,
+    ) -> Self {
+        self.code_index_freshness_reader = Some(code_index_freshness_reader);
         self
     }
 
@@ -799,6 +844,7 @@ async fn build_state_inner(
         lcm_read_authority,
         git_correlation_read_authority,
         delivery_read_authority,
+        proximity_attention_read_authority,
         registered_savings_db,
         automation_authority,
         automation_observation,
@@ -873,6 +919,7 @@ async fn build_state_inner(
         lcm_read_authority,
         git_correlation_read_authority,
         delivery_read_authority,
+        proximity_attention_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
         project_root: cg.store_layout.project_root.clone(),
@@ -946,6 +993,7 @@ pub async fn build_selected_project_state(
             lcm_read_authority: None,
             git_correlation_read_authority: None,
             delivery_read_authority: active.delivery_read_authority.clone(),
+            proximity_attention_read_authority: active.proximity_attention_read_authority.clone(),
             registered_savings_db: active.savings_db.clone(),
             automation_authority: active.automation_authority.clone(),
             automation_observation: active.automation_observation.clone(),
@@ -1095,6 +1143,8 @@ where
                 .and_then(|authority| authority.git_correlation_read_authority.clone()),
             delivery_read_authority: test_authority
                 .and_then(|authority| authority.delivery_read_authority.clone()),
+            proximity_attention_read_authority: test_authority
+                .and_then(|authority| authority.proximity_attention_read_authority.clone()),
             registered_savings_db: test_authority
                 .map(|authority| authority.profile_database.clone()),
             automation_authority: test_authority
@@ -1106,7 +1156,8 @@ where
                 .unwrap_or_else(standalone_dashboard_automation_writer),
             doctor_report_reader: None,
             remote_operational_status_reader: None,
-            code_index_freshness_reader: None,
+            code_index_freshness_reader: test_authority
+                .and_then(|authority| authority.code_index_freshness_reader.clone()),
             feedback_status_reader: None,
             pr_autotrack_reader: test_authority
                 .and_then(|authority| authority.pr_autotrack_reader.clone()),
@@ -2492,6 +2543,7 @@ mod authority_tests {
                 lcm_read_authority: None,
                 git_correlation_read_authority: None,
                 delivery_read_authority: None,
+                proximity_attention_read_authority: None,
                 savings_db: None,
                 savings_db_path: String::new(),
                 project_root: project_root.clone(),

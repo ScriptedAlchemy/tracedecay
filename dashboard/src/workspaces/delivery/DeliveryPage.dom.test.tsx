@@ -102,19 +102,58 @@ const INBOX = {
   excluded_pull_requests: 1,
 } satisfies DeliveryInboxV1;
 
+/** Inbox already joined by the server — overlapping_edit is Active with typed
+ * proximity evidence (no client `/api/feedback/proximity` re-join). */
+const INBOX_WITH_PROXIMITY_ATTENTION = {
+  ...INBOX,
+  pull_requests: [
+    {
+      ...INBOX.pull_requests[0]!,
+      attention: [
+        INBOX.pull_requests[0]!.attention[0]!,
+        {
+          id: 'project.alpha:42:overlapping_edit',
+          project_id: 'project.alpha',
+          pull_request_id: '42',
+          source: 'overlapping_edit',
+          state: 'active',
+          evidence: [
+            {
+              kind: 'proximity_encounter',
+              encounter_id: 'sha256:overlap',
+              relation: 'overlapping_edit',
+            },
+          ],
+          coverage: 'complete',
+          observed_at_micros: 1_700_000_100_000_000,
+        },
+      ],
+    },
+  ],
+} satisfies DeliveryInboxV1;
+
 function LocationProbe() {
   return <output data-testid="location">{useLocation().search}</output>;
+}
+
+function serveRoutes(routes: Record<string, { status: number; body: unknown }>) {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const hit = Object.entries(routes).find(([path]) => url.includes(path));
+    const { status, body } = hit?.[1] ?? { status: 404, body: { status: 'not_found' } };
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    } as Response;
+  });
 }
 
 function renderDelivery(payload: DeliveryInboxV1, domainState = 'ready', route = '/delivery') {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => fixtureEnvelope(payload, domainState),
-      } as Response;
+    serveRoutes({
+      '/api/delivery/inbox': { status: 200, body: fixtureEnvelope(payload, domainState) },
     }),
   );
   const client = new QueryClient({
@@ -199,5 +238,13 @@ describe('DeliveryPage', () => {
 
     expect(await screen.findByText('Project registry unavailable')).toBeTruthy();
     expect(screen.queryByText('No admitted pull requests')).toBeNull();
+  });
+
+  it('renders server-joined overlapping_edit proximity evidence from the inbox', async () => {
+    renderDelivery(INBOX_WITH_PROXIMITY_ATTENTION);
+
+    const detail = await screen.findByRole('region', { name: 'Pull request detail' });
+    expect(await within(detail).findByText('sha256:overlap:overlapping_edit')).toBeTruthy();
+    expect(within(detail).queryByText('This source has no mounted Delivery authority.')).toBeNull();
   });
 });
