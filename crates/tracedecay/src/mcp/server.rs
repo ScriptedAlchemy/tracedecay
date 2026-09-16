@@ -13,7 +13,9 @@ use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
 use crate::project::TraceDecay;
-use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
+use tracedecay_contracts::code_index_freshness::{
+    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT, CodeIndexConvergenceParkedV1,
+};
 use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -126,9 +128,6 @@ pub(crate) enum CodeIndexAdmission {
     PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
     Unavailable,
 }
-
-pub(crate) const CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT: &str =
-    "code_index_publication_authority_corrupt";
 
 pub(crate) const CODE_INDEX_LINKED_WORKTREE_DISABLED: &str = "linked_worktree_disabled";
 

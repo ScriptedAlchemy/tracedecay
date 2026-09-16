@@ -2280,7 +2280,10 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
 
     let (reason_code, retryable, detail) =
         error.project_route_context().expect("typed project route");
-    assert_eq!(reason_code, crate::mcp::server::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT);
+    assert_eq!(
+        reason_code,
+        tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT
+    );
     assert!(!retryable, "publication corruption requires reset");
     assert!(
         detail.contains("injected sync refusal"),
