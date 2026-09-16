@@ -2805,11 +2805,12 @@ impl LatestCodeTextGenerationV1 {
         .map_err(map_text_artifact_error)?;
         let needs_clone_successor = !reader.has_clone_fingerprints();
         let prior = reader.verified_artifact().clone();
-        // Publish Ready before installing owners so status cannot observe
-        // query-ready owners while the last finalization wake still says
-        // Verification.
-        self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
+        // Match the cold-open path: install owners first, then publish Ready.
+        // Publishing Ready before a failed install (admission ceiling / shrink)
+        // would leave dashboard/MCP progress claiming a ready generation that
+        // cannot serve queries.
         self.install_artifact_owners(reader, reader_reservation)?;
+        self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         if needs_clone_successor {
             let source = store.open_sealed_source(&sealed_identity, control)?;
             let build =
