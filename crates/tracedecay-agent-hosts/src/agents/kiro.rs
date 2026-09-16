@@ -7,11 +7,13 @@
 //! host-capability doctrine forbids. The binary is therefore a hard
 //! requirement for the global lifecycle, with no config-editing fallback.
 //!
-//! The canonical global integration is MCP-only. Older releases also wrote
-//! global steering, a managed agent, and a default-agent selection, but the
-//! catalog-native lifecycle no longer owns or grades those retired artifacts.
-//! Workspace-local registration still writes its MCP entry, steering, and
-//! managed agent because Kiro has no project-path-aware registry operation.
+//! The canonical global integration is MCP-only and does not create global
+//! steering, a managed agent, or a default-agent selection. Older releases
+//! wrote those artifacts; when a legacy global steering file is still present,
+//! activate reconciles it onto the current owned block so doctor can clear the
+//! stale-block failure it reports. Workspace-local registration still writes
+//! its MCP entry, steering, and managed agent because Kiro has no
+//! project-path-aware registry operation.
 //!
 //! User-owned Kiro agents remain user-managed. If `~/.kiro/agents/tracedecay.json`
 //! already exists and is not the file tracedecay writes, install and uninstall
@@ -466,6 +468,12 @@ impl AgentIntegration for KiroIntegration {
         if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
+            // Catalog-native global install stays MCP-only and does not create
+            // `~/.kiro/steering/tracedecay.md`. Prior releases did write that
+            // file; doctor grades it when present, so activate must converge
+            // any leftover owned block or the stated install remedy never
+            // clears the failure.
+            reconcile_legacy_global_steering(&ctx.home)?;
         }
         Ok(())
     }
@@ -698,10 +706,10 @@ fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) -> Result<()>
     super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro)
 }
 
-/// Add or refresh tracedecay's global steering resource for default Kiro
-/// sessions. Every owned block — the current sentinel-delimited shape or a
-/// historical heading-marked one — converges onto exactly one copy of the
-/// current block in place; operator text around it is preserved.
+/// Add or refresh tracedecay's steering resource. Every owned block — the
+/// current sentinel-delimited shape or a historical heading-marked one —
+/// converges onto exactly one copy of the current block in place; operator
+/// text around it is preserved.
 fn install_steering_rules(path: &Path) -> Result<()> {
     let block = steering_block_text();
     super::prompt_rules::reconcile_prompt_rules_with(path, |existing| {
@@ -710,6 +718,23 @@ fn install_steering_rules(path: &Path) -> Result<()> {
             existing, &ranges, &block,
         ))
     })
+}
+
+/// Converge a leftover global steering file from a prior release. Absence is
+/// the catalog-native end state and is left alone; presence must reconcile or
+/// return a typed inspection failure.
+fn reconcile_legacy_global_steering(home: &Path) -> Result<()> {
+    let path = steering_path(home);
+    match std::fs::metadata(&path) {
+        Ok(_) => install_steering_rules(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!(
+                "failed to inspect Kiro global steering {}: {error}",
+                path.display()
+            ),
+        }),
+    }
 }
 
 fn steering_block_text() -> String {
