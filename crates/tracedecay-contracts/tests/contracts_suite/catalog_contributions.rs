@@ -185,3 +185,37 @@ fn verified_graph_mcp_reads_have_application_primitive_admission_identity() {
         }));
     }
 }
+
+#[test]
+fn similar_and_redundancy_bind_legacy_protocol_as_alias_of_current() {
+    use tracedecay_tool_catalog::BindingStatus;
+
+    let contribution = primitive_read_contribution().unwrap();
+    for operation in ["similar", "redundancy"] {
+        let current = contribution
+            .bindings()
+            .iter()
+            .find(|binding| {
+                binding.surface() == BindingSurface::Mcp
+                    && binding.operation().as_str() == operation
+                    && matches!(binding.status(), BindingStatus::Current)
+            })
+            .unwrap_or_else(|| panic!("{operation} current MCP binding"));
+        let legacy = contribution
+            .bindings()
+            .iter()
+            .find(|binding| {
+                binding.surface() == BindingSurface::Mcp
+                    && binding.operation().as_str() == operation
+                    && matches!(binding.status(), BindingStatus::Deprecated { .. })
+            })
+            .unwrap_or_else(|| panic!("{operation} deprecated MCP binding"));
+        assert_eq!(
+            legacy.alias_of(),
+            Some(current.binding_id()),
+            "{operation} legacy binding must alias the current successor"
+        );
+        assert!(current.protocol_revisions().contains(2));
+        assert!(legacy.protocol_revisions().contains(1));
+    }
+}
