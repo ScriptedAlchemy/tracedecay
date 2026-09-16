@@ -33,6 +33,15 @@ impl BranchGenerationReadControlV1 {
             })
             .then_some(CodeIndexSearchUnavailableReasonV1::TimedOut)
     }
+
+    /// Whether this request has said how long it may wait on a contended
+    /// resource. A deadline or a cancellation is a bound its owner will
+    /// eventually fire; a control carrying neither would loop until the holder
+    /// happened to leave, so such a request is refused at once instead.
+    #[must_use]
+    pub fn has_wait_budget(&self) -> bool {
+        self.deadline.is_some() || self.cancellation.is_some()
+    }
 }
 
 pub struct BranchGenerationPairV1 {
@@ -71,6 +80,11 @@ fn try_lock_scheduler(
 /// refused with, so a compare read that merely collided with a probe told the
 /// user its generation exceeded the bounded-read limits. The wait ends with the
 /// request's own terminal state, exactly as the fence wait above it does.
+///
+/// A control with no wait budget — neither deadline nor cancellation — keeps
+/// the immediate `CapacityUnavailable` refusal: nothing would ever end its
+/// wait, and this runs on a blocking thread while the async parent holds the
+/// build-publication fence, so a stuck holder would pin both indefinitely.
 fn lock_scheduler_for_exact_read<'a>(
     scheduler: &'a std::sync::Mutex<super::CodeIndexWorktreeSchedulerV1>,
     control: &BranchGenerationReadControlV1,
@@ -78,6 +92,9 @@ fn lock_scheduler_for_exact_read<'a>(
     loop {
         if let Some(scheduler) = try_lock_scheduler(scheduler)? {
             return Ok(scheduler);
+        }
+        if !control.has_wait_budget() {
+            return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
         }
         if let Some(reason) = control.termination() {
             return Err(reason);
@@ -89,7 +106,8 @@ fn lock_scheduler_for_exact_read<'a>(
 /// The async twin of [`lock_scheduler_for_exact_read`] for the native
 /// candidate producer, which runs on its caller's runtime rather than a
 /// blocking thread; the sleep between attempts parks the future, never a
-/// worker. The guard is only ever produced on the attempt that returns.
+/// worker. The guard is only ever produced on the attempt that returns, and
+/// the no-wait-budget rule is the same.
 async fn lock_scheduler_for_exact_read_async<'a>(
     scheduler: &'a std::sync::Mutex<super::CodeIndexWorktreeSchedulerV1>,
     control: &BranchGenerationReadControlV1,
@@ -97,6 +115,9 @@ async fn lock_scheduler_for_exact_read_async<'a>(
     loop {
         if let Some(scheduler) = try_lock_scheduler(scheduler)? {
             return Ok(scheduler);
+        }
+        if !control.has_wait_budget() {
+            return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
         }
         if let Some(reason) = control.termination() {
             return Err(reason);
@@ -1371,86 +1392,134 @@ mod tests {
     /// genuinely oversized generation is refused with, so a compare read that
     /// merely collided with a probe told the user its generation exceeded the
     /// bounded-read limits.
-    #[tokio::test]
-    async fn an_exact_read_that_finds_the_scheduler_held_waits_for_it() {
-        let project = TempDir::new().expect("project");
-        let store = TempDir::new().expect("store");
-        init_fixture_repository(project.path());
-        let (base_revision, base_tree) = commit_source(
-            project.path(),
-            "pub fn held_scheduler_base_value() -> usize { 1 }\n",
-            "base",
-        );
-        let (head_revision, head_tree) = commit_source(
-            project.path(),
-            "pub fn held_scheduler_head_value() -> usize { 2 }\n",
-            "head",
-        );
+    /// A mounted worktree whose tip is sealed and whose base commit is not, so
+    /// an exact compare read has to mint the base — the step that needs the
+    /// scheduler.
+    struct HeldSchedulerFixtureV1 {
+        _project: TempDir,
+        _store: TempDir,
+        registry: CodeIndexSchedulerRegistryV1,
+        canonical_project: std::path::PathBuf,
+        scope: ResolvedScope,
+        reference: RefId,
+        base_revision: GitOidV1,
+        base_tree: GitOidV1,
+        head_revision: GitOidV1,
+        head_tree: GitOidV1,
+    }
 
-        let project_id = ProjectId::new("project.held-scheduler-read").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
-        let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
-        // Only the tip is indexed, so the base has to be minted, and minting
-        // is the step that needs the scheduler.
-        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
-            project_id.clone(),
-            &canonical_project,
-            scoped_store,
-            Arc::new(SharedCodeIndexBytePoolV1::default()),
-        )
-        .expect("open scheduler");
-        scheduler.reconcile_now().expect("publish tip generation");
-        drop(scheduler);
+    impl HeldSchedulerFixtureV1 {
+        async fn open(project_id: &str) -> Self {
+            let project = TempDir::new().expect("project");
+            let store = TempDir::new().expect("store");
+            init_fixture_repository(project.path());
+            let (base_revision, base_tree) = commit_source(
+                project.path(),
+                "pub fn held_scheduler_base_value() -> usize { 1 }\n",
+                "base",
+            );
+            let (head_revision, head_tree) = commit_source(
+                project.path(),
+                "pub fn held_scheduler_head_value() -> usize { 2 }\n",
+                "head",
+            );
 
-        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
-        registry
-            .mount_worktree(
+            let project_id = ProjectId::new(project_id).expect("project id");
+            let canonical_project = project.path().canonicalize().expect("canonical project");
+            let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
+            let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
                 project_id.clone(),
                 &canonical_project,
-                store.path().to_path_buf(),
+                scoped_store,
+                Arc::new(SharedCodeIndexBytePoolV1::default()),
             )
-            .await
-            .expect("mount sealed store");
-        let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
-            .expect("indexing identity");
-        let reference = identity.head_ref().cloned().expect("head reference");
-        let scope = ResolvedScope::new(
-            project_id,
-            identity.repository_id().clone(),
-            identity.worktree_id().clone(),
-            Some(reference.clone()),
-        )
-        .expect("resolved scope");
-        let deadline_in = |duration: std::time::Duration| {
-            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
-                tracedecay_contracts::clock::now_micros().0
-                    + i64::try_from(duration.as_micros()).expect("deadline fits"),
-            ))
-            .expect("deadline")
-        };
+            .expect("open scheduler");
+            scheduler.reconcile_now().expect("publish tip generation");
+            drop(scheduler);
 
-        let handle = registry
-            .scheduler_handle(&canonical_project)
-            .await
-            .expect("mounted scheduler handle");
-        // The probe holds the scheduler from its own thread, the way a status
-        // read on the blocking pool does, until the test lets it go.
-        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let probe = std::thread::spawn(move || {
-            let _held = handle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            held_tx.send(()).expect("the test observes the hold");
-            release_rx.recv().expect("the test releases the hold");
-        });
-        held_rx.recv().expect("the probe holds the scheduler");
+            let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+            registry
+                .mount_worktree(
+                    project_id.clone(),
+                    &canonical_project,
+                    store.path().to_path_buf(),
+                )
+                .await
+                .expect("mount sealed store");
+            let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
+                .expect("indexing identity");
+            let reference = identity.head_ref().cloned().expect("head reference");
+            let scope = ResolvedScope::new(
+                project_id,
+                identity.repository_id().clone(),
+                identity.worktree_id().clone(),
+                Some(reference.clone()),
+            )
+            .expect("resolved scope");
+            Self {
+                _project: project,
+                _store: store,
+                registry,
+                canonical_project,
+                scope,
+                reference,
+                base_revision,
+                base_tree,
+                head_revision,
+                head_tree,
+            }
+        }
+
+        fn base(&self) -> (&RefId, &GitOidV1, &GitOidV1) {
+            (&self.reference, &self.base_revision, &self.base_tree)
+        }
+
+        fn head(&self) -> (&RefId, &GitOidV1, &GitOidV1) {
+            (&self.reference, &self.head_revision, &self.head_tree)
+        }
+
+        /// Hold the mounted scheduler from a thread of its own, the way a status
+        /// probe on the blocking pool does, until the returned sender fires.
+        async fn hold_scheduler(
+            &self,
+        ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+            let handle = self
+                .registry
+                .scheduler_handle(&self.canonical_project)
+                .await
+                .expect("mounted scheduler handle");
+            let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let probe = std::thread::spawn(move || {
+                let _held = handle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                held_tx.send(()).expect("the test observes the hold");
+                release_rx.recv().expect("the test releases the hold");
+            });
+            held_rx.recv().expect("the probe holds the scheduler");
+            (release_tx, probe)
+        }
+    }
+
+    fn deadline_in(duration: std::time::Duration) -> tracedecay_contracts::Deadline {
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+            tracedecay_contracts::clock::now_micros().0
+                + i64::try_from(duration.as_micros()).expect("deadline fits"),
+        ))
+        .expect("deadline")
+    }
+
+    #[tokio::test]
+    async fn an_exact_read_that_finds_the_scheduler_held_waits_for_it() {
+        let fixture = HeldSchedulerFixtureV1::open("project.held-scheduler-read").await;
+        let (release_tx, probe) = fixture.hold_scheduler().await;
 
         let expired = settled_pair(
-            &registry,
-            &scope,
-            (&reference, &base_revision, &base_tree),
-            (&reference, &head_revision, &head_tree),
+            &fixture.registry,
+            &fixture.scope,
+            fixture.base(),
+            fixture.head(),
             &BranchGenerationReadControlV1 {
                 deadline: Some(deadline_in(std::time::Duration::from_millis(300))),
                 cancellation: None,
@@ -1468,14 +1537,14 @@ mod tests {
             deadline: Some(deadline_in(std::time::Duration::from_secs(30))),
             cancellation: None,
         };
-        let mut waiting = std::pin::pin!(registry.generations_for_revisions(
-            &scope,
-            &reference,
-            &base_revision,
-            &base_tree,
-            &reference,
-            &head_revision,
-            &head_tree,
+        let mut waiting = std::pin::pin!(fixture.registry.generations_for_revisions(
+            &fixture.scope,
+            &fixture.reference,
+            &fixture.base_revision,
+            &fixture.base_tree,
+            &fixture.reference,
+            &fixture.head_revision,
+            &fixture.head_tree,
             control.clone(),
         ));
         tokio::select! {
@@ -1501,7 +1570,7 @@ mod tests {
                 .source_revision
                 .as_ref()
                 .map(tracedecay_domain::CommitId::as_str),
-            Some(base_revision.as_str()),
+            Some(fixture.base_revision.as_str()),
             "the waiting read mints the base it was asked for"
         );
         let base_symbols =
@@ -1510,6 +1579,88 @@ mod tests {
             base_symbols
                 .iter()
                 .any(|symbol| symbol.name == "held_scheduler_base_value")
+        );
+    }
+
+    /// A read carrying neither a deadline nor a cancellation has declared no
+    /// wait budget: nothing it owns would ever end a wait on a held scheduler,
+    /// and the exact-read path would sit on a blocking thread with the
+    /// build-publication fence held for as long as the holder stayed. Such a
+    /// read keeps the immediate typed `CapacityUnavailable` refusal on both the
+    /// blocking compare path and the native candidate producer, and the same
+    /// read succeeds once the scheduler is free — the refusal named the race,
+    /// not the generation.
+    #[tokio::test]
+    async fn an_exact_read_without_a_wait_budget_is_refused_at_once() {
+        let fixture = HeldSchedulerFixtureV1::open("project.no-budget-scheduler-read").await;
+        let (release_tx, probe) = fixture.hold_scheduler().await;
+        let no_budget = BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+
+        // While the probe holds the scheduler, `CapacityUnavailable` is the only
+        // exit a no-budget read has before the probe lets go: a read that waited
+        // would sit until the bounded-read timeout below fires instead.
+        let refused = settled_pair(
+            &fixture.registry,
+            &fixture.scope,
+            fixture.base(),
+            fixture.head(),
+            &no_budget,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .map(|_| "sealed pair");
+        assert!(
+            matches!(
+                refused,
+                Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable)
+            ),
+            "a compare read with no wait budget is refused with the typed reason, got {refused:?}"
+        );
+
+        let produced = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.registry.with_native_candidate_generation_producer(
+                &fixture.scope,
+                no_budget.clone(),
+                |_, _| Ok("produced"),
+            ),
+        )
+        .await
+        .expect("bounded native candidate read");
+        assert!(
+            matches!(
+                produced,
+                Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable)
+            ),
+            "a native candidate read with no wait budget is refused with the typed reason, got {produced:?}"
+        );
+
+        release_tx
+            .send(())
+            .expect("the probe is waiting to release");
+        probe.join().expect("the probe thread joins");
+        let pair = settled_pair(
+            &fixture.registry,
+            &fixture.scope,
+            fixture.base(),
+            fixture.head(),
+            &no_budget,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("the same read completes once the scheduler is free");
+        assert_eq!(
+            pair.base
+                .generation()
+                .snapshot()
+                .source_revision
+                .as_ref()
+                .map(tracedecay_domain::CommitId::as_str),
+            Some(fixture.base_revision.as_str()),
+            "the refusal was the race, not the generation"
         );
     }
 
