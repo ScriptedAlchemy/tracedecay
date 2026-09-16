@@ -71,7 +71,7 @@ use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
     EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
     PRODUCTION_BOUNDARY, ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1,
-    RankedCandidateRowV1, RequiredCancellationV1, RequiredOfflineV1, ResourceSampleV1,
+    RankedCandidateRowV1, RequiredCancellationV1, ResourceSampleV1,
     WORKLOAD_RELATIVE, WorkloadQueryV1, canonical_json_bytes, canonical_sha256,
     compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
     evaluated_diversity_policy, fusion_profile, load_candidate_workload, retrieval_budget,
@@ -646,7 +646,6 @@ fn generate_partition_output(
         expected_query_fallback_digest,
         query_fallback_matches_expected,
         cancellation: RequiredCancellationV1::BoundedTypedCancelled,
-        offline: RequiredOfflineV1::NoNetworkAndQueryFallbackAvailable,
         resources,
         queries: rows,
     })
@@ -772,11 +771,11 @@ fn compose_production_query(
                 base: request.clone(),
                 query_view: &query_view,
                 generation: generation_id.clone(),
-                whole_terms: route.parts.whole_terms.clone(),
-                subtokens: route.parts.subtokens.clone(),
-                phrases: route.parts.phrases.clone(),
-                proximities: route.proximities.clone(),
-                field_filters: route.field_filters.clone(),
+                whole_terms: std::borrow::Cow::Borrowed(route.parts.whole_terms.as_slice()),
+                subtokens: std::borrow::Cow::Borrowed(route.parts.subtokens.as_slice()),
+                phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
+                proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),
+                field_filters: std::borrow::Cow::Borrowed(route.field_filters.as_slice()),
                 fuzzy_budget: 8,
                 lexical_profile_revision: id(
                     tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
@@ -1779,10 +1778,6 @@ pub(crate) mod tests {
             assert_eq!(
                 output.cancellation,
                 RequiredCancellationV1::BoundedTypedCancelled
-            );
-            assert_eq!(
-                output.offline,
-                RequiredOfflineV1::NoNetworkAndQueryFallbackAvailable
             );
             assert_eq!(output.fallback_digest, output.query_fallback_digest);
             assert_eq!(

@@ -536,8 +536,8 @@ pub(crate) async fn resolve_daemon_initialize_route(
 }
 
 /// Parent deadline for one daemon/MCP composition edge's repository discovery.
-pub(super) fn repository_discovery_parent_deadline(
-) -> tracedecay_runtime_core::cancellation::MonotonicDeadline {
+pub(super) fn repository_discovery_parent_deadline()
+-> tracedecay_runtime_core::cancellation::MonotonicDeadline {
     tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
         std::time::Instant::now() + super::REPOSITORY_DISCOVERY_DEADLINE,
     )

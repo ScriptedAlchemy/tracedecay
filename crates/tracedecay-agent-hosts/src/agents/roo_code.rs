@@ -44,10 +44,10 @@ impl AgentIntegration for RooCodeIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        if component != super::host_bundle::HostBundleComponentV1::ContextMcp {
+        if component != super::host_bundle::HostComponentV1::ContextMcp {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
         mcp_servers_registration_state(&roo_settings_path(&ctx.home))
@@ -63,10 +63,10 @@ impl AgentIntegration for RooCodeIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             let path = roo_settings_path(home);
             vec![path.clone(), config_backup_path(&path)]
         } else {
@@ -77,10 +77,10 @@ impl AgentIntegration for RooCodeIntegration {
     #[hotpath::measure(label = "roo_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             install_mcp_server_entry(
                 &roo_settings_path(&ctx.home),
                 "mcpServers",
@@ -100,10 +100,10 @@ impl AgentIntegration for RooCodeIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             uninstall_mcp_server_entry(
                 &roo_settings_path(&ctx.home),
                 "mcpServers",

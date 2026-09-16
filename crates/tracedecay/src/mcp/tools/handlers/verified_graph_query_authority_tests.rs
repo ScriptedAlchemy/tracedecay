@@ -13,12 +13,9 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         "tracedecay_callees",
         "tracedecay_impact",
         "tracedecay_node",
-        // `tracedecay_similar` / `tracedecay_redundancy` are shared-code
-        // (clone-family) lanes: they bind `code_index_similar_executor` /
-        // `code_index_redundancy_executor`, never `verified_graph_query_port`.
-        // Their absent-executor refusal is covered in tracedecay-mcp graph
-        // search unit tests; listing them here falsely required empty-arg
-        // probes to reach a graph wait they never take.
+        // `tracedecay_similar` / `tracedecay_redundancy` bind clone-family
+        // executors, never `verified_graph_query_port`. Behavioral coverage is
+        // `clone_family_tools_refuse_absent_executors_without_awaiting_graph_query`.
         "tracedecay_rename_preview",
         "tracedecay_implementations",
         "tracedecay_callers_for",
@@ -70,17 +67,97 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
     ]
 }
 
-#[test]
-fn clone_family_tools_are_not_verified_graph_query_waiters() {
-    // Shared-code tools must not be treated as verified-graph waiters: an
-    // absent query port is not their admission gate, and empty-arg probes
-    // fail request-shape validation before any graph path runs.
-    for tool_name in ["tracedecay_similar", "tracedecay_redundancy"] {
-        assert!(
-            !graph_handlers_that_await_query().contains(&tool_name),
-            "{tool_name} binds the clone-family lane, not verified_graph_query_port"
-        );
+/// Clone-family tools bind their own executors. With the verified graph query
+/// port absent and those executors missing, each tool must still decode a
+/// schema-valid request and refuse with its executor-specific typed error,
+/// never the graph-port unavailable reason the waiter inventory would imply.
+#[tokio::test]
+async fn clone_family_tools_refuse_absent_executors_without_awaiting_graph_query() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("authority isolation");
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("clone-family-absent-executor");
+    fs::create_dir_all(project.join("src")).expect("fixture sources");
+    fs::write(project.join("src/lib.rs"), "pub fn widget() {}\n").expect("write fixture");
+    init_committed_git_fixture(&project);
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.clone-family-absent-executor",
+    )
+    .await
+    .expect("registered fixture");
+
+    let options = lower_level_ports_without_query(&cg);
+    assert!(
+        options.verified_graph_query_port.is_none(),
+        "fixture must leave the verified graph query port unmounted"
+    );
+    assert!(
+        options.code_index_similar_executor.is_none(),
+        "fixture must leave the similar executor unmounted"
+    );
+    assert!(
+        options.code_index_redundancy_executor.is_none(),
+        "fixture must leave the redundancy executor unmounted"
+    );
+    let scope = options
+        .admitted_project_scope
+        .as_ref()
+        .expect("fixture must admit a project scope for schema-valid clone args");
+
+    let cases = [
+        (
+            "tracedecay_similar",
+            json!({
+                "project_id": scope.project_id,
+                "repository_id": scope.repository_id,
+                "target": {
+                    "kind": "symbol_occurrence",
+                    "symbol_occurrence_id": "symbol.clone-family-absent-executor",
+                },
+                "match_classes": ["conservative_exact"],
+                "result_limit": 10,
+                "work_limit": 20,
+            }),
+            "verified-code-similarity-unavailable",
+            "the maintained clone similarity lane is unavailable",
+        ),
+        (
+            "tracedecay_redundancy",
+            json!({
+                "project_id": scope.project_id,
+                "repository_id": scope.repository_id,
+                "match_classes": ["conservative_exact"],
+                "scope": { "kind": "repository" },
+                "include_generated_paths": false,
+                "family_limit": 10,
+                "member_limit": 10,
+                "work_limit": 20,
+            }),
+            "verified-code-redundancy-unavailable",
+            "the maintained clone family lane is unavailable",
+        ),
+    ];
+
+    for (tool_name, args, expected_reason, expected_detail) in cases {
+        let outcome = handle_tool_call_with_registry_options(
+            &cg,
+            tool_name,
+            args,
+            None,
+            None,
+            options.clone(),
+        )
+        .await;
+        let error = outcome.expect_err(tool_name);
+        let (reason_code, retryable, detail) = error
+            .project_route_context()
+            .unwrap_or_else(|| panic!("{tool_name} must be a typed project route, got {error}"));
+        assert_eq!(reason_code, expected_reason, "{tool_name}");
+        assert!(!retryable, "{tool_name}");
+        assert_eq!(detail, expected_detail, "{tool_name}");
     }
+    cg.close();
 }
 
 fn lower_level_ports_without_query(cg: &TraceDecay) -> ToolCallRegistryOptions<'_> {

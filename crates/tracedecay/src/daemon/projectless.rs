@@ -5,10 +5,15 @@ use serde_json::json;
 
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
+use tracedecay_daemon_service::DaemonProjectRegistryReadService;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::server::{LiveTranscriptRefreshJoin, join_required_live_transcript_refresh};
+use tracedecay_mcp::tools::catalog_discovery::{
+    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
+};
 use tracedecay_mcp::{
-    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
+    explore_call_budget, project_catalog_discovery_scope, tool_error_response,
     tool_result_has_semantic_error,
 };
 use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
@@ -180,6 +185,7 @@ async fn projectless_response(
             ),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         }),
+        "tools/list" => Some(projectless_tools_list_response(id)),
         "tools/call" => {
             let started = timings_enabled.then(std::time::Instant::now);
             let mut response =
@@ -202,6 +208,63 @@ async fn projectless_response(
             ErrorCode::MethodNotFound,
             format!("Method not found: {}", request.method),
         )),
+    }
+}
+
+/// Whether projectless dispatch can serve this tool without a mounted project.
+///
+/// Discovery and call admission share this predicate so `tools/list` never
+/// advertises a name that still answers "requires an initialized code project".
+fn projectless_tool_is_discoverable(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_admin_project"
+            | "tracedecay_hook_runtime"
+            | "tracedecay_admin_cli"
+            | "tracedecay_project_list"
+            | "tracedecay_project_search"
+            | "tracedecay_project_context"
+    ) || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+}
+
+/// Projectless `tools/list`: the host-available catalog, reduced to tools the
+/// projectless dispatcher can actually call. An empty or uncomposable catalog
+/// is a typed error, never a successful empty listing.
+fn projectless_tools_list_payload() -> std::result::Result<serde_json::Value, String> {
+    let profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .map_err(|error| format!("invalid MCP discovery profile: {error}"))?;
+    let authority = default_catalog_discovery_authority()
+        .map_err(|error| format!("MCP catalog discovery unavailable: {error}"))?;
+    let mut payload = catalog_discovery_tools_list_payload(
+        None,
+        explore_call_budget(0),
+        &profile_id,
+        &authority,
+        &project_catalog_discovery_scope(),
+        ToolRegistryMode::HostAvailable,
+    )
+    .map_err(|error| format!("MCP catalog discovery unavailable: {error}"))?;
+    let tools = payload
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| "MCP catalog discovery unavailable".to_owned())?;
+    tools.retain(|tool| {
+        tool.get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(projectless_tool_is_discoverable)
+    });
+    if tools.is_empty() {
+        return Err("MCP projectless catalog discovery produced no tools".to_owned());
+    }
+    Ok(payload)
+}
+
+fn projectless_tools_list_response(id: serde_json::Value) -> JsonRpcResponse {
+    match projectless_tools_list_payload() {
+        Ok(payload) => JsonRpcResponse::success(id, payload),
+        Err(message) => JsonRpcResponse::error(id, ErrorCode::InternalError, message),
     }
 }
 
@@ -258,19 +321,16 @@ async fn projectless_tools_call_response_with_connection(
             return JsonRpcResponse::error(id, ErrorCode::InvalidParams, message.to_string());
         }
     };
+    // Call admission is the discovery predicate: a name `tools/list` did not
+    // advertise is refused here before any account or store work.
+    let discoverable = projectless_tool_is_discoverable(tool_name);
     #[cfg(feature = "hotpath")]
     {
-        let hotpath_tool_name = if matches!(
-            tool_name,
-            "tracedecay_admin_project" | "tracedecay_hook_runtime" | "tracedecay_admin_cli"
-        )
-            || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
-        {
-            tool_name
-        } else {
-            "unknown"
-        };
+        let hotpath_tool_name = if discoverable { tool_name } else { "unknown" };
         hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
+    }
+    if !discoverable {
+        return requires_project_error(id, tool_name);
     }
     if let Err(error) = boxed_projectless_phase(store_administration.ensure_account_active()).await
     {
@@ -296,60 +356,76 @@ async fn projectless_tools_call_response_with_connection(
             tool_name @ ("tracedecay_project_list"
             | "tracedecay_project_search"
             | "tracedecay_project_context") => boxed_projectless_phase(
-                projectless_registry_response(id, tool_name, arguments, connection),
+                projectless_registry_response(id, tool_name, arguments, store_administration),
             ),
             _ => {
-                if let Some(operation) =
+                // `projectless_tool_is_discoverable` admitted the name above,
+                // so any remaining tool is a retained profile operation.
+                let Some(operation) =
                     tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
-                {
-                    boxed_projectless_phase(projectless_profile_retained_response(
-                        id,
-                        tool_name,
-                        operation,
-                        arguments,
-                        connection,
-                        store_administration,
-                    ))
-                } else {
-                    return JsonRpcResponse::error(
-                        id,
-                        ErrorCode::InternalError,
-                        format!("{tool_name} requires an initialized code project"),
-                    );
-                }
+                else {
+                    return requires_project_error(id, tool_name);
+                };
+                boxed_projectless_phase(projectless_profile_retained_response(
+                    id,
+                    tool_name,
+                    operation,
+                    arguments,
+                    connection,
+                    store_administration,
+                ))
             }
         };
     response.await
 }
 
+fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResponse {
+    JsonRpcResponse::error(
+        id,
+        ErrorCode::InternalError,
+        format!("{tool_name} requires an initialized code project"),
+    )
+}
+
+/// Registry reads are profile-scoped: they answer from the authenticated
+/// profile's project registry, the same authority `tracedecay projects`
+/// reads, so a connection without a mounted project still gets the real
+/// listing (possibly empty). No project is marked active. A registry that
+/// cannot be opened is a typed tool error, never an empty listing.
 async fn projectless_registry_response(
     id: serde_json::Value,
     tool_name: &str,
     arguments: serde_json::Value,
-    connection: &ProjectlessConnectionStateV1,
+    store_administration: &StoreAdministration,
 ) -> tracedecay_mcp::JsonRpcResponse {
+    let registry =
+        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
+            Ok(registry) => registry,
+            Err(error) => return tool_error_response(id, tool_name, &error),
+        };
+    let registry_reads = DaemonProjectRegistryReadService::new(registry);
     let result = match tool_name {
         "tracedecay_project_list" => {
             tracedecay_mcp::handlers::info::handle_project_list(
-                &connection.client_identity.profile_root,
-                arguments,
                 None,
+                arguments,
+                Some(&registry_reads),
             )
             .await
         }
         "tracedecay_project_search" => {
             tracedecay_mcp::handlers::info::handle_project_search(
-                &connection.client_identity.profile_root,
-                arguments,
                 None,
+                arguments,
+                Some(&registry_reads),
             )
             .await
         }
         "tracedecay_project_context" => {
             tracedecay_mcp::handlers::info::handle_project_context(
-                &connection.client_identity.profile_root,
-                arguments,
                 None,
+                arguments,
+                Some(&registry_reads),
             )
             .await
         }

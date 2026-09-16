@@ -148,13 +148,15 @@ pub enum ProjectRegistryListingScope {
 }
 
 /// A bounded listing read together with the project root the dispatched graph
-/// serves.
+/// serves, when one is mounted.
 ///
 /// Routing stays with the caller: MCP names the served root, and the daemon
-/// resolves that root's registry identity to mark the active project.
+/// resolves that root's registry identity to mark the active project. A
+/// projectless connection reads the same registry with no active root, so no
+/// project is marked active.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectRegistryListingCommand {
-    pub active_project_root: PathBuf,
+    pub active_project_root: Option<PathBuf>,
     pub scope: ProjectRegistryListingScope,
     pub limit: usize,
 }
@@ -162,7 +164,7 @@ pub struct ProjectRegistryListingCommand {
 /// A single-project context read, scoped the same way as a listing read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectRegistryContextCommand {
-    pub active_project_root: PathBuf,
+    pub active_project_root: Option<PathBuf>,
     pub selector: ProjectRegistrySelector,
 }
 
@@ -252,7 +254,7 @@ mod tests {
 
     fn listing_command() -> ProjectRegistryListingCommand {
         ProjectRegistryListingCommand {
-            active_project_root: PathBuf::from("/srv/checkout"),
+            active_project_root: Some(PathBuf::from("/srv/checkout")),
             scope: ProjectRegistryListingScope::Matching {
                 query: "checkout".to_string(),
             },
@@ -262,7 +264,7 @@ mod tests {
 
     fn context_command() -> ProjectRegistryContextCommand {
         ProjectRegistryContextCommand {
-            active_project_root: PathBuf::from("/srv/checkout"),
+            active_project_root: Some(PathBuf::from("/srv/checkout")),
             selector: ProjectRegistrySelector::ProjectId("project.checkout".to_string()),
         }
     }

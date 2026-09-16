@@ -105,11 +105,6 @@ pub fn try_language(key: &str) -> Result<Language, String> {
         .ok_or_else(|| format!("ts_provider: unknown language key '{key}'"))
 }
 
-/// Backward-compatible fallible alias for extractor parser call sites.
-pub fn language(key: &str) -> Result<Language, String> {
-    try_language(key)
-}
-
 /// Parse one file with the shared grammar table.
 ///
 /// Language load and `set_language` are the `code_extraction.language` phase.
@@ -203,7 +198,7 @@ mod tests {
     #[cfg(not(feature = "large-grammars"))]
     fn large_bundle_keys_are_not_registered_without_the_bundle() -> Result<(), String> {
         for key in ["powershell", "cobol", "protobuf", "zig"] {
-            let Err(err) = super::language(key) else {
+            let Err(err) = super::try_language(key) else {
                 return Err(format!(
                     "grammar key '{key}' should not be registered when its bundle is disabled"
                 ));
@@ -216,7 +211,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "lang-markdown"))]
     fn markdown_is_not_registered_without_its_feature() -> Result<(), String> {
-        let Err(err) = super::language("markdown") else {
+        let Err(err) = super::try_language("markdown") else {
             return Err("markdown should not be registered when lang-markdown is disabled".into());
         };
         assert!(err.contains("unknown language key"));

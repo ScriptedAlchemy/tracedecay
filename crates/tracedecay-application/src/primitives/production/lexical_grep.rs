@@ -117,17 +117,17 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                     if context.request.cancellation().is_cancelled() {
                         return PrimitiveOutcomeV1::Cancelled;
                     }
-                    if !symbols_by_file.contains_key(&hit.file)
+                    if !symbols_by_file.contains_key(hit.file.as_ref())
                         && let Ok(symbols) = logical_file_symbols(
                             &reader,
                             Arc::clone(&graph_cancellation),
-                            &hit.file,
+                            hit.file.as_ref(),
                         )
                     {
-                        symbols_by_file.insert(hit.file.clone(), symbols);
+                        symbols_by_file.insert(hit.file.to_string(), symbols);
                     }
                     let enclosing = match symbols_by_file
-                        .get(&hit.file)
+                        .get(hit.file.as_ref())
                         .ok_or(())
                         .and_then(|symbols| symbol_at_line(symbols, hit.line))
                     {
@@ -138,7 +138,7 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                         }
                     };
                     matches.push(GrepHitV1 {
-                        file: hit.file,
+                        file: hit.file.to_string(),
                         line: hit.line,
                         text: hit.text,
                         before: hit.before,

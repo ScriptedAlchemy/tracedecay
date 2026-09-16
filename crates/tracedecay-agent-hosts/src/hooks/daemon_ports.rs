@@ -308,15 +308,6 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryH
             .await
         })
     }
-
-    fn deliver_legacy<'a>(
-        &'a self,
-        _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
-        _deadline: HookSynchronousDeadlineV1,
-    ) -> HookDeliveryFutureV1<'a> {
-        Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
-    }
 }
 
 /// Daemon-backed Context Scout delivery-receipt commit.
@@ -363,15 +354,6 @@ impl AsyncHookFeedbackDeliveryPortV1<ContextScoutDeliveryReceiptHookV1>
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move { self.post_receipt(&feedback.receipt, deadline).await })
-    }
-
-    fn deliver_legacy<'a>(
-        &'a self,
-        _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a ContextScoutDeliveryReceiptHookV1,
-        _deadline: HookSynchronousDeadlineV1,
-    ) -> HookDeliveryFutureV1<'a> {
-        Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
     }
 }
 

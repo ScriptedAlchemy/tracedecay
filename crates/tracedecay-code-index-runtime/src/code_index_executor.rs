@@ -115,12 +115,59 @@ async fn bounded_by_settlement<F: std::future::Future>(
     cancellation: Option<&tracedecay_contracts::CancellationSignal>,
     work: F,
 ) -> Result<F::Output, code_search::CodeIndexSearchOutcomeV1> {
+    settled_or(deadline, cancellation, work)
+        .await
+        .map_err(|reason| code_index_search_unavailable(reason, reason.as_str()))
+}
+
+/// [`bounded_by_settlement`] for executors that answer with a bare typed
+/// reason rather than a search outcome: the similar and redundancy reads take
+/// the same unguarded mounted-map read after their permit, and a request that
+/// queued for that permit has all the more reason to keep its deadline live
+/// through it.
+async fn settled_or<F: std::future::Future>(
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
+    work: F,
+) -> Result<F::Output, code_search::CodeIndexSearchUnavailableReasonV1> {
     tokio::select! {
         biased;
         output = work => Ok(output),
-        reason = mcp_search_request_settlement(deadline, cancellation) => {
-            Err(code_index_search_unavailable(reason, reason.as_str()))
+        reason = mcp_search_request_settlement(deadline, cancellation) => Err(reason),
+    }
+}
+
+/// Take one execution permit, waiting only as long as the request's own
+/// deadline and cancellation allow.
+///
+/// The permit bounds how many scans run at once, not how many requests may
+/// exist. Refusing the loser of a permit race outright answered it with
+/// `CapacityUnavailable`, the same reason a genuinely oversized bounded read is
+/// refused with — so two dashboard family reads fired together made the loser
+/// report that a retained generation exceeded the bounded-read limits. A
+/// request that carries a deadline or a cancellation has said how long it can
+/// wait: it queues on the permit up to that bound and settles with the typed
+/// `TimedOut` or `Cancelled` state if the permit never comes. The semaphore is
+/// tokio's, so the wait parks a future rather than a runtime worker. A request
+/// that carries neither declared no wait budget and is still refused at once
+/// rather than parked behind a holder nothing bounds — the same rule the exact
+/// scheduler reads apply.
+pub(crate) async fn acquire_execution_permit(
+    execution_admission: Arc<tokio::sync::Semaphore>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
+    cancellation: Option<&tracedecay_contracts::CancellationSignal>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, code_search::CodeIndexSearchUnavailableReasonV1> {
+    if deadline.is_none() && cancellation.is_none() {
+        return execution_admission
+            .try_acquire_owned()
+            .map_err(|_| code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+    }
+    tokio::select! {
+        biased;
+        permit = execution_admission.acquire_owned() => {
+            permit.map_err(|_| code_search::CodeIndexSearchUnavailableReasonV1::Internal)
         }
+        reason = mcp_search_request_settlement(deadline, cancellation) => Err(reason),
     }
 }
 
@@ -753,13 +800,16 @@ where
                 if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
                     return outcome;
                 }
-                let execution_permit = match execution_admission.try_acquire_owned() {
+                let execution_permit = match acquire_execution_permit(
+                    execution_admission,
+                    control.deadline.as_ref(),
+                    control.cancellation.as_ref(),
+                )
+                .await
+                {
                     Ok(permit) => permit,
-                    Err(_) => {
-                        return code_index_search_unavailable(
-                            code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                            "search_capacity_unavailable",
-                        );
+                    Err(reason) => {
+                        return code_index_search_unavailable(reason, reason.as_str());
                     }
                 };
                 let execution_result = {
@@ -1391,18 +1441,27 @@ where
             if let Some(reason) = control.request_termination() {
                 return unavailable(reason);
             }
-            let permit = match execution_admission.try_acquire_owned() {
+            let permit = match acquire_execution_permit(
+                execution_admission,
+                control.deadline.as_ref(),
+                control.cancellation.as_ref(),
+            )
+            .await
+            {
                 Ok(permit) => permit,
-                Err(_) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                    );
-                }
+                Err(reason) => return unavailable(reason),
             };
-            let Some((generation, _)) = schedulers
-                .latest_text_serving_freshness_for_scope(&scope)
-                .await
-            else {
+            let text_serving = match settled_or(
+                control.deadline.as_ref(),
+                control.cancellation.as_ref(),
+                schedulers.latest_text_serving_freshness_for_scope(&scope),
+            )
+            .await
+            {
+                Ok(text_serving) => text_serving,
+                Err(reason) => return unavailable(reason),
+            };
+            let Some((generation, _)) = text_serving else {
                 return unavailable(
                     code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                 );
@@ -1557,18 +1616,27 @@ where
             if let Some(reason) = control.request_termination() {
                 return unavailable(reason);
             }
-            let permit = match execution_admission.try_acquire_owned() {
+            let permit = match acquire_execution_permit(
+                execution_admission,
+                control.deadline.as_ref(),
+                control.cancellation.as_ref(),
+            )
+            .await
+            {
                 Ok(permit) => permit,
-                Err(_) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                    );
-                }
+                Err(reason) => return unavailable(reason),
             };
-            let Some((generation, _)) = schedulers
-                .latest_text_serving_freshness_for_scope(&scope)
-                .await
-            else {
+            let text_serving = match settled_or(
+                control.deadline.as_ref(),
+                control.cancellation.as_ref(),
+                schedulers.latest_text_serving_freshness_for_scope(&scope),
+            )
+            .await
+            {
+                Ok(text_serving) => text_serving,
+                Err(reason) => return unavailable(reason),
+            };
+            let Some((generation, _)) = text_serving else {
                 return unavailable(
                     code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                 );

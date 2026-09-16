@@ -34,7 +34,8 @@ use tracedecay_query::retrieval::{
     exact::{CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest},
     lexical::{
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1, CodeLexicalArtifactBuilderV1,
         CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, LexicalLaneRequest,
         LexicalRouteKindV1, LexicalRoutingV1,
     },
@@ -81,6 +82,42 @@ fn text_artifact_source_batches_scale_with_build_memory() {
             8 * CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
         ),
         (512, 512 * 1024 * 1024, 1024)
+    );
+}
+
+#[test]
+fn clone_successor_batches_leave_scratch_and_metadata_headroom() {
+    const RESERVATION: usize = 128 * 1024 * 1024;
+    const PAGE: usize = 4 * 1024 * 1024;
+    const SCRATCH: usize = 4 * PAGE;
+    let (pages, bytes) = super::super::clone_successor_source_batch_limits_from_charges(0)
+        .expect("empty metadata fits the successor reservation");
+    assert_eq!(pages, 64);
+    assert_eq!(
+        bytes,
+        RESERVATION - CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1 - SCRATCH
+    );
+    assert_eq!(
+        CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1 + SCRATCH + bytes,
+        RESERVATION
+    );
+    assert!(
+        bytes < 64 * 1024 * 1024,
+        "a 64 MiB page batch would consume the entire remainder after the SQLite cache"
+    );
+
+    let metadata = 8 * 1024 * 1024;
+    let (_, with_metadata) =
+        super::super::clone_successor_source_batch_limits_from_charges(metadata)
+            .expect("modest metadata still leaves a page batch");
+    assert_eq!(with_metadata, bytes - metadata);
+
+    let too_large = RESERVATION
+        .saturating_sub(CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1)
+        .saturating_sub(SCRATCH);
+    assert!(
+        super::super::clone_successor_source_batch_limits_from_charges(too_large).is_err(),
+        "metadata that fills the remainder after cache and scratch must fail closed"
     );
 }
 
@@ -377,11 +414,11 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .retrieve_lexical(&LexicalLaneRequest {
             query_view: &query_view,
             generation,
-            whole_terms: vec!["callee".to_owned()],
-            subtokens: vec!["callee".to_owned()],
-            phrases: Vec::new(),
-            proximities: Vec::new(),
-            field_filters: Vec::new(),
+            whole_terms: std::borrow::Cow::Owned(vec!["callee".to_owned()]),
+            subtokens: std::borrow::Cow::Owned(vec!["callee".to_owned()]),
+            phrases: std::borrow::Cow::Owned(Vec::new()),
+            proximities: std::borrow::Cow::Owned(Vec::new()),
+            field_filters: std::borrow::Cow::Owned(Vec::new()),
             fuzzy_budget: 0,
             lexical_profile_revision: ComponentRevision::new(
                 tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,

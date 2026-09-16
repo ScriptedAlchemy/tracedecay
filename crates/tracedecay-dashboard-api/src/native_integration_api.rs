@@ -7,7 +7,7 @@
 //! a transaction but never advance one, apply edits, or mutate Git.
 
 use axum::Json;
-use axum::extract::{Extension, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -17,7 +17,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::NativeIntegrationTransactionId;
 
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardState, RequestControl};
 
 #[derive(Deserialize)]
 pub struct NativeIntegrationStatusQueryV1 {
@@ -28,7 +28,7 @@ pub struct NativeIntegrationStatusQueryV1 {
 #[hotpath::measure(label = "dashboard_api.native_integration.status", future = true)]
 pub async fn status(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Query(query): Query<NativeIntegrationStatusQueryV1>,
 ) -> Response {
     let transaction_id = match NativeIntegrationTransactionId::new(query.transaction_id) {
@@ -49,9 +49,7 @@ pub async fn status(
     // A dashboard without the daemon application transport, or without live
     // request admission, has no authority to consult; that is the same typed
     // unmounted state the daemon answers for a project without the runtime.
-    let (Some(runtime), Some(Extension(control))) =
-        (state.application_invocation_executor.as_deref(), control)
-    else {
+    let Some(runtime) = state.application_invocation_executor.as_deref() else {
         return Json(NativeIntegrationSurfaceResultV1::unavailable(
             NativeIntegrationSurfaceUnavailableV1::AuthorityUnmounted,
         ))

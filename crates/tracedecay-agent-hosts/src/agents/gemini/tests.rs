@@ -328,7 +328,7 @@ fn deactivation_drives_the_hosts_own_uninstall_by_extension_name() {
 /// rather than "missing".
 #[test]
 fn registration_state_follows_the_hosts_installed_extension() {
-    use crate::agents::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+    use crate::agents::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 
     let home = tempfile::tempdir().unwrap();
     let health = HealthcheckContext {
@@ -341,14 +341,14 @@ fn registration_state_follows_the_hosts_installed_extension() {
         "a staged source the host never installed is not an installation"
     );
     assert_eq!(
-        GeminiIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        GeminiIntegration.host_component_registration(HostComponentV1::Core, &health),
         HostBundleRegistrationStateV1::Missing
     );
 
     simulate_host_install(home.path(), "/bin/tracedecay");
     assert!(GeminiIntegration.has_tracedecay(home.path()));
     assert_eq!(
-        GeminiIntegration.host_component_registration(HostBundleComponentV1::ContextMcp, &health),
+        GeminiIntegration.host_component_registration(HostComponentV1::ContextMcp, &health),
         HostBundleRegistrationStateV1::Current
     );
     assert!(matches!(
@@ -361,7 +361,7 @@ fn registration_state_follows_the_hosts_installed_extension() {
     // A relocated binary is only visible to the lifecycle-aware readback.
     assert_eq!(
         GeminiIntegration.host_component_registration_for_lifecycle(
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
             &health,
             &install_context(home.path(), "/relocated/tracedecay"),
         ),
@@ -379,7 +379,7 @@ fn registration_state_follows_the_hosts_installed_extension() {
 
     std::fs::write(installed_manifest_path(home.path()), b"{not json").unwrap();
     assert_eq!(
-        GeminiIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        GeminiIntegration.host_component_registration(HostComponentV1::Core, &health),
         HostBundleRegistrationStateV1::Corrupt
     );
 }

@@ -2351,7 +2351,7 @@ impl<'a> ArtifactQueryV1<'a> {
         pruned: &mut Vec<(String, u64)>,
     ) -> Result<DocumentQueryV1, RetrievalPortError> {
         let mut whole_terms = Vec::new();
-        for term in &request.whole_terms {
+        for term in request.whole_terms.iter() {
             whole_terms.push(normalize_lexical(term));
             if let Some(expansions) = fuzzy.by_query.get(term) {
                 whole_terms.extend(expansions.iter().cloned());

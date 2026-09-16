@@ -61,7 +61,7 @@ impl AgentIntegration for OpenCodeIntegration {
     #[hotpath::measure(label = "hosts.agent.opencode.project_install")]
     fn activate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -88,7 +88,7 @@ impl AgentIntegration for OpenCodeIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -101,7 +101,7 @@ impl AgentIntegration for OpenCodeIntegration {
 
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -135,10 +135,10 @@ impl AgentIntegration for OpenCodeIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1 as State};
+        use super::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
 
         let config_path = opencode_config_path(&ctx.home);
         let config = match std::fs::read(&config_path) {
@@ -165,18 +165,18 @@ impl AgentIntegration for OpenCodeIntegration {
                     .iter()
                     .all(|expected| args.iter().any(|arg| arg.as_str() == Some(expected)))
             });
-        if component == HostBundleComponentV1::ContextMcp {
+        if component == HostComponentV1::ContextMcp {
             return if mcp_current {
                 State::Current
             } else {
                 State::Missing
             };
         }
-        if component == HostBundleComponentV1::OperatorMcp {
+        if component == HostComponentV1::OperatorMcp {
             return State::Missing;
         }
         let config_root = config_path.parent().unwrap_or(&ctx.home);
-        if component == HostBundleComponentV1::Agent {
+        if component == HostComponentV1::Agent {
             let assets = super::plugin_bundle::opencode_agent_files()
                 .into_iter()
                 .map(|(relative, _)| config_root.join(relative).is_file())
@@ -217,20 +217,20 @@ impl AgentIntegration for OpenCodeIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         home: &Path,
     ) -> Vec<std::path::PathBuf> {
-        use super::host_bundle::HostBundleComponentV1;
+        use super::host_bundle::HostComponentV1;
 
         let mut paths = Vec::new();
-        if components.contains(&HostBundleComponentV1::Core)
-            || components.contains(&HostBundleComponentV1::ContextMcp)
+        if components.contains(&HostComponentV1::Core)
+            || components.contains(&HostComponentV1::ContextMcp)
         {
             let config = opencode_config_path(home);
             paths.push(config.clone());
             paths.push(opencode_original_config_path(&config));
         }
-        if components.contains(&HostBundleComponentV1::Core) {
+        if components.contains(&HostComponentV1::Core) {
             paths.push(opencode_prompt_path(home));
         }
         paths.extend(external_opencode_asset_paths(home, components));
@@ -243,13 +243,13 @@ impl AgentIntegration for OpenCodeIntegration {
 
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        use super::host_bundle::HostBundleComponentV1;
+        use super::host_bundle::HostComponentV1;
 
-        let core = components.contains(&HostBundleComponentV1::Core);
-        let mcp = components.contains(&HostBundleComponentV1::ContextMcp);
+        let core = components.contains(&HostComponentV1::Core);
+        let mcp = components.contains(&HostComponentV1::ContextMcp);
         install_registration_entries(
             &opencode_config_path(&ctx.home),
             &ctx.tracedecay_bin,
@@ -272,13 +272,13 @@ impl AgentIntegration for OpenCodeIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        use super::host_bundle::HostBundleComponentV1;
+        use super::host_bundle::HostComponentV1;
 
-        let core = components.contains(&HostBundleComponentV1::Core);
-        let mcp = components.contains(&HostBundleComponentV1::ContextMcp);
+        let core = components.contains(&HostComponentV1::Core);
+        let mcp = components.contains(&HostComponentV1::ContextMcp);
         remove_registration_entries(&opencode_config_path(&ctx.home), mcp, core, false)?;
         if core {
             let prompt = opencode_prompt_path(&ctx.home);
@@ -442,12 +442,12 @@ fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
 }
 
 fn opencode_asset_relative_paths(
-    components: &[super::host_bundle::HostBundleComponentV1],
+    components: &[super::host_bundle::HostComponentV1],
 ) -> Vec<std::path::PathBuf> {
-    use super::host_bundle::HostBundleComponentV1;
+    use super::host_bundle::HostComponentV1;
 
     let mut paths = Vec::new();
-    if components.contains(&HostBundleComponentV1::Core)
+    if components.contains(&HostComponentV1::Core)
         && let Ok(files) = rendered_plugin_files("tracedecay")
     {
         paths.extend(
@@ -456,14 +456,14 @@ fn opencode_asset_relative_paths(
                 .map(|(relative, _)| std::path::PathBuf::from(relative)),
         );
     }
-    if components.contains(&HostBundleComponentV1::Agent) {
+    if components.contains(&HostComponentV1::Agent) {
         paths.extend(
             super::plugin_bundle::opencode_agent_files()
                 .into_iter()
                 .map(|(relative, _)| std::path::PathBuf::from(relative)),
         );
     }
-    if components.contains(&HostBundleComponentV1::ContextMcp) {
+    if components.contains(&HostComponentV1::ContextMcp) {
         paths.extend([
             std::path::PathBuf::from("plugins/tracedecay-mcp.ts"),
             std::path::PathBuf::from("tracedecay/opencode.registration.json"),
@@ -476,7 +476,7 @@ fn opencode_asset_relative_paths(
 
 fn external_opencode_asset_paths(
     home: &Path,
-    components: &[super::host_bundle::HostBundleComponentV1],
+    components: &[super::host_bundle::HostComponentV1],
 ) -> Vec<std::path::PathBuf> {
     let root = opencode_config_path(home)
         .parent()
@@ -488,7 +488,7 @@ fn external_opencode_asset_paths(
 fn external_opencode_asset_paths_for(
     home: &Path,
     root: &Path,
-    components: &[super::host_bundle::HostBundleComponentV1],
+    components: &[super::host_bundle::HostComponentV1],
 ) -> Vec<std::path::PathBuf> {
     if root == home.join(".config/opencode") {
         return Vec::new();
@@ -501,7 +501,7 @@ fn external_opencode_asset_paths_for(
 
 fn mirror_external_opencode_assets(
     home: &Path,
-    components: &[super::host_bundle::HostBundleComponentV1],
+    components: &[super::host_bundle::HostComponentV1],
 ) -> Result<()> {
     let root = opencode_config_path(home)
         .parent()
@@ -513,7 +513,7 @@ fn mirror_external_opencode_assets(
 fn mirror_external_opencode_assets_to(
     home: &Path,
     root: &Path,
-    components: &[super::host_bundle::HostBundleComponentV1],
+    components: &[super::host_bundle::HostComponentV1],
 ) -> Result<()> {
     let relative_paths = opencode_asset_relative_paths(components);
     let destinations = external_opencode_asset_paths_for(home, root, components);
@@ -532,7 +532,7 @@ fn mirror_external_opencode_assets_to(
 
 fn remove_external_opencode_assets(
     home: &Path,
-    components: &[super::host_bundle::HostBundleComponentV1],
+    components: &[super::host_bundle::HostComponentV1],
 ) -> Result<()> {
     for path in external_opencode_asset_paths(home, components) {
         match super::safe_remove_host_file(&path) {
@@ -1186,11 +1186,11 @@ mod tests {
 
     #[test]
     fn external_xdg_assets_are_mirrored_byte_for_byte() {
-        use crate::agents::host_bundle::HostBundleComponentV1;
+        use crate::agents::host_bundle::HostComponentV1;
 
         let home = tempfile::tempdir().unwrap();
         let xdg = tempfile::tempdir().unwrap();
-        let components = [HostBundleComponentV1::ContextMcp];
+        let components = [HostComponentV1::ContextMcp];
         for (index, relative) in opencode_asset_relative_paths(&components)
             .iter()
             .enumerate()

@@ -46,7 +46,7 @@ impl AgentIntegration for HermesIntegration {
 
     fn host_component_registration(
         &self,
-        _component: super::host_bundle::HostBundleComponentV1,
+        _component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
         hermes_registration_state(&ctx.home, None)
@@ -54,7 +54,7 @@ impl AgentIntegration for HermesIntegration {
 
     fn host_component_registration_for_lifecycle(
         &self,
-        _component: super::host_bundle::HostBundleComponentV1,
+        _component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
@@ -91,7 +91,7 @@ impl AgentIntegration for HermesIntegration {
 
     fn host_component_registration_paths_checked(
         &self,
-        _components: &[super::host_bundle::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         home: &Path,
     ) -> Result<Vec<PathBuf>> {
         let mut paths = self.host_registration_paths(home);
@@ -709,7 +709,7 @@ mod registration_tests {
 
         let paths = HermesIntegration
             .host_component_registration_paths_checked(
-                &[super::super::host_bundle::HostBundleComponentV1::Core],
+                &[super::super::host_bundle::HostComponentV1::Core],
                 home.path(),
             )
             .unwrap();

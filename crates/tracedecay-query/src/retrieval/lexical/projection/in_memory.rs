@@ -560,7 +560,7 @@ impl LexicalGenerationPostingsV1 {
         pruned: &mut Vec<(String, u64)>,
     ) -> RoaringBitmap {
         let mut sources = Vec::new();
-        for term in &request.whole_terms {
+        for term in request.whole_terms.iter() {
             let (frequency, documents) = self.whole_term_documents(&normalize_lexical(term));
             sources.push((frequency, (term.clone(), documents)));
             if let Some(expansions) = fuzzy.by_query.get(term) {
@@ -582,7 +582,7 @@ impl LexicalGenerationPostingsV1 {
                 }),
         );
         if let Some(postings) = self.term_documents.get(&LexicalFieldV1::Subtoken) {
-            for subtoken in &request.subtokens {
+            for subtoken in request.subtokens.iter() {
                 if let Some(posting) = postings.get(&normalize_lexical(subtoken)) {
                     sources.push((
                         posting.documents.len() as usize,

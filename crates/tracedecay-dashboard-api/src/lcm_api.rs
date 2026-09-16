@@ -7,10 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use axum::{
-    Json,
-    extract::{Extension, State},
-};
+use axum::{Json, extract::State};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +16,7 @@ use super::read_model::{
     scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 
 mod aggregates;
 
@@ -392,14 +389,14 @@ pub struct OverviewParams {
 /// manifest before this boundary reduces the hydrated records.
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>> {
     hotpath::future!(
         async move {
             lcm_read(
                 &state,
-                control.map(|Extension(control)| control),
+                control,
                 DashboardLcmReadRequestV1::Overview {
                     query: params.q,
                     limit: params.limit.unwrap_or(25).clamp(1, 200),
@@ -433,7 +430,7 @@ pub struct SearchParams {
 /// GET /api/plugins/hermes-lcm/search
 pub async fn search(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>> {
     hotpath::future!(
@@ -448,7 +445,7 @@ pub async fn search(
             };
             lcm_read(
                 &state,
-                control.map(|Extension(control)| control),
+                control,
                 DashboardLcmReadRequestV1::Search {
                     query: params.q,
                     limit: params.limit.unwrap_or(50).clamp(1, 500),
@@ -476,7 +473,7 @@ pub struct SessionParams {
 /// GET /api/plugins/hermes-lcm/session/{session_id}
 pub async fn session(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>> {
@@ -484,7 +481,7 @@ pub async fn session(
         async move {
             lcm_read(
                 &state,
-                control.map(|Extension(control)| control),
+                control,
                 DashboardLcmReadRequestV1::Session {
                     session_id,
                     limit: params.limit.unwrap_or(100).clamp(1, 500),
@@ -509,7 +506,7 @@ pub struct TimelineParams {
 /// GET /api/plugins/hermes-lcm/timeline
 pub async fn timeline(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<TimelineParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
     hotpath::future!(
@@ -521,7 +518,7 @@ pub async fn timeline(
             };
             lcm_read(
                 &state,
-                control.map(|Extension(control)| control),
+                control,
                 DashboardLcmReadRequestV1::Timeline {
                     bucket,
                     session_id: trimmed_nonempty(params.session_id),
@@ -537,7 +534,7 @@ pub async fn timeline(
 
 async fn lcm_read<T>(
     state: &DashboardState,
-    control: Option<DashboardHttpRequestControlV1>,
+    control: DashboardHttpRequestControlV1,
     request: DashboardLcmReadRequestV1,
 ) -> Json<DashboardEnvelopeV1<Option<T>>>
 where
@@ -548,13 +545,6 @@ where
             scope_from_state(state),
             None,
             "lcm_daemon_authority_unavailable",
-        ));
-    };
-    let Some(control) = control else {
-        return Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(state),
-            None,
-            "dashboard_request_admission_unavailable",
         ));
     };
     let outcome = authority

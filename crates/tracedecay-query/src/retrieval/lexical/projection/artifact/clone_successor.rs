@@ -116,40 +116,64 @@ impl CodeLexicalCloneSuccessorV1 {
         Ok(cursor)
     }
 
+    pub fn projection_metadata(&self) -> &CodeLexicalProjectionMetadataV1 {
+        &self.metadata
+    }
+
+    /// Append one page through the atomic batch path.
     pub fn append_page(
         &mut self,
         page: &VerifiedSealedLexicalPageV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        self.append_pages(std::slice::from_ref(page), control)
+    }
+
+    /// Atomically append an ordered, contiguous batch of verified source
+    /// pages. Every page is checked against the copied source receipt and the
+    /// persisted successor cursor exactly as a single-page append is; the
+    /// batch shares one durable SQLite commit, so a crash resumes at the last
+    /// committed batch boundary instead of paying one `fsync` per page.
+    pub fn append_pages(
+        &mut self,
+        pages: &[VerifiedSealedLexicalPageV1],
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        let Some(last) = pages.last() else {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "clone successor page batches must be non-empty".to_owned(),
+            ));
+        };
         checkpoint(control)?;
         let _authority = BuilderMutationGuardV1::enter(&self.mutation_gate)?;
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
-        let next_page: i64 = transaction
+        let mut next_page: i64 = transaction
             .query_row(
                 "SELECT next_page_ordinal FROM clone_successor_state WHERE singleton = 1",
                 [],
                 |row| row.get(0),
             )
             .map_err(sqlite_error)?;
-        if u64::try_from(next_page).ok() != Some(page.page_ordinal()) {
-            return Err(CodeLexicalArtifactErrorV1::Contract(
-                "clone successor page is not the next source page".to_owned(),
-            ));
+        for page in pages {
+            checkpoint(control)?;
+            if u64::try_from(next_page).ok() != Some(page.page_ordinal()) {
+                return Err(CodeLexicalArtifactErrorV1::Contract(
+                    "clone successor page is not the next source page".to_owned(),
+                ));
+            }
+            verify_copied_source_page(&transaction, page)?;
+            append_clone_rows(&transaction, page, control)?;
+            next_page = i64::try_from(page.page_ordinal().saturating_add(1))
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
         }
-        verify_copied_source_page(&transaction, page)?;
-        let next_cursor = page
+        let next_cursor = last
             .next_cursor()
             .persisted_bytes()
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        append_clone_rows(&transaction, page, control)?;
         transaction
             .execute(
                 "UPDATE clone_successor_state SET next_page_ordinal = ?1, next_cursor = ?2 WHERE singleton = 1",
-                params![
-                    i64::try_from(page.page_ordinal().saturating_add(1))
-                        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-                    next_cursor,
-                ],
+                params![next_page, next_cursor],
             )
             .map_err(sqlite_error)?;
         checkpoint(control)?;

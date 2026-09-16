@@ -30,12 +30,11 @@ use super::writer::{
     regular_file_exists, remove_if_digest_matches, sync_cap_dir,
 };
 use super::{
-    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleComponentV1, HostBundleError,
-    HostBundleInstallReceiptV1, HostBundleJournalEntryV1, HostBundleLifecycleOpV1,
-    HostBundleManifestV1, HostBundleReceiptArtifactV1, HostBundleRollbackBoundaryV1,
-    HostBundleVerificationAdapterV1, HostComponentSetJournalComponentV1,
-    HostComponentSetJournalStateV1, HostComponentSetJournalV1, HostComponentSetReceiptV1,
-    HostKindV1,
+    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleJournalEntryV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
+    HostBundleReceiptArtifactV1, HostBundleRollbackBoundaryV1, HostBundleVerificationAdapterV1,
+    HostComponentSetJournalComponentV1, HostComponentSetJournalStateV1, HostComponentSetJournalV1,
+    HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
 };
 
 /// Public component-set lifecycle façade over the capability-rooted writer.
@@ -264,7 +263,7 @@ impl HostBundleWriterV1 {
 
         // Resolve receiptless-adoption authority through the same adapter the
         // preview used, so the replanned mutations match the confirmed plan.
-        let adoption_by_component: BTreeMap<HostBundleComponentV1, bool> = component_set
+        let adoption_by_component: BTreeMap<HostComponentV1, bool> = component_set
             .components
             .iter()
             .map(|component| {
@@ -481,7 +480,7 @@ impl HostBundleWriterV1 {
         component_set: &HostComponentSetV1,
         request: &HostComponentSetExecutionRequestV1,
         verifier: &V,
-        adoption_by_component: &BTreeMap<HostBundleComponentV1, bool>,
+        adoption_by_component: &BTreeMap<HostComponentV1, bool>,
     ) -> Result<Vec<PreparedHostComponentSetComponentV1>, HostBundleError> {
         let mut prepared = Vec::with_capacity(component_set.components.len());
         let mut claimed_paths = BTreeMap::new();

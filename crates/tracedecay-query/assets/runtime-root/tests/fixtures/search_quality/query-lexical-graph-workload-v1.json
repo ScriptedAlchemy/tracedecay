@@ -136,8 +136,7 @@
   ],
   "decision_policy": {
     "required_cancellation": "bounded_typed_cancelled",
-    "required_fallback_byte_stability": true,
-    "required_offline": "no_network_and_query_fallback_available"
+    "required_fallback_byte_stability": true
   },
   "expected_query_fallback_digests": {
     "train": "sha256:afa693698d371e76f4b6bb127886e6636e5294399ff5e95a5a29e9ea1ef77b36",

@@ -5,6 +5,7 @@
 //! `LexicalPostingReadPort` against the lexical projection land with the
 //! query/i3 composition packet.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -264,11 +265,11 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         base: base_request(max_candidates),
         query_view,
         generation: id("generation.1"),
-        whole_terms: vec!["reserve".to_owned(), "stock".to_owned()],
-        subtokens: vec!["res".to_owned()],
-        phrases: Vec::new(),
-        proximities: Vec::new(),
-        field_filters: Vec::new(),
+        whole_terms: Cow::Owned(vec!["reserve".to_owned(), "stock".to_owned()]),
+        subtokens: Cow::Owned(vec!["res".to_owned()]),
+        phrases: Cow::Owned(Vec::new()),
+        proximities: Cow::Owned(Vec::new()),
+        field_filters: Cow::Owned(Vec::new()),
         fuzzy_budget: 2,
         lexical_profile_revision: id("lexical-profile.v1"),
         score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),
@@ -280,10 +281,10 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
 #[test]
 fn lexical_request_owns_proximity_bounds() {
     let mut request = lexical_request(8);
-    request.proximities = vec![LexicalProximityV1 {
+    request.proximities = Cow::Owned(vec![LexicalProximityV1 {
         terms: vec!["reserve".to_owned(), "stock".to_owned()],
         maximum_gap: 9,
-    }];
+    }]);
 
     assert!(
         request
@@ -493,10 +494,10 @@ fn lexical_lane_scores_candidates_with_checked_fixed_point_sums() {
 #[test]
 fn lexical_lane_applies_include_field_filters() {
     let mut request = lexical_request(8);
-    request.field_filters = vec![LexicalFieldFilterV1 {
+    request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
         field: LexicalFieldV1::SymbolName,
         include: true,
-    }];
+    }]);
     let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
 
     let result = complete_batch(lane.retrieve_lexical(&request).expect("filtered retrieval"));
@@ -519,10 +520,10 @@ fn lexical_lane_applies_include_field_filters() {
 #[test]
 fn lexical_lane_applies_exclude_field_filters() {
     let mut request = lexical_request(8);
-    request.field_filters = vec![LexicalFieldFilterV1 {
+    request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
         field: LexicalFieldV1::BodyText,
         include: false,
-    }];
+    }]);
     let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
 
     let result = complete_batch(lane.retrieve_lexical(&request).expect("filtered retrieval"));
@@ -734,8 +735,8 @@ fn lexical_lane_unwinds_a_cancelled_request_before_reading_postings() {
 #[test]
 fn lexical_lane_requires_at_least_one_term() {
     let mut request = lexical_request(8);
-    request.whole_terms = Vec::new();
-    request.subtokens = Vec::new();
+    request.whole_terms = Cow::Owned(Vec::new());
+    request.subtokens = Cow::Owned(Vec::new());
     let lane = LexicalLane::new(FakeLexicalPort::complete(Vec::new()));
 
     let result = lane.retrieve_lexical(&request);

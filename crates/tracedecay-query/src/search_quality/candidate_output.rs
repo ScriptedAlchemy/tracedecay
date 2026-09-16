@@ -160,7 +160,6 @@ pub struct ProfileSpecV1 {
 #[serde(deny_unknown_fields)]
 pub struct DecisionPolicySliceV1 {
     pub required_cancellation: RequiredCancellationV1,
-    pub required_offline: RequiredOfflineV1,
     pub required_fallback_byte_stability: bool,
 }
 
@@ -171,16 +170,6 @@ pub struct DecisionPolicySliceV1 {
 pub enum RequiredCancellationV1 {
     /// Every query settled through a bounded, typed cancellation.
     BoundedTypedCancelled,
-}
-
-/// The offline discipline a candidate run must demonstrate. Closed: retrieval
-/// under evaluation never reaches the network, and the query fallback stays
-/// available without it.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RequiredOfflineV1 {
-    /// No network was reachable and the query fallback remained available.
-    NoNetworkAndQueryFallbackAvailable,
 }
 
 /// One need class a workload query belongs to.
@@ -394,7 +383,6 @@ pub struct ProductionCandidateOutputV1 {
     pub expected_query_fallback_digest: String,
     pub query_fallback_matches_expected: bool,
     pub cancellation: RequiredCancellationV1,
-    pub offline: RequiredOfflineV1,
     pub resources: BTreeMap<String, ResourceSampleV1>,
     pub queries: Vec<QueryCandidateRowV1>,
 }

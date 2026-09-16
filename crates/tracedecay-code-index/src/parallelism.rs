@@ -596,6 +596,19 @@ pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
     with_background_cpu_permits(1, operation)
 }
 
+/// Run a nested pool fan-out with the calling thread's admitted units
+/// yielded for its duration. Admission is FIFO, so a parent that kept its
+/// unit while waiting on leaves stolen by other workers could wedge the
+/// process: a wider request at the queue head never fits while the parent
+/// holds, and the parent's leaves never reach the head. The units are
+/// reacquired before the parent resumes, including during unwind.
+pub fn with_yielded_background_cpu_permits<R>(operation: impl FnOnce() -> R) -> R {
+    match WORKER_RUNTIME.get() {
+        Some(runtime) => runtime.background_cpu.with_yielded_permits(operation),
+        None => operation(),
+    }
+}
+
 /// Run `operation` on the configured indexing pool.
 ///
 /// CPU admission happens inside each active parallel work unit through

@@ -27,17 +27,18 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
         .map_or(default, |value| value.clamp(1, max))
 }
 
-fn project_registry_result(project_root: &Path, args: &Value, payload: &Value) -> ToolResult {
-    render_registry_result(Some(project_root), args, payload)
-}
-
 fn registry_result(args: &Value, payload: &Value) -> ToolResult {
     render_registry_result(None, args, payload)
 }
 
+/// The registry tree view renders only an `ok` listing. An `unavailable`
+/// payload carries the same zeroed tree keys for shape stability and must
+/// not be read back as "no registered projects".
 fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) -> ToolResult {
     rendered_tool_result(root, args, payload, vec![], || {
-        if payload.get("project_tree").is_some() {
+        if payload.get("status").and_then(Value::as_str) == Some("ok")
+            && payload.get("project_tree").is_some()
+        {
             let view = serde_json::from_value::<ProjectRegistryView>(json!({
                 "summary": payload.get("summary").cloned().unwrap_or_else(|| json!({})),
                 "project_tree": payload.get("project_tree").cloned().unwrap_or_else(|| json!([])),
@@ -91,9 +92,12 @@ fn is_explicit_project_path_selector(selector: &str) -> bool {
             || selector.contains('\\'))
 }
 
+/// `project_root` is the served project when the call arrives over a
+/// project connection; a projectless connection reads the same profile
+/// registry with `None` and marks no project active.
 #[hotpath::measure(label = "mcp.info.project_list.total")]
 pub async fn handle_project_list(
-    project_root: &Path,
+    project_root: Option<&Path>,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
@@ -102,7 +106,7 @@ pub async fn handle_project_list(
         list_registered_projects(
             registry,
             ProjectRegistryListingCommand {
-                active_project_root: project_root.to_path_buf(),
+                active_project_root: project_root.map(Path::to_path_buf),
                 scope: ProjectRegistryListingScope::All,
                 limit,
             },
@@ -121,7 +125,7 @@ pub async fn handle_project_list(
 
 #[hotpath::measure(label = "mcp.info.project_search.total")]
 pub async fn handle_project_search(
-    project_root: &Path,
+    project_root: Option<&Path>,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
@@ -137,7 +141,7 @@ pub async fn handle_project_search(
         list_registered_projects(
             registry,
             ProjectRegistryListingCommand {
-                active_project_root: project_root.to_path_buf(),
+                active_project_root: project_root.map(Path::to_path_buf),
                 scope: ProjectRegistryListingScope::Matching {
                     query: query.clone(),
                 },
@@ -198,42 +202,55 @@ fn registry_listing_result(
     }
 }
 
-fn project_context_selector(project_root: &Path, args: &Value) -> ProjectRegistrySelector {
+/// The selector defaults to the served project root; a projectless call has
+/// no such default and must name the project explicitly.
+fn project_context_selector(
+    project_root: Option<&Path>,
+    args: &Value,
+) -> Result<ProjectRegistrySelector> {
     if let Some(project_id) = args
         .get("project_selector")
         .and_then(Value::as_object)
         .and_then(|selector| selector.get("project_id"))
         .and_then(Value::as_str)
     {
-        return ProjectRegistrySelector::ProjectId(project_id.to_owned());
+        return Ok(ProjectRegistrySelector::ProjectId(project_id.to_owned()));
     }
     let Some(path) = args.get("path").and_then(Value::as_str) else {
-        return ProjectRegistrySelector::Path {
+        let Some(project_root) = project_root else {
+            return Err(TraceDecayError::Config {
+                message: "missing required parameter: path or project_selector (no active \
+                          project is connected)"
+                    .to_string(),
+            });
+        };
+        return Ok(ProjectRegistrySelector::Path {
             path: project_root.to_path_buf(),
             allow_git_identity: true,
-        };
+        });
     };
     let path = Path::new(path);
     let allow_git_identity =
         path.is_absolute() && is_explicit_project_path_selector(path.to_string_lossy().as_ref());
-    ProjectRegistrySelector::Path {
+    Ok(ProjectRegistrySelector::Path {
         path: path.to_path_buf(),
         allow_git_identity,
-    }
+    })
 }
 
 #[hotpath::measure(label = "mcp.info.project_context.total")]
 pub async fn handle_project_context(
-    project_root: &Path,
+    project_root: Option<&Path>,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
+    let selector = project_context_selector(project_root, &args)?;
     let outcome = hotpath::future!(
         read_registered_project_context(
             registry,
             ProjectRegistryContextCommand {
-                active_project_root: project_root.to_path_buf(),
-                selector: project_context_selector(project_root, &args),
+                active_project_root: project_root.map(Path::to_path_buf),
+                selector,
             },
         ),
         label = "mcp.info.project_context.read"
@@ -257,12 +274,17 @@ pub async fn handle_project_context(
             "stores": context.stores,
         }),
     };
-    Ok(project_registry_result(project_root, &args, &payload))
+    Ok(render_registry_result(project_root, &args, &payload))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::registry_missing_payload;
+    use std::path::Path;
+
+    use serde_json::json;
+    use tracedecay_contracts::{ProjectRegistryListingOutcome, ProjectRegistrySelector};
+
+    use super::{project_context_selector, registry_listing_result, registry_missing_payload};
 
     #[test]
     fn missing_registry_payload_preserves_unavailable_state() {
@@ -275,5 +297,68 @@ mod tests {
         );
         assert_eq!(payload["projects"].as_array().map(Vec::len), Some(0));
         assert!(payload.get("registry_path").is_none());
+    }
+
+    /// The rendered text of an unavailable registry must say so; the zeroed
+    /// tree keys exist for payload-shape stability, not to read as an empty
+    /// listing.
+    #[test]
+    fn unavailable_listing_does_not_render_as_an_empty_registry() {
+        let result = registry_listing_result(
+            &json!({}),
+            "registered projects",
+            None,
+            25,
+            ProjectRegistryListingOutcome::RegistryUnavailable,
+        );
+        let text = result.value["content"][0]["text"]
+            .as_str()
+            .expect("rendered text");
+        assert!(
+            text.contains("unavailable") && text.contains("not present"),
+            "unavailable state must survive rendering, got:\n{text}"
+        );
+        assert!(
+            !text.contains("No registered projects found"),
+            "an absent registry must not read as an empty one, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn project_context_selector_defaults_to_the_served_root_only_when_one_exists() {
+        let served = Path::new("/srv/checkout");
+        assert_eq!(
+            project_context_selector(Some(served), &json!({})).expect("served root selector"),
+            ProjectRegistrySelector::Path {
+                path: served.to_path_buf(),
+                allow_git_identity: true,
+            }
+        );
+
+        let error = project_context_selector(None, &json!({}))
+            .expect_err("a projectless read with no selector must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("missing required parameter: path or project_selector"),
+            "unexpected refusal: {error}"
+        );
+
+        assert_eq!(
+            project_context_selector(None, &json!({"path": "/srv/other"}))
+                .expect("explicit path selector"),
+            ProjectRegistrySelector::Path {
+                path: Path::new("/srv/other").to_path_buf(),
+                allow_git_identity: true,
+            }
+        );
+        assert_eq!(
+            project_context_selector(
+                None,
+                &json!({"project_selector": {"project_id": "project.other"}})
+            )
+            .expect("project id selector"),
+            ProjectRegistrySelector::ProjectId("project.other".to_owned())
+        );
     }
 }

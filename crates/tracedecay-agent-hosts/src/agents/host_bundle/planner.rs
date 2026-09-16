@@ -21,9 +21,9 @@ use super::model::{
     HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
 };
 use super::{
-    HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleComponentV1, HostBundleError,
-    HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
-    HostBundleVerificationAdapterV1, HostKindV1, MAX_ARTIFACT_CONTENT_BYTES, validate_identifier,
+    HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
+    HostComponentV1, HostKindV1, MAX_ARTIFACT_CONTENT_BYTES, validate_identifier,
     validate_relative_install_path,
 };
 
@@ -136,7 +136,7 @@ pub struct HostArtifactMutationV1 {
 pub struct HostBundleLifecycleRequestV1 {
     pub operation: HostBundleLifecycleOpV1,
     pub expected_host: HostKindV1,
-    pub expected_component: HostBundleComponentV1,
+    pub expected_component: HostComponentV1,
     pub explicit_confirmation: bool,
     /// Hermes has one user-profile binding. Other hosts must pass zero here;
     /// this is not an ambient profile-discovery mechanism.
@@ -155,7 +155,7 @@ pub struct HostBundleLifecycleRequestV1 {
 pub struct HostBundleMutationPlanV1 {
     pub operation: HostBundleLifecycleOpV1,
     pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
+    pub component: HostComponentV1,
     pub mutations: Vec<HostArtifactMutationV1>,
     pub rollback_required: bool,
 }
@@ -489,7 +489,7 @@ struct HostComponentSetPlanDigestPayloadV1 {
     operation_id: [u8; 16],
     operation: HostBundleLifecycleOpV1,
     host: HostKindV1,
-    expected_components: Vec<HostBundleComponentV1>,
+    expected_components: Vec<HostComponentV1>,
     hermes_profile_bindings: u8,
     base_registration_revision: [u8; 32],
     current_registration_revision: [u8; 32],
@@ -507,7 +507,7 @@ struct HostComponentSetArtifactStatePayloadV1 {
 
 #[derive(Serialize)]
 struct HostComponentArtifactStateV1 {
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     manifest_digest: [u8; 32],
     receipt_digest: Option<[u8; 32]>,
     observed: Vec<ObservedHostArtifactV1>,
@@ -855,7 +855,7 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
 pub(super) fn component_receiptless_adoption<R: HostComponentSetRegistrationV1>(
     request: &HostComponentSetExecutionRequestV1,
     registration: &R,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
 ) -> bool {
     request.lifecycle.explicit_adoption || registration.receiptless_component_provenance(component)
 }

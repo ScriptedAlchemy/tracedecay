@@ -172,10 +172,10 @@ impl AgentIntegration for GeminiIntegration {
     /// component and the core registration are the same fact here.
     fn host_component_registration(
         &self,
-        component: super::host_bundle::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::HostBundleComponentV1 as Component;
+        use super::host_bundle::HostComponentV1 as Component;
 
         if !matches!(component, Component::Core | Component::ContextMcp) {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
@@ -188,7 +188,7 @@ impl AgentIntegration for GeminiIntegration {
     /// binary reports `Repairable` instead of a stale `Current`.
     fn host_component_registration_for_lifecycle(
         &self,
-        component: super::host_bundle::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {

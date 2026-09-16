@@ -1,11 +1,11 @@
-use axum::extract::{Extension, Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::util::{JsonQuery, coerce_limit, http_detail};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardState, RequestControl};
 use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
 use crate::read_model::DashboardDomainStateV1;
 use crate::tracedecay::facts::memory_application_for_db;
@@ -24,17 +24,9 @@ pub struct ListParams {
 #[hotpath::measure(label = "dashboard_api.receipts.list", future = true)]
 pub async fn list(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<ListParams>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(Extension(control)) = control else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(http_detail(
-                "dashboard HTTP request admission is unavailable",
-            )),
-        );
-    };
     let receipt_state = match params.state.as_deref() {
         Some(value) => match AutomaticFactState::parse(value) {
             Ok(state) => Some(state),
@@ -98,17 +90,9 @@ pub async fn list(
 #[hotpath::measure(label = "dashboard_api.receipts.view", future = true)]
 pub async fn view(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     AxumPath(id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(Extension(control)) = control else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(http_detail(
-                "dashboard HTTP request admission is unavailable",
-            )),
-        );
-    };
     let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
     {
         Ok(memory) => memory,

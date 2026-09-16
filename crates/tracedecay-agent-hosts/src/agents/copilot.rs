@@ -96,10 +96,10 @@ impl AgentIntegration for CopilotIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        if component != super::host_bundle::HostBundleComponentV1::ContextMcp {
+        if component != super::host_bundle::HostComponentV1::ContextMcp {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
         copilot_context_mcp_registration_state(&ctx.home)
@@ -117,10 +117,10 @@ impl AgentIntegration for CopilotIntegration {
     /// TraceDecay-written VS Code settings file.
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             let path = copilot_cli_mcp_config_path(home);
             vec![path.clone(), config_backup_path(&path)]
         } else {
@@ -135,10 +135,10 @@ impl AgentIntegration for CopilotIntegration {
     /// writes it (see the module documentation), so there is nothing to drive.
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             let copilot_cli = require_copilot_cli()?;
             copilot_mcp_add_with(&copilot_cli, &ctx.home, &ctx.tracedecay_bin)?;
         }
@@ -150,10 +150,10 @@ impl AgentIntegration for CopilotIntegration {
     /// deactivation reverses exactly what activation created.
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             let copilot_cli = require_copilot_cli()?;
             copilot_mcp_remove_with(&copilot_cli, &ctx.home)?;
         }

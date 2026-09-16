@@ -4,24 +4,24 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tracedecay_agent_hosts::agents::host_bundle::{
-    HostBundleComponentV1, HostBundleInstallReceiptV1, HostBundleManifestV1,
+    HostComponentV1, HostBundleInstallReceiptV1, HostBundleManifestV1,
     HostComponentSetReceiptV1,
 };
 
 pub(super) fn selected_feedback_component(
     aggregate: &HostComponentSetReceiptV1,
-) -> tracedecay_domain::errors::Result<HostBundleComponentV1> {
+) -> tracedecay_domain::errors::Result<HostComponentV1> {
     if aggregate
         .component_manifests
         .iter()
-        .any(|manifest| manifest.component == HostBundleComponentV1::Core)
+        .any(|manifest| manifest.component == HostComponentV1::Core)
     {
-        return Ok(HostBundleComponentV1::Core);
+        return Ok(HostComponentV1::Core);
     }
     if let [manifest] = aggregate.component_manifests.as_slice()
-        && manifest.component == HostBundleComponentV1::ContextMcp
+        && manifest.component == HostComponentV1::ContextMcp
     {
-        return Ok(HostBundleComponentV1::ContextMcp);
+        return Ok(HostComponentV1::ContextMcp);
     }
     Err(tracedecay_domain::errors::TraceDecayError::Config {
         message: "aggregate receipt has no selected feedback component".to_string(),

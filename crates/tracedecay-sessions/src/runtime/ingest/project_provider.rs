@@ -758,12 +758,30 @@ impl<'a> ProjectProviderRun<'a> {
         else {
             return ProviderRunOutcome::skipped();
         };
-        ProviderRunOutcome::bounded(
-            outcome.stats,
-            outcome.bytes_consumed,
-            outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
-        )
+        let byte_cap_exceeded = outcome.bytes_consumed > self.max_new_bytes;
+        hermes_run_outcome(outcome, byte_cap_exceeded)
     }
+}
+
+/// One Hermes sweep as the scheduler sees it. A skipped source is a partial
+/// scan, reported as a retryable failure because the next pass re-discovers
+/// the same `state.db`; an incomplete projection drain is a deferred unit.
+pub(super) fn hermes_run_outcome(
+    outcome: hermes::HermesSweepOutcome,
+    byte_cap_exceeded: bool,
+) -> ProviderRunOutcome {
+    let mut run = ProviderRunOutcome::bounded(
+        outcome.stats,
+        outcome.bytes_consumed,
+        outcome.deferred_by_byte_cap || byte_cap_exceeded,
+    );
+    if outcome.source_failures > 0 {
+        run.add_failure(TranscriptCatchUpFailure::source_scan_partial(
+            "hermes", true,
+        ));
+    }
+    run.add_deferred_units(u64::from(outcome.projection_drain_deferred));
+    run
 }
 
 async fn ingest_project_claude_observations(
@@ -804,9 +822,10 @@ mod tests {
 
     use super::{
         MAX_CODEX_SOURCE_FAILURES_PER_PASS, ProviderRunOutcome, claude_provider_run_outcome,
-        codex_source_failure_saturates_pass, cursor_composer_run_outcome,
+        codex_source_failure_saturates_pass, cursor_composer_run_outcome, hermes_run_outcome,
         merge_cursor_sweep_outcome,
     };
+    use crate::runtime::hermes::HermesSweepOutcome;
 
     #[test]
     fn codex_source_failures_bound_each_provider_pass() {
@@ -819,6 +838,38 @@ mod tests {
             false,
         ));
         assert!(codex_source_failure_saturates_pass(1, true));
+    }
+
+    #[test]
+    fn hermes_skipped_source_is_a_failed_pass_not_a_clean_one() {
+        let mut sweep = HermesSweepOutcome {
+            bytes_consumed: 12,
+            source_failures: 1,
+            ..HermesSweepOutcome::default()
+        };
+        sweep.stats.messages_upserted = 3;
+
+        let outcome = hermes_run_outcome(sweep, false);
+
+        assert_eq!(outcome.stats.messages_upserted, 3);
+        assert_eq!(outcome.bytes_consumed, 12);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].reason_code, "source_scan_partial");
+        assert!(outcome.failures[0].retryable);
+        assert!(!outcome.succeeded());
+    }
+
+    #[test]
+    fn hermes_deferred_projection_drain_is_a_deferred_unit() {
+        let sweep = HermesSweepOutcome {
+            projection_drain_deferred: true,
+            ..HermesSweepOutcome::default()
+        };
+
+        let outcome = hermes_run_outcome(sweep, false);
+
+        assert_eq!(outcome.deferred_units, 1);
+        assert!(outcome.failures.is_empty());
     }
 
     #[test]

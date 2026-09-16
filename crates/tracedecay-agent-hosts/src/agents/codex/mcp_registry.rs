@@ -59,7 +59,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agents::host_bundle::HostBundleComponentV1;
+use crate::agents::host_bundle::HostComponentV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{CODEX_MCP_SERVER_ARGS, CODEX_MCP_SERVER_ENV, codex_config_path};
@@ -98,10 +98,10 @@ const CODEX_HOOKS_KEY: &str = "hooks";
 /// has an MCP route and must not gain a second, standalone one. Without `Core`
 /// the staged `.mcp.json` is never loaded by anything, and the host registry is
 /// the only way the server actually exists.
-pub(super) fn is_mcp_only_component_set(components: &[HostBundleComponentV1]) -> bool {
-    !components.contains(&HostBundleComponentV1::Core)
-        && (components.contains(&HostBundleComponentV1::ContextMcp)
-            || components.contains(&HostBundleComponentV1::OperatorMcp))
+pub(super) fn is_mcp_only_component_set(components: &[HostComponentV1]) -> bool {
+    !components.contains(&HostComponentV1::Core)
+        && (components.contains(&HostComponentV1::ContextMcp)
+            || components.contains(&HostComponentV1::OperatorMcp))
 }
 
 /// Resolve Codex's own CLI, or fail with the typed requirement.

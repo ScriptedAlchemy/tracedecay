@@ -16,10 +16,10 @@ use super::control::{
 };
 use super::planner::{ObservedArtifactKindV1, ObservedHostArtifactV1, observe_artifact_at};
 use super::{
-    HostBundleArtifactV1, HostBundleComponentV1, HostBundleError, HostBundleInstallReceiptV1,
-    HostBundleJournalV1, HostBundleLifecycleOpV1, HostBundleRollbackBoundaryV1,
-    HostComponentSetJournalV1, HostEditStopConformanceEvidenceV1, HostKindV1,
-    HostNativeFixtureEvidenceV1, native_host_edit_stop_conformance_evidence, stock_host_kinds,
+    HostBundleArtifactV1, HostBundleError, HostBundleInstallReceiptV1, HostBundleJournalV1,
+    HostBundleLifecycleOpV1, HostBundleRollbackBoundaryV1, HostComponentSetJournalV1,
+    HostComponentV1, HostEditStopConformanceEvidenceV1, HostKindV1, HostNativeFixtureEvidenceV1,
+    native_host_edit_stop_conformance_evidence, stock_host_kinds,
     supported_host_edit_stop_conformance_evidence,
 };
 
@@ -36,7 +36,7 @@ pub trait HostBundleRegistrationInspectorV1 {
     fn inspect_registration(
         &self,
         host: HostKindV1,
-        component: HostBundleComponentV1,
+        component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1;
 
     /// Operator guidance for a host that exposes component activation only
@@ -102,7 +102,7 @@ pub struct HostBundleArtifactDoctorResultV1 {
 pub struct HostBundleComponentDoctorResultV1 {
     pub receipt_path: PathBuf,
     pub host: Option<HostKindV1>,
-    pub component: Option<HostBundleComponentV1>,
+    pub component: Option<HostComponentV1>,
     pub state: HostBundleComponentDoctorStateV1,
     pub registration: Option<HostBundleRegistrationStateV1>,
     pub artifacts: Vec<HostBundleArtifactDoctorResultV1>,
@@ -500,7 +500,7 @@ pub fn inspect_installed_host_bundle_components_at(
             state_path,
             host.descriptor().cli_id()
         );
-        let component = HostBundleComponentV1::Core;
+        let component = HostComponentV1::Core;
         if let Some(result) = components
             .iter_mut()
             .find(|result| result.host == Some(host) && result.component == Some(component))
@@ -610,7 +610,7 @@ fn artifacts_are_wholly_unmaterialised(artifacts: &[HostBundleArtifactDoctorResu
 pub(super) fn corrupt_component_result(
     receipt_path: PathBuf,
     host: Option<HostKindV1>,
-    component: Option<HostBundleComponentV1>,
+    component: Option<HostComponentV1>,
 ) -> HostBundleComponentDoctorResultV1 {
     let repair_action = match (host, component) {
         (Some(HostKindV1::KimiCode), Some(_)) => format!(
@@ -641,7 +641,7 @@ pub(super) fn corrupt_component_result(
 
 pub(super) fn repair_action(
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     state: HostBundleComponentDoctorStateV1,
     registration: HostBundleRegistrationStateV1,
 ) -> String {

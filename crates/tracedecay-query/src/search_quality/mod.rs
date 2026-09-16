@@ -32,7 +32,7 @@ pub mod report;
 pub use candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EvaluationConcurrencyContractV1,
     EvaluationExecutionContractV1, GenerateCandidateOutputsResultV1, NeedProvenanceKindV1,
-    NeedProvenanceV1, ProductionCandidateOutputV1, RequiredCancellationV1, RequiredOfflineV1,
+    NeedProvenanceV1, ProductionCandidateOutputV1, RequiredCancellationV1,
     ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1, WorkloadQueryV1,
     compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
     load_candidate_workload, validate_workload_for_tuning,
