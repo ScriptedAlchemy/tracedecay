@@ -39,7 +39,9 @@ pub enum ChunkIncrementErrorV1 {
     #[error("symbol occurrence {0} occurs more than once in re-extracted evidence")]
     DuplicateReextractedSymbol(SymbolOccurrenceId),
     #[error("a chunk manifest is not canonical: {0}")]
-    NonCanonical(String),
+    NonCanonical(crate::noncanonical::NonCanonicalCauseV1),
+    #[error("code-index parallel worker runtime failed: {0}")]
+    Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
     #[error("the increment plan does not match the supplied prior generation")]
     PriorGenerationMismatch,
     #[error("the increment plan references missing prior file occurrence {0}")]
@@ -81,7 +83,7 @@ impl GenerationChunkManifestV1 {
     ) -> Result<Self, ChunkIncrementErrorV1> {
         generation_id
             .validate()
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
 
         // Per-file validation is independent work and dominates a
         // corpus-sized aggregate, so it fans out over the indexing pool
@@ -99,8 +101,7 @@ impl GenerationChunkManifestV1 {
                     })
                 })
                 .collect::<Vec<_>>()
-        })
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        })?;
         validated.into_iter().collect::<Result<(), _>>()?;
 
         let capacity = files.iter().map(|file| file.chunks.len()).sum();
@@ -119,8 +120,7 @@ impl GenerationChunkManifestV1 {
         }
         // Typed identities are unique (checked below), so the parallel sort
         // yields exactly the order the serial sort did.
-        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))?;
         if let Some(duplicate) = chunks
             .windows(2)
             .find(|pair| pair[0].id == pair[1].id)
@@ -233,7 +233,9 @@ pub fn materialize_generation_increment(
                 })?;
                 if &prior.document.content_digest != content_digest {
                     return Err(ChunkIncrementErrorV1::NonCanonical(
-                        "carry-forward content digest does not match prior chunks".to_owned(),
+                        crate::noncanonical::NonCanonicalCauseV1::new(
+                            crate::noncanonical::NonCanonicalReasonCodeV1::CarryForwardDigestMismatch,
+                        ),
                     ));
                 }
                 let rematerialized_occurrences = prior
@@ -315,9 +317,7 @@ pub fn materialize_generation_increment(
         }
     }
     if !reextracted_files.is_empty() || !reextracted_symbols.is_empty() {
-        return Err(ChunkIncrementErrorV1::NonCanonical(
-            "unplanned re-extracted generation evidence was supplied".to_owned(),
-        ));
+        return Err(ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::UnplannedReextractedEvidence)));
     }
 
     let chunks = GenerationChunkManifestV1::new(generation_id.clone(), files)?;
@@ -396,22 +396,41 @@ pub fn plan_chunk_increment(
     };
     changes.manifest_digest = changes
         .compute_digest()
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
     changes
         .validate()
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
     Ok(changes)
 }
 
 fn map_chunking_error(error: ChunkingFailureV1) -> ChunkIncrementErrorV1 {
     match error {
         ChunkingFailureV1::GenerationMismatch => ChunkIncrementErrorV1::MixedGeneration,
-        other => ChunkIncrementErrorV1::NonCanonical(other.to_string()),
+        ChunkingFailureV1::NonCanonicalIdentity(cause) => {
+            ChunkIncrementErrorV1::NonCanonical(cause)
+        }
+        other => ChunkIncrementErrorV1::NonCanonical(
+            crate::noncanonical::NonCanonicalCauseV1::new(
+                crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+            )
+            .with(
+                crate::noncanonical::NonCanonicalDetailKeyV1::Detail,
+                other.to_string(),
+            ),
+        ),
     }
 }
 
 fn map_lineage_error(error: LineageResolutionErrorV1) -> ChunkIncrementErrorV1 {
-    ChunkIncrementErrorV1::NonCanonical(error.to_string())
+    ChunkIncrementErrorV1::NonCanonical(
+        crate::noncanonical::NonCanonicalCauseV1::new(
+            crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+        )
+        .with(
+            crate::noncanonical::NonCanonicalDetailKeyV1::Detail,
+            error.to_string(),
+        ),
+    )
 }
 
 fn placeholder_digest() -> ManifestDigest {

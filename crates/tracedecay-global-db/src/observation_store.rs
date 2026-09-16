@@ -282,7 +282,7 @@ impl RegisteredGlobalDb {
             }
             tracedecay_runtime_core::storage::ProfileShardValidationError::NonCanonical {
                 reason,
-            } => noncanonical(reason),
+            } => noncanonical(reason.to_string()),
         })?;
 
         Ok(ProjectObservationStoreResolution {
