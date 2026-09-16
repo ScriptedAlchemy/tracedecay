@@ -40,7 +40,9 @@ import { elideStart, formatCount, formatMicrosUtc, splitBytes } from '../../ui/f
 type CodeIndexBuildProgress = NonNullable<CodeIndexWorktreeFreshnessV1['progress']>;
 
 const ACTIVE_POLL_MS = 1_000;
+const QUIET_ACTIVE_POLL_MS = 4_000;
 const IDLE_POLL_MS = 30_000;
+const QUIET_AFTER_SECONDS = 4;
 const STALLED_AFTER_SECONDS = 30;
 
 export function IndexFreshness() {
@@ -262,7 +264,10 @@ function freshnessPollIntervalMs(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): number {
   if (!hasActiveBuild(result)) return IDLE_POLL_MS;
-  if (hasStalledActiveBuild(result)) return IDLE_POLL_MS;
+  // Quiet-active fallback. code_index_activity is hook admission, not scheduler
+  // resume. Freshness samples peaked at 95ms; 4s detects a new progress stamp
+  // without 1 Hz on a wedged build. Terminal and idle stay at 30s.
+  if (hasQuietActiveBuild(result)) return QUIET_ACTIVE_POLL_MS;
   return ACTIVE_POLL_MS;
 }
 
@@ -278,7 +283,7 @@ function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean
   return true;
 }
 
-function hasStalledActiveBuild(
+function hasQuietActiveBuild(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): boolean {
   if (result?.outcome !== 'envelope') return false;
@@ -287,7 +292,7 @@ function hasStalledActiveBuild(
     if (!worktreeHasActiveBuild(worktree)) return false;
     const progress = worktree.progress;
     if (progress == null) return false;
-    return observedAt - progress.last_progress_micros >= STALLED_AFTER_SECONDS * 1_000_000;
+    return observedAt - progress.last_progress_micros >= QUIET_AFTER_SECONDS * 1_000_000;
   });
 }
 
