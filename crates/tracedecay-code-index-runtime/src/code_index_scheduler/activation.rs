@@ -504,7 +504,7 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(batch);
-                CodeIndexDemandAdmissionV1::Accepted
+                CodeIndexDemandAdmissionV1::Queued
             })
         });
         CodeIndexActivationV1::new(
@@ -572,8 +572,10 @@ mod tests {
         paths.extend((0..=MAX_PENDING_HOOK_PATHS).map(|index| format!("src/{index}.rs")));
 
         assert!(matches!(
-            activation.notify_hook_paths(repository.path(), paths).await,
-            CodeIndexDemandAdmissionV1::Accepted
+            activation
+                .admit(repository.path(), CodeIndexDemandV1::HookPaths(paths))
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
         ));
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         gate.notify_waiters();
@@ -651,7 +653,7 @@ mod tests {
                     Ok(())
                 })
             }),
-            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Accepted })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
         );
 
         assert_eq!(
@@ -691,7 +693,7 @@ mod tests {
             CancellationToken::new(),
             CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
             Arc::new(|| Box::pin(async { Ok(()) })),
-            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Accepted })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
         ));
         assert!(registry.register_activation(&scope, &disabled));
         assert_eq!(
@@ -723,7 +725,7 @@ mod tests {
             CancellationToken::new(),
             CodeIndexAutomaticAdmissionV1::Admitted,
             Arc::new(|| Box::pin(async { Ok(()) })),
-            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Accepted })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
         ));
         assert!(registry.register_activation(&scope, &enabled));
         assert_eq!(
@@ -804,7 +806,7 @@ mod tests {
             Arc::clone(&route_registered),
             CancellationToken::new(),
             mount,
-            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Accepted })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
         );
 
         assert!(activation.activate());

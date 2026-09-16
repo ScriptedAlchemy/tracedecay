@@ -430,38 +430,16 @@ mod tests {
     }
 
     #[test]
-    fn merge_reconcile_admission_prefers_corrupt_over_unavailable_and_accepted() {
-        let corrupt = CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked("a"));
-        assert!(matches!(
-            corrupt
-                .clone()
-                .merge(CodeIndexReconcileAdmissionV1::Accepted),
-            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
-        ));
-        assert!(matches!(
-            CodeIndexReconcileAdmissionV1::Unavailable.merge(corrupt.clone()),
-            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
-        ));
-        assert!(matches!(
-            CodeIndexReconcileAdmissionV1::Unavailable
-                .merge(CodeIndexReconcileAdmissionV1::Accepted),
-            CodeIndexReconcileAdmissionV1::Unavailable
-        ));
-        assert!(matches!(
-            CodeIndexReconcileAdmissionV1::Accepted.merge(CodeIndexReconcileAdmissionV1::Accepted),
-            CodeIndexReconcileAdmissionV1::Accepted
-        ));
-    }
-
-    #[test]
     fn host_outcome_maps_corrupt_terminal_unavailable_not_degraded() {
         use crate::mcp::server::{
             CODE_INDEX_LINKED_WORKTREE_DISABLED, CODE_INDEX_SCHEDULER_UNAVAILABLE,
-            CodeIndexAdmission as A,
+            code_index_host_outcome,
         };
+        use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1;
         use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
         use tracedecay_sessions::admission::HostAdmissionStatus;
-        let corrupt = A::PublicationAuthorityCorrupt(parked("term")).host_outcome();
+        let corrupt =
+            code_index_host_outcome(&CodeIndexDemandAdmissionV1::Terminal(parked("term")));
         assert_eq!(corrupt.status, HostAdmissionStatus::Unavailable);
         assert!(!corrupt.retryable);
         assert_eq!(
@@ -469,7 +447,7 @@ mod tests {
             Some(CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT)
         );
 
-        let linked = A::LinkedWorktreeDisabled.host_outcome();
+        let linked = code_index_host_outcome(&CodeIndexDemandAdmissionV1::RefusedByPolicy);
         assert_eq!(linked.status, HostAdmissionStatus::Degraded);
         assert!(!linked.retryable);
         assert_eq!(
@@ -477,7 +455,9 @@ mod tests {
             Some(CODE_INDEX_LINKED_WORKTREE_DISABLED)
         );
 
-        let unavailable = A::Unavailable.host_outcome();
+        let unavailable = code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(
+            CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+        ));
         assert_eq!(unavailable.status, HostAdmissionStatus::Unavailable);
         assert!(unavailable.retryable);
         assert_eq!(
@@ -515,7 +495,7 @@ mod tests {
                 let overflow_batches = Arc::clone(&overflow_batches);
                 Box::pin(async move {
                     overflow_batches.lock().expect("record batch").push(batch);
-                    CodeIndexReconcileAdmissionV1::Accepted
+                    CodeIndexDemandAdmissionV1::Queued
                 })
             })
         };
@@ -531,10 +511,10 @@ mod tests {
         assert!(
             sink(
                 root.clone(),
-                crate::mcp::server::CodeIndexReconcileDemandV1::Explicit
+                crate::mcp::server::CodeIndexDemandV1::OperatorReconcile
             )
             .await
-                == crate::mcp::server::CodeIndexAdmission::Accepted,
+                == crate::mcp::server::CodeIndexDemandAdmissionV1::Queued,
             "a pre-mount reconcile request must be accepted, not dropped"
         );
 
@@ -581,9 +561,7 @@ mod tests {
             })
         };
         let hint_sink: code_index_scheduler::CodeIndexActivationHintSinkV1 =
-            Arc::new(move |_batch| {
-                Box::pin(async move { CodeIndexReconcileAdmissionV1::Accepted })
-            });
+            Arc::new(move |_batch| Box::pin(async move { CodeIndexDemandAdmissionV1::Queued }));
         let activation = Arc::new(
             code_index_scheduler::CodeIndexActivationV1::new_with_admission(
                 &root,
@@ -598,9 +576,12 @@ mod tests {
         assert!(
             matches!(
                 activation
-                    .notify_hook_paths(&root, vec!["lib.rs".to_owned()])
+                    .admit(
+                        &root,
+                        CodeIndexDemandV1::HookPaths(vec!["lib.rs".to_owned()])
+                    )
                     .await,
-                CodeIndexReconcileAdmissionV1::Unavailable
+                CodeIndexDemandAdmissionV1::RefusedByPolicy
             ),
             "a watch-driven hint must still honour the linked-worktree watch policy"
         );
@@ -609,12 +590,12 @@ mod tests {
         let hook_sink = code_index_hook_sink(Arc::clone(&activation));
         assert_eq!(
             hook_sink(root.clone(), vec!["lib.rs".to_owned()]).await,
-            crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled
+            crate::mcp::server::CodeIndexDemandAdmissionV1::RefusedByPolicy
         );
         let probe_sink = code_index_freshness_probe_sink(registry.clone(), Arc::clone(&activation));
         assert_eq!(
             probe_sink(root.clone()).await,
-            crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled
+            crate::mcp::server::CodeIndexDemandAdmissionV1::RefusedByPolicy
         );
         let sink = code_index_reconcile_sink(Arc::clone(&activation));
         // The daemon's own whole-worktree demands — a `workspaceOpen` /
@@ -626,10 +607,10 @@ mod tests {
         assert!(
             sink(
                 root.clone(),
-                crate::mcp::server::CodeIndexReconcileDemandV1::Automatic
+                crate::mcp::server::CodeIndexDemandV1::Reconcile
             )
             .await
-                == crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled,
+                == crate::mcp::server::CodeIndexDemandAdmissionV1::RefusedByPolicy,
             "an automatic whole-worktree demand must honour the linked-worktree watch policy"
         );
         for _ in 0..8 {
@@ -643,10 +624,10 @@ mod tests {
         assert!(
             sink(
                 root.clone(),
-                crate::mcp::server::CodeIndexReconcileDemandV1::Explicit
+                crate::mcp::server::CodeIndexDemandV1::OperatorReconcile
             )
             .await
-                == crate::mcp::server::CodeIndexAdmission::Accepted,
+                == crate::mcp::server::CodeIndexDemandAdmissionV1::Queued,
             "explicit reconcile demand must be accepted on a linked worktree"
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {

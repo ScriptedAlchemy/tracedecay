@@ -122,7 +122,7 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
             registry
                 .notify_hook_paths(&project, &["src/main.rs".to_owned()])
                 .await,
-            super::CodeIndexReconcileAdmissionV1::Accepted
+            super::CodeIndexDemandAdmissionV1::Queued
         ),
         "a real source hint reaches the mounted scheduler"
     );
