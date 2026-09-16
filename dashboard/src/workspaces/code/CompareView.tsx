@@ -60,31 +60,23 @@ export function CompareView({
     '/api/code-index/freshness',
     CodeIndexFreshnessPayloadV1Schema,
   );
-  // The indexed worktree is the one revision the daemon already knows exactly.
-  // It is offered for head only when the scheduler reported both the
-  // reference and the revision; a missing revision is not defaulted.
-  const indexedWorktree = envelopePayload(freshness.data)?.worktrees.find(
-    (worktree) => worktree.source_reference !== null && worktree.source_revision !== null,
-  );
-  const indexed =
-    indexedWorktree?.source_reference != null && indexedWorktree.source_revision != null
-      ? {
-          branch: branchFromReference(indexedWorktree.source_reference),
-          revision: indexedWorktree.source_revision,
-        }
-      : undefined;
+  // Prefill only when exactly one fresh worktree reports both reference and
+  // revision. Ambiguous (several) or stale mounts stay manual so clearing the
+  // head cannot snap back to an arbitrary first row.
+  const indexed = uniqueFreshIndexedRevision(envelopePayload(freshness.data)?.worktrees);
+  const indexedBranch = indexed?.branch;
+  const indexedRevision = indexed?.revision;
   const [draft, setDraft] = useState<CompareSelection>(selection);
-  // An empty head is filled with the indexed worktree as soon as the daemon
-  // names it, so the reader types one side, not two. A head the reader typed
-  // is never overwritten.
+  // Primitive deps: a fresh object identity each render must not re-run this
+  // and refill a head the reader just cleared.
   useEffect(() => {
-    if (indexed === undefined) return;
+    if (indexedBranch === undefined || indexedRevision === undefined) return;
     setDraft((current) =>
       current.head.branch === '' && current.head.revision === ''
-        ? { ...current, head: { branch: indexed.branch, revision: indexed.revision } }
+        ? { ...current, head: { branch: indexedBranch, revision: indexedRevision } }
         : current,
     );
-  }, [indexed]);
+  }, [indexedBranch, indexedRevision]);
   return (
     <div className="flex min-h-full flex-col" data-compare-selected={complete}>
       <header className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-2">
@@ -107,6 +99,28 @@ export function CompareView({
 }
 
 type IndexedRevision = { branch: string; revision: string };
+
+function uniqueFreshIndexedRevision(
+  worktrees: ReadonlyArray<{
+    source_reference: string | null;
+    source_revision: string | null;
+    staleness_state: string | null;
+  }> | undefined,
+): IndexedRevision | undefined {
+  if (worktrees === undefined) return undefined;
+  const fresh = worktrees.filter(
+    (worktree) =>
+      worktree.staleness_state === 'fresh' &&
+      worktree.source_reference !== null &&
+      worktree.source_revision !== null,
+  );
+  if (fresh.length !== 1) return undefined;
+  const only = fresh[0]!;
+  return {
+    branch: branchFromReference(only.source_reference!),
+    revision: only.source_revision!,
+  };
+}
 
 /**
  * What stands between the reader and a comparison, said in terms of the two
@@ -138,9 +152,13 @@ function SelectionGuidance({
         </h1>
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-2xs">
           <dt className="td-legend">base</dt>
-          <dd className="text-text-primary">{side(draft.base)}</dd>
+          <dd className="min-w-0 break-all text-text-primary" title={side(draft.base)}>
+            {side(draft.base)}
+          </dd>
           <dt className="td-legend">head</dt>
-          <dd className="text-text-primary">{side(draft.head)}</dd>
+          <dd className="min-w-0 break-all text-text-primary" title={side(draft.head)}>
+            {side(draft.head)}
+          </dd>
         </dl>
         <p className="text-3xs leading-relaxed text-text-muted">
           {indexed === undefined
@@ -289,7 +307,7 @@ function Field({
         spellCheck={false}
         autoComplete="off"
         className={cn(
-          'min-h-[var(--touch-target-min)] min-w-0 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-0 px-2 text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+          'min-h-[var(--touch-target-min)] min-w-0 max-w-full break-all rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-0 px-2 text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
           mono && 'td-value',
         )}
       />

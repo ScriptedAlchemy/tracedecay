@@ -44,6 +44,7 @@ describe("SSE query invalidation", () => {
         events: [
           event("storage_telemetry_invalidated"),
           event("project_registry_changed"),
+          event("code_index_activity"),
           event("heartbeat"),
         ],
         refetch: false,
@@ -52,6 +53,7 @@ describe("SSE query invalidation", () => {
     ).toEqual([
       ["storage", "telemetry"],
       ["projects"],
+      ["code-index"],
     ]);
   });
 

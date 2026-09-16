@@ -14,7 +14,14 @@ import type {
   StrataFileV1,
   StrataMeasurementV1,
 } from '../../contracts/generated.ts';
-import { CONTOUR_INTERVAL, MAX_DRAWN_REGIONS, buildCortexModel } from './cortexRelief.ts';
+import {
+  CONTOUR_INTERVAL,
+  MAX_DRAWN_REGIONS,
+  buildCortexModel,
+  maxRegionsWithoutOverlap,
+  reliefBodyRx,
+  reliefLabelHalfWidth,
+} from './cortexRelief.ts';
 
 function cluster(
   directory: string,
@@ -63,6 +70,28 @@ function measurement(
     },
     ...overrides,
   };
+}
+
+function assertBandClear(
+  regions: ReadonlyArray<{
+    readonly x: number | null;
+    readonly y: number | null;
+    readonly radius: number | null;
+    readonly label: string;
+    readonly directory: string;
+  }>,
+): void {
+  expect(new Set(regions.map((region) => region.y)).size).toBe(1);
+  const ordered = [...regions].sort((a, b) => a.x! - b.x!);
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1]!;
+    const current = ordered[index]!;
+    const bodyGap = reliefBodyRx(previous.radius!) + reliefBodyRx(current.radius!);
+    const labelGap =
+      reliefLabelHalfWidth(previous.label, previous.directory) +
+      reliefLabelHalfWidth(current.label, current.directory);
+    expect(current.x! - previous.x!).toBeGreaterThanOrEqual(Math.max(bodyGap, labelGap) - 1e-6);
+  }
 }
 
 describe('elevation', () => {
@@ -148,6 +177,52 @@ describe('elevation', () => {
       Math.min(...sameDepth.map((region) => region.y!));
     expect(spread).toBe(0);
   });
+
+  it('folds crowded same-depth bodies instead of overlapping them', () => {
+    const count = 28;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(`src/mod${index}`, { order: index, file_count: 4 }),
+    );
+    const files = Array.from({ length: count }, (_, index) => file(`src/mod${index}/a.rs`, 0));
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 1 }));
+    const labels = clusters.map((item) => ({
+      label: `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`,
+      directory: item.directory,
+    }));
+    const capacity = maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels);
+    expect(model.drawnRegions.length).toBe(capacity);
+    expect(model.foldedRegions).toBe(count - capacity);
+    expect(model.foldedRegions).toBeGreaterThan(0);
+    assertBandClear(model.drawnRegions.filter((region) => region.depth === 0));
+  });
+
+  it('keeps multi-depth bedrock bands free of body and label collisions', () => {
+    const bedrockCount = 16;
+    const ridgeCount = 6;
+    const count = bedrockCount + ridgeCount;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(`src/mod${index}`, { order: index, file_count: 8 }),
+    );
+    const files = Array.from({ length: count }, (_, index) =>
+      file(`src/mod${index}/a.rs`, index < bedrockCount ? 0 : 1 + (index % 3)),
+    );
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 3 }));
+    expect(model.maxDepth).toBeGreaterThanOrEqual(3);
+    const bedrock = model.drawnRegions.filter((region) => region.depth === 0);
+    const labels = clusters.slice(0, bedrockCount).map((item) => ({
+      label: `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`,
+      directory: item.directory,
+    }));
+    expect(bedrock.length).toBeGreaterThanOrEqual(1);
+    expect(bedrock.length).toBeLessThanOrEqual(
+      maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels),
+    );
+    if (bedrockCount > maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels)) {
+      expect(model.foldedRegions).toBeGreaterThan(0);
+    }
+    assertBandClear(bedrock);
+  });
+
 });
 
 describe('area', () => {
