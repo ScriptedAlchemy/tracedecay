@@ -26,6 +26,7 @@ use tracedecay_application::delivery::{
     ProjectDeliveryInboxCoverageV1, ProjectDeliveryInboxPullRequestStateV1,
     ProjectDeliveryInboxSourceV1, ProjectDeliveryIndexedHeadV1, ProjectDeliveryMembershipBasisV1,
     ProjectDeliveryProviderMountGateV1, ProjectDeliveryProviderStateV1,
+    ProjectDeliveryProximityAttentionSourceV1, ProjectDeliveryProximityRelationV1,
     ProjectDeliveryPullRequestIdentityV1, ProjectDeliveryPullRequestOperationV1,
     ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1, ProjectDeliveryReadKindV1,
     ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1, ProjectDeliveryRegistrySourceV1,
@@ -659,6 +660,28 @@ pub enum DeliveryAttentionStateV1 {
     Denied,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryProximityRelationV1 {
+    CodeNeighborhoodCandidate,
+    SharedCodeCandidate,
+    OverlappingEdit,
+    ConfirmedConflict,
+}
+
+impl From<ProjectDeliveryProximityRelationV1> for DeliveryProximityRelationV1 {
+    fn from(relation: ProjectDeliveryProximityRelationV1) -> Self {
+        match relation {
+            ProjectDeliveryProximityRelationV1::CodeNeighborhoodCandidate => {
+                Self::CodeNeighborhoodCandidate
+            }
+            ProjectDeliveryProximityRelationV1::SharedCodeCandidate => Self::SharedCodeCandidate,
+            ProjectDeliveryProximityRelationV1::OverlappingEdit => Self::OverlappingEdit,
+            ProjectDeliveryProximityRelationV1::ConfirmedConflict => Self::ConfirmedConflict,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryAttentionEvidenceV1 {
@@ -675,6 +698,10 @@ pub enum DeliveryAttentionEvidenceV1 {
     },
     IndexedGeneration {
         generation: String,
+    },
+    ProximityEncounter {
+        encounter_id: String,
+        relation: DeliveryProximityRelationV1,
     },
 }
 
@@ -800,6 +827,21 @@ pub trait DashboardDeliveryReadPortV1: Send + Sync {
         project: DashboardDeliveryProjectV1,
         request: ProjectDeliveryReadRequestV1,
     ) -> DashboardDeliveryReadFutureV1<'_>;
+}
+
+pub type DashboardProximityAttentionReadFutureV1<'a> =
+    Pin<Box<dyn Future<Output = ProjectDeliveryProximityAttentionSourceV1> + Send + 'a>>;
+
+/// Canonical feedback-proximity read folded into Delivery's join input.
+/// Missing mount → `Unsupported`; denied/unavailable → `Unavailable`; ready
+/// pages carry typed coverage. The inbox HTTP handler is the only production
+/// join site — the dashboard never re-joins client-side.
+pub trait DashboardProximityAttentionReadPortV1: Send + Sync {
+    fn read(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project: DashboardDeliveryProjectV1,
+    ) -> DashboardProximityAttentionReadFutureV1<'_>;
 }
 
 #[hotpath::measure(label = "dashboard_api.delivery.overview", future = true)]
@@ -967,7 +1009,7 @@ pub async fn inbox(
                         control.clone(),
                         DashboardDeliveryProjectV1 {
                             project_id: project.project_id.clone(),
-                            project_root,
+                            project_root: project_root.clone(),
                         },
                         ProjectDeliveryReadRequestV1 {
                             kind: ProjectDeliveryReadKindV1::Inbox,
@@ -981,6 +1023,22 @@ pub async fn inbox(
                     .await
             }
             _ => ProjectDeliveryReadOutcomeV1::Unavailable,
+        };
+        let proximity = match state.proximity_attention_read_authority.as_ref() {
+            Some(authority) => {
+                authority
+                    .read(
+                        control.clone(),
+                        DashboardDeliveryProjectV1 {
+                            project_id: project.project_id.clone(),
+                            project_root,
+                        },
+                    )
+                    .await
+            }
+            // No proximity authority mounted: leave proximity sources
+            // Unsupported rather than inventing Clear/Active attention.
+            None => ProjectDeliveryProximityAttentionSourceV1::Unsupported,
         };
         sources.push(ProjectDeliveryInboxSourceV1 {
             registry: ProjectDeliveryRegistrySourceV1 {
@@ -997,6 +1055,7 @@ pub async fn inbox(
             indexed,
             delivery,
             memberships: Vec::new(),
+            proximity,
         });
     }
     let mut aggregation =
@@ -1257,6 +1316,13 @@ fn map_attention_item(
                         generation: generation.as_str().to_owned(),
                     }
                 }
+                ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
+                    encounter_id,
+                    relation,
+                } => DeliveryAttentionEvidenceV1::ProximityEncounter {
+                    encounter_id: encounter_id.to_string(),
+                    relation: DeliveryProximityRelationV1::from(relation),
+                },
             })
             .collect(),
         coverage: map_inbox_coverage(item.coverage),

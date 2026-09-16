@@ -49,7 +49,11 @@ export function DeliveryPage() {
         title="Delivery"
         note="registered projects · indexed PR heads · explicit attention evidence"
       />
-      <ReadSection title="Delivery inbox" chrome="centered" state={inboxReadState(inbox.isPending, inbox.data)}>
+      <ReadSection
+        title="Delivery inbox"
+        chrome="centered"
+        state={inboxReadState(inbox.isPending, inbox.data)}
+      >
         {(payload) => <Inbox payload={payload} />}
       </ReadSection>
     </div>
@@ -80,7 +84,11 @@ function inboxReadState(
       detail: 'delivery evidence was not disclosed',
     };
   }
-  return { kind: 'ready', value: result.envelope.payload };
+  // Server-owned `GET /api/delivery/inbox` already joined proximity attention.
+  return {
+    kind: 'ready',
+    value: result.envelope.payload,
+  };
 }
 
 function Inbox({ payload }: { payload: DeliveryInboxV1 }) {
@@ -577,6 +585,8 @@ function evidenceIdentity(evidence: DeliveryAttentionEvidenceV1): string {
       return evidence.failure_anchor;
     case 'indexed_generation':
       return evidence.generation;
+    case 'proximity_encounter':
+      return `${evidence.encounter_id}:${evidence.relation}`;
     default: {
       const unhandled: never = evidence;
       return unhandled;
