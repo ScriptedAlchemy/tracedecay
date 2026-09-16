@@ -82,6 +82,7 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         ApplicationSurfaceOperation::FeedbackList => "/feedback/list".to_owned(),
         ApplicationSurfaceOperation::FeedbackImpact => "/feedback/impact".to_owned(),
         ApplicationSurfaceOperation::FeedbackAdvisoryCycle => "/feedback/advisory_cycle".to_owned(),
+        ApplicationSurfaceOperation::FeedbackProximity => "/feedback/proximity".to_owned(),
         operation @ (ApplicationSurfaceOperation::CodeExactOccurrence
         | ApplicationSurfaceOperation::CodePhraseSearch
         | ApplicationSurfaceOperation::CodeSymbolSearch

@@ -37,7 +37,8 @@ use super::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
     FEEDBACK_GET_CAPABILITY_ID_V1, FEEDBACK_GET_USE_CASE_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
-    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackReadOperationsV1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackProximityReadRequestV1, FeedbackProximityReadResultV1,
+    FeedbackReadOperationsV1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1,
 };
 use super::{FeedbackAdvisoryCycleSurfaceRequestV1, FeedbackAdvisoryCycleSurfaceResultV1};
@@ -80,6 +81,13 @@ const ADVISORY_SURFACES: [BindingSurface; 3] = [
 /// cycle. They remain visible capability metadata for LSP/native projection,
 /// but do not create three independent network orchestration paths.
 const ADVISORY_PROVIDER_CONTRIBUTION_SURFACES: [BindingSurface; 0] = [];
+
+const PROXIMITY_READ_SURFACES: [BindingSurface; 4] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+    BindingSurface::Dashboard,
+];
 
 const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
     FeedbackSurfaceSpec {
@@ -212,7 +220,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Contribute immediate or configured-threshold proximity evidence to feedback_advisory_cycle without locks, scheduling, continuation, or an independent orchestration path.",
         example: "Inspect concurrent-work proximity for this branch",
         paginated: false,
-        surfaces: &ADVISORY_PROVIDER_CONTRIBUTION_SURFACES,
+        surfaces: &PROXIMITY_READ_SURFACES,
     },
 ];
 
@@ -317,6 +325,11 @@ fn feedback_executable_schemas(
         ADVISORY_CYCLE_CAPABILITY_ID_V1,
         FeedbackAdvisoryCycleSurfaceRequestV1,
         FeedbackAdvisoryCycleSurfaceResultV1
+    );
+    add!(
+        PROXIMITY_CAPABILITY_ID_V1,
+        FeedbackProximityReadRequestV1,
+        FeedbackProximityReadResultV1
     );
     Ok(schemas)
 }

@@ -19,7 +19,10 @@ use std::time::Duration;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
-use tracedecay_contracts::feedback::{FeedbackReadPort, FeedbackRouteAuthorizationPort};
+use tracedecay_contracts::feedback::{
+    FeedbackProximityReadRequestV1, FeedbackProximityReadResultV1, FeedbackReadPort,
+    FeedbackRouteAuthorizationPort,
+};
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, ApplicationOutcome, ApplicationProblem,
     ApplicationProblemKind, ApplicationResult, AuthorityReceipt, AuthorizedScopeSet,
@@ -221,8 +224,9 @@ pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
 pub use feedback::{
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
-    DaemonFeedbackInvocationOwner, advisory_cycle_invocation_result,
-    daemon_operation_event_authority,
+    DaemonFeedbackInvocationOwner, DaemonFeedbackProximityInvocationFuture,
+    DaemonFeedbackProximityInvocationRequest, advisory_cycle_invocation_result,
+    daemon_operation_event_authority, feedback_proximity_invocation_result,
 };
 pub use primitive::{
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,

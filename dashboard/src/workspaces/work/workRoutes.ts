@@ -8,6 +8,7 @@ import {
   WorkGraphReadV1Schema,
   WorkEvidenceRetrieveRequestV1Schema,
   WorkEvidenceRetrievalV1Schema,
+  WorkExecutionHistoryV1Schema,
   PrepareWorkProductMutationRequestV1Schema,
   WorkProductMutationReceiptV1Schema,
   WorkProductMutationRequestV1Schema,
@@ -44,6 +45,13 @@ export const WORK_LIST_ATTEMPTS_ROUTE = {
   path: "/api/work/list-attempts",
   request: WorkAttemptListRequestV1Schema,
   response: WorkAttemptListV1Schema,
+} as const satisfies WorkRoute<unknown, unknown>;
+
+export const WORK_EXECUTION_HISTORY_ROUTE = {
+  operation: "operation.work.execution_history",
+  path: "/api/work/execution-history",
+  request: WorkAttemptListRequestV1Schema,
+  response: WorkExecutionHistoryV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 /**

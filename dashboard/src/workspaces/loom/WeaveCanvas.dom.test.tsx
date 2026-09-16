@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
+import { FeedbackProximityEncounterV1Schema } from '../../contracts/index.ts';
 import { WeaveCanvas, LoadedEventCanvas, eventPositions } from './WeaveCanvas.tsx';
 import { composeWeave, type WeaveSession } from './weave.ts';
 
@@ -130,4 +131,63 @@ it('maps the visible vertical session window into the minimap and supports keybo
   expect(Number(window.getAttribute('y'))).toBeGreaterThan(earlier);
   fireEvent.keyDown(minimap, { key: 'ArrowDown' });
   expect(scrollBy).toHaveBeenCalledWith({ top: 150 });
+});
+
+it('draws the same proximity interval on the weave and existing minimap', () => {
+  const weave = composeWeave([
+    session({ session_id: 'left', provider: 'codex' }),
+    session({ session_id: 'right', provider: 'cursor' }),
+  ]);
+  const scope = {
+    project_id: 'project.proximity',
+    repository_id: 'repository.proximity',
+    worktree_id: 'worktree.proximity',
+    branch_ref: 'refs/heads/proximity',
+    head_commit_id: 'commit.proximity',
+  };
+  const participant = (provider: string, sessionId: string, agentId: string) => ({
+    access: 'write',
+    activity: { start: BASE * 1_000_000, end: (BASE + 1_800) * 1_000_000 },
+    address: {
+      scope,
+      file: 'file.proximity',
+      span: { start_byte: 1, end_byte: 2 },
+      symbol: 'symbol.proximity',
+    },
+    agent_id: agentId,
+    branch_ref: 'refs/heads/proximity',
+    head_revision: `commit.${sessionId}`,
+    source: { provider, session_id: sessionId, source_key: null },
+    worktree_id: 'worktree.proximity',
+    worktree_root: `/tmp/${sessionId}`,
+  });
+  const encounter = FeedbackProximityEncounterV1Schema.parse({
+    coverage: 'complete',
+    encounter_id: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    expires_at: (BASE + 2_000) * 1_000_000,
+    interval: {
+      start: (BASE + 300) * 1_000_000,
+      end: (BASE + 900) * 1_000_000,
+    },
+    observed_at: (BASE + 1_800) * 1_000_000,
+    participants: [
+      participant('codex', 'left', 'agent.left'),
+      participant('cursor', 'right', 'agent.right'),
+    ],
+    relation: { relation_kind: 'overlapping_edit', warning_class: 'same_file' },
+    scope,
+  });
+
+  const { container } = render(
+    <WeaveCanvas
+      weave={weave}
+      selectedId={null}
+      onSelect={() => {}}
+      ariaLabel="weave"
+      proximityEncounters={[encounter]}
+    />,
+  );
+
+  expect(container.querySelectorAll('[data-proximity-encounter]').length).toBe(2);
+  expect(container.querySelectorAll('[data-minimap-proximity-encounter]').length).toBe(2);
 });

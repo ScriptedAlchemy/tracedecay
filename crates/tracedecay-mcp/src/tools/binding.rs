@@ -127,14 +127,14 @@ fn application_surface_branch_sensitivity(
         ContextScoutExplain, ContextScoutFeedback, ContextScoutPause, ContextScoutRecent,
         ContextScoutResume, ContextScoutStatus, DiagnosticsRead, FeedbackAdvisoryCycle,
         FeedbackDiagnostics, FeedbackExpand, FeedbackGet, FeedbackImpact, FeedbackList,
-        FileDependents, GitApply, GitBlame, GitDiff, GitHistory, GitHubStackSignalExpand, GitHunks,
-        GitPreview, GitStatus, HealthDelta, HealthRead, ModuleApi, NativeIntegrationApply,
-        NativeIntegrationApprove, NativeIntegrationCancel, NativeIntegrationPreflight,
-        NativeIntegrationStackSnapshot, NativeIntegrationStatus, NativeIntegrationWorktreeConfirm,
-        NativeIntegrationWorktreeInspect, NativeIntegrationWorktreeInventory,
-        NativeIntegrationWorktreeReconcile, NativeIntegrationWorktreeRemove, ObservatoryRead,
-        QualifiedName, SessionLookup, SourceBody, SourceLines, SourceOutline, StorageStatus,
-        TestResults,
+        FeedbackProximity, FileDependents, GitApply, GitBlame, GitDiff, GitHistory,
+        GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta, HealthRead,
+        ModuleApi, NativeIntegrationApply, NativeIntegrationApprove, NativeIntegrationCancel,
+        NativeIntegrationPreflight, NativeIntegrationStackSnapshot, NativeIntegrationStatus,
+        NativeIntegrationWorktreeConfirm, NativeIntegrationWorktreeInspect,
+        NativeIntegrationWorktreeInventory, NativeIntegrationWorktreeReconcile,
+        NativeIntegrationWorktreeRemove, ObservatoryRead, QualifiedName, SessionLookup, SourceBody,
+        SourceLines, SourceOutline, StorageStatus, TestResults,
     };
     match operation {
         // Mixed ApplicationSurface group: these operations read configuration,
@@ -193,6 +193,7 @@ fn application_surface_branch_sensitivity(
         | FeedbackList
         | FeedbackImpact
         | FeedbackAdvisoryCycle
+        | FeedbackProximity
         | AffectedTests
         | TestResults
         | CodeExactOccurrence

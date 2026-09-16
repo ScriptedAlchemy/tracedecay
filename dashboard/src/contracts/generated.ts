@@ -89,6 +89,10 @@ export const AdmitWorkSynthesisCommandSchema = z.object({
 }).strict();
 export type AdmitWorkSynthesisCommand = z.infer<typeof AdmitWorkSynthesisCommandSchema>;
 
+/** Strongly typed canonical identity: `AgentInstanceId`. */
+export const AgentInstanceIdSchema = z.string();
+export type AgentInstanceId = z.infer<typeof AgentInstanceIdSchema>;
+
 export const AnalyticsAgentsPayloadV1Schema = z.object({
   available: z.boolean(),
   by_agent: z.array(z.lazy(() => AnalyticsAgentUsageV1Schema)),
@@ -2422,6 +2426,119 @@ export const FeedbackObservationWatermarkV1Schema = z.object({
 }).strict();
 export type FeedbackObservationWatermarkV1 = z.infer<typeof FeedbackObservationWatermarkV1Schema>;
 
+export const FeedbackProximityAccessKindV1Schema = z.enum(["read", "write"]);
+export type FeedbackProximityAccessKindV1 = z.infer<typeof FeedbackProximityAccessKindV1Schema>;
+
+export const FeedbackProximityCloneHandleV1Schema = z.object({
+  retrieval_anchor_ids: z.array(z.lazy(() => RetrievalAnchorIdSchema)),
+  source_generation: z.lazy(() => CodeGenerationIdSchema),
+  source_symbol: z.lazy(() => SymbolOccurrenceIdSchema),
+}).strict();
+export type FeedbackProximityCloneHandleV1 = z.infer<typeof FeedbackProximityCloneHandleV1Schema>;
+
+export const FeedbackProximityConflictDifferenceV1Schema = z.object({
+  difference_digest: z.lazy(() => ManifestDigestSchema),
+  file: z.lazy(() => FileOccurrenceIdSchema),
+  span: z.lazy(() => SourceSpanSchema),
+}).strict();
+export type FeedbackProximityConflictDifferenceV1 = z.infer<typeof FeedbackProximityConflictDifferenceV1Schema>;
+
+export const FeedbackProximityConflictHandleV1Schema = z.object({
+  common_base_revision: z.lazy(() => CommitIdSchema),
+  differences: z.array(z.lazy(() => FeedbackProximityConflictDifferenceV1Schema)),
+  evidence_digest: z.lazy(() => ManifestDigestSchema),
+  left_head_revision: z.lazy(() => CommitIdSchema),
+  right_head_revision: z.lazy(() => CommitIdSchema),
+}).strict();
+export type FeedbackProximityConflictHandleV1 = z.infer<typeof FeedbackProximityConflictHandleV1Schema>;
+
+export const FeedbackProximityEncounterV1Schema = z.object({
+  coverage: z.lazy(() => ProximityCoverageV1Schema),
+  encounter_id: z.lazy(() => ManifestDigestSchema),
+  expires_at: z.lazy(() => UtcMicrosSchema),
+  interval: z.lazy(() => FeedbackProximityIntervalV1Schema),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  participants: z.array(z.lazy(() => FeedbackProximityParticipantV1Schema)),
+  relation: z.lazy(() => FeedbackProximityRelationV1Schema),
+  scope: z.lazy(() => FeedbackScopeV1Schema),
+}).strict();
+export type FeedbackProximityEncounterV1 = z.infer<typeof FeedbackProximityEncounterV1Schema>;
+
+export const FeedbackProximityIntervalV1Schema = z.object({
+  end: z.lazy(() => UtcMicrosSchema),
+  start: z.lazy(() => UtcMicrosSchema),
+}).strict();
+export type FeedbackProximityIntervalV1 = z.infer<typeof FeedbackProximityIntervalV1Schema>;
+
+export const FeedbackProximityOmissionV1Schema = z.enum(["active_session_limit", "clone_coverage_partial", "code_index_revision_mismatch", "conflict_evidence_unavailable", "edited_path_limit", "encounter_limit", "missing_code_address", "missing_participant_observation", "missing_participant_revision", "missing_participant_worktree", "recent_observation_limit", "session_activity_limit"]);
+export type FeedbackProximityOmissionV1 = z.infer<typeof FeedbackProximityOmissionV1Schema>;
+
+export const FeedbackProximityParticipantV1Schema = z.object({
+  access: z.lazy(() => FeedbackProximityAccessKindV1Schema),
+  activity: z.lazy(() => FeedbackProximityIntervalV1Schema),
+  address: z.lazy(() => ProximityAddressV1Schema),
+  agent_id: z.lazy(() => AgentInstanceIdSchema),
+  branch_ref: z.union([z.lazy(() => RefIdSchema), z.null()]),
+  head_revision: z.union([z.lazy(() => CommitIdSchema), z.null()]),
+  source: z.lazy(() => ObservationSourceIdentityV1Schema),
+  worktree_id: z.union([z.lazy(() => WorktreeIdSchema), z.null()]),
+  worktree_root: z.string(),
+}).strict();
+export type FeedbackProximityParticipantV1 = z.infer<typeof FeedbackProximityParticipantV1Schema>;
+
+export const FeedbackProximityReadPageV1Schema = z.object({
+  encounters: z.array(z.lazy(() => FeedbackProximityEncounterV1Schema)),
+  expires_at: z.lazy(() => UtcMicrosSchema),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  scope: z.lazy(() => FeedbackScopeV1Schema),
+  source_generation: z.lazy(() => CodeGenerationIdSchema),
+}).strict();
+export type FeedbackProximityReadPageV1 = z.infer<typeof FeedbackProximityReadPageV1Schema>;
+
+export const FeedbackProximityReadRequestV1Schema = z.object({
+  observed_at: z.lazy(() => UtcMicrosSchema),
+}).strict();
+export type FeedbackProximityReadRequestV1 = z.infer<typeof FeedbackProximityReadRequestV1Schema>;
+
+export const FeedbackProximityReadResultV1Schema = z.discriminatedUnion("state", [z.object({
+  page: z.lazy(() => FeedbackProximityReadPageV1Schema),
+  state: z.literal("complete"),
+}).strict(), z.object({
+  page: z.lazy(() => FeedbackProximityReadPageV1Schema),
+  state: z.literal("complete_zero"),
+}).strict(), z.object({
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  state: z.literal("denied"),
+}).strict(), z.object({
+  omissions: z.array(z.lazy(() => FeedbackProximityOmissionV1Schema)),
+  page: z.lazy(() => FeedbackProximityReadPageV1Schema),
+  state: z.literal("partial"),
+}).strict(), z.object({
+  omissions: z.array(z.lazy(() => FeedbackProximityOmissionV1Schema)),
+  page: z.lazy(() => FeedbackProximityReadPageV1Schema),
+  state: z.literal("stale"),
+}).strict(), z.object({
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  state: z.literal("unavailable"),
+}).strict()]);
+export type FeedbackProximityReadResultV1 = z.infer<typeof FeedbackProximityReadResultV1Schema>;
+
+export const FeedbackProximityRelationV1Schema = z.discriminatedUnion("relation_kind", [z.object({
+  relation_kind: z.literal("code_neighborhood_candidate"),
+  warning_class: z.lazy(() => ProximityWarningClassV1Schema),
+}).strict(), z.object({
+  conflict_handle: z.lazy(() => FeedbackProximityConflictHandleV1Schema),
+  relation_kind: z.literal("confirmed_conflict"),
+}).strict(), z.object({
+  relation_kind: z.literal("overlapping_edit"),
+  warning_class: z.lazy(() => ProximityWarningClassV1Schema),
+}).strict(), z.object({
+  clone_handle: z.lazy(() => FeedbackProximityCloneHandleV1Schema),
+  relation_kind: z.literal("shared_code_candidate"),
+  warning_class: z.lazy(() => ProximityWarningClassV1Schema),
+}).strict()]);
+export type FeedbackProximityRelationV1 = z.infer<typeof FeedbackProximityRelationV1Schema>;
+
 /** One surface × operation × argument × error-class cell projected from
 dispatcher rejection source events. */
 export const FeedbackRejectedArgumentGroupV1Schema = z.object({
@@ -2432,6 +2549,18 @@ export const FeedbackRejectedArgumentGroupV1Schema = z.object({
   surface: z.lazy(() => RejectedArgumentSurfaceV1Schema),
 }).strict();
 export type FeedbackRejectedArgumentGroupV1 = z.infer<typeof FeedbackRejectedArgumentGroupV1Schema>;
+
+/** Exact repository scope used for a feedback evaluation. A path, current
+working directory, repository display name, or mutable branch label is not
+a substitute for this identity. */
+export const FeedbackScopeV1Schema = z.object({
+  branch_ref: z.string(),
+  head_commit_id: z.lazy(() => CommitIdSchema),
+  project_id: z.lazy(() => ProjectIdSchema),
+  repository_id: z.lazy(() => RepositoryIdSchema),
+  worktree_id: z.lazy(() => WorktreeIdSchema),
+}).strict();
+export type FeedbackScopeV1 = z.infer<typeof FeedbackScopeV1Schema>;
 
 export const FeedbackSystemMetricDenominatorV1Schema = z.enum(["eligible_observations", "eligible_source_families", "latency_samples", "outcome_observations", "relevance_labels", "returned_and_omitted_items", "revocation_observations", "stack_transition_observations"]);
 export type FeedbackSystemMetricDenominatorV1 = z.infer<typeof FeedbackSystemMetricDenominatorV1Schema>;
@@ -3964,6 +4093,22 @@ export const ProviderUsageSummaryV1Schema = z.object({
   usage_event_count: z.number().int().safe().nullable(),
 });
 export type ProviderUsageSummaryV1 = z.infer<typeof ProviderUsageSummaryV1Schema>;
+
+/** A privacy-scoped code address. It identifies the coarse changed-code shape
+but carries no other actor, session, or private-source content. */
+export const ProximityAddressV1Schema = z.object({
+  file: z.lazy(() => FileOccurrenceIdSchema),
+  scope: z.lazy(() => FeedbackScopeV1Schema),
+  span: z.union([z.lazy(() => SourceSpanSchema), z.null()]),
+  symbol: z.union([z.lazy(() => SymbolOccurrenceIdSchema), z.null()]),
+}).strict();
+export type ProximityAddressV1 = z.infer<typeof ProximityAddressV1Schema>;
+
+export const ProximityCoverageV1Schema = z.enum(["complete", "denied", "partial", "private", "stale", "unavailable"]);
+export type ProximityCoverageV1 = z.infer<typeof ProximityCoverageV1Schema>;
+
+export const ProximityWarningClassV1Schema = z.enum(["incompatible_branch_worktree", "neighborhood", "overlapping_range", "same_crate", "same_file", "same_package", "same_symbol", "shared_caller", "shared_dependency", "shared_test"]);
+export type ProximityWarningClassV1 = z.infer<typeof ProximityWarningClassV1Schema>;
 
 export const PublicCodeProjectSchema = z.object({
   canonical_root: z.string(),

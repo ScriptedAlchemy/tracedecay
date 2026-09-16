@@ -450,12 +450,21 @@ mod tests {
                 "/feedback/advisory_cycle",
                 ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
             ),
+            (
+                "/feedback/proximity",
+                ApplicationSurfaceOperation::FeedbackProximity,
+            ),
         ];
 
         for (index, (path, _)) in routes.iter().enumerate() {
+            let body = if *path == "/feedback/proximity" {
+                r#"{"observed_at":1}"#
+            } else {
+                "{}"
+            };
             let mut request = Request::post(*path)
                 .header("content-type", "application/json")
-                .body(Body::from("{}"))
+                .body(Body::from(body))
                 .expect("HTTP request");
             request.extensions_mut().insert(
                 RequestId::new(format!("request.http.feedback.{index}")).expect("request id"),

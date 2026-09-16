@@ -82,15 +82,6 @@ fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
         assert_eq!(source("session_commit")["state"], "ready");
         assert_eq!(source("session_file")["state"], "partial");
         assert_eq!(source("branch_worktree")["state"], "ready");
-        assert_eq!(source("delivery_outcomes")["state"], "unsupported");
-        assert!(
-            source("delivery_outcomes")["required_authority"]
-                .as_str()
-                .is_some_and(|authority| {
-                    authority.contains("GET /api/delivery/overview")
-                        && authority.contains("session-linked")
-                }),
-            "unsupported source must name the missing authority: {envelope}"
-        );
+        assert_eq!(statuses.len(), 3);
     });
 }

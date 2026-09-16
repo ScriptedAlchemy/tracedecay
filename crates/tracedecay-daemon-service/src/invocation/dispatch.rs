@@ -514,6 +514,20 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            DaemonInvocationPayload::FeedbackProximity {
+                request,
+                deadline,
+                cancellation,
+            } => {
+                execute_feedback_proximity(
+                    request_id,
+                    advisory_cycle,
+                    request,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
             DaemonInvocationPayload::FeedbackImpact {
                 request_handle,
                 observed_at,

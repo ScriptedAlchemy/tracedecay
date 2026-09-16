@@ -72,7 +72,9 @@ use tracedecay_contracts::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleControl, FeedbackCycleExecutionRequest,
     FeedbackCycleService, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
     FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackRuntimeStateV1, ProximityEvaluationRequestV1, feedback_surface_operation,
+    FeedbackProximityAccessKindV1, FeedbackProximityEncounterV1, FeedbackProximityIntervalV1,
+    FeedbackProximityParticipantV1, FeedbackProximityRelationV1, FeedbackRuntimeStateV1,
+    ProximityEvaluationRequestV1, feedback_surface_operation,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_contracts::{
@@ -99,10 +101,10 @@ use tracedecay_domain::feedback::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
-    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CodeGenerationId,
-    ComponentVersion, LocatorDigest, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceRangeV1, SessionId, SymbolOccurrenceId,
+    AgentInstanceId, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
+    CodeGenerationId, ComponentVersion, LocatorDigest, ObservationId, ObservationOrderingDomainV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, SessionId, SymbolOccurrenceId,
 };
 
 mod code_graph;
@@ -1762,6 +1764,44 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         scope: scope.clone(),
         observed_at: now,
     };
+    let participant = |ordinal: usize| FeedbackProximityParticipantV1 {
+        source: ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("provider.cursor").unwrap(),
+            peers[ordinal].clone(),
+        )
+        .unwrap(),
+        agent_id: AgentInstanceId::new(format!("agent.advisory.peer.{}", ordinal + 1)).unwrap(),
+        worktree_id: Some(scope.worktree_id.clone()),
+        worktree_root: project.to_string_lossy().into_owned(),
+        branch_ref: Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+        head_revision: Some(scope.head_commit_id.clone()),
+        access: FeedbackProximityAccessKindV1::Write,
+        activity: FeedbackProximityIntervalV1 {
+            start: UtcMicros(now.0.saturating_sub(2_000_000)),
+            end: now,
+        },
+        address: tracedecay_domain::feedback::ProximityAddressV1 {
+            scope: scope.clone(),
+            file: ci_symbol.file.clone(),
+            span: Some(ci_symbol.span),
+            symbol: Some(ci_symbol.symbol.clone()),
+        },
+    };
+    let encounter = FeedbackProximityEncounterV1 {
+        encounter_id: four_pillar_digest('3'),
+        scope: scope.clone(),
+        interval: FeedbackProximityIntervalV1 {
+            start: UtcMicros(now.0.saturating_sub(1_000_000)),
+            end: now,
+        },
+        participants: vec![participant(0), participant(1)],
+        relation: FeedbackProximityRelationV1::OverlappingEdit {
+            warning_class: ProximityWarningClassV1::SameFile,
+        },
+        observed_at: UtcMicros(now.0.saturating_sub(1_000_000)),
+        expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
+        coverage: ProximityCoverageV1::Complete,
+    };
     let proximity_evidence = fixture
         .proximity_evidence(AdvisoryProximityFixtureEvidenceV1 {
             observations: peers
@@ -1772,6 +1812,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
             retrieval_anchor_ids: vec![
                 RetrievalAnchorId::new("anchor.advisory.four-pillar.proximity").unwrap(),
             ],
+            encounter,
             address: tracedecay_domain::feedback::ProximityAddressV1 {
                 scope: scope.clone(),
                 file: ci_symbol.file.clone(),
@@ -1799,10 +1840,18 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     let proximity_owner = ProximityRuntimeOwnerV1::new(
         scope.clone(),
         RecordedProximityEvidenceAuthority {
-            batch: CanonicalProximityEvidenceBatchV1::new(
-                vec![proximity_evidence],
-                ProximityCoverageV1::Complete,
-            )
+            batch: CanonicalProximityEvidenceBatchV1 {
+                evidence: vec![proximity_evidence],
+                coverage: ProximityCoverageV1::Complete,
+                source_generation: CodeGenerationId::new(
+                    "generation.advisory.four-pillar.proximity",
+                )
+                .unwrap(),
+                observed_at: now,
+                expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
+                omissions: Vec::new(),
+            }
+            .validated()
             .expect("proximity evidence batch"),
         },
         (),

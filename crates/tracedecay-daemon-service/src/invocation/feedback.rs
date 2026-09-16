@@ -41,7 +41,20 @@ pub struct DaemonAdvisoryCycleInvocationRequest {
     pub cancellation: CancellationContext,
 }
 
+pub struct DaemonFeedbackProximityInvocationRequest {
+    pub request_id: RequestId,
+    pub request: FeedbackProximityReadRequestV1,
+    pub deadline: Deadline,
+    pub cancellation: CancellationContext,
+}
+
 pub type DaemonAdvisoryCycleInvocationFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<DaemonFeedbackInvocationResult, ApplicationProblem>> + Send + 'a,
+    >,
+>;
+
+pub type DaemonFeedbackProximityInvocationFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<DaemonFeedbackInvocationResult, ApplicationProblem>> + Send + 'a,
     >,
@@ -52,6 +65,11 @@ pub trait DaemonAdvisoryCycleInvocationPort: Send + Sync {
         &self,
         request: DaemonAdvisoryCycleInvocationRequest,
     ) -> DaemonAdvisoryCycleInvocationFuture<'_>;
+
+    fn invoke_proximity(
+        &self,
+        request: DaemonFeedbackProximityInvocationRequest,
+    ) -> DaemonFeedbackProximityInvocationFuture<'_>;
 }
 
 #[derive(Clone)]
@@ -535,6 +553,146 @@ pub fn advisory_cycle_invocation_result(
     })
 }
 
+pub fn feedback_proximity_invocation_result(
+    context: &RequestContext,
+    started_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+    result: FeedbackProximityReadResultV1,
+) -> Result<DaemonFeedbackInvocationResult, ApplicationProblem> {
+    result
+        .validate()
+        .map_err(|_| feedback_proximity_contract_problem())?;
+    let ended_at = current_micros();
+    let (termination, completeness, returned, omission_reason) = match &result {
+        FeedbackProximityReadResultV1::Complete { page } => (
+            OperationTermination::Completed,
+            CoverageCompleteness::Complete,
+            page.encounters.len() as u64,
+            None,
+        ),
+        FeedbackProximityReadResultV1::CompleteZero { .. } => (
+            OperationTermination::Completed,
+            CoverageCompleteness::Complete,
+            0,
+            None,
+        ),
+        FeedbackProximityReadResultV1::Partial { page, .. } => (
+            OperationTermination::Partial,
+            CoverageCompleteness::Partial,
+            page.encounters.len() as u64,
+            Some(OmissionReason::Unsupported),
+        ),
+        FeedbackProximityReadResultV1::Stale { page, .. } => (
+            OperationTermination::Partial,
+            CoverageCompleteness::Partial,
+            page.encounters.len() as u64,
+            Some(OmissionReason::Stale),
+        ),
+        FeedbackProximityReadResultV1::Denied { .. } => (
+            OperationTermination::Partial,
+            CoverageCompleteness::Partial,
+            0,
+            Some(OmissionReason::Redacted),
+        ),
+        FeedbackProximityReadResultV1::Unavailable { .. } => (
+            OperationTermination::Unavailable,
+            CoverageCompleteness::Partial,
+            0,
+            Some(OmissionReason::Unavailable),
+        ),
+    };
+    let eligible = returned.saturating_add(u64::from(omission_reason.is_some()));
+    let coverage = EvidenceCoverage {
+        requested_domains: vec![EvidenceDomain::Graph],
+        visited: Some(eligible),
+        eligible: Some(eligible),
+        returned,
+        completeness,
+        domains: vec![CoverageDomainState {
+            domain: EvidenceDomain::Graph,
+            completeness,
+        }],
+    };
+    coverage
+        .validate()
+        .map_err(|_| feedback_proximity_contract_problem())?;
+    let policy = PolicyDecisionRef::new(
+        "policy.daemon.feedback-proximity",
+        1,
+        canonical_sha256(&(
+            "tracedecay.daemon.feedback-proximity-policy.v1",
+            context.scope(),
+            context.grant().digest.as_str(),
+        ))
+        .map_err(|_| feedback_proximity_contract_problem())?,
+        ComponentVersion::new("tracedecay.daemon.feedback-proximity")
+            .map_err(|_| feedback_proximity_contract_problem())?,
+    )
+    .map_err(|_| feedback_proximity_contract_problem())?;
+    let authority = AuthorityReceipt::from_context(context, policy, ended_at)
+        .map_err(|_| feedback_proximity_contract_problem())?;
+    let execution = OperationReceipt {
+        started_at,
+        ended_at,
+        effective_deadline: deadline,
+        cancellation: match cancellation.state {
+            CancellationState::Cancelled { requested_at } => {
+                Some(tracedecay_contracts::CancellationObservation {
+                    stage: tracedecay_contracts::CancellationStage::DuringRead,
+                    observed_at: requested_at,
+                })
+            }
+            CancellationState::Active => None,
+        },
+        budget: OperationBudgetUsage::default(),
+        termination,
+    };
+    execution
+        .validate()
+        .map_err(|_| feedback_proximity_contract_problem())?;
+    let omissions = omission_reason
+        .map(|reason| {
+            vec![Omission {
+                domain: EvidenceDomain::Graph,
+                count: 1,
+                reason,
+            }]
+        })
+        .unwrap_or_default();
+    let payload =
+        serde_json::to_value(result).map_err(|_| feedback_proximity_contract_problem())?;
+    Ok(DaemonFeedbackInvocationResult {
+        scope: context.scope().clone(),
+        evidence: EvidencePacket {
+            temporal: TemporalState::current(ended_at),
+            authority,
+            evidence_authorities: Vec::new(),
+            coverage,
+            omissions,
+            scores: Vec::new(),
+            contributions: Vec::new(),
+            page: PageState::first_page(
+                SortContractId::new("sort.application.feedback.proximity.stable")
+                    .map_err(|_| feedback_proximity_contract_problem())?,
+                1,
+                Some(returned),
+                returned,
+            )
+            .map_err(|_| feedback_proximity_contract_problem())?,
+            execution,
+            payload: Some(payload),
+        },
+    })
+}
+
+fn feedback_proximity_contract_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "feedback.proximity.contract".to_owned(),
+        message: "The feedback proximity read returned an invalid application result".to_owned(),
+    })
+}
+
 fn incomplete_advisory_cycle_coverage() -> EvidenceCoverage {
     EvidenceCoverage {
         requested_domains: vec![EvidenceDomain::Diagnostic],
@@ -602,6 +760,55 @@ pub(super) async fn execute_feedback_advisory_cycle(
         .invoke(DaemonAdvisoryCycleInvocationRequest {
             document_uri,
             observed_at,
+            deadline,
+            cancellation,
+        })
+        .await
+    {
+        Ok(result) if result.scope.project_id == owner.project_id => {
+            DaemonInvocationResponse::with_outcome(
+                wire_request_id,
+                DaemonInvocationOutcome::Feedback {
+                    scope: result.scope,
+                    result: DaemonFeedbackResult::from_application(result.evidence),
+                },
+            )
+        }
+        Ok(_) => concealed_application_problem(wire_request_id),
+        Err(problem) => application_problem(wire_request_id, problem),
+    }
+}
+
+#[hotpath::measure(label = "daemon.service.feedback.proximity", future = true)]
+pub(super) async fn execute_feedback_proximity(
+    wire_request_id: String,
+    owner: Option<DaemonAdvisoryCycleInvocationOwner>,
+    request: FeedbackProximityReadRequestV1,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(owner) = owner else {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "feedback.proximity.unavailable".to_owned(),
+                message: "The feedback proximity authority is unavailable".to_owned(),
+            }),
+        );
+    };
+    match owner
+        .service
+        .invoke_proximity(DaemonFeedbackProximityInvocationRequest {
+            request_id: match RequestId::new(wire_request_id.clone()) {
+                Ok(request_id) => request_id,
+                Err(_) => {
+                    return DaemonInvocationResponse::problem(
+                        wire_request_id,
+                        DaemonInvocationProblem::InvalidRequest,
+                    );
+                }
+            },
+            request,
             deadline,
             cancellation,
         })

@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
+  FeedbackProximityReadResultV1,
   WorkAttemptListV1,
 } from '../../contracts/index.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
@@ -18,7 +19,13 @@ import {
   useWorkTopologyMetrics,
 } from './workViewsQueries.ts';
 import { workAttemptReading, type WorkAttemptReading } from './workAttemptModel.ts';
-import { workGraphReading, type WorkGraphReading } from './workGraphModel.ts';
+import {
+  workGraphReading,
+  type WorkGraphReading,
+} from './workGraphModel.ts';
+import type { ConcurrentAttemptsReading } from './workConcurrentAttempts.ts';
+import { useWorkConcurrentAttempts } from './workConcurrentAttemptsQuery.ts';
+import { WorkConcurrentAttemptsView } from './views/WorkConcurrentAttemptsView.tsx';
 import { WorkCausalView } from './views/WorkCausalView.tsx';
 import { WorkDagView } from './views/WorkDagView.tsx';
 import {
@@ -95,9 +102,13 @@ function WorkProjectionView({
   attemptList,
   topology,
   topologyMetrics,
+  concurrent,
+  proximity,
+  selectedEncounterId,
   graph,
   selected,
   onSelect,
+  onSelectEncounter,
 }: {
   kind: WorkProjectionKind;
   snapshot: WorkProductView;
@@ -108,9 +119,13 @@ function WorkProjectionView({
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
   topology: WorkResult<ExecutionTopologyViewV1> | undefined;
   topologyMetrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
+  concurrent: ConcurrentAttemptsReading;
+  proximity: WorkResult<FeedbackProximityReadResultV1> | undefined;
+  selectedEncounterId: string | null;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
+  onSelectEncounter: (encounterId: string | null) => void;
 }) {
   switch (kind) {
     case 'board':
@@ -154,6 +169,15 @@ function WorkProjectionView({
           onSelect={onSelect}
         />
       );
+    case 'concurrent-attempts':
+      return (
+        <WorkConcurrentAttemptsView
+          reading={concurrent}
+          proximity={proximity}
+          selectedEncounterId={selectedEncounterId}
+          onSelectEncounter={onSelectEncounter}
+        />
+      );
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -168,7 +192,11 @@ export function WorkPage() {
   // The execution record belongs to the timeline and the topology lens, so
   // the attempt list is read when one of those projections is the camera and
   // not on every visit to the page.
-  const attempts = useWorkAttempts(projection === 'timeline' || projection === 'topology');
+  const attempts = useWorkAttempts(
+    projection === 'timeline' ||
+      projection === 'topology' ||
+      projection === 'concurrent-attempts',
+  );
   const topology = useWorkTopology(projection === 'topology');
   // The accounting read behind the topology lens's integration and stack
   // cards; issued only when that lens is the camera.
@@ -178,6 +206,12 @@ export function WorkPage() {
   // the exact repository scope returned in the daemon's response envelope.
   const graph = useWorkGraphViews(true);
   const graphReading = useMemo(() => workGraphReading(graph.data), [graph.data]);
+  const concurrent = useWorkConcurrentAttempts(
+    graph.data,
+    graphReading,
+    selected,
+    projection,
+  );
   const result = useMemo(() => currentWorkProductView(graph.data), [graph.data]);
   const value = result?.outcome === 'value' ? result.value : undefined;
 
@@ -224,8 +258,12 @@ export function WorkPage() {
             * switcher on a 503 would strand a reader in a projection they
             * cannot leave. */}
           <div className="flex min-w-0 flex-col gap-1.5">
-            <WorkProjectionSwitcher active={projection} onSelect={setProjection} />
-            <p className="text-3xs text-text-muted">{projectionNote(projection)}</p>
+            <WorkProjectionSwitcher
+              active={concurrent.active}
+              onSelect={setProjection}
+              projections={concurrent.projections}
+            />
+            <p className="text-3xs text-text-muted">{projectionNote(concurrent.active)}</p>
           </div>
 
           {/* The region the camera points at, drawn in every state rather than
@@ -236,7 +274,7 @@ export function WorkPage() {
           <div
             role="tabpanel"
             id={PROJECTION_PANEL_ID}
-            aria-labelledby={tabId(projection)}
+            aria-labelledby={tabId(concurrent.active)}
             className="flex min-w-0 flex-col gap-3"
           >
             {graph.isPending ? (
@@ -260,15 +298,19 @@ export function WorkPage() {
 
             {value === undefined ? null : (
               <WorkProjectionView
-                kind={projection}
+                kind={concurrent.active}
                 snapshot={value}
                 attempts={attemptReading}
                 attemptList={attempts.data}
                 topology={topology.data}
                 topologyMetrics={topologyMetrics.data}
+                concurrent={concurrent.reading}
+                proximity={concurrent.proximity}
+                selectedEncounterId={concurrent.selectedEncounterId}
                 graph={graphReading}
                 selected={selected}
                 onSelect={setSelected}
+                onSelectEncounter={concurrent.selectEncounter}
               />
             )}
           </div>

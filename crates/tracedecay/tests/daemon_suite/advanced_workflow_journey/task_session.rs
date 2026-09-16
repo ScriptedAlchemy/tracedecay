@@ -129,6 +129,31 @@ impl DashboardProcess {
             .unwrap_or_else(|error| panic!("POST {url} answered non-JSON `{text}`: {error}"));
         (status, body)
     }
+
+    pub(super) fn read_proximity(&self, observed_at: UtcMicros) -> (u16, Value) {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build()
+            .into();
+        let url = format!("{}/api/feedback/proximity", self.base_url);
+        let mut response = agent
+            .post(&url)
+            .content_type("application/json")
+            .send(
+                serde_json::to_string(&serde_json::json!({ "observed_at": observed_at }))
+                    .expect("encode proximity request"),
+            )
+            .unwrap_or_else(|error| panic!("POST {url} failed: {error}"));
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .unwrap_or_else(|error| panic!("POST {url} body failed: {error}"));
+        let body = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("POST {url} answered non-JSON `{text}`: {error}"));
+        (status, body)
+    }
 }
 
 impl Drop for DashboardProcess {
