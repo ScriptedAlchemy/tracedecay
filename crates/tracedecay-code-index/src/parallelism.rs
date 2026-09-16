@@ -5,12 +5,10 @@
 //! caps that CPU target. Exact profile or environment selections are never
 //! silently narrowed: an unsafe count is a typed startup refusal.
 
+use std::cell::Cell;
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::{
-    Arc, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::configuration::{
     CodeIndexWorkerLimitingReasonV1, CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1,
@@ -547,20 +545,20 @@ impl fmt::Display for CodeIndexParallelismErrorV1 {
 
 impl std::error::Error for CodeIndexParallelismErrorV1 {}
 
-/// 0 means "use the configured host width".
-static FORCED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+// 0 means "use the configured host width".
 thread_local! {
+    static FORCED_WORKERS: Cell<usize> = const { Cell::new(0) };
     /// Test-only: force [`install`] on this thread to return
     /// [`CodeIndexParallelismErrorV1::PoolBuild`]. Thread-scoped so a fault
     /// test cannot leak into sibling tests running in the same process.
-    static FORCE_INSTALL_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_INSTALL_FAILURE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Indexing width callers should fan out to. A width below 2 means "run
 /// inline".
 #[must_use]
 pub fn indexing_workers() -> usize {
-    match FORCED_WORKERS.load(Ordering::Relaxed) {
+    match FORCED_WORKERS.with(Cell::get) {
         0 => WORKER_RUNTIME.get().map_or_else(
             || indexing_worker_target(detected_cores()),
             |runtime| runtime.plan.effective_workers,
@@ -578,20 +576,20 @@ pub fn indexing_workers() -> usize {
 /// comes from [`indexing_workers`].
 #[doc(hidden)]
 pub fn force_indexing_workers_for_test(workers: usize) {
-    FORCED_WORKERS.store(workers.max(1), Ordering::Relaxed);
+    FORCED_WORKERS.with(|forced| forced.set(workers.max(1)));
 }
 
 /// Restore production sizing after [`force_indexing_workers_for_test`].
 #[doc(hidden)]
 pub fn clear_forced_indexing_workers_for_test() {
-    FORCED_WORKERS.store(0, Ordering::Relaxed);
+    FORCED_WORKERS.with(|forced| forced.set(0));
 }
 
 /// Force [`install`] to fail so callers can assert operational pool errors stay
 /// typed as parallelism failures instead of identity corruption.
 #[doc(hidden)]
 pub fn force_install_failure_for_test(force: bool) {
-    FORCE_INSTALL_FAILURE.with(|flag| flag.set(force));
+    FORCE_INSTALL_FAILURE.with(|forced| forced.set(force));
 }
 
 /// Run one active work unit under the installed worker runtime's background
@@ -638,7 +636,7 @@ where
     R: Send,
 {
     hotpath::gauge!("code_index_worker_count").set(indexing_workers());
-    if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
+    if FORCE_INSTALL_FAILURE.with(Cell::get) {
         return Err(CodeIndexParallelismErrorV1::PoolBuild {
             message: "forced code-index worker pool failure for test".to_owned(),
         });
