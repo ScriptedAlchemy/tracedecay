@@ -240,6 +240,29 @@ mod tests {
         assert_eq!(gemini.edit.native_fixture_digest, None);
     }
 
+    /// Kimi MCP is the installer-owned session/user `mcp.json` route. The
+    /// packaged plugin manifest omits `mcpServers` on purpose, so citing that
+    /// file would treat omission as supported-MCP evidence.
+    #[test]
+    fn kimi_mcp_evidence_is_installer_user_config_route() {
+        let evidence = stock_host_registration_evidence(HostKindV1::KimiCode);
+        let mcp = evidence
+            .iter()
+            .find(|row| row.route == HostRegistrationRouteV1::Mcp)
+            .expect("Kimi MCP registration row");
+        let hook = evidence
+            .iter()
+            .find(|row| row.route == HostRegistrationRouteV1::Hook)
+            .expect("Kimi hook registration row");
+        assert_eq!(mcp.state, HostCapabilityStateV1::Supported);
+        assert_eq!(mcp.evidence_ref, "src/agents/kimi.rs");
+        assert_eq!(hook.evidence_ref, "plugin/.kimi-plugin/plugin.json");
+        assert_ne!(
+            mcp.evidence_ref, hook.evidence_ref,
+            "Kimi MCP must not reuse the plugin-manifest hook authority"
+        );
+    }
+
     /// Every `HostKindV1` variant owns table rows: a CLI route first plus at
     /// least one daemon route, each route once, each with a non-empty evidence
     /// reference. A host-specific route (Claude/OpenCode LSP, Cursor native

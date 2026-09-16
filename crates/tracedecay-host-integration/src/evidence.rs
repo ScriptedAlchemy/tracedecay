@@ -147,10 +147,14 @@ pub(crate) const HOST_REGISTRATIONS: &[HostRegistrationDescriptor] = host_regist
         Hook => "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
         Mcp => "https://kilo.ai/docs/automate/mcp/using-in-kilo-code",
     }
+    // Kimi hooks remain in the packaged plugin manifest. MCP does not: the
+    // installer writes `mcpServers.tracedecay` into Kimi's host-owned
+    // session/user `mcp.json` (`~/.kimi-code/mcp.json` or `$KIMI_CODE_HOME`),
+    // so the MCP row cites the installer that owns that route.
     KimiCode {
         Cli => "src/tool_command.rs",
         Hook => "plugin/.kimi-plugin/plugin.json",
-        Mcp => "plugin/.kimi-plugin/plugin.json",
+        Mcp => "src/agents/kimi.rs",
     }
     OpenCode {
         Cli => "src/tool_command.rs",
