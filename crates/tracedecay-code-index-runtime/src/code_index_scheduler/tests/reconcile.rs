@@ -2832,6 +2832,7 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     let store = TempDir::new().expect("store root");
     let (registry, _) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    drain_clone_backfill(&registry, fixture.path()).await;
     let generation = latest.generation();
     let verified_import = generation
         .imports()
