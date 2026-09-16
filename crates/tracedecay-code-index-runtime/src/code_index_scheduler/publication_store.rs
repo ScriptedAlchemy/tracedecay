@@ -475,6 +475,11 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     /// retire the shutdown signal between two segments of one seal.
     #[cfg(test)]
     seal_segment_observer: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test-only: observes each batched `segments_root` directory fsync so a
+    /// test can assert a single publish syncs the directory once regardless
+    /// of how many new file segments it wrote.
+    #[cfg(test)]
+    segments_dir_sync_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Last generation handed to `publish_atomically`. A transient store
     /// failure must not drop it: the next undecoded retry republishes this
     /// candidate instead of extracting the whole worktree again.
@@ -769,6 +774,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
             shutdown_signal: None,
             #[cfg(test)]
             seal_segment_observer: None,
+            #[cfg(test)]
+            segments_dir_sync_observer: None,
             unpublished_candidate: Arc::new(Mutex::new(None)),
         })
     }
@@ -804,6 +811,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
         observer: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         self.seal_segment_observer = Some(observer);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_segments_dir_sync_observer_for_test(
+        mut self,
+        observer: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        self.segments_dir_sync_observer = Some(observer);
         self
     }
 
@@ -899,12 +915,20 @@ impl DaemonCodeIndexPublicationStoreV1 {
         file.sync_all().map_err(Self::unavailable)
     }
 
+    /// Writes a sealed segment durably, deferring the containing-directory
+    /// fsync to the caller so a multi-segment publish batch pays for one
+    /// directory sync instead of one per segment (each segment file is
+    /// still fsynced before its rename, so per-file durability is
+    /// unaffected). Returns `true` if a new segment file was written and
+    /// renamed into place (requiring the caller to sync the directory
+    /// afterward), or `false` if an already-durable, verified segment was
+    /// found in place (no rename occurred, so no directory sync is owed).
     #[hotpath::measure(label = "code_index.generation.publish.segment")]
     fn publish_segment_durable(
         &self,
         digest: &ManifestDigest,
         bytes: &[u8],
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
         let digest_hex = sha256_hex_suffix(digest.as_str())
             .ok_or_else(|| Self::unavailable("sealed segment digest is not sha256"))?;
         let expected_digest = digest.as_str();
@@ -928,7 +952,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         "existing sealed segment does not match its content address",
                     ));
                 }
-                return Ok(());
+                return Ok(false);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(Self::unavailable(error)),
@@ -952,7 +976,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         Self::write_durable(&temporary_path, bytes)?;
         std::fs::rename(&temporary_path, &final_path).map_err(Self::unavailable)?;
-        Self::sync_directory(&self.segments_root)
+        Ok(true)
     }
 
     fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
@@ -2221,6 +2245,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         ));
         let mut evidence_pack = TemporaryEvidencePackV1::create(evidence_temporary_path)?;
         let mut referenced_segment_bytes = 0_u64;
+        let mut wrote_new_file_segment = false;
         self.seal_encoded_segment_bytes.store(0, Ordering::Relaxed);
         self.seal_existing_segment_bytes_read
             .store(0, Ordering::Relaxed);
@@ -2240,13 +2265,15 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                                     "sealed segment length exceeds u64".to_owned(),
                                 )
                             })?;
-                            hotpath::measure_block!(
+                            if hotpath::measure_block!(
                                 "code_index.generation.publish.segment_durable",
                                 self.publish_segment_durable(digest, bytes)
                             )
                             .map_err(|error| {
                                 CodeIndexProductionErrorV1::Contract(error.to_string())
-                            })?;
+                            })? {
+                                wrote_new_file_segment = true;
+                            }
                             #[cfg(test)]
                             if let Some(observer) = self.seal_segment_observer.as_ref() {
                                 observer();
@@ -2312,6 +2339,20 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 return Err(Self::unavailable(error));
             }
         };
+        // All newly written segment files for this publish were fsynced
+        // and renamed above; POSIX only requires a single directory fsync
+        // to make those renames durable, so batch it here rather than
+        // syncing once per segment inside `publish_segment_durable`.
+        if wrote_new_file_segment {
+            hotpath::measure_block!(
+                "code_index.generation.publish.segments_dir_sync",
+                Self::sync_directory(&self.segments_root)
+            )?;
+            #[cfg(test)]
+            if let Some(observer) = self.segments_dir_sync_observer.as_ref() {
+                observer();
+            }
+        }
         #[cfg(feature = "hotpath")]
         {
             hotpath::gauge!("code_index.generation.publish.encoded_file_segment_bytes")
