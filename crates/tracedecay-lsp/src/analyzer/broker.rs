@@ -22,7 +22,7 @@ mod shared_client;
 #[path = "broker/tests.rs"]
 mod tests;
 
-use refresh::{BrokerRefreshCapacity, RefreshBatch};
+use refresh::{AnalyzerSpawn, BrokerRefreshCapacity, RefreshBatch};
 pub use refresh::{
     CompletedRefresh, MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS, MAX_ANALYZER_QUEUED_ROOT_BATCHES,
     PreparedRefresh,
@@ -383,9 +383,8 @@ impl DiagnosticBroker {
                 message: format!("no LSP adapter registered for language '{language}'"),
             })?;
         let command = self.settings.command_for(language, &adapter.command);
-        let launch = match self.resolve_launch(language, &command) {
-            Ok(launch) => launch,
-            Err(_) => return Ok(None),
+        let Ok(launch) = self.resolve_launch(language, &command) else {
+            return Ok(None);
         };
         let key = LspSessionKey {
             language: language.to_owned(),
@@ -616,9 +615,11 @@ impl DiagnosticBroker {
         Ok(Some(PreparedRefresh::new(
             language.to_string(),
             canonical_project_root,
-            command,
-            launch,
-            adapter.args,
+            AnalyzerSpawn {
+                command,
+                launch,
+                args: adapter.args,
+            },
             epoch,
             batches,
             reservation,
@@ -628,19 +629,18 @@ impl DiagnosticBroker {
     /// Resolves the executable for `command` in this project, recording a
     /// refusal as the language's typed `Unavailable` state so the snapshot
     /// reports why no analyzer runs instead of an `Available` engine that
-    /// TraceDecay will never start.
+    /// `TraceDecay` will never start.
     fn resolve_launch(
         &mut self,
         language: &str,
         command: &str,
     ) -> std::result::Result<AnalyzerLaunch, AnalyzerLaunchError> {
-        resolve_analyzer_launch(command, &self.project_root).map_err(|error| {
+        resolve_analyzer_launch(command, &self.project_root).inspect_err(|error| {
             self.engine_errors
                 .insert(language.to_string(), error.engine_error());
             self.engine_overrides
                 .insert(language.to_string(), EngineState::Unavailable);
             self.remove_language_clients(language);
-            error
         })
     }
 

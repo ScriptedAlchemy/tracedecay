@@ -66,12 +66,20 @@ impl PreparedRefreshReservation {
     }
 }
 
+/// What every batch of a refresh spawns: the configured command (for
+/// operator-facing messages), the launch it resolved to, and the adapter's
+/// arguments.
+#[derive(Clone)]
+pub(crate) struct AnalyzerSpawn {
+    pub(crate) command: String,
+    pub(crate) launch: AnalyzerLaunch,
+    pub(crate) args: Vec<String>,
+}
+
 pub struct PreparedRefresh {
     language: String,
     project_root: PathBuf,
-    command: String,
-    launch: AnalyzerLaunch,
-    args: Vec<String>,
+    spawn: AnalyzerSpawn,
     epoch: u64,
     batches: Vec<RefreshBatch>,
     reservation: PreparedRefreshReservation,
@@ -94,9 +102,7 @@ impl PreparedRefresh {
     pub(crate) fn new(
         language: String,
         project_root: PathBuf,
-        command: String,
-        launch: AnalyzerLaunch,
-        args: Vec<String>,
+        spawn: AnalyzerSpawn,
         epoch: u64,
         batches: Vec<RefreshBatch>,
         reservation: PreparedRefreshReservation,
@@ -104,9 +110,7 @@ impl PreparedRefresh {
         Self {
             language,
             project_root,
-            command,
-            launch,
-            args,
+            spawn,
             epoch,
             batches,
             reservation,
@@ -115,7 +119,7 @@ impl PreparedRefresh {
 
     /// The exact program and environment every batch of this refresh spawns.
     pub fn launch(&self) -> &AnalyzerLaunch {
-        &self.launch
+        &self.spawn.launch
     }
 
     pub async fn collect_diagnostics(
@@ -134,7 +138,7 @@ impl PreparedRefresh {
         timeouts: LspRefreshTimeouts,
     ) -> CompletedRefresh {
         let language = self.language.clone();
-        let command = self.command.clone();
+        let command = self.spawn.command.clone();
         let epoch = self.epoch;
         let result = self.collect(timeouts).await;
         CompletedRefresh {
@@ -164,9 +168,7 @@ impl PreparedRefresh {
                 ordinal,
                 batch,
                 self.project_root.clone(),
-                self.command.clone(),
-                self.launch.clone(),
-                self.args.clone(),
+                self.spawn.clone(),
                 timeouts,
                 run_permit,
             ));
@@ -187,9 +189,7 @@ impl PreparedRefresh {
                     ordinal,
                     batch,
                     self.project_root.clone(),
-                    self.command.clone(),
-                    self.launch.clone(),
-                    self.args.clone(),
+                    self.spawn.clone(),
                     timeouts,
                     run_permit,
                 ));
@@ -208,12 +208,15 @@ async fn collect_refresh_batch(
     ordinal: usize,
     batch: RefreshBatch,
     project_root: PathBuf,
-    command: String,
-    launch: AnalyzerLaunch,
-    args: Vec<String>,
+    spawn: AnalyzerSpawn,
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
 ) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
+    let AnalyzerSpawn {
+        command,
+        launch,
+        args,
+    } = spawn;
     let shared = batch.client;
     let mut client_slot = shared
         .client()

@@ -231,7 +231,10 @@ mod rustup_proxy {
             message.starts_with(NOT_INSTALLED_FOR_TOOLCHAIN_MESSAGE),
             "{message}"
         );
-        assert!(!message.contains('\n') && !message.contains("syncing channel"), "{message}");
+        assert!(
+            !message.contains('\n') && !message.contains("syncing channel"),
+            "{message}"
+        );
 
         let engine = broker.snapshot().engines.remove(0);
         assert_eq!(engine.state, EngineState::Unavailable);
