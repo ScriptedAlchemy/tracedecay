@@ -867,7 +867,7 @@ fn project_open_problem(
             if workflow_application || authority != "workflow"
     ) {
         DaemonInvocationProblem::ResetRequired
-    } else if crate::daemon::error_message_is_project_open_retryable(&error.to_string()) {
+    } else if crate::daemon::error_is_project_open_retryable(error) {
         // A still-warming project open (or a saturated open queue) is a
         // retryable state for every operation. Mapping it to the git branch's
         // terminal not-found/not-authorized would misreport an authorized

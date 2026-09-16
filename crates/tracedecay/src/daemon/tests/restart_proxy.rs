@@ -160,7 +160,7 @@ fn deferred_repository_discovery_is_project_open_retryable() {
     );
 
     assert!(
-        super::super::error_message_is_project_open_retryable(&error.to_string()),
+        super::super::error_is_project_open_retryable(&error),
         "a deferred discovery must classify as retryable, got: {error}"
     );
 
@@ -186,7 +186,7 @@ fn terminal_repository_discovery_failures_are_not_project_open_retryable() {
         );
 
         assert!(
-            !super::super::error_message_is_project_open_retryable(&error.to_string()),
+            !super::super::error_is_project_open_retryable(&error),
             "a terminal discovery failure must not classify as retryable: {error}"
         );
     }
@@ -883,7 +883,13 @@ async fn proxy_retries_bounded_project_warming_responses() {
                     "id": request["id"],
                     "error": {
                         "code": -32603,
-                        "message": "config error: TraceDecay project '/tmp/project' is warming in the background; retry the same tool shortly"
+                        "message": "TraceDecay project '/tmp/project' is warming in the background; retry the same tool shortly",
+                        "data": {
+                            "reason_code": "project_warming",
+                            "retryable": true,
+                            "detail": "TraceDecay project '/tmp/project' is warming in the background; retry the same tool shortly",
+                            "kind": "project_warming"
+                        }
                     }
                 })
             } else {

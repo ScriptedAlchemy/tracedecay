@@ -343,11 +343,14 @@ fn is_database_read_failure(message: &str) -> bool {
 /// failure may clear on its own.
 pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Duration> {
     match error {
+        TraceDecayError::ProjectRoute { reason_code, .. }
+            if reason_code == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE =>
+        {
+            Some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
+        }
         TraceDecayError::Config { message } => (message.contains("identity cutover conflict")
             || message.contains("ambiguous legacy profile stores")
-            || message.contains("enrollment marker did not resolve a profile store")
-            || (message.contains("repository discovery")
-                && message.contains(PROJECT_WARMING_RETRY_HINT)))
+            || message.contains("enrollment marker did not resolve a profile store"))
         .then_some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF),
         // This audit's whole job is to read persisted rows and judge them, so
         // its verdict is a property of the stored data: a row rejected now is
@@ -413,9 +416,8 @@ impl ProjectOpenFailure {
         let retry_backoff = project_open_retry_backoff(error);
         let retry_at = retry_backoff.map(|backoff| Instant::now() + backoff);
         let reason = match error {
-            TraceDecayError::Config { message }
-                if message.contains("repository discovery")
-                    && message.contains(PROJECT_WARMING_RETRY_HINT) =>
+            TraceDecayError::ProjectRoute { reason_code, .. }
+                if reason_code == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE =>
             {
                 ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery
             }

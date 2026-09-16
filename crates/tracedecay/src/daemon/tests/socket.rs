@@ -95,7 +95,7 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
     .expect_err("a never-ready owner must return a warming error");
 
     assert!(
-        super::super::error_message_is_project_warming(&error.to_string()),
+        super::super::error_is_project_warming(&error),
         "unexpected owner timeout: {error}"
     );
     assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
