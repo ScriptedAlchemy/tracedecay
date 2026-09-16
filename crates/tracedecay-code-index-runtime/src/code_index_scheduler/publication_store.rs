@@ -19,8 +19,8 @@ use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationStoreLockV1, DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1,
     DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
     MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
-    acquire_code_generation_store_lock, acquire_code_generation_store_read_lock,
-    durable_generation_index_digest, retain_bounded_generation_index,
+    acquire_code_generation_store_lock, durable_generation_index_digest,
+    retain_bounded_generation_index, try_acquire_code_generation_store_lock,
 };
 use tracedecay_domain::{
     CodeGenerationId, ContentDigest, ManifestDigest, ProjectionBatchRequestV1,
@@ -478,7 +478,6 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     /// Test-only: observes each batched `segments_root` directory fsync so a
     /// test can assert a single publish syncs the directory once regardless
     /// of how many new file segments it wrote.
-    /// CI retrigger marker (no behavior).
     #[cfg(test)]
     segments_dir_sync_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Last generation handed to `publish_atomically`. A transient store
@@ -1272,12 +1271,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        // A retained segment is immutable and content-addressed; the read
-        // only needs retention and publication writers held off between the
-        // pointer check and the byte read. A shared hold does that without
-        // turning a concurrent retention tick or graph seal into a typed
-        // failure of the whole projection (issue #1103 / #1226).
-        let _lock = acquire_code_generation_store_read_lock(root).map_err(Self::unavailable)?;
+        let _lock = try_acquire_code_generation_store_lock(root)
+            .map_err(Self::unavailable)?
+            .ok_or_else(|| Self::unavailable("sealed lexical source generation store is busy"))?;
         let pointer = self.read_publication_pointer()?;
         if !pointer.as_ref().is_some_and(|pointer| {
             pointer.generation_index.iter().any(|entry| {
@@ -2630,6 +2626,20 @@ impl CodeChunkProjectionSink for DaemonProjectionSinkV1 {
                     current_chunk_digest: None,
                     operation: ProjectionOperationV1::Deleted,
                     outcome: ProjectionOutcomeV1::Applied,
+                    output_digest: None,
+                }),
+        );
+        decisions.extend(
+            request
+                .changes
+                .reused
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: change.current_digest.clone(),
+                    operation: ProjectionOperationV1::Reused,
+                    outcome: ProjectionOutcomeV1::Reused,
                     output_digest: None,
                 }),
         );
