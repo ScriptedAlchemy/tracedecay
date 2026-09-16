@@ -7,6 +7,15 @@ semantics are available on Linux and macOS without GNU coreutils or util-linux.
 
 from __future__ import annotations
 
+import sys
+import time
+
+# Readiness probes sample this clock repeatedly. Avoid loading the process
+# controls and argument parser just to read a monotonic timestamp.
+if __name__ == "__main__" and sys.argv[1:] == ["monotonic-ms"]:
+    print(time.monotonic_ns() // 1_000_000)
+    raise SystemExit(0)
+
 import argparse
 import errno
 import math
@@ -15,8 +24,6 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
-import sys
-import time
 from collections.abc import Sequence
 
 
