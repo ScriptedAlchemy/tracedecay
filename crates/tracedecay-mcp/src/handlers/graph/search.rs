@@ -10,11 +10,10 @@ use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
-    ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestV1,
-    RedundancySurfaceRequestWireV1, RenamePreviewNodeV1, RenamePreviewPrimitiveRequestV1,
-    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
-    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, SimilarSurfaceRequestWireV1, SimilarTargetV1,
+    ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestWireV1, RenamePreviewNodeV1,
+    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
+    RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
+    SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestWireV1, SimilarTargetV1,
 };
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -1046,7 +1045,7 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
             return Err(TraceDecayError::ProjectRoute {
                 reason_code: "similar-request-schema-retired".to_owned(),
                 retryable: false,
-                detail: "tracedecay_similar retired the {symbol, limit} request shape; use the family schema (project_id, repository_id, target, match_classes, result_limit, work_limit) — catalog binding.mcp.similar.v1 aliases binding.mcp.similar.v2".to_owned(),
+                detail: "tracedecay_similar retired the {symbol, limit} request shape; use the family schema (project_id, repository_id, target, match_classes, result_limit, work_limit). Catalog binding.mcp.similar.v1 covers protocol revisions 1..=2 on one surface-operation key.".to_owned(),
             });
         }
     };
@@ -1227,7 +1226,7 @@ pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<
             return Err(TraceDecayError::ProjectRoute {
                 reason_code: "redundancy-request-schema-retired".to_owned(),
                 retryable: false,
-                detail: "tracedecay_redundancy retired the path/min_lines/max_pairs request shape; use the family schema (project_id, repository_id, match_classes, scope, family_limit, member_limit, work_limit) — catalog binding.mcp.redundancy.v1 aliases binding.mcp.redundancy.v2".to_owned(),
+                detail: "tracedecay_redundancy retired the path/min_lines/max_pairs request shape; use the family schema (project_id, repository_id, match_classes, scope, family_limit, member_limit, work_limit). Catalog binding.mcp.redundancy.v1 covers protocol revisions 1..=2 on one surface-operation key.".to_owned(),
             });
         }
     };
