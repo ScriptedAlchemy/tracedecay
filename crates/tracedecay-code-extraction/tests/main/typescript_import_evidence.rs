@@ -102,7 +102,7 @@ fn parser_owned_tree_import_rows_do_not_disappear_from_parsed_artifact() {
     let mut parser = Parser::new();
     parser
         .set_language(
-            &tracedecay_code_extraction::ts_provider::language("typescript")
+            &tracedecay_code_extraction::ts_provider::try_language("typescript")
                 .expect("bundled TypeScript grammar"),
         )
         .expect("configure TypeScript parser");
