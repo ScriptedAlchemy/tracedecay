@@ -218,10 +218,19 @@ impl RmcpWorkDeliverySettlement {
     }
 }
 
+/// Race a dispatch future against the transport cancellation token.
+///
+/// When cancel wins and `cancel_registered_request` finds a live registration,
+/// the sticky/worker path owns settlement, so this keeps awaiting `handling`.
+/// When cancel wins and the request is not registered yet, pass
+/// `cancellation_registered` so this waits for the same notify the legacy
+/// connection uses instead of dropping `handling` during route resolution.
+/// Only a cancel that can never register (no notify channel) abandons.
 pub async fn await_dispatch_with_cancellation<F, C, N>(
     handling: F,
     cancellation: N,
     mut cancel_registered_request: C,
+    cancellation_registered: Option<&tokio::sync::Notify>,
 ) -> Option<F::Output>
 where
     F: std::future::Future,
@@ -231,12 +240,32 @@ where
     tokio::pin!(handling);
     tokio::pin!(cancellation);
     tokio::select! {
-        response = &mut handling => Some(response),
-        () = &mut cancellation => {
-            if cancel_registered_request() {
-                Some(handling.await)
-            } else {
-                None
+        biased;
+        response = &mut handling => return Some(response),
+        () = &mut cancellation => {}
+    }
+    if cancel_registered_request() {
+        return Some(handling.await);
+    }
+    let Some(notify) = cancellation_registered else {
+        return None;
+    };
+    // Cancel raced route resolution: keep polling handling while waiting for
+    // prepare_dispatch_control to register, same as the legacy connection.
+    loop {
+        let registered = notify.notified();
+        tokio::pin!(registered);
+        registered.as_mut().enable();
+        if cancel_registered_request() {
+            return Some(handling.await);
+        }
+        tokio::select! {
+            biased;
+            response = &mut handling => return Some(response),
+            () = &mut registered => {
+                if cancel_registered_request() {
+                    return Some(handling.await);
+                }
             }
         }
     }
@@ -413,14 +442,20 @@ where
         let response = if pre_cancelled {
             Some(handling.await)
         } else {
-            await_dispatch_with_cancellation(handling, request_cancellation.cancelled(), || {
-                dispatch_cancellation.cancel();
-                // Only an admitted request has a worker that can observe the
-                // signal and settle its own cancelled terminal. A cancel that
-                // arrives before registration has nothing to poll, so the
-                // dispatch is abandoned instead of run to completion.
-                self.context.cancel_request(&id, &self.memory_request_scope)
-            })
+            await_dispatch_with_cancellation(
+                handling,
+                request_cancellation.cancelled(),
+                || {
+                    dispatch_cancellation.cancel();
+                    // Live registration delivers the cancel to the admitted
+                    // worker. A miss here is usually "not yet registered"
+                    // during route resolution; the notify channel below waits
+                    // for prepare_dispatch_control instead of dropping the
+                    // sticky sample / selected-target settlement path.
+                    self.context.cancel_request(&id, &self.memory_request_scope)
+                },
+                Some(self.context.cancellation_registered()),
+            )
             .await
         }
         .ok_or_else(|| {
@@ -738,4 +773,87 @@ pub fn project_server_retired_error() -> ErrorData {
             "detail": "the retained project server was replaced or revoked; retry against the current owner",
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::await_dispatch_with_cancellation;
+
+    #[tokio::test]
+    async fn cancellation_stops_dispatch_when_registration_can_never_arrive() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let cancel_attempts = Arc::clone(&attempts);
+
+        let result = await_dispatch_with_cancellation(
+            std::future::pending::<()>(),
+            std::future::ready(()),
+            move || {
+                cancel_attempts.fetch_add(1, Ordering::SeqCst);
+                false
+            },
+            None,
+        )
+        .await;
+
+        assert_eq!(result, None);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "without a registration channel, an unregistered cancel abandons dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn rmcp_cancel_during_route_resolution_preserves_dispatch_until_registration() {
+        // Cancel can win while route resolution still awaits, before
+        // prepare_dispatch_control registers. Legacy waits on
+        // cancellation_registered; RMCP must too so sticky sampling and the
+        // selected target still settle.
+        let registration = Arc::new(tokio::sync::Notify::new());
+        let registered = Arc::new(AtomicBool::new(false));
+        let cancel_attempts = Arc::new(AtomicUsize::new(0));
+        let handling_registered = Arc::clone(&registered);
+        let handling_notify = Arc::clone(&registration);
+        let cancel_registered = Arc::clone(&registered);
+        let cancel_hits = Arc::clone(&cancel_attempts);
+
+        let handling = async move {
+            tokio::task::yield_now().await;
+            handling_registered.store(true, Ordering::SeqCst);
+            handling_notify.notify_waiters();
+            "tool_dispatch_cancelled"
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            await_dispatch_with_cancellation(
+                handling,
+                std::future::ready(()),
+                move || {
+                    cancel_hits.fetch_add(1, Ordering::SeqCst);
+                    cancel_registered.load(Ordering::SeqCst)
+                },
+                Some(registration.as_ref()),
+            ),
+        )
+        .await
+        .expect("RMCP mid-route cancel must not hang waiting for registration");
+
+        assert_eq!(
+            result,
+            Some("tool_dispatch_cancelled"),
+            "cancel before registration must preserve dispatch through the sticky sample"
+        );
+        assert!(
+            cancel_attempts.load(Ordering::SeqCst) >= 2,
+            "cancel must retry after registration, not abandon on the first miss"
+        );
+        assert!(
+            registered.load(Ordering::SeqCst),
+            "registration must complete so the selected target can settle"
+        );
+    }
 }

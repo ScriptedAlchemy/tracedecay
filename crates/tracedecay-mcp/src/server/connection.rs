@@ -74,9 +74,14 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     /// finish route resolution and let the target settle the cancel rather
     /// than abandoning the dispatch and answering from the caller, so a cancel
     /// arriving during a long route becomes visible only once routing
-    /// completes. The one case a transport may abandon a dispatch is a cancel
-    /// that [`Self::cancel_request`] reports as unregistered: no worker exists
-    /// to observe the signal, so there is nothing to settle.
+    /// completes.
+    ///
+    /// A cancel that [`Self::cancel_request`] reports as unregistered is not
+    /// automatically "never registerable": route resolution has not yet called
+    /// `prepare_dispatch_control`. Transports must wait on
+    /// [`Self::cancellation_registered`] (as the legacy connection does) so
+    /// the sticky sample and selected target still settle. Abandon only when
+    /// the cancel can never register — no registration wait channel.
     fn dispatch<'a>(
         &'a self,
         request: McpDispatchRequest<'a>,
