@@ -99,7 +99,7 @@ const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 /// Clone-successor page batches share one durable commit. The bounds equal
 /// the floor (scale 1) text-artifact batch, so every page the first-pass
 /// builder admitted also fits one successor batch, and the retained pages plus
-/// the builder's SQLite page cache stay inside the successor reservation.
+/// the builder's `SQLite` page cache stay inside the successor reservation.
 const CLONE_SUCCESSOR_BATCH_PAGES_V1: usize = TEXT_ARTIFACT_BASE_BATCH_PAGES_V1;
 const CLONE_SUCCESSOR_BATCH_BYTES_V1: usize = TEXT_ARTIFACT_BASE_BATCH_BYTES_V1;
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
