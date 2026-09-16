@@ -595,28 +595,26 @@ where
                 &LEXICAL_REJECTIONS,
             )?;
             evidence.validate_against_validated_request(request)?;
-            // Filter scores first so a field-filter reject never clones the
-            // full evidence (matched terms, binding payload, …) only to drop it.
-            let field_scores: Vec<_> = evidence
+            if !evidence
                 .field_scores_micros
                 .iter()
-                .copied()
-                .filter(|(field, _)| field_admitted(&request.field_filters, *field))
-                .collect();
-            if field_scores.is_empty() {
+                .any(|(field, _)| field_admitted(&request.field_filters, *field))
+            {
                 // A candidate scored only on filtered-out fields is excluded
                 // by the typed field filters; it is accounted, never silent.
                 excluded += 1;
                 continue;
             }
+            let mut filtered = evidence.clone();
+            filtered
+                .field_scores_micros
+                .retain(|(field, _)| field_admitted(&request.field_filters, *field));
             let mut raw_score = FixedPointScore::ZERO;
-            for (_, field_score) in &field_scores {
+            for (_, field_score) in &filtered.field_scores_micros {
                 raw_score = raw_score
                     .checked_add(FixedPointScore(*field_score))
                     .map_err(contract_error)?;
             }
-            let mut filtered = evidence.clone();
-            filtered.field_scores_micros = field_scores;
             admitted.push((candidate.clone(), filtered, raw_score));
         }
         // Canonical deterministic order: recomputed fixed-point score
