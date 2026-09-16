@@ -9,7 +9,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use tracedecay_domain::configuration::{
@@ -549,6 +549,8 @@ impl std::error::Error for CodeIndexParallelismErrorV1 {}
 
 /// 0 means "use the configured host width".
 static FORCED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+/// Test-only: force [`install`] to return [`CodeIndexParallelismErrorV1::PoolBuild`].
+static FORCE_INSTALL_FAILURE: AtomicBool = AtomicBool::new(false);
 
 /// Indexing width callers should fan out to. A width below 2 means "run
 /// inline".
@@ -579,6 +581,13 @@ pub fn force_indexing_workers_for_test(workers: usize) {
 #[doc(hidden)]
 pub fn clear_forced_indexing_workers_for_test() {
     FORCED_WORKERS.store(0, Ordering::Relaxed);
+}
+
+/// Force [`install`] to fail so callers can assert operational pool errors stay
+/// typed as parallelism failures instead of identity corruption.
+#[doc(hidden)]
+pub fn force_install_failure_for_test(force: bool) {
+    FORCE_INSTALL_FAILURE.store(force, Ordering::SeqCst);
 }
 
 /// Run one active work unit under the installed worker runtime's background
@@ -612,6 +621,11 @@ where
     R: Send,
 {
     hotpath::gauge!("code_index_worker_count").set(indexing_workers());
+    if FORCE_INSTALL_FAILURE.load(Ordering::SeqCst) {
+        return Err(CodeIndexParallelismErrorV1::PoolBuild {
+            message: "forced code-index worker pool failure for test".to_owned(),
+        });
+    }
     if let Some(runtime) = WORKER_RUNTIME.get() {
         return Ok(runtime.install(operation));
     }
