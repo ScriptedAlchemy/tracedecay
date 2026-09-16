@@ -2606,8 +2606,6 @@ mod tests {
     };
     use crate::intake::{CodeIndexIntake, SanitizedCodeIntake};
     use crate::languages::{LanguageRegistry, StaticLanguageRegistry};
-    use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
-    use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 
     struct AlwaysCancelled;
 
