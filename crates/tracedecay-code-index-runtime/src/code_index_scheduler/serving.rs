@@ -1495,6 +1495,13 @@ impl LatestCompleteCodeIndexV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
+    /// Exact and lexical query owners are installed for this generation.
+    ///
+    /// This is the sole readiness predicate for a publication's graph seat
+    /// gate and for admitting a full sealed-generation graph replay. Clone
+    /// fingerprint backfill may still be unfinished when this returns true —
+    /// that remaining work is [`Self::text_projection_needs_work`], not a
+    /// seat or replay precondition.
     pub fn query_owners_are_ready(&self) -> bool {
         matches!(
             self.query_owner_readiness(),
