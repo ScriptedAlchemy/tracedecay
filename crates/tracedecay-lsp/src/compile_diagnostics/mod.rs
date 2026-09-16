@@ -17,10 +17,13 @@ pub mod rust;
 pub mod typescript;
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
 use tracedecay_domain::errors::Result;
+
+use crate::analyzer::launch::{RUSTUP_AUTO_INSTALL_DISABLED, RUSTUP_AUTO_INSTALL_ENV};
 
 pub use cache::DiagnosticsCache;
 
@@ -138,27 +141,35 @@ pub fn rust_diagnostics_target_dir(project_root: &Path) -> PathBuf {
 /// driver, so it survives the request that started it).
 #[hotpath::measure(label = "compile_diagnostics.prewarm")]
 pub fn spawn_rust_diagnostics_prewarm(project_root: &Path) -> Result<()> {
-    use std::process::{Command, Stdio};
-
     let target_dir = rust::target_dir_for(project_root);
     if let Some(parent) = target_dir.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    Command::new("cargo")
-        .arg("check")
-        .arg("--message-format=json")
-        .arg("--target-dir")
-        .arg(&target_dir)
-        .current_dir(project_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    rust_prewarm_command(project_root, &target_dir)
         .spawn()
         .map(|_child| ())
         .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("failed to spawn cargo prewarm: {e}"),
         })
+}
+
+/// The exact `cargo check` the prewarm spawns. Like every other cargo this
+/// crate runs, it carries `RUSTUP_AUTO_INSTALL=0` so a project pinning an
+/// uninstalled toolchain cannot make the rustup proxy download it.
+fn rust_prewarm_command(project_root: &Path, target_dir: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .arg("check")
+        .arg("--message-format=json")
+        .arg("--target-dir")
+        .arg(target_dir)
+        .current_dir(project_root)
+        .env(RUSTUP_AUTO_INSTALL_ENV, RUSTUP_AUTO_INSTALL_DISABLED)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 /// Which compiler levels become diagnostics. Every driver reports "error" and
@@ -559,5 +570,34 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(retry[0].message, "retry");
+    }
+
+    /// The prewarm is a cargo spawn like the foreground driver's and must be
+    /// as install-free: the built command carries the no-install setting.
+    #[test]
+    fn rust_prewarm_command_carries_the_no_install_environment() {
+        let project = tempfile::tempdir().unwrap();
+        let target_dir = project.path().join("target");
+
+        let command = rust_prewarm_command(project.path(), &target_dir);
+
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs,
+            vec![(
+                RUSTUP_AUTO_INSTALL_ENV.to_owned(),
+                Some(RUSTUP_AUTO_INSTALL_DISABLED.to_owned())
+            )]
+        );
+        assert_eq!(command.get_program(), "cargo");
+        assert_eq!(command.get_current_dir(), Some(project.path()));
     }
 }

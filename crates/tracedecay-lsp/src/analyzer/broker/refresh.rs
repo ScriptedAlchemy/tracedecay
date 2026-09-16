@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,12 +6,17 @@ use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
 
 use super::super::client::{LspDocument, LspRefreshError, LspRefreshTimeouts, StdioLspClient};
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
+use super::super::launch::AnalyzerLaunch;
 use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
 use super::{CodeDiagnostic, EngineState};
 use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
     pub(crate) workspace_root: PathBuf,
+    /// Resolved from this batch's own workspace root: nested roots may pin
+    /// different toolchains, so each batch spawns the binary rustup reports
+    /// for its root rather than the one the project root resolved to.
+    pub(crate) launch: AnalyzerLaunch,
     pub(crate) documents: Vec<LspDocument>,
     pub(crate) client: Arc<SharedAnalyzerClient>,
 }
@@ -65,11 +70,19 @@ impl PreparedRefreshReservation {
     }
 }
 
+/// What every batch of a refresh shares: the configured command (for
+/// operator-facing messages) and the adapter's arguments. The program each
+/// batch runs is its own [`RefreshBatch::launch`].
+#[derive(Clone)]
+pub(crate) struct AnalyzerSpawn {
+    pub(crate) command: String,
+    pub(crate) args: Vec<String>,
+}
+
 pub struct PreparedRefresh {
     language: String,
     project_root: PathBuf,
-    command: String,
-    args: Vec<String>,
+    spawn: AnalyzerSpawn,
     epoch: u64,
     batches: Vec<RefreshBatch>,
     reservation: PreparedRefreshReservation,
@@ -92,8 +105,7 @@ impl PreparedRefresh {
     pub(crate) fn new(
         language: String,
         project_root: PathBuf,
-        command: String,
-        args: Vec<String>,
+        spawn: AnalyzerSpawn,
         epoch: u64,
         batches: Vec<RefreshBatch>,
         reservation: PreparedRefreshReservation,
@@ -101,12 +113,20 @@ impl PreparedRefresh {
         Self {
             language,
             project_root,
-            command,
-            args,
+            spawn,
             epoch,
             batches,
             reservation,
         }
+    }
+
+    /// The exact program and environment each workspace-root batch of this
+    /// refresh spawns, in batch order.
+    pub fn batch_launches(&self) -> Vec<(&Path, &AnalyzerLaunch)> {
+        self.batches
+            .iter()
+            .map(|batch| (batch.workspace_root.as_path(), &batch.launch))
+            .collect()
     }
 
     pub async fn collect_diagnostics(
@@ -125,7 +145,7 @@ impl PreparedRefresh {
         timeouts: LspRefreshTimeouts,
     ) -> CompletedRefresh {
         let language = self.language.clone();
-        let command = self.command.clone();
+        let command = self.spawn.command.clone();
         let epoch = self.epoch;
         let result = self.collect(timeouts).await;
         CompletedRefresh {
@@ -155,8 +175,7 @@ impl PreparedRefresh {
                 ordinal,
                 batch,
                 self.project_root.clone(),
-                self.command.clone(),
-                self.args.clone(),
+                self.spawn.clone(),
                 timeouts,
                 run_permit,
             ));
@@ -177,8 +196,7 @@ impl PreparedRefresh {
                     ordinal,
                     batch,
                     self.project_root.clone(),
-                    self.command.clone(),
-                    self.args.clone(),
+                    self.spawn.clone(),
                     timeouts,
                     run_permit,
                 ));
@@ -197,11 +215,12 @@ async fn collect_refresh_batch(
     ordinal: usize,
     batch: RefreshBatch,
     project_root: PathBuf,
-    command: String,
-    args: Vec<String>,
+    spawn: AnalyzerSpawn,
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
 ) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
+    let AnalyzerSpawn { command, args } = spawn;
+    let launch = batch.launch;
     let shared = batch.client;
     let mut client_slot = shared
         .client()
@@ -219,8 +238,8 @@ async fn collect_refresh_batch(
             )));
         };
         let mut use_of_analyzer = RefreshUseOfAnalyzer::new(&shared, client_slot, attempt, None);
-        use_of_analyzer.client = match StdioLspClient::start_with_timeouts(
-            &command,
+        use_of_analyzer.client = match StdioLspClient::start_with_launch(
+            &launch,
             &args,
             &batch.workspace_root,
             timeouts,
@@ -230,7 +249,10 @@ async fn collect_refresh_batch(
             Ok(client) => Some(client),
             Err(error) => {
                 use_of_analyzer.retire(AnalyzerEvent::StartupFailed);
-                return Err(RefreshFailure::crashed(&error));
+                return Err(RefreshFailure::unstartable(
+                    &error,
+                    batch.workspace_root.clone(),
+                ));
             }
         };
         if shared.mark_ready(attempt).is_none() {
@@ -324,6 +346,10 @@ impl Drop for RefreshUseOfAnalyzer<'_> {
 pub(crate) struct RefreshFailure {
     pub(crate) state: EngineState,
     pub(crate) message: String,
+    /// The workspace root whose resolved launch could not be started at all
+    /// (the program is gone, not executable, or exited before initialize).
+    /// The broker evicts that retained launch so the next refresh re-probes.
+    pub(crate) unstartable_launch_root: Option<PathBuf>,
 }
 
 impl RefreshFailure {
@@ -335,6 +361,7 @@ impl RefreshFailure {
                 EngineState::Crashed
             },
             message: error.to_string(),
+            unstartable_launch_root: None,
         }
     }
 
@@ -342,10 +369,18 @@ impl RefreshFailure {
         Self::crashed_message(error.to_string())
     }
 
-    fn crashed_message(message: String) -> Self {
+    fn unstartable(error: &TraceDecayError, workspace_root: PathBuf) -> Self {
+        Self {
+            unstartable_launch_root: Some(workspace_root),
+            ..Self::crashed(error)
+        }
+    }
+
+    pub(crate) fn crashed_message(message: String) -> Self {
         Self {
             state: EngineState::Crashed,
             message,
+            unstartable_launch_root: None,
         }
     }
 }

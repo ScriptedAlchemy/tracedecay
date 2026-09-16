@@ -11,6 +11,7 @@ use super::super::client::{
 use super::super::error::{
     AnalyzerCancellation as CancellationToken, AnalyzerRuntimeError as TraceDecayError,
 };
+use super::super::launch::AnalyzerLaunch;
 use super::shared_client::SharedAnalyzerClient;
 use crate::{
     AdmittedRoot, AnalyzerEvent, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
@@ -24,7 +25,7 @@ struct SemanticOperationKey {
 }
 
 struct StdioLspSemanticAuthorityInner {
-    command: String,
+    launch: AnalyzerLaunch,
     args: Vec<String>,
     /// The adapter language this analyzer serves, used verbatim as the
     /// `languageId` when this lane has to open a document upstream.
@@ -48,7 +49,7 @@ pub struct StdioLspSemanticAuthority {
 
 impl StdioLspSemanticAuthority {
     pub fn new(
-        command: impl Into<String>,
+        launch: AnalyzerLaunch,
         args: Vec<String>,
         language: impl Into<String>,
         project_root: PathBuf,
@@ -57,7 +58,7 @@ impl StdioLspSemanticAuthority {
     ) -> Arc<Self> {
         let root_uri = root_uri.into();
         Self::from_shared_client(
-            command,
+            launch,
             args,
             language,
             project_root,
@@ -68,7 +69,7 @@ impl StdioLspSemanticAuthority {
     }
 
     pub(crate) fn from_shared_client(
-        command: impl Into<String>,
+        launch: AnalyzerLaunch,
         args: Vec<String>,
         language: impl Into<String>,
         project_root: PathBuf,
@@ -78,7 +79,7 @@ impl StdioLspSemanticAuthority {
     ) -> Arc<Self> {
         Arc::new(Self {
             inner: Arc::new(StdioLspSemanticAuthorityInner {
-                command: command.into(),
+                launch,
                 args,
                 language: language.into(),
                 project_root,
@@ -112,8 +113,8 @@ impl StdioLspSemanticAuthority {
         let Some(attempt) = self.inner.shared.begin_start() else {
             return Err(TraceDecayError::Unavailable);
         };
-        match StdioLspClient::start_with_timeouts(
-            &self.inner.command,
+        match StdioLspClient::start_with_launch(
+            &self.inner.launch,
             &self.inner.args,
             &self.inner.project_root,
             self.inner.timeouts,
@@ -242,8 +243,8 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     } else if let Some(attempt) = inner.shared.begin_start() {
                         let started = tokio::select! {
                             () = cancellation.cancelled() => Ok(None),
-                            client = StdioLspClient::start_with_timeouts(
-                                &inner.command,
+                            client = StdioLspClient::start_with_launch(
+                                &inner.launch,
                                 &inner.args,
                                 &inner.project_root,
                                 inner.timeouts,
@@ -410,7 +411,7 @@ mod tests {
     #[tokio::test]
     async fn exhausted_supervisor_rejects_capability_initialization_without_respawning() {
         let authority = StdioLspSemanticAuthority::new(
-            "tracedecay-must-not-spawn",
+            AnalyzerLaunch::direct("tracedecay-must-not-spawn"),
             Vec::new(),
             "rust",
             std::env::temp_dir(),
@@ -454,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn failed_refresh_restarts_the_analyzer_instead_of_retiring_semantics() {
         let authority = StdioLspSemanticAuthority::new(
-            "tracedecay-analyzer-that-cannot-spawn",
+            AnalyzerLaunch::direct("tracedecay-analyzer-that-cannot-spawn"),
             Vec::new(),
             "rust",
             std::env::temp_dir(),
@@ -516,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn an_abandoned_start_is_taken_over_rather_than_stranding_the_analyzer() {
         let authority = StdioLspSemanticAuthority::new(
-            "tracedecay-analyzer-that-cannot-spawn",
+            AnalyzerLaunch::direct("tracedecay-analyzer-that-cannot-spawn"),
             Vec::new(),
             "rust",
             std::env::temp_dir(),
@@ -559,7 +560,7 @@ mod tests {
     #[test]
     fn a_late_result_from_a_superseded_start_is_ignored() {
         let authority = StdioLspSemanticAuthority::new(
-            "tracedecay-analyzer-that-cannot-spawn",
+            AnalyzerLaunch::direct("tracedecay-analyzer-that-cannot-spawn"),
             Vec::new(),
             "rust",
             std::env::temp_dir(),
@@ -601,7 +602,7 @@ mod tests {
     #[tokio::test]
     async fn a_concurrent_caller_joins_a_live_start_instead_of_competing() {
         let authority = StdioLspSemanticAuthority::new(
-            "tracedecay-analyzer-that-cannot-spawn",
+            AnalyzerLaunch::direct("tracedecay-analyzer-that-cannot-spawn"),
             Vec::new(),
             "rust",
             std::env::temp_dir(),
