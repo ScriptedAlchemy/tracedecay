@@ -33,6 +33,7 @@ import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { CanonicalObservations } from './CanonicalObservations.tsx';
 import { AdoptionCoverage } from './AdoptionCoverage.tsx';
 import { AdoptionOutcomes } from './AdoptionOutcomes.tsx';
+import { CloneIndexStatus } from './CloneIndexStatus.tsx';
 import { HookHints } from './HookHints.tsx';
 import { PerformanceBudgets } from './PerformanceBudgets.tsx';
 import { PerformanceComparisons } from './PerformanceComparisons.tsx';
@@ -178,6 +179,7 @@ function DiagnosisWing() {
         pending={codeIndexFreshness.isPending}
         scopeKey={codeIndexScopeKey}
       />
+      <CloneIndexStatus result={codeIndexFreshness.data} pending={codeIndexFreshness.isPending} />
     </>
   );
 }
@@ -358,7 +360,9 @@ function hasActiveCodeIndexBuild(
     result?.outcome === 'envelope' &&
     (result.envelope.domain_state !== 'ready' ||
       result.envelope.payload.worktrees.some(
-        (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
+        (worktree) =>
+          (worktree.progress != null && worktree.progress.phase !== 'ready') ||
+          worktree.clone_index?.state === 'backfilling',
       ))
   );
 }

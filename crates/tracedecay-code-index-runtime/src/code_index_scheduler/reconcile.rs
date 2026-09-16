@@ -219,6 +219,8 @@ pub struct CodeIndexPublishEvidenceV1 {
     pub reextracted_files: usize,
     pub changed_chunks: usize,
     pub reused_chunks: usize,
+    pub clone_payloads_reused: Option<u64>,
+    pub clone_stale_invalidations: Option<u64>,
     pub overflow_reconciled: bool,
 }
 
@@ -1713,6 +1715,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             reextracted_files: 0,
             changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
             reused_chunks: changes.reused.len(),
+            clone_payloads_reused: None,
+            clone_stale_invalidations: None,
             overflow_reconciled: drained_hints.overflow(),
         });
         drained_hints.commit();
@@ -1995,6 +1999,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 reextracted_files,
                 changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
                 reused_chunks: changes.reused.len(),
+                clone_payloads_reused: None,
+                clone_stale_invalidations: None,
                 overflow_reconciled: drained_hints.overflow(),
             });
             drained_hints.commit();
@@ -2573,6 +2579,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.mark_reconciled(source_manifest);
 
             let changes = &generation.projection().request().changes;
+            let (clone_payloads_reused, clone_stale_invalidations) =
+                active_generation.as_ref().map_or((0, 0), |prior| {
+                    prior.clone_payload_change_accounting(&generation)
+                });
             let lane_digest = canonical_sha256(&(
                 generation.snapshot().content_identity.clone(),
                 generation
@@ -2599,6 +2609,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                     reextracted_files,
                     changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
                     reused_chunks: changes.reused.len(),
+                    clone_payloads_reused: Some(clone_payloads_reused),
+                    clone_stale_invalidations: Some(clone_stale_invalidations),
                     overflow_reconciled,
                 },
             ));

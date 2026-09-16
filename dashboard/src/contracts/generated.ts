@@ -656,6 +656,87 @@ export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
 export const CatalogGenerationIdSchema = z.string();
 export type CatalogGenerationId = z.infer<typeof CatalogGenerationIdSchema>;
 
+/** Fixed per-request clone candidate and verification budgets. */
+export const CodeCloneIndexBudgetsV1Schema = z.object({
+  candidate_bodies: z.number().int().safe().min(0),
+  hot_posting_rows: z.number().int().safe().min(0),
+  minimum_body_tokens: z.number().int().safe().min(0),
+  minimum_directional_coverage_millionths: z.number().int().safe().min(0),
+  posting_rows: z.number().int().safe().min(0),
+  verification_bodies: z.number().int().safe().min(0),
+  verification_token_work: z.number().int().safe().min(0),
+});
+export type CodeCloneIndexBudgetsV1 = z.infer<typeof CodeCloneIndexBudgetsV1Schema>;
+
+/** Coverage retained by one clone-index artifact or in-progress successor.
+
+Counts are `None` until the clone artifact has observed the corresponding
+denominator. A complete empty repository reports `Some(0)`, which keeps a
+designed zero distinct from unavailable coverage. */
+export const CodeCloneIndexCoverageV1Schema = z.object({
+  completed_source_pages: z.number().int().safe().min(0),
+  conservative_normalized_bodies: z.number().int().safe().min(0).nullable(),
+  eligible_source_bodies: z.number().int().safe().min(0).nullable(),
+  exact_postings: z.number().int().safe().min(0).nullable(),
+  excluded_incomplete_tokenization_bodies: z.number().int().safe().min(0).nullable(),
+  excluded_too_small_bodies: z.number().int().safe().min(0).nullable(),
+  hot_posting_rows_skipped: z.number().int().safe().min(0).nullable(),
+  hot_postings_skipped: z.number().int().safe().min(0).nullable(),
+  near_fingerprint_bodies: z.number().int().safe().min(0).nullable(),
+  near_fingerprint_postings: z.number().int().safe().min(0).nullable(),
+  payloads_reused: z.number().int().safe().min(0).nullable(),
+  rename_normalized_bodies: z.number().int().safe().min(0).nullable(),
+  rename_partial_bodies: z.number().int().safe().min(0).nullable(),
+  rename_unsupported_bodies: z.number().int().safe().min(0).nullable(),
+  source_bodies: z.number().int().safe().min(0).nullable(),
+  total_source_pages: z.number().int().safe().min(0),
+  unique_payloads: z.number().int().safe().min(0).nullable(),
+});
+export type CodeCloneIndexCoverageV1 = z.infer<typeof CodeCloneIndexCoverageV1Schema>;
+
+/** Generation-pinned clone-index evidence shared by non-error readiness states. */
+export const CodeCloneIndexObservationV1Schema = z.object({
+  artifact_format_revision: z.number().int().min(0).nullable(),
+  budgets: z.lazy(() => CodeCloneIndexBudgetsV1Schema),
+  conservative_normalization_revision: z.number().int().min(0).max(65535),
+  coverage: z.lazy(() => CodeCloneIndexCoverageV1Schema),
+  generation_id: z.string(),
+  rename_normalization_revision: z.number().int().min(0).max(65535),
+  resources: z.lazy(() => CodeCloneIndexResourcesV1Schema),
+  source_revision: z.string().nullable(),
+});
+export type CodeCloneIndexObservationV1 = z.infer<typeof CodeCloneIndexObservationV1Schema>;
+
+/** Measured resources and update accounting for one clone-index generation. */
+export const CodeCloneIndexResourcesV1Schema = z.object({
+  bytes_on_disk: z.number().int().safe().min(0).nullable(),
+  changed_symbol_update_micros: z.number().int().safe().min(0).nullable(),
+  peak_scratch_memory_bytes: z.number().int().safe().min(0).nullable(),
+  stale_invalidations: z.number().int().safe().min(0).nullable(),
+});
+export type CodeCloneIndexResourcesV1 = z.infer<typeof CodeCloneIndexResourcesV1Schema>;
+
+/** Clone readiness, independent from lexical and graph serving. */
+export const CodeCloneIndexStatusV1Schema = z.discriminatedUnion("state", [z.object({
+  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
+  state: z.literal("backfilling"),
+}), z.object({
+  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
+  omission_reasons: z.array(z.string()),
+  state: z.literal("partial"),
+}), z.object({
+  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
+  state: z.literal("ready"),
+}), z.object({
+  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
+  reason: z.string(),
+  state: z.literal("stale"),
+}), z.object({
+  reason: z.string(),
+  state: z.literal("unavailable"),
+})]);
+export type CodeCloneIndexStatusV1 = z.infer<typeof CodeCloneIndexStatusV1Schema>;
+
 /** Strongly typed canonical identity: `CodeGenerationId`. */
 export const CodeGenerationIdSchema = z.string();
 export type CodeGenerationId = z.infer<typeof CodeGenerationIdSchema>;
@@ -793,6 +874,7 @@ export type CodeIndexWorkerStatusV1 = z.infer<typeof CodeIndexWorkerStatusV1Sche
 exactly this type back out of the daemon's `tracedecay_status` response,
 keeping one authority for the freshness shape. */
 export const CodeIndexWorktreeFreshnessV1Schema = z.object({
+  clone_index: z.union([z.lazy(() => CodeCloneIndexStatusV1Schema), z.null()]).optional(),
   code_graph_serving: z.union([z.lazy(() => CodeGraphServingReadinessV1Schema), z.null()]).optional(),
   coverage: z.string(),
   generation_recovery: z.union([z.lazy(() => CodeIndexGenerationRecoveryV1Schema), z.null()]).optional(),

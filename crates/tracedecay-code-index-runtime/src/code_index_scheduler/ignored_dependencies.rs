@@ -893,6 +893,8 @@ fn publication_evidence(
         reextracted_files,
         changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
         reused_chunks: changes.reused.len(),
+        clone_payloads_reused: None,
+        clone_stale_invalidations: None,
         overflow_reconciled: false,
     })
 }

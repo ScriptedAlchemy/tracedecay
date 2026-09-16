@@ -168,6 +168,7 @@ mod tests {
                     code_graph_serving: Some(CodeGraphServingReadinessV1::Unavailable {
                         reason: "generation_unavailable".to_owned(),
                     }),
+                    clone_index: None,
                     snapshot_content_identity: None,
                     sealed_at_micros: None,
                     last_reconcile_micros: Some(42),

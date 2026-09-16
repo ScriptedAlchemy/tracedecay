@@ -33,10 +33,11 @@ use tracedecay_domain::{
 use tracedecay_private_fs::open_private_file;
 
 use super::builder::compute_section_digests;
+use super::clone_census::{CodeLexicalCloneIndexCensusV1, read_clone_index_census};
 use super::fingerprints::{
-    CloneFingerprintArtifactReadV1, CloneFingerprintReadRequestV1,
-    CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
-    read_clone_fingerprint_page,
+    CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1, CloneFingerprintArtifactReadV1,
+    CloneFingerprintReadRequestV1, CloneSelectedBlockArtifactCandidateV1,
+    CloneSelectedBlockArtifactReadV1, read_clone_fingerprint_page,
 };
 use super::format::{
     ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, CodeLexicalImportMembershipWitnessV1,
@@ -114,6 +115,7 @@ pub struct CodeLexicalArtifactReaderV1 {
     metadata: super::super::CodeLexicalProjectionMetadataV1,
     receipt: VerifiedCodeLexicalArtifactV1,
     layout: LexicalArtifactLayoutV1,
+    clone_index_census: Arc<OnceLock<Result<Arc<CodeLexicalCloneIndexCensusV1>, String>>>,
     retained_owned_bytes: usize,
     /// Fuzzy expansion walks every in-fuzzy term. Hash-ordered `term_id`
     /// rows make a fresh `ORDER BY term` scan random I/O; share one load
@@ -551,6 +553,7 @@ impl CodeLexicalArtifactReaderV1 {
             metadata,
             receipt: stored,
             layout,
+            clone_index_census: Arc::new(OnceLock::new()),
             retained_owned_bytes,
             fuzzy_vocabulary: Arc::new(OnceLock::new()),
         })
@@ -564,6 +567,34 @@ impl CodeLexicalArtifactReaderV1 {
     #[hotpath::skip]
     pub fn verified_artifact(&self) -> &VerifiedCodeLexicalArtifactV1 {
         &self.receipt
+    }
+
+    #[hotpath::skip]
+    pub fn artifact_format_revision(&self) -> u32 {
+        self.layout.revision()
+    }
+
+    #[hotpath::skip]
+    pub fn clone_index_census(
+        &self,
+    ) -> Result<Option<Arc<CodeLexicalCloneIndexCensusV1>>, CodeLexicalArtifactErrorV1> {
+        if !self.layout.has_clone_index() {
+            return Ok(None);
+        }
+        let census = self.clone_index_census.get_or_init(|| {
+            let connection = self.lock_connection().map_err(|error| error.to_string())?;
+            read_clone_index_census(
+                &connection,
+                self.layout.has_clone_fingerprints(),
+                CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
+            )
+            .map(Arc::new)
+            .map_err(|error| error.to_string())
+        });
+        census
+            .as_ref()
+            .map(|census| Some(Arc::clone(census)))
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.clone()))
     }
 
     #[hotpath::skip]

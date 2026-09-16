@@ -2161,6 +2161,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     reextracted_files: evidence.reextracted_files,
                     changed_chunks: evidence.changed_chunks,
                     reused_chunks: evidence.reused_chunks,
+                    clone_payloads_reused: evidence.clone_payloads_reused,
+                    clone_stale_invalidations: evidence.clone_stale_invalidations,
                 },
                 evidence.overflow_reconciled,
             ),

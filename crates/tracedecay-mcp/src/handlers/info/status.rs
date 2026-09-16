@@ -831,6 +831,7 @@ mod tests {
             code_graph_serving: Some(
                 tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
             ),
+            clone_index: Some(Default::default()),
             ..Default::default()
         };
 
@@ -838,6 +839,13 @@ mod tests {
         assert_eq!(
             value["code_graph_serving"],
             serde_json::json!({ "state": "ready" })
+        );
+        assert_eq!(
+            value["clone_index"],
+            serde_json::json!({
+                "state": "unavailable",
+                "reason": "clone index authority is unavailable"
+            })
         );
     }
 
