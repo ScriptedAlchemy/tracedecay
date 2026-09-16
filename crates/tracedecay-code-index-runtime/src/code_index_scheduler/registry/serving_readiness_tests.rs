@@ -7,14 +7,50 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1;
 use tracedecay_domain::ProjectId;
 
 use super::super::graph_activation::install_injected_activation_gate;
-use super::{CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1};
+use super::{
+    CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1, dashboard_generation_is_ready,
+};
 
 /// Failure bound on an owner pass finishing once the worker is parked. Nothing
 /// here passes because time elapsed; a pass that never ends fails loudly.
 const OWNER_PASS_QUIESCENCE_CEILING: Duration = Duration::from_mins(2);
+
+#[test]
+fn dashboard_ready_requires_text_and_graph_lane_owners() {
+    assert!(dashboard_generation_is_ready(
+        None,
+        true,
+        true,
+        &Some(CodeGraphServingReadinessV1::Ready),
+    ));
+    assert!(
+        !dashboard_generation_is_ready(
+            None,
+            false,
+            true,
+            &Some(CodeGraphServingReadinessV1::Ready),
+        ),
+        "freshness must not report ready while exact or lexical lane owners are incomplete"
+    );
+    for graph in [
+        CodeGraphServingReadinessV1::Pending,
+        CodeGraphServingReadinessV1::Refused {
+            reason: "fixture refusal".to_owned(),
+        },
+        CodeGraphServingReadinessV1::Unavailable {
+            reason: "fixture unavailable".to_owned(),
+        },
+    ] {
+        assert!(
+            !dashboard_generation_is_ready(None, true, true, &Some(graph.clone())),
+            "freshness must not report ready while graph lane coverage is incomplete: {graph:?}"
+        );
+    }
+}
 
 /// Park the background worker and wait out whatever pass is already in flight.
 ///
