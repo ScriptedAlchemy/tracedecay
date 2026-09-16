@@ -1320,7 +1320,8 @@ async fn serving_seat_wait_diagnostic(
 /// wakes on per-worktree seating, including restored mounts that emit no new
 /// registry-wide seat count. That subscribe returns `None` until the worktree
 /// is mounted, so the loop re-attempts it each iteration until it returns
-/// `Some`. A waiter that starts before mount still observes
+/// `Some`. A waiter that starts before mount observes
+/// [`CodeIndexSchedulerRegistryV1::subscribe_root_mounted`] and
 /// [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
 ///
 /// `watch::Sender::subscribe()` marks the current value seen, so a seat that
@@ -1344,6 +1345,7 @@ where
             return value;
         }
         let mut seats = registry.subscribe_serving_seats();
+        let mut root_mounted = registry.subscribe_root_mounted();
         let mut per_worktree = None;
         loop {
             if per_worktree.is_none() {
@@ -1364,13 +1366,20 @@ where
                         result = changes.changed() => {
                             result.expect("the per-worktree serving channel stays open while the owner lives");
                         }
+                        result = root_mounted.changed() => {
+                            result.expect("the root-mounted channel stays open while the registry lives");
+                        }
                     }
                 }
                 None => {
-                    seats
-                        .changed()
-                        .await
-                        .expect("the seating channel stays open while the registry lives");
+                    tokio::select! {
+                        result = seats.changed() => {
+                            result.expect("the seating channel stays open while the registry lives");
+                        }
+                        result = root_mounted.changed() => {
+                            result.expect("the root-mounted channel stays open while the registry lives");
+                        }
+                    }
                 }
             }
         }
