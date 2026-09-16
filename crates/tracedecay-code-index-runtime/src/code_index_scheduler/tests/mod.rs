@@ -39,6 +39,7 @@ use crate::code_index_scheduler::{
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod branch_publication_tests;
+mod deferred_mount_tests;
 mod noop_reconcile_tests;
 mod publication_store;
 mod reconcile;

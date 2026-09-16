@@ -2262,6 +2262,15 @@ impl CodeIndexSchedulerRegistryV1 {
         self.generation_publications.subscribe()
     }
 
+    /// Push one synthetic publication for scheduler integration tests.
+    #[cfg(test)]
+    pub fn push_generation_publication_for_test(
+        &self,
+        publication: CodeIndexGenerationPublishedV1,
+    ) {
+        let _ = self.generation_publications.send(publication);
+    }
+
     /// Subscribe before probing the serving slot. Sealed publication precedes
     /// serving, including on a restored mount where no new publication event is
     /// emitted. Successful source revalidation also signals this watch when an

@@ -25,7 +25,7 @@ pub(super) fn spawn_deferred_query_authority_mount(
 ) -> bool {
     // Same contract as the deferred advisory owner: a route whose code index
     // is disabled never seats a text generation, so this retry has nothing to
-    // wait for. Parking it would poll the shared store once a second for the
+    // wait for. Parking it would keep a publish/serving waiter alive for the
     // daemon's life and re-mount on every other route's publication.
     if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
         &invocation.code_index_schedulers,
