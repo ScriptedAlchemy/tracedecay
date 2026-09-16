@@ -62,29 +62,36 @@ export function CompareView({
   );
   // The indexed worktree is the one revision the daemon already knows exactly.
   // It is offered for head only when the scheduler reported both the
-  // reference and the revision; a missing revision is not defaulted.
-  const indexedWorktree = envelopePayload(freshness.data)?.worktrees.find(
+  // reference and the revision; a missing revision is not defaulted. Several
+  // mounted worktrees are several candidate heads, and filling whichever the
+  // route happened to list first would prefill an arbitrary revision, so an
+  // ambiguous mount set fills nothing and says why.
+  const exactWorktrees = (envelopePayload(freshness.data)?.worktrees ?? []).filter(
     (worktree) => worktree.source_reference !== null && worktree.source_revision !== null,
   );
+  const soleWorktree = exactWorktrees.length === 1 ? exactWorktrees[0] : undefined;
   const indexed =
-    indexedWorktree?.source_reference != null && indexedWorktree.source_revision != null
+    soleWorktree?.source_reference != null && soleWorktree.source_revision != null
       ? {
-          branch: branchFromReference(indexedWorktree.source_reference),
-          revision: indexedWorktree.source_revision,
+          branch: branchFromReference(soleWorktree.source_reference),
+          revision: soleWorktree.source_revision,
         }
       : undefined;
   const [draft, setDraft] = useState<CompareSelection>(selection);
   // An empty head is filled with the indexed worktree as soon as the daemon
   // names it, so the reader types one side, not two. A head the reader typed
-  // is never overwritten.
+  // is never overwritten. The identity fields are the dependency, not the
+  // object holding them, so a re-render does not re-run the fill.
+  const indexedBranch = indexed?.branch;
+  const indexedRevision = indexed?.revision;
   useEffect(() => {
-    if (indexed === undefined) return;
+    if (indexedBranch === undefined || indexedRevision === undefined) return;
     setDraft((current) =>
       current.head.branch === '' && current.head.revision === ''
-        ? { ...current, head: { branch: indexed.branch, revision: indexed.revision } }
+        ? { ...current, head: { branch: indexedBranch, revision: indexedRevision } }
         : current,
     );
-  }, [indexed]);
+  }, [indexedBranch, indexedRevision]);
   return (
     <div className="flex min-h-full flex-col" data-compare-selected={complete}>
       <header className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-2">
@@ -100,7 +107,11 @@ export function CompareView({
       {complete ? (
         <UnionLayoutReading selection={selection} />
       ) : (
-        <SelectionGuidance draft={draft} indexed={indexed} />
+        <SelectionGuidance
+          draft={draft}
+          indexed={indexed}
+          ambiguousMounts={exactWorktrees.length > 1}
+        />
       )}
     </div>
   );
@@ -117,9 +128,11 @@ type IndexedRevision = { branch: string; revision: string };
 function SelectionGuidance({
   draft,
   indexed,
+  ambiguousMounts,
 }: {
   draft: CompareSelection;
   indexed: IndexedRevision | undefined;
+  ambiguousMounts: boolean;
 }) {
   const side = (value: CompareSelection['base']) => {
     if (value.branch === '' && value.revision === '') return 'not named yet';
@@ -143,13 +156,20 @@ function SelectionGuidance({
           <dd className="text-text-primary">{side(draft.head)}</dd>
         </dl>
         <p className="text-3xs leading-relaxed text-text-muted">
-          {indexed === undefined
-            ? 'The daemon has not reported an indexed worktree revision, so nothing is prefilled.'
-            : 'Name the base branch and the exact commit it should hold, then press Compare. A branch that has moved past that commit is reported as stale rather than compared.'}
+          {prefillNote(indexed, ambiguousMounts)}
         </p>
       </div>
     </div>
   );
+}
+
+function prefillNote(indexed: IndexedRevision | undefined, ambiguousMounts: boolean): string {
+  if (indexed !== undefined) {
+    return 'Name the base branch and the exact commit it should hold, then press Compare. A branch that has moved past that commit is reported as stale rather than compared.';
+  }
+  return ambiguousMounts
+    ? 'Several mounted worktrees report an exact revision, so no head is prefilled — name the one you mean.'
+    : 'The daemon has not reported an indexed worktree revision, so nothing is prefilled.';
 }
 
 /** The four identity fields and two lens filters. Submission writes the URL;
