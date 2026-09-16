@@ -21,7 +21,8 @@ pub const RECEIPT_TIMEOUT: Duration = Duration::from_secs(45);
 /// Lanes a terminal receipt still waits for.
 ///
 /// Every lane must answer from the current complete generation. The lexical
-/// lane may do so `partial` with the typed reason `candidate_sources_pruned`:
+/// lane may do so `partial` with the typed reason
+/// [`tracedecay_query::code_search::partial_reason::CANDIDATE_SOURCES_PRUNED`]:
 /// the query's identifier split produced a term whose document frequency
 /// exceeds the lexical candidate budget (`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`),
 /// so recall for that route is policy-bounded, not missing. A journey whose
@@ -36,10 +37,49 @@ fn lanes_short_of_terminal(search: &Value) -> Vec<&'static str> {
             let coverage = &search["coverage"][*lane];
             !(*lane == "lexical"
                 && coverage["status"] == "partial"
-                && coverage["reason"] == "candidate_sources_pruned"
+                && coverage["reason"]
+                    == tracedecay_query::code_search::partial_reason::CANDIDATE_SOURCES_PRUNED
                 && coverage["generation"].is_null())
         })
         .collect()
+}
+
+#[test]
+fn policy_bounded_lexical_partial_is_terminal_only_on_current_generation() {
+    use tracedecay_query::code_search::partial_reason::CANDIDATE_SOURCES_PRUNED;
+
+    let current = json!({
+        "coverage": {
+            "exact": "complete",
+            "lexical": {
+                "status": "partial",
+                "reason": CANDIDATE_SOURCES_PRUNED,
+                "generation": null,
+            },
+            "graph": "complete",
+        }
+    });
+    assert!(
+        lanes_short_of_terminal(&current).is_empty(),
+        "current-generation policy-bounded lexical partial is terminal"
+    );
+
+    let stale = json!({
+        "coverage": {
+            "exact": "complete",
+            "lexical": {
+                "status": "partial",
+                "reason": CANDIDATE_SOURCES_PRUNED,
+                "generation": "generation.previous",
+            },
+            "graph": "complete",
+        }
+    });
+    assert_eq!(
+        lanes_short_of_terminal(&stale),
+        vec!["lexical"],
+        "stale-generation partial with the same reason must keep waiting"
+    );
 }
 
 pub fn daemon_log_for_failure() -> String {

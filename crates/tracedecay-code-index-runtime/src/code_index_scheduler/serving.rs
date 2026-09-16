@@ -189,6 +189,15 @@ const TEXT_ARTIFACT_MAXIMUM_CLONE_WARMUP_ADVANCES_V1: usize = 1;
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
+/// Outcome of the one-slice clone-fingerprint warmup on a similar/redundancy
+/// request. `Pending` means the retained worker owns remaining backfill —
+/// never collapse that into a hard GenerationUnavailable miss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloneSimilarityWarmupForRequestV1 {
+    Ready,
+    Pending,
+}
+
 pub(super) type GenerationServingCachesV1 = (
     CodeGenerationId,
     Arc<RwLock<Option<Arc<ProductionCodeIndexQueryOwnersV1>>>>,
@@ -1917,7 +1926,7 @@ impl LatestCodeTextGenerationV1 {
     pub(crate) fn finish_clone_similarity_warmup_for_request(
         &self,
         request_control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<bool, RetrievalPortError> {
+    ) -> Result<CloneSimilarityWarmupForRequestV1, RetrievalPortError> {
         let mut advances = 0_usize;
         while self.text_projection_needs_work() {
             self.advance_text_serving_for_request(
@@ -1926,10 +1935,16 @@ impl LatestCodeTextGenerationV1 {
             )?;
             advances += 1;
             if advances >= TEXT_ARTIFACT_MAXIMUM_CLONE_WARMUP_ADVANCES_V1 {
-                return Ok(!self.text_projection_needs_work());
+                return Ok(if self.text_projection_needs_work() {
+                    // Background owns the remainder; do not collapse this into
+                    // a hard GenerationUnavailable miss at the executor.
+                    CloneSimilarityWarmupForRequestV1::Pending
+                } else {
+                    CloneSimilarityWarmupForRequestV1::Ready
+                });
             }
         }
-        Ok(true)
+        Ok(CloneSimilarityWarmupForRequestV1::Ready)
     }
 
     pub(crate) fn production_query_owners_with_budget(

@@ -65,7 +65,7 @@ use crate::{
     code_index::provider::GenerationTestAttributionJoinReadPort,
     code_index_scheduler::{
         CodeIndexBuildProgressStateV1, CodeIndexCommittedProgressSampleV1,
-        CodeIndexSchedulerRegistryV1, SharedCodeIndexBytePoolV1,
+        CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1, SharedCodeIndexBytePoolV1,
     },
 };
 
@@ -4148,7 +4148,10 @@ async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
             .execute_query_search(&scope, core_search_request("main"))
             .await;
         assert!(
-            !registry.request_query_background_reconcile(&scope).await,
+            matches!(
+                registry.request_query_background_reconcile(&scope).await,
+                CodeIndexReconcileAdmissionV1::Unavailable
+            ),
             "an outstanding wake must debounce every further admission"
         );
         assert_eq!(
@@ -4164,11 +4167,17 @@ async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
     // A fresh due window (the worker claimed the wake) admits exactly one more.
     registry.clear_pending_wake_for_scope(&scope).await;
     assert!(
-        registry.request_query_background_reconcile(&scope).await,
+        matches!(
+            registry.request_query_background_reconcile(&scope).await,
+            CodeIndexReconcileAdmissionV1::Accepted
+        ),
         "a new due window admits one request"
     );
     assert!(
-        !registry.request_query_background_reconcile(&scope).await,
+        matches!(
+            registry.request_query_background_reconcile(&scope).await,
+            CodeIndexReconcileAdmissionV1::Unavailable
+        ),
         "and only one"
     );
 

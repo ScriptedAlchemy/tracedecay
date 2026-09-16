@@ -1345,6 +1345,17 @@ type ReadyProbeServingPartsV1 = (
     Arc<AtomicUsize>,
 );
 
+/// Typed verdict from a demand-driven reconcile wake (hooks, overflow, query
+/// admission). Callers must match this — especially
+/// [`Self::PublicationAuthorityCorrupt`] — instead of swallowing a bool and
+/// driving inline work against a terminal park.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexReconcileAdmissionV1 {
+    Accepted,
+    PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
+    Unavailable,
+}
+
 #[derive(Clone)]
 pub struct CodeIndexSchedulerRegistryV1 {
     pub max_worktrees: usize,

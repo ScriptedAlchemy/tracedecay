@@ -46,9 +46,9 @@ use crate::{
     },
     code_index_scheduler::{
         CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexHintPolicyV1,
-        CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileOutcomeV1,
-        CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
-        SharedCodeIndexBytePoolV1,
+        CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
+        CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+        GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
         classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
         feedback_document_identity_from_generation,
         freshness_witness::RestoreFreshnessWitnessV1,
@@ -4039,7 +4039,10 @@ async fn a_fresh_seat_declines_query_admission_during_source_verification() {
         .await
         .expect("mounted reconcile owner");
     assert!(
-        !registry.request_query_background_reconcile(&scope).await,
+        matches!(
+            registry.request_query_background_reconcile(&scope).await,
+            CodeIndexReconcileAdmissionV1::Unavailable
+        ),
         "a servable seat under an unexpired proof is already the query's answer"
     );
     assert_eq!(
@@ -5173,7 +5176,10 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
 
     let mut admitted = 0;
     for request in requests {
-        if request.await.expect("query admission task joins") {
+        if matches!(
+            request.await.expect("query admission task joins"),
+            CodeIndexReconcileAdmissionV1::Accepted
+        ) {
             admitted += 1;
         }
     }
@@ -5392,7 +5398,10 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
     );
     registry.release_query_claim(&scope);
     assert!(
-        !request.await.expect("query admission task joins"),
+        matches!(
+            request.await.expect("query admission task joins"),
+            CodeIndexReconcileAdmissionV1::Unavailable
+        ),
         "a query whose claim lost its owner to a foreign wake must not restamp \
          QueryAdmission over that arrival"
     );
@@ -5442,7 +5451,10 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     registry.release_pending_wake_claim_drop(&scope).await;
 
     assert!(
-        !request.await.expect("query admission task joins"),
+        matches!(
+            request.await.expect("query admission task joins"),
+            CodeIndexReconcileAdmissionV1::Unavailable
+        ),
         "the rejected query releases its own claimed marker"
     );
     assert!(
