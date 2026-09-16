@@ -187,6 +187,10 @@ pub(super) fn def_remote_status_read() -> ToolDefinition {
 #[cfg(test)]
 mod tests {
     use super::{application_definitions, application_input_schema};
+    use crate::definitions::{
+        add_format_property, add_registered_project_selector_properties,
+        get_maximal_tool_definitions, project_input_schema,
+    };
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId};
 
     #[test]
@@ -219,6 +223,7 @@ mod tests {
         let registry = tracedecay_contracts::mcp_executable_binding_registry()
             .expect("application MCP registry");
         let definitions = application_definitions().expect("application definitions");
+        let advertised = get_maximal_tool_definitions().expect("advertised definitions");
 
         for operation in ApplicationSurfaceOperation::ALL {
             let descriptor = handlers
@@ -240,10 +245,35 @@ mod tests {
                 executable.capability_id(),
                 descriptor.operation().capability_id()
             );
+            let canonical = executable.request_schema().body();
+            let expected_schema = match operation {
+                // These tools deliberately adapt a shipped request or bound
+                // a CAS-gated payload. Every other request must stay typed.
+                ApplicationSurfaceOperation::DiagnosticsRead
+                | ApplicationSurfaceOperation::ConfigurationSet
+                | ApplicationSurfaceOperation::ConfigurationBatch
+                | ApplicationSurfaceOperation::ConfigurationProtectedPreview => {
+                    application_input_schema(operation, canonical).expect("reviewed MCP projection")
+                }
+                _ => canonical.clone(),
+            };
+            assert_eq!(definition.input_schema, expected_schema, "{operation:?}");
+
+            // Check the final tools/list projection too: assembly can add
+            // transport arguments or accidentally introduce a duplicate name.
+            let mut expected = vec![definition.clone()];
+            project_input_schema(&mut expected[0].input_schema);
+            add_registered_project_selector_properties(&mut expected);
+            add_format_property(&mut expected).expect("transport format schema");
+            let published = advertised
+                .iter()
+                .filter(|published| published.name == definition.name)
+                .collect::<Vec<_>>();
+            assert_eq!(published.len(), 1, "{}", definition.name);
             assert_eq!(
-                definition.input_schema,
-                application_input_schema(operation, executable.request_schema().body())
-                    .expect("application input schema")
+                published[0].input_schema, expected[0].input_schema,
+                "{}",
+                definition.name
             );
         }
     }

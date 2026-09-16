@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn work_and_workflow_advertise_every_executable_request_schema() {
+    let definitions = get_maximal_tool_definitions().expect("tool definitions");
+    for (family, registry) in [
+        (
+            "work",
+            tracedecay_contracts::work_executable_binding_registry().expect("Work registry"),
+        ),
+        (
+            "workflow",
+            tracedecay_contracts::workflow_executable_binding_registry()
+                .expect("Workflow registry"),
+        ),
+    ] {
+        assert!(registry.iter().count() > 0);
+        for availability in registry.iter() {
+            let binding = availability.binding().expect("executable binding");
+            let operation = binding
+                .operation_id()
+                .as_str()
+                .strip_prefix(&format!("operation.{family}."))
+                .expect("operation family");
+            let name = format!("tracedecay_{family}_{operation}");
+            let advertised = definitions
+                .iter()
+                .filter(|definition| definition.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(advertised.len(), 1, "{name}");
+            assert_eq!(
+                advertised[0].input_schema,
+                mcp_input_schema(binding.request_schema().body()),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
     assert!(
         get_tool_definitions()
