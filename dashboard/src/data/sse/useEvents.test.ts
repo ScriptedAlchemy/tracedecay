@@ -44,7 +44,7 @@ describe("SSE query invalidation", () => {
         events: [
           event("storage_telemetry_invalidated"),
           event("project_registry_changed"),
-          event("code_index_activity"),
+          event("code_index_activity", "project.alpha"),
           event("heartbeat"),
         ],
         refetch: false,
@@ -53,8 +53,35 @@ describe("SSE query invalidation", () => {
     ).toEqual([
       ["storage", "telemetry"],
       ["projects"],
-      ["code-index"],
+      ["code-index", "freshness", "project:project.alpha"],
     ]);
+  });
+
+  it("scopes code_index_activity to the event's project freshness key", () => {
+    expect(
+      targetedInvalidationKeys({
+        events: [event("code_index_activity", "project.alpha")],
+        refetch: false,
+        stale: false,
+      }),
+    ).toEqual([["code-index", "freshness", "project:project.alpha"]]);
+    expect(
+      targetedInvalidationKeys({
+        events: [event("code_index_activity", "project.beta")],
+        refetch: false,
+        stale: false,
+      }),
+    ).toEqual([["code-index", "freshness", "project:project.beta"]]);
+  });
+
+  it("does not invent a code-index target for activity without a project", () => {
+    expect(
+      targetedInvalidationKeys({
+        events: [event("code_index_activity")],
+        refetch: false,
+        stale: false,
+      }),
+    ).toEqual([]);
   });
 
   it("invalidates all canonical queries after a revision gap", () => {

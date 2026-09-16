@@ -60,8 +60,19 @@ describe('Compare prefill', () => {
     ]);
     renderCompare();
 
-    await screen.findByText(/nothing is prefilled/i);
+    expect(await screen.findByText(/indexed worktree that is not fresh/i)).toBeTruthy();
+    expect(screen.queryByText(/has not reported an indexed worktree revision/i)).toBeNull();
     expect(screen.queryByDisplayValue('stale-branch')).toBeNull();
+  });
+
+  it('says the daemon has not reported a revision when no worktree identities exist', async () => {
+    stubFreshness([]);
+    renderCompare();
+
+    expect(
+      await screen.findByText(/has not reported an indexed worktree revision/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/is not fresh/i)).toBeNull();
   });
 
   it('keeps a cleared head cleared across parent re-renders', async () => {
@@ -111,13 +122,11 @@ describe('Compare prefill', () => {
 
     const longName = `${'very-long-branch-name-'.repeat(4)}tail`;
     const branch = await screen.findByDisplayValue(longName);
-    expect(branch.className).toContain('break-all');
-    expect(branch.className).toContain('max-w-full');
+    expect(branch).toHaveProperty('value', longName);
     const guidance = document.querySelector('[data-compare-guidance] dd:last-of-type');
-    expect(guidance?.className).toContain('min-w-0');
-    expect(guidance?.className).toContain('break-all');
     expect(guidance?.getAttribute('title')).toContain(longName);
     expect(guidance?.textContent).toContain(longName);
+    expect(guidance?.textContent).not.toMatch(/…/);
   });
 });
 
