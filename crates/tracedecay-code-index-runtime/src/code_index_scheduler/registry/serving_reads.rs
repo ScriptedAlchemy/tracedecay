@@ -1475,7 +1475,8 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn request_query_background_reconcile(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
-    ) -> bool {
+    ) -> super::CodeIndexReconcileAdmissionV1 {
+        use super::CodeIndexReconcileAdmissionV1;
         #[cfg(test)]
         let test_control = Self::query_admission_control_for_test(scope);
         #[cfg(test)]
@@ -1496,8 +1497,11 @@ impl CodeIndexSchedulerRegistryV1 {
         ) = {
             let mounted = self.mounted.lock().await;
             let Some((root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
-                return false;
+                return CodeIndexReconcileAdmissionV1::Unavailable;
             };
+            if Self::publication_authority_requires_reset(worktree) {
+                return Self::publication_authority_corrupt_admission(worktree);
+            }
             (
                 root.clone(),
                 worktree.source_freshness.clone(),
@@ -1519,7 +1523,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // the blocking freshness probe. A pending or concurrently claimed wake
         // already supplies this query's remedy.
         let Some(wake_claim) = PendingWakeClaimV1::claim(Arc::clone(&pending_wake)) else {
-            return false;
+            return CodeIndexReconcileAdmissionV1::Unavailable;
         };
         #[cfg(test)]
         if let Some(test_control) = test_control.as_ref()
@@ -1547,7 +1551,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work);
         let proof_expired = !source_freshness.ready_without_stat(&root, &shutting_down);
         if !nothing_servable && !text_owners_are_warming && !proof_expired {
-            return false;
+            return CodeIndexReconcileAdmissionV1::Unavailable;
         }
         if nothing_servable {
             // This admission observed no source mutation, so it may not
@@ -1571,7 +1575,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // `take_pending_arrival` (owner reset to zero); that only happens
         // inside a reconcile pass, which is itself the remedy.
         if !wake_claim.still_owns() {
-            return false;
+            return CodeIndexReconcileAdmissionV1::Unavailable;
         }
         Self::note_wake(
             &pending_wake,
@@ -1579,6 +1583,6 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexCadenceTriggerV1::QueryAdmission,
         );
         wake_claim.settle();
-        true
+        CodeIndexReconcileAdmissionV1::Accepted
     }
 }

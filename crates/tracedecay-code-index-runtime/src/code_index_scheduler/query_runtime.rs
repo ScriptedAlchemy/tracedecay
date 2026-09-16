@@ -21,7 +21,10 @@ use tracedecay_domain::{
     ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
-use super::{CodeIndexSchedulerRegistryV1, serving::CodeTextQueryOwnerReadinessV1};
+use super::{
+    CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1,
+    serving::CodeTextQueryOwnerReadinessV1,
+};
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
 };
@@ -542,7 +545,17 @@ impl CodeIndexSchedulerRegistryV1 {
                         // admission (debounced on the pending wake), never inline and
                         // never parking, then still fail typed rather than degrade
                         // into an empty answer.
-                        self.request_query_background_reconcile(scope).await;
+                        match self.request_query_background_reconcile(scope).await {
+                            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) => {
+                                return Err(
+                                    QuerySearchExecutionErrorV1::ExactGenerationUnavailable(
+                                        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                                    ),
+                                );
+                            }
+                            CodeIndexReconcileAdmissionV1::Accepted
+                            | CodeIndexReconcileAdmissionV1::Unavailable => {}
+                        }
                         let unverified = self.generation_is_unverified_for_scope(scope).await;
                         return Err(if unverified {
                             QuerySearchExecutionErrorV1::GenerationUnverified
@@ -666,7 +679,15 @@ where
         if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_))
             || text.text_projection_needs_work()
         {
-            schedulers.request_query_background_reconcile(scope).await;
+            match schedulers.request_query_background_reconcile(scope).await {
+                CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) => {
+                    return Err(QuerySearchExecutionErrorV1::ExactGenerationUnavailable(
+                        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                    ));
+                }
+                CodeIndexReconcileAdmissionV1::Accepted
+                | CodeIndexReconcileAdmissionV1::Unavailable => {}
+            }
         }
         let CodeTextQueryOwnerReadinessV1::Ready(owners) = readiness else {
             return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
