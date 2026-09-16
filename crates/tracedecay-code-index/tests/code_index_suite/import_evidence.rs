@@ -360,6 +360,40 @@ fn rust_inherent_impl_methods_resolve_when_type_and_impl_are_in_different_files(
 }
 
 #[test]
+fn rust_inherent_method_does_not_bind_to_a_same_named_type_in_another_module() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.homonym.lib",
+            "crates/widgets/src/lib.rs",
+            "mod inner;\npub struct Builder;\nimpl Builder {\n    pub fn finish(&self) {}\n}\n",
+        ),
+        (
+            "file.homonym.inner",
+            "crates/widgets/src/inner.rs",
+            "pub struct Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.homonym.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n    builder.finish();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let finish = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Builder::finish");
+    let inner_build = symbol_occurrence(&generation, "crates/widgets/src/inner.rs::Builder::build");
+
+    assert_resolved_edge(&generation, &caller, &finish, RelationEdgeKindV1::Calls);
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != caller
+                || edge.to_occurrence != inner_build
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "`inner::Builder::build` belongs to a different type than `widgets::Builder`"
+    );
+}
+
+#[test]
 fn rust_typed_parameter_method_call_binds_through_import_and_crate_reexport() {
     let generation = published_rust_workspace(&[
         (
