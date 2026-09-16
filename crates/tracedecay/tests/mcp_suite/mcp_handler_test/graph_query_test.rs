@@ -2324,7 +2324,7 @@ async fn callers_of_cross_file_builder_method_include_typed_local_sites() {
                  builder.build()\n\
              }\n\
              pub fn make_walk_again() -> u32 {\n\
-                 let builder = WalkBuilder::new();\n\
+                 let mut builder = WalkBuilder::new();\n\
                  builder.build()\n\
              }\n",
         )

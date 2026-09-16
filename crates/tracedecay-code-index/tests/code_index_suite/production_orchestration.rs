@@ -590,7 +590,7 @@ fn cross_file_builder_method_calls_bind_through_typed_locals() {
             "file.builder.caller",
             "crates/app/src/lib.rs",
             "rust",
-            "use builder::WalkBuilder;\npub fn make_walk() -> u32 {\n    let mut builder = WalkBuilder::new();\n    builder.build()\n}\npub fn make_walk_again() -> u32 {\n    let builder = WalkBuilder::new();\n    builder.build()\n}\n",
+            "use builder::WalkBuilder;\npub fn make_walk() -> u32 {\n    let mut builder = WalkBuilder::new();\n    builder.build()\n}\npub fn make_walk_again() -> u32 {\n    let mut builder = WalkBuilder::new();\n    builder.build()\n}\n",
         ),
         (
             "file.builder.def",
