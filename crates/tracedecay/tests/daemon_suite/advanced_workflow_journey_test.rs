@@ -444,6 +444,51 @@ fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
 }
 
 #[test]
+fn feedback_proximity_http_is_mounted_in_an_isolated_project() {
+    let scratch = workflow_tempdir();
+    let home = scratch.path().join("home");
+    let project = scratch.path().join("project");
+    initialize_project(&home, &project);
+    let project = project.canonicalize().expect("canonical project root");
+    let _daemon = spawn_project_daemon(&home, &project);
+    run(
+        common::tracedecay_command_with_home(&home)
+            .arg("init")
+            .current_dir(&project),
+        "tracedecay init",
+    );
+    let context: Value = serde_json::from_slice(&run(
+        common::tracedecay_command_with_home(&home)
+            .args(["projects", "context"])
+            .arg(&project)
+            .arg("--json")
+            .current_dir(&project),
+        "tracedecay projects context",
+    ))
+    .expect("project context JSON");
+    let project_id: ProjectId = id(context["project"]["project_id"]
+        .as_str()
+        .expect("project id"));
+    let client = sdk_client(&home, project_id.as_str());
+    let _ = wait_for_application_mount(&client);
+    wait_for_work_mount(&client);
+    let dashboard = task_session::DashboardProcess::start(&home, &project);
+
+    let (status, body) = dashboard.read_proximity(now());
+
+    assert_eq!(status, 200, "POST /api/feedback/proximity failed: {body}");
+    assert!(
+        body.pointer("/value/outcome/value/payload/state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| matches!(
+                state,
+                "complete" | "complete_zero" | "partial" | "stale" | "unavailable"
+            )),
+        "the route must return a generated typed state: {body}"
+    );
+}
+
+#[test]
 fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let scratch = workflow_tempdir();
     let home = scratch.path().join("home");
@@ -1346,6 +1391,22 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         &client,
         &dashboard,
         evidence_scope,
+    );
+    let (proximity_status, proximity) = dashboard.read_proximity(now());
+    assert_eq!(
+        proximity_status, 200,
+        "the canonical proximity route must be mounted beside the Work evidence read: {proximity}"
+    );
+    let proximity_state = proximity
+        .pointer("/value/outcome/value/payload/state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("proximity response omitted its typed state: {proximity}"));
+    assert!(
+        matches!(
+            proximity_state,
+            "complete" | "complete_zero" | "partial" | "stale"
+        ),
+        "the admitted journey must return a typed proximity read: {proximity}"
     );
 
     let handoff_scope = TaskHandoffScope::new(

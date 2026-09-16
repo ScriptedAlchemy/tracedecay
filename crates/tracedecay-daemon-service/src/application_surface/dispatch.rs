@@ -301,6 +301,14 @@ pub async fn execute_application_surface(
                     cancellation_context,
                 )
             }
+            ApplicationSurfaceRequest::FeedbackProximity(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback_proximity(
+                    request_id.as_str(),
+                    request,
+                    deadline,
+                    cancellation_context,
+                )
+            }
             ApplicationSurfaceRequest::TestResults(_) => {
                 tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
                     request_id.as_str(),

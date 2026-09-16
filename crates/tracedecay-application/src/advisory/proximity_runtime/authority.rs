@@ -10,7 +10,9 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::feedback::{
-    FeedbackPortFuture, PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1,
+    FeedbackPortFuture, FeedbackProximityAccessKindV1, FeedbackProximityEncounterV1,
+    FeedbackProximityIntervalV1, FeedbackProximityOmissionV1, FeedbackProximityParticipantV1,
+    FeedbackProximityRelationV1, PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1,
     ProximityEvaluationRequestV1,
 };
 use tracedecay_domain::feedback::{
@@ -19,23 +21,25 @@ use tracedecay_domain::feedback::{
     ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityWarningClassV1,
 };
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, ContentDigest, ObservationScopeV1, RelationEdgeKindV1,
-    SourceSpan, SymbolOccurrenceId, UtcMicros,
+    AgentInstanceId, CanonicalObservationEnvelopeV1, CommitId, ContentDigest, FileOccurrenceId,
+    ObservationScopeV1, ObservationSourceIdentityV1, RefId, RelationEdgeKindV1, SourceSpan,
+    SymbolOccurrenceId, UtcMicros, canonical_sha256,
 };
-use tracedecay_graph_db::GraphNamespace;
+use tracedecay_graph_db::{GraphCancellation, GraphNamespace};
 use tracedecay_store::{ObservationProjectionStore, ObservationReplayRequest, ObservationStore};
 
 use super::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
-    CanonicalProximityEvidenceV1,
+    CanonicalProximityEvidenceV1, FeedbackProximityReadRuntimeV1,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation,
 };
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitRelationFilter, GitEvidenceGraphHead, GitRefFilter, SessionsForQuery,
-    git_evidence_projection_identity, normalize_worktree, open_git_evidence_graph_view,
+    CommitRelationFilter, GitEvidenceGraphHead, GitRefFilter, SessionGitCorrelationHit,
+    SessionsForQuery, git_evidence_projection_identity, normalize_worktree,
+    open_git_evidence_graph_view,
 };
 
 const MAX_ACTIVE_SESSIONS_V1: usize = 32;
@@ -58,9 +62,314 @@ struct StoredAgentObservation {
 struct ProximityCandidate {
     path: String,
     session_keys: BTreeSet<SessionKey>,
+    session_paths: BTreeMap<SessionKey, String>,
     warning_class: ProximityWarningClassV1,
     relation_kinds: Vec<ProximityRelationPathKindV1>,
     relation_strength: ProximityRelationStrengthV1,
+}
+
+type VerifiedGraphPaths = BTreeMap<String, (FileOccurrenceId, ContentDigest)>;
+
+struct ProximityAssembly<'a> {
+    owner: &'a ProductionProximityEvidenceAuthorityV1,
+    request: &'a ProximityEvaluationRequestV1,
+    code_index_identity: Option<&'a crate::diagnostics_publication::CodeIndexPublicationIdentityV1>,
+    verified_graph_paths: &'a VerifiedGraphPaths,
+    observations: &'a BTreeMap<SessionKey, StoredAgentObservation>,
+    graph_nodes: &'a BTreeMap<String, Vec<CodeGraphSymbolSummaryV1>>,
+    session_edit_spans: &'a BTreeMap<(SessionKey, String), Vec<SourceSpan>>,
+    active: &'a BTreeMap<SessionKey, SessionGitCorrelationHit>,
+    reader: &'a CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    observed_seconds: i64,
+    since: i64,
+    expires_at: UtcMicros,
+}
+
+impl ProximityAssembly<'_> {
+    fn evidence_for(
+        &self,
+        candidate: ProximityCandidate,
+        omissions: &mut BTreeSet<FeedbackProximityOmissionV1>,
+    ) -> Option<CanonicalProximityEvidenceV1> {
+        let file = if let Some(identity) = self.code_index_identity {
+            let Some((file, indexed_digest)) = identity.file(&candidate.path) else {
+                omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
+                return None;
+            };
+            let Some((_, graph_digest)) = self.verified_graph_paths.get(&candidate.path) else {
+                omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
+                return None;
+            };
+            if indexed_digest != graph_digest {
+                omissions.insert(FeedbackProximityOmissionV1::CodeIndexRevisionMismatch);
+                return None;
+            }
+            file.clone()
+        } else {
+            let Some((file, _)) = self.verified_graph_paths.get(&candidate.path) else {
+                omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
+                return None;
+            };
+            file.clone()
+        };
+        let selected = candidate
+            .session_keys
+            .iter()
+            .filter_map(|key| {
+                self.observations
+                    .get(key)
+                    .map(|observation| (key, observation))
+            })
+            .collect::<Vec<_>>();
+        let agents = selected
+            .iter()
+            .filter_map(|(_, observation)| observation.envelope.relations().agent_id())
+            .map(tracedecay_domain::ObservationId::as_str)
+            .collect::<BTreeSet<_>>();
+        if selected.len() < 2 || agents.len() < 2 {
+            omissions.insert(FeedbackProximityOmissionV1::MissingParticipantObservation);
+            return None;
+        }
+        let path_nodes = self
+            .graph_nodes
+            .get(&candidate.path)
+            .map_or(&[][..], Vec::as_slice);
+        let blast_radius_size = if path_nodes.is_empty() {
+            omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
+            1
+        } else {
+            let seeds = path_nodes
+                .iter()
+                .map(|node| node.occurrence.clone())
+                .collect::<Vec<_>>();
+            if let Ok(nodes) = self.reader.impact(
+                &seeds,
+                &[],
+                1,
+                100_000,
+                100_000,
+                Arc::clone(&self.cancellation),
+            ) {
+                u32::try_from(nodes.impacted.len().max(1)).unwrap_or(u32::MAX)
+            } else {
+                omissions.insert(FeedbackProximityOmissionV1::CloneCoveragePartial);
+                u32::try_from(path_nodes.len()).unwrap_or(u32::MAX)
+            }
+        };
+        let latest_activity = candidate
+            .session_keys
+            .iter()
+            .filter_map(|key| self.active.get(key))
+            .filter_map(|hit| hit.last_ts.or(hit.committed_at).or(hit.first_ts))
+            .max()
+            .unwrap_or(self.since);
+        let age = self.observed_seconds.saturating_sub(latest_activity).max(0);
+        let freshness = 10_000_u16.saturating_sub(
+            u16::try_from(
+                age.saturating_mul(10_000)
+                    .div_euclid(ACTIVITY_HORIZON_SECONDS_V1)
+                    .min(10_000),
+            )
+            .unwrap_or(10_000),
+        );
+        let exact_address = self
+            .verified_graph_paths
+            .contains_key(&candidate.path)
+            .then(|| {
+                let ranges = candidate
+                    .session_keys
+                    .iter()
+                    .map(|key| {
+                        self.session_edit_spans
+                            .get(&(key.clone(), candidate.path.clone()))
+                            .map(Vec::as_slice)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                exact_graph_address(path_nodes, &ranges)
+            })
+            .flatten();
+        if candidate.warning_class == ProximityWarningClassV1::SameFile
+            && !path_nodes.is_empty()
+            && exact_address.is_none()
+        {
+            omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
+        }
+        let warning_class = exact_warning_class(candidate.warning_class, exact_address.is_some());
+        let relation_anchor = selected
+            .first()
+            .map(|(_, observation)| observation.anchor.clone());
+        let mut participants = Vec::with_capacity(selected.len());
+        for (key, observation) in &selected {
+            let Some(hit) = self.active.get(*key) else {
+                omissions.insert(FeedbackProximityOmissionV1::MissingParticipantObservation);
+                continue;
+            };
+            let Some(worktree_root) = hit.worktree.clone() else {
+                omissions.insert(FeedbackProximityOmissionV1::MissingParticipantWorktree);
+                continue;
+            };
+            let Some(path) = candidate.session_paths.get(*key) else {
+                omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
+                continue;
+            };
+            let Some((participant_file, graph_digest)) = self.verified_graph_paths.get(path) else {
+                omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
+                continue;
+            };
+            if self
+                .code_index_identity
+                .and_then(|identity| identity.file(path))
+                .is_some_and(|(_, indexed_digest)| indexed_digest != graph_digest)
+            {
+                omissions.insert(FeedbackProximityOmissionV1::CodeIndexRevisionMismatch);
+                continue;
+            }
+            let participant_nodes = self.graph_nodes.get(path).map_or(&[][..], Vec::as_slice);
+            let ranges = self
+                .session_edit_spans
+                .get(&((*key).clone(), path.clone()))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let (span, symbol) = participant_graph_address(participant_nodes, ranges);
+            let source = ObservationSourceIdentityV1::for_provider(
+                observation.envelope.provider().clone(),
+                observation.envelope.relations().session_id().clone(),
+            )
+            .ok()?;
+            let agent_id = AgentInstanceId::new(
+                observation
+                    .envelope
+                    .relations()
+                    .agent_id()?
+                    .as_str()
+                    .to_owned(),
+            )
+            .ok()?;
+            let activity = activity_interval(hit)?;
+            let normalized = normalize_worktree(&worktree_root);
+            let head_revision = if normalized == self.owner.normalized_worktree {
+                Some(self.request.scope.head_commit_id.clone())
+            } else {
+                hit.commit_sha
+                    .as_ref()
+                    .and_then(|commit| CommitId::new(commit.clone()).ok())
+            };
+            if head_revision.is_none() {
+                omissions.insert(FeedbackProximityOmissionV1::MissingParticipantRevision);
+            }
+            participants.push(FeedbackProximityParticipantV1 {
+                source,
+                agent_id,
+                worktree_id: (normalized == self.owner.normalized_worktree)
+                    .then(|| self.request.scope.worktree_id.clone()),
+                worktree_root,
+                branch_ref: hit.branch.as_deref().and_then(branch_ref),
+                head_revision,
+                access: FeedbackProximityAccessKindV1::Write,
+                activity,
+                address: ProximityAddressV1 {
+                    scope: self.request.scope.clone(),
+                    file: participant_file.clone(),
+                    span,
+                    symbol,
+                },
+            });
+        }
+        if participants.len() != 2 {
+            return None;
+        }
+        let interval = FeedbackProximityIntervalV1 {
+            start: participants
+                .iter()
+                .map(|participant| participant.activity.start)
+                .max()?,
+            end: participants
+                .iter()
+                .map(|participant| participant.activity.end)
+                .min()?,
+        };
+        if interval.start.0 > interval.end.0 {
+            return None;
+        }
+        let relation = if matches!(
+            warning_class,
+            ProximityWarningClassV1::SameFile
+                | ProximityWarningClassV1::OverlappingRange
+                | ProximityWarningClassV1::SameSymbol
+        ) {
+            FeedbackProximityRelationV1::OverlappingEdit { warning_class }
+        } else {
+            FeedbackProximityRelationV1::CodeNeighborhoodCandidate { warning_class }
+        };
+        let encounter_id = canonical_sha256(&(
+            "tracedecay.feedback.proximity.encounter.v1",
+            &self.request.scope,
+            &interval,
+            &participants,
+            &relation,
+            self.request.observed_at,
+            self.expires_at,
+        ))
+        .ok()?;
+        let encounter = FeedbackProximityEncounterV1 {
+            encounter_id,
+            scope: self.request.scope.clone(),
+            interval,
+            participants,
+            relation,
+            observed_at: self.request.observed_at,
+            expires_at: self.expires_at,
+            coverage: ProximityCoverageV1::Complete,
+        };
+        Some(CanonicalProximityEvidenceV1 {
+            observations: selected
+                .iter()
+                .map(|(_, observation)| observation.envelope.clone())
+                .collect(),
+            retrieval_anchor_ids: selected
+                .iter()
+                .map(|(_, observation)| observation.anchor.clone())
+                .collect(),
+            encounter,
+            address: ProximityAddressV1 {
+                scope: self.request.scope.clone(),
+                file,
+                span: exact_address.as_ref().map(|address| address.0),
+                symbol: exact_address.map(|address| address.1),
+            },
+            relation_paths: candidate
+                .relation_kinds
+                .into_iter()
+                .map(|kind| ProximityRelationPathV1 {
+                    kind,
+                    retrieval_anchor_id: relation_anchor.clone(),
+                })
+                .collect(),
+            risk_inputs: ProximityRiskInputsV1 {
+                overlap_size: u32::try_from(selected.len()).unwrap_or(u32::MAX),
+                blast_radius_size,
+                relation_strength: candidate.relation_strength,
+                branch_worktree_incompatibility:
+                    ProximityBranchWorktreeIncompatibilityV1::Compatible,
+                freshness_decay_basis_points: freshness,
+            },
+            warning_class,
+            raw_risk_basis_points: if matches!(
+                warning_class,
+                ProximityWarningClassV1::SameFile
+                    | ProximityWarningClassV1::OverlappingRange
+                    | ProximityWarningClassV1::SameSymbol
+            ) {
+                10_000
+            } else {
+                7_500
+            },
+            observed_at: self.request.observed_at,
+            expires_at: self.expires_at,
+            coverage: ProximityCoverageV1::Complete,
+        })
+    }
 }
 
 /// Owned production authority mounted by the advisory registrar.
@@ -134,17 +443,28 @@ impl ProductionProximityEvidenceAuthorityV1 {
         let reader = verified
             .reader_with_cancellation(context, request.observed_at, Arc::clone(&cancellation))
             .ok()?;
+        let source_generation = reader.generation().clone();
+        let expires_at = UtcMicros(request.observed_at.0.checked_add(EVIDENCE_TTL_MICROS_V1)?);
+        let mut omissions = BTreeSet::new();
         let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref() {
             let Some(identity) = resolver.resolve(self.worktree_root.clone()).await else {
                 return Some(CanonicalProximityEvidenceBatchV1 {
                     evidence: Vec::new(),
                     coverage: ProximityCoverageV1::Partial,
+                    source_generation,
+                    observed_at: request.observed_at,
+                    expires_at,
+                    omissions: vec![FeedbackProximityOmissionV1::CodeIndexRevisionMismatch],
                 });
             };
             if identity.source_revision() != Some(&request.scope.head_commit_id) {
                 return Some(CanonicalProximityEvidenceBatchV1 {
                     evidence: Vec::new(),
                     coverage: ProximityCoverageV1::Partial,
+                    source_generation,
+                    observed_at: request.observed_at,
+                    expires_at,
+                    omissions: vec![FeedbackProximityOmissionV1::CodeIndexRevisionMismatch],
                 });
             }
             Some(identity)
@@ -159,8 +479,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
         let projection =
             git_evidence_projection_identity(GraphNamespace::new("project").ok()?).ok()?;
         // A never-published, legacy, or unreadable head yields no proximity
-        // evidence, the same as before; the bounded view hydrates only the
-        // sessions active on this worktree instead of the whole projection.
+        // evidence. Branch scope retains separately registered worktrees.
         let GitEvidenceGraphHead::Indexed(view) = open_git_evidence_graph_view(
             self.sessions.project_graph_runtime()?,
             &projection,
@@ -173,7 +492,14 @@ impl ProductionProximityEvidenceAuthorityV1 {
         let hits = view
             .sessions_for(
                 &SessionsForQuery {
-                    git_ref: GitRefFilter::Worktree(self.normalized_worktree.clone()),
+                    git_ref: GitRefFilter::Branch(
+                        request
+                            .scope
+                            .branch_ref
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(request.scope.branch_ref.as_str())
+                            .to_owned(),
+                    ),
                     since: Some(since),
                     until: Some(observed_seconds),
                     limit: MAX_ACTIVE_SESSIONS_V1,
@@ -181,20 +507,27 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 CommitRelationFilter::Produced,
             )
             .ok()?;
-        let mut partial = hits.len() == MAX_ACTIVE_SESSIONS_V1;
+        if hits.len() == MAX_ACTIVE_SESSIONS_V1 {
+            omissions.insert(FeedbackProximityOmissionV1::ActiveSessionLimit);
+        }
         let mut active = BTreeMap::new();
         for hit in hits {
             active.insert((hit.provider.clone(), hit.session_id.clone()), hit);
         }
         if active.len() < 2 {
-            return CanonicalProximityEvidenceBatchV1::new(
-                Vec::new(),
-                if partial {
-                    ProximityCoverageV1::Partial
-                } else {
+            return CanonicalProximityEvidenceBatchV1 {
+                evidence: Vec::new(),
+                coverage: if omissions.is_empty() {
                     ProximityCoverageV1::Complete
+                } else {
+                    ProximityCoverageV1::Partial
                 },
-            );
+                source_generation,
+                observed_at: request.observed_at,
+                expires_at,
+                omissions: omissions.into_iter().collect(),
+            }
+            .validated();
         }
 
         let mut edits: BTreeMap<String, BTreeSet<SessionKey>> = BTreeMap::new();
@@ -211,7 +544,9 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 )
                 .await
                 .ok()?;
-            partial |= rows.len() == MAX_ACTIVITY_ROWS_PER_SESSION_V1;
+            if rows.len() == MAX_ACTIVITY_ROWS_PER_SESSION_V1 {
+                omissions.insert(FeedbackProximityOmissionV1::SessionActivityLimit);
+            }
             for row in rows {
                 for edit in edited_paths(row.metadata_json.as_deref(), &self.worktree_root) {
                     edits
@@ -232,7 +567,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
             }
         }
         if edits.len() > MAX_EDITED_PATHS_V1 {
-            partial = true;
+            omissions.insert(FeedbackProximityOmissionV1::EditedPathLimit);
             let retained = edits
                 .keys()
                 .take(MAX_EDITED_PATHS_V1)
@@ -249,11 +584,15 @@ impl ProductionProximityEvidenceAuthorityV1 {
         let after_sequence = checkpoint
             .last_sequence()
             .saturating_sub(MAX_RECENT_OBSERVATIONS_V1 as u64);
-        partial |= checkpoint.last_sequence() > MAX_RECENT_OBSERVATIONS_V1 as u64;
+        if checkpoint.last_sequence() > MAX_RECENT_OBSERVATIONS_V1 as u64 {
+            omissions.insert(FeedbackProximityOmissionV1::RecentObservationLimit);
+        }
         let replay =
             ObservationReplayRequest::new(after_sequence, MAX_RECENT_OBSERVATIONS_V1).ok()?;
         let rows = observation_store.replay_observations(replay).await.ok()?;
-        partial |= rows.len() == MAX_RECENT_OBSERVATIONS_V1;
+        if rows.len() == MAX_RECENT_OBSERVATIONS_V1 {
+            omissions.insert(FeedbackProximityOmissionV1::RecentObservationLimit);
+        }
         let project_scope = ObservationScopeV1::Project {
             project_id: request.scope.project_id.clone(),
         };
@@ -265,7 +604,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
             let Ok(envelope) = serde_json::from_value::<CanonicalObservationEnvelopeV1>(
                 row.observation().payload().clone(),
             ) else {
-                partial = true;
+                omissions.insert(FeedbackProximityOmissionV1::MissingParticipantObservation);
                 continue;
             };
             if envelope.relations().agent_id().is_none() {
@@ -290,7 +629,9 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 observations.insert(key, candidate);
             }
         }
-        partial |= active.keys().any(|key| !observations.contains_key(key));
+        if active.keys().any(|key| !observations.contains_key(key)) {
+            omissions.insert(FeedbackProximityOmissionV1::MissingParticipantObservation);
+        }
 
         let mut graph_nodes = BTreeMap::<String, Vec<CodeGraphSymbolSummaryV1>>::new();
         let mut verified_graph_paths = BTreeMap::new();
@@ -311,24 +652,39 @@ impl ProductionProximityEvidenceAuthorityV1 {
                             );
                         }
                         _ => {
-                            partial = true;
+                            omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
                         }
                     }
                 }
                 Err(_) => {
-                    partial = true;
+                    omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
                 }
             }
         }
         let mut candidates = edits
             .iter()
             .filter(|(_, sessions)| sessions.len() >= 2)
-            .map(|(path, sessions)| ProximityCandidate {
-                path: path.clone(),
-                session_keys: sessions.clone(),
-                warning_class: ProximityWarningClassV1::SameFile,
-                relation_kinds: Vec::new(),
-                relation_strength: ProximityRelationStrengthV1::Direct,
+            .flat_map(|(path, sessions)| {
+                let sessions = sessions.iter().cloned().collect::<Vec<_>>();
+                (0..sessions.len()).flat_map(move |left| {
+                    let sessions = sessions.clone();
+                    let path = path.clone();
+                    (left.saturating_add(1)..sessions.len()).map(move |right| {
+                        let left = sessions[left].clone();
+                        let right = sessions[right].clone();
+                        ProximityCandidate {
+                            path: path.clone(),
+                            session_keys: BTreeSet::from([left.clone(), right.clone()]),
+                            session_paths: BTreeMap::from([
+                                (left, path.clone()),
+                                (right, path.clone()),
+                            ]),
+                            warning_class: ProximityWarningClassV1::SameFile,
+                            relation_kinds: Vec::new(),
+                            relation_strength: ProximityRelationStrengthV1::Direct,
+                        }
+                    })
+                })
             })
             .collect::<Vec<_>>();
         let session_keys = session_edits.keys().cloned().collect::<Vec<_>>();
@@ -356,32 +712,39 @@ impl ProductionProximityEvidenceAuthorityV1 {
                         } else {
                             (right_path.clone(), left_path.clone())
                         };
-                        let (relation, relation_partial) =
-                            if let Some(cached) = relation_cache.get(&path_pair) {
-                                cached.clone()
-                            } else {
-                                let (Some(left_nodes), Some(right_nodes)) =
-                                    (graph_nodes.get(&path_pair.0), graph_nodes.get(&path_pair.1))
-                                else {
-                                    partial = true;
-                                    continue;
-                                };
-                                let resolved = graph_relation(
-                                    &reader,
-                                    Arc::clone(&cancellation),
-                                    left_nodes,
-                                    right_nodes,
-                                );
-                                relation_cache.insert(path_pair.clone(), resolved.clone());
-                                resolved
+                        let (relation, relation_partial) = if let Some(cached) =
+                            relation_cache.get(&path_pair)
+                        {
+                            cached.clone()
+                        } else {
+                            let (Some(left_nodes), Some(right_nodes)) =
+                                (graph_nodes.get(&path_pair.0), graph_nodes.get(&path_pair.1))
+                            else {
+                                omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
+                                continue;
                             };
-                        partial |= relation_partial;
+                            let resolved = graph_relation(
+                                &reader,
+                                Arc::clone(&cancellation),
+                                left_nodes,
+                                right_nodes,
+                            );
+                            relation_cache.insert(path_pair.clone(), resolved.clone());
+                            resolved
+                        };
+                        if relation_partial {
+                            omissions.insert(FeedbackProximityOmissionV1::CloneCoveragePartial);
+                        }
                         let Some(relation) = relation else {
                             continue;
                         };
                         candidates.push(ProximityCandidate {
                             path: path_pair.0,
                             session_keys: BTreeSet::from([left_key.clone(), right_key.clone()]),
+                            session_paths: BTreeMap::from([
+                                (left_key.clone(), left_path.clone()),
+                                (right_key.clone(), right_path.clone()),
+                            ]),
                             warning_class: relation.warning_class,
                             relation_kinds: relation.kinds,
                             relation_strength: relation.strength,
@@ -399,167 +762,49 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 })
                 .then_with(|| left.session_keys.cmp(&right.session_keys))
         });
-        partial |= candidates.len() > MAX_PROXIMITY_EVIDENCE_V1;
+        if candidates.len() > MAX_PROXIMITY_EVIDENCE_V1 {
+            omissions.insert(FeedbackProximityOmissionV1::EncounterLimit);
+        }
         candidates.truncate(MAX_PROXIMITY_EVIDENCE_V1);
-        let expires_at = UtcMicros(request.observed_at.0.checked_add(EVIDENCE_TTL_MICROS_V1)?);
+        let assembly = ProximityAssembly {
+            owner: self,
+            request,
+            code_index_identity: code_index_identity.as_ref(),
+            verified_graph_paths: &verified_graph_paths,
+            observations: &observations,
+            graph_nodes: &graph_nodes,
+            session_edit_spans: &session_edit_spans,
+            active: &active,
+            reader: &reader,
+            cancellation: Arc::clone(&cancellation),
+            observed_seconds,
+            since,
+            expires_at,
+        };
         let mut evidence = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            let file = if let Some(identity) = code_index_identity.as_ref() {
-                let Some((file, indexed_digest)) = identity.file(&candidate.path) else {
-                    partial = true;
-                    continue;
-                };
-                let Some((_, graph_digest)) = verified_graph_paths.get(&candidate.path) else {
-                    partial = true;
-                    continue;
-                };
-                if indexed_digest != graph_digest {
-                    partial = true;
-                    continue;
-                }
-                file.clone()
-            } else {
-                let Some((file, _)) = verified_graph_paths.get(&candidate.path) else {
-                    partial = true;
-                    continue;
-                };
-                file.clone()
-            };
-            let selected = candidate
-                .session_keys
-                .iter()
-                .filter_map(|key| observations.get(key))
-                .collect::<Vec<_>>();
-            let agents = selected
-                .iter()
-                .filter_map(|observation| observation.envelope.relations().agent_id())
-                .map(tracedecay_domain::ObservationId::as_str)
-                .collect::<BTreeSet<_>>();
-            if selected.len() < 2 || agents.len() < 2 {
-                partial = true;
-                continue;
+            if let Some(item) = assembly.evidence_for(candidate, &mut omissions) {
+                evidence.push(item);
             }
-            let path_nodes = graph_nodes
-                .get(&candidate.path)
-                .map_or(&[][..], Vec::as_slice);
-            let blast_radius_size = if path_nodes.is_empty() {
-                partial = true;
-                1
-            } else {
-                let seeds = path_nodes
-                    .iter()
-                    .map(|node| node.occurrence.clone())
-                    .collect::<Vec<_>>();
-                if let Ok(nodes) =
-                    reader.impact(&seeds, &[], 1, 100_000, 100_000, Arc::clone(&cancellation))
-                {
-                    u32::try_from(nodes.impacted.len().max(1)).unwrap_or(u32::MAX)
-                } else {
-                    partial = true;
-                    u32::try_from(path_nodes.len()).unwrap_or(u32::MAX)
-                }
-            };
-            let latest_activity = candidate
-                .session_keys
-                .iter()
-                .filter_map(|key| active.get(key))
-                .filter_map(|hit| hit.last_ts.or(hit.committed_at).or(hit.first_ts))
-                .max()
-                .unwrap_or(since);
-            let age = observed_seconds.saturating_sub(latest_activity).max(0);
-            let freshness = 10_000_u16.saturating_sub(
-                u16::try_from(
-                    age.saturating_mul(10_000)
-                        .div_euclid(ACTIVITY_HORIZON_SECONDS_V1)
-                        .min(10_000),
-                )
-                .unwrap_or(10_000),
-            );
-            let exact_address = verified_graph_paths
-                .contains_key(&candidate.path)
-                .then(|| {
-                    let ranges = candidate
-                        .session_keys
-                        .iter()
-                        .map(|key| {
-                            session_edit_spans
-                                .get(&(key.clone(), candidate.path.clone()))
-                                .map(Vec::as_slice)
-                        })
-                        .collect::<Option<Vec<_>>>()?;
-                    exact_graph_address(path_nodes, &ranges)
-                })
-                .flatten();
-            if candidate.warning_class == ProximityWarningClassV1::SameFile
-                && !path_nodes.is_empty()
-                && exact_address.is_none()
-            {
-                partial = true;
-            }
-            let warning_class =
-                exact_warning_class(candidate.warning_class, exact_address.is_some());
-            let relation_anchor = selected
-                .first()
-                .map(|observation| observation.anchor.clone());
-            evidence.push(CanonicalProximityEvidenceV1 {
-                observations: selected
-                    .iter()
-                    .map(|observation| observation.envelope.clone())
-                    .collect(),
-                retrieval_anchor_ids: selected
-                    .iter()
-                    .map(|observation| observation.anchor.clone())
-                    .collect(),
-                address: ProximityAddressV1 {
-                    scope: request.scope.clone(),
-                    file,
-                    span: exact_address.as_ref().map(|address| address.0),
-                    symbol: exact_address.map(|address| address.1),
-                },
-                relation_paths: candidate
-                    .relation_kinds
-                    .into_iter()
-                    .map(|kind| ProximityRelationPathV1 {
-                        kind,
-                        retrieval_anchor_id: relation_anchor.clone(),
-                    })
-                    .collect(),
-                risk_inputs: ProximityRiskInputsV1 {
-                    overlap_size: u32::try_from(selected.len()).unwrap_or(u32::MAX),
-                    blast_radius_size,
-                    relation_strength: candidate.relation_strength,
-                    branch_worktree_incompatibility:
-                        ProximityBranchWorktreeIncompatibilityV1::Compatible,
-                    freshness_decay_basis_points: freshness,
-                },
-                warning_class,
-                raw_risk_basis_points: if matches!(
-                    warning_class,
-                    ProximityWarningClassV1::SameFile
-                        | ProximityWarningClassV1::OverlappingRange
-                        | ProximityWarningClassV1::SameSymbol
-                ) {
-                    10_000
-                } else {
-                    7_500
-                },
-                observed_at: request.observed_at,
-                expires_at,
-                coverage: if partial {
-                    ProximityCoverageV1::Partial
-                } else {
-                    ProximityCoverageV1::Complete
-                },
-            });
         }
-        CanonicalProximityEvidenceBatchV1::new(
+        let coverage = if omissions.is_empty() {
+            ProximityCoverageV1::Complete
+        } else {
+            ProximityCoverageV1::Partial
+        };
+        for item in &mut evidence {
+            item.coverage = coverage;
+            item.encounter.coverage = coverage;
+        }
+        CanonicalProximityEvidenceBatchV1 {
             evidence,
-            if partial {
-                ProximityCoverageV1::Partial
-            } else {
-                ProximityCoverageV1::Complete
-            },
-        )
+            coverage,
+            source_generation,
+            observed_at: request.observed_at,
+            expires_at,
+            omissions: omissions.into_iter().collect(),
+        }
+        .validated()
     }
 }
 
@@ -601,6 +846,65 @@ pub(crate) fn production_proximity_evidence_authority_v1(
         ProductionProximityEvidenceAuthorityV1::new(sessions, code_graph, scope, worktree_root)?
             .with_code_index_identity(code_index_identity),
     ))
+}
+
+pub fn production_feedback_proximity_read_runtime_v1(
+    sessions: RegisteredGlobalDbLeaseV1,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
+    scope: FeedbackScopeV1,
+    worktree_root: PathBuf,
+    code_index_identity: Arc<
+        dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
+    >,
+) -> Option<FeedbackProximityReadRuntimeV1> {
+    let evidence = production_proximity_evidence_authority_v1(
+        sessions,
+        code_graph,
+        scope.clone(),
+        worktree_root,
+        code_index_identity,
+    )?;
+    FeedbackProximityReadRuntimeV1::new(scope, evidence)
+}
+
+fn activity_interval(hit: &SessionGitCorrelationHit) -> Option<FeedbackProximityIntervalV1> {
+    let start = hit.first_ts.or(hit.committed_at)?;
+    let end = hit.last_ts.or(hit.committed_at).unwrap_or(start);
+    Some(FeedbackProximityIntervalV1 {
+        start: UtcMicros(start.checked_mul(1_000_000)?),
+        end: UtcMicros(end.checked_mul(1_000_000)?),
+    })
+}
+
+fn branch_ref(branch: &str) -> Option<RefId> {
+    let reference = if branch.starts_with("refs/") {
+        branch.to_owned()
+    } else {
+        format!("refs/heads/{branch}")
+    };
+    RefId::new(reference).ok()
+}
+
+fn participant_graph_address(
+    nodes: &[CodeGraphSymbolSummaryV1],
+    ranges: &[SourceSpan],
+) -> (Option<SourceSpan>, Option<SymbolOccurrenceId>) {
+    let mut resolved = None::<(&CodeGraphSymbolSummaryV1, SourceSpan)>;
+    for range in ranges {
+        let Some(candidate) = resolve_edit_range_symbol(range, nodes) else {
+            return (None, None);
+        };
+        match &resolved {
+            Some((current, _)) if current.occurrence != candidate.0.occurrence => {
+                return (None, None);
+            }
+            None => resolved = Some(candidate),
+            _ => {}
+        }
+    }
+    resolved.map_or((None, None), |(node, span)| {
+        (Some(span), Some(node.occurrence.clone()))
+    })
 }
 
 #[derive(Clone)]

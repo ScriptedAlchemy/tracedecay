@@ -11,6 +11,7 @@ mod github_ci_proximity;
 pub mod observations;
 mod ports;
 mod problem_terminal;
+mod proximity_read;
 mod read;
 mod service;
 
@@ -40,6 +41,13 @@ pub use ports::{
     FeedbackPublicationReadPort, FeedbackPublicationRecordState, FeedbackPublicationV1,
     FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
     FeedbackRuntimeStateV1,
+};
+pub use proximity_read::{
+    FeedbackProximityAccessKindV1, FeedbackProximityCloneHandleV1,
+    FeedbackProximityConflictDifferenceV1, FeedbackProximityConflictHandleV1,
+    FeedbackProximityEncounterV1, FeedbackProximityIntervalV1, FeedbackProximityOmissionV1,
+    FeedbackProximityParticipantV1, FeedbackProximityReadPageV1, FeedbackProximityReadRequestV1,
+    FeedbackProximityReadResultV1, FeedbackProximityRelationV1,
 };
 pub use read::{
     CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,

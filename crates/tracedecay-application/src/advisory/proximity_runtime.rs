@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::feedback::{
-    FeedbackPortFuture, PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1,
-    ProximityEvaluationRequestV1,
+    FeedbackPortFuture, FeedbackProximityEncounterV1, FeedbackProximityOmissionV1,
+    FeedbackProximityReadPageV1, FeedbackProximityReadRequestV1, FeedbackProximityReadResultV1,
+    PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1, ProximityEvaluationRequestV1,
 };
 use tracedecay_contracts::{
     AdvisoryFindingContributionBatchV1, AdvisoryFindingContributorV1,
@@ -24,8 +25,8 @@ use tracedecay_domain::feedback::{
     ProximityTierV1, ProximityWarningClassV1, ProximityWarningIdV1,
 };
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, ManifestDigest, RetrievalAnchorId, UtcMicros, canonical_sha256,
-    sha256_hex_suffix,
+    CanonicalObservationEnvelopeV1, CodeGenerationId, ManifestDigest, RetrievalAnchorId, UtcMicros,
+    canonical_sha256, sha256_hex_suffix,
 };
 
 use tracedecay_global_db::configuration::contracts::ports::{
@@ -39,6 +40,7 @@ mod authority;
 pub(crate) use authority::production_proximity_evidence_authority_v1;
 pub use authority::{
     ProductionProximityEvidenceAuthorityV1, SharedCanonicalProximityEvidenceAuthorityV1,
+    production_feedback_proximity_read_runtime_v1,
 };
 
 const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str =
@@ -103,6 +105,7 @@ impl ProximityThresholdPinV1 {
 pub struct CanonicalProximityEvidenceV1 {
     pub observations: Vec<CanonicalObservationEnvelopeV1>,
     pub retrieval_anchor_ids: Vec<RetrievalAnchorId>,
+    pub encounter: FeedbackProximityEncounterV1,
     pub address: ProximityAddressV1,
     pub relation_paths: Vec<ProximityRelationPathV1>,
     pub risk_inputs: ProximityRiskInputsV1,
@@ -117,6 +120,10 @@ impl CanonicalProximityEvidenceV1 {
     fn validate_for(&self, request: &ProximityEvaluationRequestV1) -> bool {
         if self.observations.is_empty()
             || self.retrieval_anchor_ids.is_empty()
+            || self.encounter.validate().is_err()
+            || self.encounter.scope != request.scope
+            || self.encounter.observed_at != self.observed_at
+            || self.encounter.expires_at != self.expires_at
             || self.address.validate().is_err()
             || self.address.scope != request.scope
             || self.risk_inputs.validate().is_err()
@@ -163,20 +170,28 @@ impl CanonicalProximityEvidenceV1 {
 pub struct CanonicalProximityEvidenceBatchV1 {
     pub evidence: Vec<CanonicalProximityEvidenceV1>,
     pub coverage: ProximityCoverageV1,
+    pub source_generation: CodeGenerationId,
+    pub observed_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub omissions: Vec<FeedbackProximityOmissionV1>,
 }
 
 impl CanonicalProximityEvidenceBatchV1 {
-    pub fn new(
-        evidence: Vec<CanonicalProximityEvidenceV1>,
-        coverage: ProximityCoverageV1,
-    ) -> Option<Self> {
-        matches!(
-            coverage,
-            ProximityCoverageV1::Complete
-                | ProximityCoverageV1::Partial
-                | ProximityCoverageV1::Stale
-        )
-        .then_some(Self { evidence, coverage })
+    pub fn validated(self) -> Option<Self> {
+        if self.observed_at.0 >= self.expires_at.0
+            || self.source_generation.validate().is_err()
+            || !matches!(
+                self.coverage,
+                ProximityCoverageV1::Complete
+                    | ProximityCoverageV1::Partial
+                    | ProximityCoverageV1::Stale
+            )
+            || (self.coverage == ProximityCoverageV1::Complete && !self.omissions.is_empty())
+            || (self.coverage != ProximityCoverageV1::Complete && self.omissions.is_empty())
+        {
+            return None;
+        }
+        Some(self)
     }
 }
 
@@ -304,6 +319,85 @@ pub enum ProximityRuntimeOutcomeV1 {
     Cancelled,
     TimedOut,
     Unavailable,
+}
+
+#[derive(Clone)]
+pub struct FeedbackProximityReadRuntimeV1 {
+    scope: FeedbackScopeV1,
+    evidence: SharedCanonicalProximityEvidenceAuthorityV1,
+}
+
+impl FeedbackProximityReadRuntimeV1 {
+    pub fn new(
+        scope: FeedbackScopeV1,
+        evidence: SharedCanonicalProximityEvidenceAuthorityV1,
+    ) -> Option<Self> {
+        scope.validate().ok()?;
+        Some(Self { scope, evidence })
+    }
+
+    pub async fn read(
+        &self,
+        context: &RequestContext,
+        request: &FeedbackProximityReadRequestV1,
+    ) -> FeedbackProximityReadResultV1 {
+        if !context_allows_feedback_operation(
+            context,
+            &self.scope,
+            PROXIMITY_CAPABILITY_ID_V1,
+            PROXIMITY_USE_CASE_ID_V1,
+        ) {
+            return FeedbackProximityReadResultV1::Denied {
+                observed_at: request.observed_at,
+            };
+        }
+        let evaluation = ProximityEvaluationRequestV1 {
+            scope: self.scope.clone(),
+            observed_at: request.observed_at,
+        };
+        let Some(mut batch) = self.evidence.current_evidence(context, &evaluation).await else {
+            return FeedbackProximityReadResultV1::Unavailable {
+                observed_at: request.observed_at,
+            };
+        };
+        let expired = request.observed_at.0 >= batch.expires_at.0;
+        if expired || batch.coverage == ProximityCoverageV1::Stale {
+            for evidence in &mut batch.evidence {
+                evidence.encounter.coverage = ProximityCoverageV1::Stale;
+            }
+            if batch.omissions.is_empty() {
+                batch
+                    .omissions
+                    .push(FeedbackProximityOmissionV1::CodeIndexRevisionMismatch);
+            }
+        }
+        let page = FeedbackProximityReadPageV1 {
+            scope: self.scope.clone(),
+            source_generation: batch.source_generation,
+            observed_at: batch.observed_at,
+            expires_at: batch.expires_at,
+            encounters: batch
+                .evidence
+                .into_iter()
+                .map(|evidence| evidence.encounter)
+                .collect(),
+        };
+        if expired || batch.coverage == ProximityCoverageV1::Stale {
+            FeedbackProximityReadResultV1::Stale {
+                page,
+                omissions: batch.omissions,
+            }
+        } else if batch.coverage == ProximityCoverageV1::Partial {
+            FeedbackProximityReadResultV1::Partial {
+                page,
+                omissions: batch.omissions,
+            }
+        } else if page.encounters.is_empty() {
+            FeedbackProximityReadResultV1::CompleteZero { page }
+        } else {
+            FeedbackProximityReadResultV1::Complete { page }
+        }
+    }
 }
 
 /// One exact-scope evaluation owner. The outer feedback cycle owns completed
@@ -609,6 +703,19 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone)]
+    struct StaticEvidence(CanonicalProximityEvidenceBatchV1);
+
+    impl CanonicalProximityEvidenceAuthorityV1 for StaticEvidence {
+        fn current_evidence<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a ProximityEvaluationRequestV1,
+        ) -> FeedbackPortFuture<'a, Option<CanonicalProximityEvidenceBatchV1>> {
+            Box::pin(async move { Some(self.0.clone()) })
+        }
+    }
+
     impl CanonicalProximityEvidenceAuthorityV1 for MutatingEvidence {
         fn current_evidence<'a>(
             &'a self,
@@ -621,7 +728,16 @@ mod tests {
                     .lock()
                     .expect("configuration lock") = self.drifted_configuration.clone();
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                CanonicalProximityEvidenceBatchV1::new(Vec::new(), ProximityCoverageV1::Complete)
+                CanonicalProximityEvidenceBatchV1 {
+                    evidence: Vec::new(),
+                    coverage: ProximityCoverageV1::Complete,
+                    source_generation: CodeGenerationId::new("generation.proximity-pin")
+                        .expect("generation"),
+                    observed_at: UtcMicros(2),
+                    expires_at: UtcMicros(3),
+                    omissions: Vec::new(),
+                }
+                .validated()
             })
         }
     }
@@ -762,5 +878,37 @@ mod tests {
             2,
             "a later cycle must use its newly authorized threshold pin"
         );
+    }
+
+    #[tokio::test]
+    async fn expired_evidence_returns_typed_stale_result() {
+        let (scope, context) = scope_and_context();
+        let batch = CanonicalProximityEvidenceBatchV1 {
+            evidence: Vec::new(),
+            coverage: ProximityCoverageV1::Complete,
+            source_generation: CodeGenerationId::new("generation.proximity-expired")
+                .expect("generation"),
+            observed_at: UtcMicros(1),
+            expires_at: UtcMicros(2),
+            omissions: Vec::new(),
+        }
+        .validated()
+        .expect("batch");
+        let runtime = FeedbackProximityReadRuntimeV1::new(scope, Arc::new(StaticEvidence(batch)))
+            .expect("runtime");
+
+        let result = runtime
+            .read(
+                &context,
+                &FeedbackProximityReadRequestV1 {
+                    observed_at: UtcMicros(3),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            FeedbackProximityReadResultV1::Stale { .. }
+        ));
     }
 }

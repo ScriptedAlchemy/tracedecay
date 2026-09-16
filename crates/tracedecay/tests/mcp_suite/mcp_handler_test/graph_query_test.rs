@@ -1477,7 +1477,7 @@ async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages(
             "project_id": project_id,
             "repository_id": repository_id,
             "match_classes": ["conservative_exact"],
-            "path": "src",
+            "scope": {"kind": "path", "path": "src"},
             "include_generated_paths": false,
             "family_limit": 1,
             "member_limit": 2,
@@ -1518,7 +1518,7 @@ async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages(
             "project_id": project_id,
             "repository_id": repository_id,
             "match_classes": ["conservative_exact"],
-            "path": "src",
+            "scope": {"kind": "path", "path": "src"},
             "include_generated_paths": false,
             "family_limit": 1,
             "member_limit": 2,
@@ -1556,7 +1556,7 @@ async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages(
             "project_id": project_id,
             "repository_id": "repository.unauthorized",
             "match_classes": ["conservative_exact"],
-            "path": null,
+            "scope": {"kind": "repository"},
             "include_generated_paths": false,
             "family_limit": 10,
             "member_limit": 10,
@@ -1573,6 +1573,222 @@ async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages(
             .contains("outside the authorized repository scope"),
         "{unauthorized}"
     );
+    shutdown_graph_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_families() {
+    let large_body = "
+        let one = parse(input);
+        let two = transform(one);
+        let three = validate(two);
+        let four = persist(three);
+        let five = audit(four);
+        let six = publish(five);
+        finish(six, input, one, two, three, four, five);
+    ";
+    let small_body = "
+        let one = parse(input);
+        let two = transform(one);
+        let three = validate(two);
+        let four = persist(three);
+        finish(four, input, one, two, three);
+    ";
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        for (path, name, body) in [
+            ("src/changed.rs", "changed", large_body),
+            ("src/existing.rs", "existing", large_body),
+            ("src/second_changed.rs", "second_changed", small_body),
+            ("src/second_existing.rs", "second_existing", small_body),
+            (
+                "src/unrelated_a.rs",
+                "unrelated_a",
+                "return untouched(input);",
+            ),
+            (
+                "src/unrelated_b.rs",
+                "unrelated_b",
+                "return untouched(input);",
+            ),
+        ] {
+            fs::write(
+                project.join(path),
+                format!("pub fn {name}(input: Input) {{ {body} }}\n"),
+            )
+            .unwrap();
+        }
+    })
+    .await;
+    let project_id = fixture
+        .production
+        .harness
+        .project_id(fixture.project_root())
+        .await
+        .expect("fixture project identity");
+    let repository_id =
+        tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
+            fixture.project_root(),
+        )
+        .expect("fixture repository identity");
+    let scope = json!({
+        "kind": "pull_request",
+        "provider": "github",
+        "pull_request_id": "1277",
+        "head_commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "changed_paths": ["src/changed.rs", "src/second_changed.rs"],
+    });
+
+    let first = call_production_tool(
+        &fixture,
+        "tracedecay_redundancy",
+        json!({
+            "project_id": project_id,
+            "repository_id": repository_id,
+            "match_classes": ["conservative_exact"],
+            "scope": scope,
+            "include_generated_paths": true,
+            "family_limit": 10,
+            "member_limit": 10,
+            "work_limit": 4,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("pull-request redundancy invocation");
+    let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
+    assert_eq!(first["coverage"]["status"], "partial", "{first}");
+    assert_eq!(first["coverage"]["reason"], "work_limit", "{first}");
+    assert!(
+        first["coverage"]["examined_members"]
+            .as_u64()
+            .is_some_and(|count| count <= 4),
+        "{first}"
+    );
+    let first_members = first["families"][0]["family"]["members"]
+        .as_array()
+        .expect("first family members");
+    assert!(
+        first_members
+            .iter()
+            .any(|member| member["path"] == "src/changed.rs"),
+        "{first}"
+    );
+    assert!(
+        first_members
+            .iter()
+            .any(|member| member["path"] == "src/existing.rs"),
+        "{first}"
+    );
+    assert!(
+        first["families"][0]["generated_members"].is_array(),
+        "{first}"
+    );
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("remaining pull-request family must be resumable");
+    let stale_cursor = cursor.to_owned();
+
+    let second = call_production_tool(
+        &fixture,
+        "tracedecay_redundancy",
+        json!({
+            "project_id": project_id,
+            "repository_id": repository_id,
+            "match_classes": ["conservative_exact"],
+            "scope": scope,
+            "include_generated_paths": true,
+            "family_limit": 10,
+            "member_limit": 10,
+            "work_limit": 4,
+            "cursor": cursor,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("pull-request redundancy continuation");
+    let second: Value = serde_json::from_str(extract_text(&second.value)).unwrap();
+    let second_members = second["families"][0]["family"]["members"]
+        .as_array()
+        .expect("second family members");
+    assert!(
+        second_members
+            .iter()
+            .any(|member| member["path"] == "src/second_changed.rs"),
+        "{second}"
+    );
+    assert!(
+        second["coverage"]["examined_members"]
+            .as_u64()
+            .is_some_and(|count| count <= 4),
+        "{second}"
+    );
+    let unrelated = second["families"]
+        .as_array()
+        .expect("second families")
+        .iter()
+        .flat_map(|family| family["family"]["members"].as_array().into_iter().flatten())
+        .any(|member| member["path"] == "src/unrelated_a.rs");
+    assert!(!unrelated, "{second}");
+
+    fs::write(
+        fixture.project_root().join("src/generation_bump.rs"),
+        "pub fn generation_bump() -> usize { 1 }\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["add", "src/generation_bump.rs"],
+        vec![
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay-test@example.com",
+            "commit",
+            "-m",
+            "generation bump",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(fixture.project_root())
+                .status()
+                .expect("git command starts")
+                .success()
+        );
+    }
+    let server = fixture
+        .production
+        .harness
+        .server(fixture.project_root())
+        .expect("production graph-query server");
+    warm_code_index_search(&server, "generation_bump").await;
+    let stale = call_production_tool(
+        &fixture,
+        "tracedecay_redundancy",
+        json!({
+            "project_id": project_id,
+            "repository_id": repository_id,
+            "match_classes": ["conservative_exact"],
+            "scope": scope,
+            "include_generated_paths": true,
+            "family_limit": 10,
+            "member_limit": 10,
+            "work_limit": 4,
+            "cursor": stale_cursor,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect_err("a prior-generation pull-request cursor must be stale");
+    assert!(
+        stale.to_string().contains("generation_unavailable"),
+        "{stale}"
+    );
+
     shutdown_graph_fixture(fixture).await;
 }
 

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use rusqlite::functions::FunctionFlags;
@@ -60,6 +61,7 @@ pub struct CloneExactFamilyArtifactPageV1 {
 }
 
 const GENERATED_PATH_FUNCTION: &str = "tracedecay_is_generated_path";
+const PULL_REQUEST_PATH_FUNCTION: &str = "tracedecay_is_pull_request_path";
 
 impl CodeLexicalArtifactReaderV1 {
     #[allow(clippy::too_many_arguments)] // mirrors sibling clone page readers' filter/cursor surface
@@ -69,6 +71,8 @@ impl CodeLexicalArtifactReaderV1 {
         repository_id: &RepositoryId,
         match_classes: &[CloneNormalizationClassV1],
         path: Option<&str>,
+        pull_request_paths: Option<&[String]>,
+        pull_request_scope_digest: Option<&ManifestDigest>,
         include_generated_paths: bool,
         cursor: Option<&str>,
         limit: usize,
@@ -100,6 +104,8 @@ impl CodeLexicalArtifactReaderV1 {
             repository_id,
             &match_classes,
             path,
+            pull_request_paths,
+            pull_request_scope_digest,
             include_generated_paths,
         ))
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
@@ -137,6 +143,7 @@ impl CodeLexicalArtifactReaderV1 {
         let after_digest = after.map(|position| position.digest.as_str()).unwrap_or("");
         let connection = self.lock_connection()?;
         install_generated_path_function(&connection)?;
+        install_pull_request_path_function(&connection, pull_request_paths)?;
         let mut statement = connection
             .prepare_cached(
                 "WITH families AS ( \
@@ -156,6 +163,8 @@ impl CodeLexicalArtifactReaderV1 {
                       AND (:include_generated OR tracedecay_is_generated_path(occurrence.path) = 0) \
                     GROUP BY posting.class, posting.normalization_revision, posting.digest \
                     HAVING COUNT(*) > 1 \
+                       AND (NOT :pull_request \
+                            OR MAX(tracedecay_is_pull_request_path(occurrence.path))) \
                  ) \
                  SELECT class, normalization_revision, digest, representative, member_count, reviewable_source_bytes \
                  FROM families \
@@ -174,6 +183,7 @@ impl CodeLexicalArtifactReaderV1 {
                 ":conservative": match_classes.contains(&CloneNormalizationClassV1::Conservative),
                 ":rename": match_classes.contains(&CloneNormalizationClassV1::Rename),
                 ":path": path,
+                ":pull_request": pull_request_paths.is_some(),
                 ":include_generated": include_generated_paths,
                 ":has_after": after.is_some(),
                 ":after_reviewable": i64::try_from(after_reviewable)
@@ -270,6 +280,28 @@ fn install_generated_path_function(
                                 .is_some_and(tracedecay_domain::is_generated_dir_segment)
                     )
                 }))
+            },
+        )
+        .map_err(sqlite_error)
+}
+
+fn install_pull_request_path_function(
+    connection: &rusqlite::Connection,
+    paths: Option<&[String]>,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let paths = paths
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    connection
+        .create_scalar_function(
+            PULL_REQUEST_PATH_FUNCTION,
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            move |context| {
+                let path = context.get::<String>(0)?;
+                Ok(paths.contains(&path))
             },
         )
         .map_err(sqlite_error)

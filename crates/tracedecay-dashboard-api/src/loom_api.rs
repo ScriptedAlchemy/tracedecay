@@ -32,11 +32,6 @@ use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, Session
 
 const DEFAULT_LIMIT: i64 = 200;
 const MAX_LIMIT: i64 = 500;
-const DELIVERY_AUTHORITY: &str = "GET /api/delivery/overview with session-linked pull_requests, \
-review_comments, ci_checks, failure_localization, and releases rows";
-const DELIVERY_REASON: &str = "the shared Delivery overview is mounted, but its outcome \
-projections are unavailable or unsupported and do not expose session-linked rows; Loom does not \
-duplicate them";
 const GIT_CORRELATION_AUTHORITY: &str = "typed Git correlation graph read port";
 const GIT_CORRELATION_REASON: &str = "Git correlation is owned by the registered graph runtime; \
 the retained session snapshot cannot query or infer commit, branch, or worktree relationships";
@@ -434,28 +429,6 @@ async fn read_temporal(
             },
         }),
         git.branch_worktree,
-        LoomSourceStatusV1 {
-            id: "delivery_outcomes",
-            label: "Pull request, review, CI & release outcomes",
-            state: DashboardDomainStateV1::Unsupported,
-            authority: None,
-            granularity: "Delivery projection row",
-            providers: Vec::new(),
-            item_count: None,
-            reason: Some(DELIVERY_REASON.to_string()),
-            required_authority: Some(DELIVERY_AUTHORITY),
-            coverage: LoomSourceCoverageV1 {
-                completeness: "unsupported",
-                eligible: None,
-                examined: None,
-                matched: None,
-                omitted: None,
-                unit: None,
-                reason:
-                    "coverage belongs to the shared Delivery projection once it serves session-linked rows"
-                        .to_string(),
-            },
-        },
     ];
 
     let refresh_state = if examined_sessions == 0 || active_generations == examined_sessions {
@@ -933,28 +906,6 @@ fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
                 GIT_CORRELATION_AUTHORITY,
                 "coalesced activity span",
             ),
-            LoomSourceStatusV1 {
-                id: "delivery_outcomes",
-                label: "Pull request, review, CI & release outcomes",
-                state: DashboardDomainStateV1::Unsupported,
-                authority: None,
-                granularity: "Delivery projection row",
-                providers: Vec::new(),
-                item_count: None,
-                reason: Some(DELIVERY_REASON.to_string()),
-                required_authority: Some(DELIVERY_AUTHORITY),
-                coverage: LoomSourceCoverageV1 {
-                    completeness: "unsupported",
-                    eligible: None,
-                    examined: None,
-                    matched: None,
-                    omitted: None,
-                    unit: None,
-                    reason:
-                        "coverage belongs to the shared Delivery projection once it serves session-linked rows"
-                            .to_string(),
-                },
-            },
         ],
         commits: Vec::new(),
         edited_files: Vec::new(),

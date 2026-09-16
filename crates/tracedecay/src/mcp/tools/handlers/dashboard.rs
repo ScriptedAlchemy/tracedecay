@@ -937,7 +937,6 @@ pub(super) async fn handle_dashboard(
                 let adapter =
                     tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter::new(
                         service,
-                        retained_cg.store_layout.project_root.clone(),
                     );
                 Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>
             });

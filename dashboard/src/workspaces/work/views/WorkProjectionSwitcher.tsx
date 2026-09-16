@@ -27,7 +27,8 @@ export type WorkProjectionKind =
   | 'timeline'
   | 'causal'
   | 'workload'
-  | 'topology';
+  | 'topology'
+  | 'concurrent-attempts';
 
 export const WORK_PROJECTIONS: readonly WorkProjectionKind[] = [
   'board',
@@ -36,6 +37,7 @@ export const WORK_PROJECTIONS: readonly WorkProjectionKind[] = [
   'causal',
   'workload',
   'topology',
+  'concurrent-attempts',
 ];
 
 /** The query parameter that positions the camera, so a projection survives a
@@ -56,6 +58,8 @@ export function projectionLabel(kind: WorkProjectionKind): string {
       return 'Workload';
     case 'topology':
       return 'Topology';
+    case 'concurrent-attempts':
+      return 'Concurrent Attempts';
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -79,6 +83,8 @@ export function projectionNote(kind: WorkProjectionKind): string {
       return 'runs as regions, sized by the tasks they touched';
     case 'topology':
       return 'attempts placed onto executors and worktrees, under one verified topology generation';
+    case 'concurrent-attempts':
+      return 'observed attempt spans joined to exact provider and session proximity evidence';
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -93,6 +99,7 @@ function asProjection(value: string | null): WorkProjectionKind {
     case 'causal':
     case 'workload':
     case 'topology':
+    case 'concurrent-attempts':
       return value;
     // An unreadable or absent parameter opens the board. The board is the
     // projection whose every channel this build can measure, so it is the one
@@ -135,23 +142,25 @@ export const PROJECTION_PANEL_ID = 'work-projection-panel';
 export function WorkProjectionSwitcher({
   active,
   onSelect,
+  projections = WORK_PROJECTIONS,
 }: {
   active: WorkProjectionKind;
   onSelect: (kind: WorkProjectionKind) => void;
+  projections?: readonly WorkProjectionKind[];
 }) {
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const move = (from: number, delta: number) => {
-    const count = WORK_PROJECTIONS.length;
+    const count = projections.length;
     const to = (from + delta + count) % count;
-    const kind = WORK_PROJECTIONS[to];
+    const kind = projections[to];
     if (kind === undefined) return;
     onSelect(kind);
     tabs.current[to]?.focus();
   };
 
   const jump = (to: number) => {
-    const kind = WORK_PROJECTIONS[to];
+    const kind = projections[to];
     if (kind === undefined) return;
     onSelect(kind);
     tabs.current[to]?.focus();
@@ -165,7 +174,7 @@ export function WorkProjectionSwitcher({
       className="flex min-w-0 flex-wrap items-center gap-1 border border-edge-subtle bg-surface-1 p-1"
       data-work-projection={active}
     >
-      {WORK_PROJECTIONS.map((kind, position) => {
+      {projections.map((kind, position) => {
         const selected = kind === active;
         return (
           <button
@@ -200,7 +209,7 @@ export function WorkProjectionSwitcher({
                   break;
                 case 'End':
                   event.preventDefault();
-                  jump(WORK_PROJECTIONS.length - 1);
+                  jump(projections.length - 1);
                   break;
                 default:
                   break;

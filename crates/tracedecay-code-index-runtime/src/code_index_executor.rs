@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracedecay_query::code_search;
+use tracedecay_query::retrieval::RetrievalPortError;
 
 use crate::code_index_scheduler;
 use crate::code_index_task_support;
@@ -1478,6 +1479,20 @@ where
         let execution_admission = Arc::clone(&execution_admission);
         Box::pin(async move {
             let unavailable = |reason| Err(reason);
+            let invalid_scope = match &request.scope {
+                code_search::CodeIndexRedundancyScopeV1::Repository => false,
+                code_search::CodeIndexRedundancyScopeV1::Path(path) => {
+                    tracedecay_domain::validate_code_logical_path(path).is_err()
+                }
+                code_search::CodeIndexRedundancyScopeV1::PullRequest { changed_paths, .. } => {
+                    changed_paths.is_empty()
+                        || changed_paths.len()
+                            > tracedecay_contracts::retrieval::MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1
+                        || changed_paths.iter().any(|path| {
+                            tracedecay_domain::validate_code_logical_path(path).is_err()
+                        })
+                }
+            };
             if request.family_limit == 0
                 || request.family_limit
                     > tracedecay_contracts::retrieval::MAX_REDUNDANCY_FAMILIES_V1 as usize
@@ -1488,9 +1503,7 @@ where
                 || request.work_limit
                     > tracedecay_contracts::retrieval::MAX_REDUNDANCY_WORK_V1 as usize
                 || request.match_classes.is_empty()
-                || request.path.as_deref().is_some_and(|path| {
-                    tracedecay_domain::validate_code_logical_path(path).is_err()
-                })
+                || invalid_scope
             {
                 return unavailable(
                     code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
@@ -1600,6 +1613,17 @@ where
             .await;
             match read {
                 Ok(Ok(outcome)) => Ok(outcome),
+                Ok(Err(
+                    RetrievalPortError::StaleEvidence | RetrievalPortError::GenerationMismatch,
+                )) => unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                ),
+                Ok(Err(RetrievalPortError::Cancelled)) => {
+                    unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled)
+                }
+                Ok(Err(RetrievalPortError::Contract(_))) => {
+                    unavailable(code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest)
+                }
                 Ok(Err(_)) | Err(_) => {
                     unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
                 }

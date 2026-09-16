@@ -367,6 +367,8 @@ pub enum ReconcileFaultKindV1 {
     DeadlineExceeded,
     /// A refusal the same input reproduces forever.
     Permanent,
+    /// The durable publication authority requires an explicit index reset.
+    PublicationCorruption,
 }
 
 #[cfg(test)]
@@ -465,6 +467,14 @@ impl ReconcileFaultInjectionV1 {
             ReconcileFaultKindV1::Permanent => Err(super::CodeIndexSchedulerErrorV1::Identity(
                 "injected permanent reconcile refusal".to_owned(),
             )),
+            ReconcileFaultKindV1::PublicationCorruption => Err(
+                crate::code_index::production::CodeIndexProductionErrorV1::Publication(
+                    crate::code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
+                        "injected corrupt publication authority".to_owned(),
+                    ),
+                )
+                .into(),
+            ),
         }
     }
 }

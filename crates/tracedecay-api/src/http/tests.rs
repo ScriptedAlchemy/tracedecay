@@ -46,6 +46,7 @@ fn feedback_read_operation_parser_is_exact_and_separately_owned() {
         ("get", ApplicationSurfaceOperation::FeedbackGet),
         ("expand", ApplicationSurfaceOperation::FeedbackExpand),
         ("list", ApplicationSurfaceOperation::FeedbackList),
+        ("proximity", ApplicationSurfaceOperation::FeedbackProximity),
     ] {
         assert_eq!(parse_feedback_read_operation(route), Some(operation));
         assert_eq!(

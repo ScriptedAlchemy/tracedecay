@@ -1,7 +1,6 @@
-//! Exact-project daemon adapter for the dashboard Delivery read authority.
+//! Registered-project daemon adapter for the dashboard Delivery read authority.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tracedecay_application::advisory::GitHubReleaseReadControlV1;
@@ -25,27 +24,24 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_dashboard_api::{
-    DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1, DashboardHttpRequestControlV1,
+    DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
+    DashboardHttpRequestControlV1,
 };
 
 pub struct DashboardDeliveryReadAdapter {
     service: DaemonInvocationService,
-    project_root: PathBuf,
 }
 
 impl DashboardDeliveryReadAdapter {
-    pub fn new(service: DaemonInvocationService, project_root: PathBuf) -> Self {
-        Self {
-            service,
-            project_root,
-        }
+    pub fn new(service: DaemonInvocationService) -> Self {
+        Self { service }
     }
 
     #[hotpath::measure(label = "mcp.dashboard.delivery.total")]
     async fn execute(
         &self,
         control: DashboardHttpRequestControlV1,
-        project_id: Option<&str>,
+        project: DashboardDeliveryProjectV1,
         request: ProjectDeliveryReadRequestV1,
     ) -> ProjectDeliveryReadOutcomeV1 {
         if control.deadline().is_elapsed_at(control.observed_at())
@@ -55,12 +51,12 @@ impl DashboardDeliveryReadAdapter {
         }
         let Some(authority) = self
             .service
-            .delivery_read_authority(Some(&self.project_root))
+            .delivery_read_authority(Some(&project.project_root))
             .await
         else {
             return ProjectDeliveryReadOutcomeV1::Unavailable;
         };
-        if project_id != Some(authority.scope().project_id.as_str()) {
+        if project.project_id != authority.scope().project_id.as_str() {
             return ProjectDeliveryReadOutcomeV1::Unavailable;
         }
         let authorization_observed_at = tracedecay_contracts::now_micros();
@@ -96,6 +92,7 @@ impl DashboardDeliveryReadAdapter {
             return ProjectDeliveryReadOutcomeV1::Unavailable;
         };
         let request = ProjectDeliveryReadRequestV1 {
+            kind: request.kind,
             expected_head_commit_id,
             max_pull_requests: request.max_pull_requests,
             max_review_items: request.max_review_items,
@@ -189,11 +186,10 @@ impl DashboardDeliveryReadPortV1 for DashboardDeliveryReadAdapter {
     fn read(
         &self,
         control: DashboardHttpRequestControlV1,
-        project_id: Option<&str>,
+        project: DashboardDeliveryProjectV1,
         request: ProjectDeliveryReadRequestV1,
     ) -> DashboardDeliveryReadFutureV1<'_> {
-        let project_id = project_id.map(str::to_owned);
-        Box::pin(async move { self.execute(control, project_id.as_deref(), request).await })
+        Box::pin(async move { self.execute(control, project, request).await })
     }
 }
 

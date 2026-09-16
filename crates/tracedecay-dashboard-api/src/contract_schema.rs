@@ -3,6 +3,9 @@
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
+use tracedecay_contracts::feedback::{
+    FeedbackProximityReadRequestV1, FeedbackProximityReadResultV1,
+};
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
 };
@@ -43,7 +46,7 @@ use super::analytics_api::{
 };
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_read_api::RevisionPairUnionLayoutV1;
-use super::delivery_api::DeliveryOverviewV1;
+use super::delivery_api::{DeliveryInboxV1, DeliveryOverviewV1};
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
 use super::explorer_api::{ExplorerQueryRunV1, ExplorerReadContextV1, ExplorerSessionSizeV1};
 use super::graph_service::{
@@ -118,8 +121,11 @@ struct DashboardContractCatalogV1 {
     lcm_overview: DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>,
     lcm_search: DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>,
     loom_temporal: LoomTemporalPayloadV1,
+    delivery_inbox: DeliveryInboxV1,
     delivery_overview: DeliveryOverviewV1,
     feedback_status: DashboardEnvelopeV1<FeedbackObservationReadModelV1>,
+    feedback_proximity_request: FeedbackProximityReadRequestV1,
+    feedback_proximity: FeedbackProximityReadResultV1,
     code_index_freshness: CodeIndexFreshnessPayloadV1,
     settings: SettingsPayloadV1,
     settings_project_patch: ProjectSettingsPatch,
@@ -578,6 +584,7 @@ mod tests {
             "LcmMessageV1",
             "LcmSummaryNodeV1",
             "LoomTemporalPayloadV1",
+            "DeliveryInboxV1",
             "DeliveryOverviewV1",
             "ExplorerSessionSizeV1",
             "ExplorerReadContextV1",

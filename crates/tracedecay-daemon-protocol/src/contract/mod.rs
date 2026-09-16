@@ -45,6 +45,7 @@ use crate::lsp_wire::{MAX_LSP_FRAME_BYTES, MAX_LSP_WORKSPACE_ROOTS};
 use crate::surface::GitReadSurfaceRequest;
 use tracedecay_contracts::ConfigurationWireRequestV1;
 use tracedecay_contracts::context_scout::ContextScoutSurfaceRequestV1;
+use tracedecay_contracts::feedback::FeedbackProximityReadRequestV1;
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
@@ -382,6 +383,7 @@ pub enum DaemonInvocationOperation {
     FeedbackExpand,
     FeedbackList,
     FeedbackAdvisoryCycle,
+    FeedbackProximity,
     FeedbackImpact,
     AffectedTests,
     FeedbackObserve,
@@ -446,6 +448,7 @@ impl DaemonInvocationOperation {
             Self::FeedbackExpand => "feedback_expand",
             Self::FeedbackList => "feedback_list",
             Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
+            Self::FeedbackProximity => "feedback_proximity",
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::FeedbackObserve => "feedback_observe",
@@ -561,6 +564,11 @@ pub enum DaemonInvocationPayload {
     FeedbackAdvisoryCycle {
         document_uri: String,
         observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackProximity {
+        request: FeedbackProximityReadRequestV1,
         deadline: Deadline,
         cancellation: CancellationContext,
     },
@@ -824,6 +832,7 @@ impl DaemonInvocationRequest {
             ApplicationSurfaceOperation::TestResults
             | ApplicationSurfaceOperation::ObservatoryRead
             | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+            | ApplicationSurfaceOperation::FeedbackProximity
             | ApplicationSurfaceOperation::SessionLookup
             | ApplicationSurfaceOperation::QualifiedName
             | ApplicationSurfaceOperation::CallChain
@@ -929,6 +938,25 @@ impl DaemonInvocationRequest {
             payload: DaemonInvocationPayload::FeedbackAdvisoryCycle {
                 document_uri,
                 observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn feedback_proximity(
+        request_id: impl Into<String>,
+        request: FeedbackProximityReadRequestV1,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::FeedbackProximity {
+                request,
                 deadline,
                 cancellation,
             },
@@ -1575,6 +1603,9 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::FeedbackAdvisoryCycle { .. } => {
                 DaemonInvocationOperation::FeedbackAdvisoryCycle
             }
+            DaemonInvocationPayload::FeedbackProximity { .. } => {
+                DaemonInvocationOperation::FeedbackProximity
+            }
             DaemonInvocationPayload::FeedbackImpact { .. } => {
                 DaemonInvocationOperation::FeedbackImpact
             }
@@ -1704,6 +1735,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::FeedbackExpand
                 | DaemonInvocationOperation::FeedbackList
                 | DaemonInvocationOperation::FeedbackAdvisoryCycle
+                | DaemonInvocationOperation::FeedbackProximity
                 | DaemonInvocationOperation::FeedbackImpact
                 | DaemonInvocationOperation::AffectedTests
                 | DaemonInvocationOperation::FeedbackObserve
@@ -2104,6 +2136,18 @@ impl DaemonInvocationRequest {
             } => {
                 if !valid_printable(document_uri, MAX_ROOT_HINT_BYTES)
                     || observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::FeedbackProximity {
+                request,
+                deadline,
+                cancellation,
+            } => {
+                if request.observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
                 {

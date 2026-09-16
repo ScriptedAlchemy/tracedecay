@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -2225,6 +2226,110 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     assert!(
         !sessions_db.exists(),
         "unavailable LCM must not open its profile store"
+    );
+    cg.close();
+}
+
+#[tokio::test]
+async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temporary project");
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("terminal-code-index-sync");
+    fs::create_dir_all(project.join("src")).expect("project source");
+    fs::write(project.join("src/lib.rs"), "pub fn terminal_sync() {}\n").expect("project source");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.terminal-code-index-sync",
+    )
+    .await
+    .expect("TraceDecay fixture");
+    let queued = std::sync::Arc::new(AtomicUsize::new(0));
+    let reconcile_sink: crate::mcp::server::CodeIndexReconcileSink = {
+        let queued = std::sync::Arc::clone(&queued);
+        std::sync::Arc::new(move |_, _| {
+            let queued = std::sync::Arc::clone(&queued);
+            Box::pin(async move {
+                queued.fetch_add(1, Ordering::AcqRel);
+                crate::mcp::server::CodeIndexAdmission::Accepted
+            })
+        })
+    };
+    let freshness_reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
+        std::sync::Arc::new(move |worktree_root| {
+            Box::pin(async move {
+                Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                        worktree_root: worktree_root.display().to_string(),
+                        progress: Some(
+                            tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1 {
+                                generation_id: "generation.terminal-sync".to_owned(),
+                                daemon_incarnation: 1,
+                                producer_incarnation: 1,
+                                progress_epoch: 1,
+                                sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
+                                phase: tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::SourceScan,
+                                committed_pages: 0,
+                                committed_chunks: 0,
+                                committed_imports: 0,
+                                committed_payload_bytes: 0,
+                                completed_files: 0,
+                                total_files: 1,
+                                completed_lexical_units: 0,
+                                total_lexical_units: 1,
+                                current_batch_pages: 0,
+                                current_batch_payload_bytes: 0,
+                                elapsed_micros: 1,
+                                last_commit_latency_micros: None,
+                                files_per_second: None,
+                                lexical_units_per_second: None,
+                                estimated_remaining_seconds: None,
+                                last_progress_micros: 1,
+                                blocked_reason: Some(
+                                    tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
+                                ),
+                            },
+                        ),
+                        parked: Some(
+                            tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+                                reason: "the publication authority is corrupt and requires an index reset: injected sync refusal".to_owned(),
+                                remediation: "reset the code-index publication authority".to_owned(),
+                                parked_at_micros: 1,
+                                observed_passes: 1,
+                                retries_on_wake: false,
+                            },
+                        ),
+                        ..Default::default()
+                    },
+                )
+            })
+        });
+
+    let error = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_admin_sync",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_reconcile_sink: Some(reconcile_sink),
+            code_index_freshness_reader: Some(freshness_reader),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect_err("terminal publication corruption must refuse sync");
+
+    assert!(
+        error.to_string().contains("injected sync refusal"),
+        "sync must report the terminal cause: {error}"
+    );
+    assert_eq!(
+        queued.load(Ordering::Acquire),
+        0,
+        "terminal sync must not queue work"
     );
     cg.close();
 }

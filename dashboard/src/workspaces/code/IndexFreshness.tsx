@@ -324,6 +324,8 @@ function blockedReasonLabel(reason: NonNullable<CodeIndexBuildProgress['blocked_
       return 'artifact store unavailable';
     case 'retry_backoff':
       return 'retry backoff';
+    case 'publication_authority_corrupt':
+      return 'publication authority corrupt';
   }
 }
 

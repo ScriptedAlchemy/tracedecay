@@ -101,10 +101,11 @@ pub use production::{
 };
 pub use proximity_runtime::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
-    CanonicalProximityEvidenceV1, ConcreteProximityRuntimeOwnerV1,
+    CanonicalProximityEvidenceV1, ConcreteProximityRuntimeOwnerV1, FeedbackProximityReadRuntimeV1,
     ProductionProximityEvidenceAuthorityV1, ProximityFindingContributorV1,
     ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
     SharedCanonicalProximityEvidenceAuthorityV1, open_proximity_runtime,
+    production_feedback_proximity_read_runtime_v1,
 };
 pub use runtime::{
     AdvisoryContributionsV1, AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,

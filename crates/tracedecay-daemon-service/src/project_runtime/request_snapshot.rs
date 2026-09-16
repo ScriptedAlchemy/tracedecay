@@ -239,7 +239,8 @@ mod tests {
     use super::*;
     use crate::invocation::{
         DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationPort,
-        DaemonAdvisoryCycleInvocationRequest,
+        DaemonAdvisoryCycleInvocationRequest, DaemonFeedbackProximityInvocationFuture,
+        DaemonFeedbackProximityInvocationRequest,
     };
     use tracedecay_contracts::{ApplicationProblem, SafeDiagnostic};
     use tracedecay_domain::ProjectId;
@@ -255,6 +256,18 @@ mod tests {
                 Err(ApplicationProblem::unavailable(SafeDiagnostic {
                     code: "feedback.test-advisory-owner".to_owned(),
                     message: "The test advisory owner is unavailable".to_owned(),
+                }))
+            })
+        }
+
+        fn invoke_proximity(
+            &self,
+            _request: DaemonFeedbackProximityInvocationRequest,
+        ) -> DaemonFeedbackProximityInvocationFuture<'_> {
+            Box::pin(async {
+                Err(ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "feedback.test-proximity-owner".to_owned(),
+                    message: "The test proximity owner is unavailable".to_owned(),
                 }))
             })
         }

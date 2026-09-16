@@ -133,7 +133,9 @@ pub mod config;
 #[doc(hidden)]
 pub mod contract_schema;
 mod delivery_api;
-pub use delivery_api::{DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1};
+pub use delivery_api::{
+    DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
+};
 mod doctor_findings_api;
 mod events_api;
 mod events_delivery;
@@ -329,9 +331,9 @@ pub struct DashboardStateCompositionV1 {
     /// Daemon-owned typed read over the verified session-git-evidence graph
     /// projection. Loom's git sources report unavailable without it.
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
-    /// Daemon-owned exact-project Delivery projection. The adapter owns
-    /// application admission and provider/store access; HTTP receives only
-    /// bounded typed source outcomes.
+    /// Daemon-wide Delivery projection over exact registered project targets.
+    /// The adapter owns application admission and provider/store access; HTTP
+    /// receives only bounded typed source outcomes.
     pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
     pub registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Exact daemon-selected profile plus its canonical automation run and
@@ -454,7 +456,7 @@ pub struct DashboardState {
     /// Daemon-owned typed read over the verified session-git-evidence graph
     /// projection, serving Loom's session↔commit and branch/worktree sources.
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
-    /// Daemon-owned exact-project Delivery projection.
+    /// Daemon-wide Delivery projection over exact registered project targets.
     pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
     /// Global accounting DB for the savings ledger and lifetime counters used
     /// by the Savings & Cost tab. Provider usage lives in the retained project
@@ -943,7 +945,7 @@ pub async fn build_selected_project_state(
             profile_code_index_worker_settings: active.profile_code_index_worker_settings.clone(),
             lcm_read_authority: None,
             git_correlation_read_authority: None,
-            delivery_read_authority: None,
+            delivery_read_authority: active.delivery_read_authority.clone(),
             registered_savings_db: active.savings_db.clone(),
             automation_authority: active.automation_authority.clone(),
             automation_observation: active.automation_observation.clone(),
@@ -1731,6 +1733,7 @@ fn project_api_router() -> Router<DashboardState> {
             get(code_index_freshness_api::freshness),
         )
         .route("/api/remote/status", get(remote_status_api::status))
+        .route("/api/delivery/inbox", get(delivery_api::inbox))
         .route("/api/delivery/overview", get(delivery_api::overview))
         .route("/api/events", get(events_api::events))
         .route(
@@ -1958,7 +1961,7 @@ fn selected_project_application_read(
         return None;
     }
     match tail {
-        "feedback/get" | "feedback/expand" | "feedback/list" => {
+        "feedback/get" | "feedback/expand" | "feedback/list" | "feedback/proximity" => {
             Some(SelectedProjectApplicationRead::Feedback)
         }
         _ => {
@@ -3568,7 +3571,12 @@ mod authority_tests {
             &Method::GET,
             "events/delivery-ack"
         ));
-        for tail in ["feedback/get", "feedback/expand", "feedback/list"] {
+        for tail in [
+            "feedback/get",
+            "feedback/expand",
+            "feedback/list",
+            "feedback/proximity",
+        ] {
             assert_eq!(
                 selected_project_application_read(&Method::POST, tail),
                 Some(SelectedProjectApplicationRead::Feedback)

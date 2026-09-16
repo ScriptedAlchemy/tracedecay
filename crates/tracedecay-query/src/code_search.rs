@@ -438,12 +438,24 @@ pub type CodeIndexSimilarExecutor =
     Arc<dyn Fn(CodeIndexSimilarRequestV1) -> CodeIndexSimilarFuture + Send + Sync + 'static>;
 
 #[derive(Clone, Debug)]
+pub enum CodeIndexRedundancyScopeV1 {
+    Repository,
+    Path(String),
+    PullRequest {
+        provider: tracedecay_domain::ProviderId,
+        pull_request_id: tracedecay_domain::feedback::GitHubPullRequestIdV1,
+        head_commit_id: tracedecay_domain::CommitId,
+        changed_paths: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
 pub struct CodeIndexRedundancyQueryV1 {
     pub project_root: PathBuf,
     pub project_id: tracedecay_domain::ProjectId,
     pub repository_id: tracedecay_domain::RepositoryId,
     pub match_classes: Vec<tracedecay_code_index::clones::CloneNormalizationClassV1>,
-    pub path: Option<String>,
+    pub scope: CodeIndexRedundancyScopeV1,
     pub include_generated_paths: bool,
     pub family_limit: usize,
     pub member_limit: usize,

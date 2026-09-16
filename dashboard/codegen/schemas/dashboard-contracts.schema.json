@@ -226,6 +226,10 @@
       ],
       "type": "object"
     },
+    "AgentInstanceId": {
+      "description": "Strongly typed canonical identity: `AgentInstanceId`.",
+      "type": "string"
+    },
     "AnalyticsAgentUsageV1": {
       "properties": {
         "agent": {
@@ -5955,6 +5959,156 @@
       ],
       "type": "object"
     },
+    "DeliveryAttentionEvidenceV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "fetched_at_micros": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "provider_operation",
+              "type": "string"
+            },
+            "operation": {
+              "$ref": "#/$defs/DeliveryGitHubReadOperationV1"
+            }
+          },
+          "required": [
+            "kind",
+            "operation",
+            "fetched_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "comment_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "review_comment",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "comment_id",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "failure_anchor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "ci_failure",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "failure_anchor"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "generation": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "indexed_generation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "generation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryAttentionItemV1": {
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/DeliveryInboxCoverageV1"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/DeliveryAttentionEvidenceV1"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "observed_at_micros": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "pull_request_id": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/DeliveryAttentionSourceV1"
+        },
+        "state": {
+          "$ref": "#/$defs/DeliveryAttentionStateV1"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "pull_request_id",
+        "source",
+        "state",
+        "evidence",
+        "coverage",
+        "observed_at_micros"
+      ],
+      "type": "object"
+    },
+    "DeliveryAttentionSourceV1": {
+      "enum": [
+        "ci_failure",
+        "unresolved_review",
+        "new_review_comment",
+        "contradiction",
+        "unsafe_pattern",
+        "test_risk",
+        "unreviewed_changed_code",
+        "weak_evidence",
+        "evidence_gap",
+        "overlapping_edit",
+        "confirmed_conflict",
+        "divergent_shared_implementation",
+        "stale_provider_state"
+      ],
+      "type": "string"
+    },
+    "DeliveryAttentionStateV1": {
+      "enum": [
+        "active",
+        "clear",
+        "unavailable",
+        "denied"
+      ],
+      "type": "string"
+    },
     "DeliveryCiAnnotationLevelV1": {
       "enum": [
         "notice",
@@ -6486,6 +6640,288 @@
         "ignored",
         "changed_paths",
         "schema_version"
+      ],
+      "type": "object"
+    },
+    "DeliveryInboxCoverageV1": {
+      "enum": [
+        "complete",
+        "partial",
+        "stale",
+        "denied",
+        "unavailable",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "DeliveryInboxProjectV1": {
+      "properties": {
+        "branch_ref": {
+          "type": "string"
+        },
+        "git_common_dir": {
+          "type": "string"
+        },
+        "indexed_generation": {
+          "type": "string"
+        },
+        "indexed_head_commit_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "project_root": {
+          "type": "string"
+        },
+        "provider_state": {
+          "$ref": "#/$defs/DeliveryProviderStateV1"
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "worktree_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "label",
+        "project_root",
+        "git_common_dir",
+        "repository_id",
+        "worktree_id",
+        "branch_ref",
+        "indexed_head_commit_id",
+        "indexed_generation",
+        "provider_state"
+      ],
+      "type": "object"
+    },
+    "DeliveryInboxPullRequestStateV1": {
+      "enum": [
+        "current",
+        "partial",
+        "stale"
+      ],
+      "type": "string"
+    },
+    "DeliveryInboxPullRequestV1": {
+      "properties": {
+        "attention": {
+          "items": {
+            "$ref": "#/$defs/DeliveryAttentionItemV1"
+          },
+          "type": "array"
+        },
+        "branch_ref": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "indexed_generation": {
+          "type": "string"
+        },
+        "indexed_head_commit_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "pull_request": {
+          "$ref": "#/$defs/DeliveryPullRequestV1"
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "shared_code": {
+          "items": {
+            "$ref": "#/$defs/DeliverySharedCodeRefV1"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/DeliveryInboxPullRequestStateV1"
+        },
+        "worktree_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "repository_id",
+        "worktree_id",
+        "branch_ref",
+        "indexed_head_commit_id",
+        "indexed_generation",
+        "state",
+        "pull_request",
+        "attention",
+        "shared_code"
+      ],
+      "type": "object"
+    },
+    "DeliveryInboxV1": {
+      "properties": {
+        "excluded_pull_requests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "membership_edges": {
+          "items": {
+            "$ref": "#/$defs/DeliveryMembershipEdgeV1"
+          },
+          "type": "array"
+        },
+        "omitted_projects": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/DeliveryInboxProjectV1"
+          },
+          "type": "array"
+        },
+        "pull_requests": {
+          "items": {
+            "$ref": "#/$defs/DeliveryInboxPullRequestV1"
+          },
+          "type": "array"
+        },
+        "registry_state": {
+          "$ref": "#/$defs/DeliveryRegistryStateV1"
+        }
+      },
+      "required": [
+        "registry_state",
+        "projects",
+        "pull_requests",
+        "membership_edges",
+        "omitted_projects",
+        "excluded_pull_requests"
+      ],
+      "type": "object"
+    },
+    "DeliveryMembershipBasisV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "shared_work_objective",
+              "type": "string"
+            },
+            "work_item_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "work_item_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "commit_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "session_git_relation",
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "commit_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "handoff_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "explicit_handoff",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "handoff_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "shared_agent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "branch_ref": {
+              "type": "string"
+            },
+            "head_commit_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "branch_pull_request_reference",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "branch_ref",
+            "head_commit_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryMembershipEdgeV1": {
+      "properties": {
+        "basis": {
+          "$ref": "#/$defs/DeliveryMembershipBasisV1"
+        },
+        "id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "pull_request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "pull_request_id",
+        "basis"
       ],
       "type": "object"
     },
@@ -8128,6 +8564,20 @@
         }
       ]
     },
+    "DeliveryProviderStateV1": {
+      "enum": [
+        "ready",
+        "partial",
+        "stale",
+        "rate_limited",
+        "failed",
+        "denied",
+        "not_published",
+        "not_configured",
+        "unavailable"
+      ],
+      "type": "string"
+    },
     "DeliveryPullRequestIdentityV1": {
       "properties": {
         "additions": {
@@ -8304,6 +8754,14 @@
         "reset_at_micros"
       ],
       "type": "object"
+    },
+    "DeliveryRegistryStateV1": {
+      "enum": [
+        "ready",
+        "partial",
+        "unavailable"
+      ],
+      "type": "string"
     },
     "DeliveryReleaseAssetV1": {
       "properties": {
@@ -8672,6 +9130,42 @@
         "items",
         "total_retained",
         "truncated"
+      ],
+      "type": "object"
+    },
+    "DeliverySharedCodeRefKindV1": {
+      "enum": [
+        "shared_code",
+        "compare"
+      ],
+      "type": "string"
+    },
+    "DeliverySharedCodeRefStateV1": {
+      "enum": [
+        "requires_selection"
+      ],
+      "type": "string"
+    },
+    "DeliverySharedCodeRefV1": {
+      "properties": {
+        "href": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/DeliverySharedCodeRefKindV1"
+        },
+        "source_generation": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/DeliverySharedCodeRefStateV1"
+        }
+      },
+      "required": [
+        "kind",
+        "state",
+        "href",
+        "source_generation"
       ],
       "type": "object"
     },
@@ -11132,6 +11626,467 @@
       ],
       "type": "object"
     },
+    "FeedbackProximityAccessKindV1": {
+      "enum": [
+        "read",
+        "write"
+      ],
+      "type": "string"
+    },
+    "FeedbackProximityCloneHandleV1": {
+      "additionalProperties": false,
+      "properties": {
+        "retrieval_anchor_ids": {
+          "items": {
+            "$ref": "#/$defs/RetrievalAnchorId"
+          },
+          "type": "array"
+        },
+        "source_generation": {
+          "$ref": "#/$defs/CodeGenerationId"
+        },
+        "source_symbol": {
+          "$ref": "#/$defs/SymbolOccurrenceId"
+        }
+      },
+      "required": [
+        "source_generation",
+        "source_symbol",
+        "retrieval_anchor_ids"
+      ],
+      "type": "object"
+    },
+    "FeedbackProximityConflictDifferenceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "difference_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "file": {
+          "$ref": "#/$defs/FileOccurrenceId"
+        },
+        "span": {
+          "$ref": "#/$defs/SourceSpan"
+        }
+      },
+      "required": [
+        "file",
+        "span",
+        "difference_digest"
+      ],
+      "type": "object"
+    },
+    "FeedbackProximityConflictHandleV1": {
+      "additionalProperties": false,
+      "properties": {
+        "common_base_revision": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "differences": {
+          "items": {
+            "$ref": "#/$defs/FeedbackProximityConflictDifferenceV1"
+          },
+          "type": "array"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "left_head_revision": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "right_head_revision": {
+          "$ref": "#/$defs/CommitId"
+        }
+      },
+      "required": [
+        "common_base_revision",
+        "left_head_revision",
+        "right_head_revision",
+        "evidence_digest",
+        "differences"
+      ],
+      "type": "object"
+    },
+    "FeedbackProximityEncounterV1": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/ProximityCoverageV1"
+        },
+        "encounter_id": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "interval": {
+          "$ref": "#/$defs/FeedbackProximityIntervalV1"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "participants": {
+          "items": {
+            "$ref": "#/$defs/FeedbackProximityParticipantV1"
+          },
+          "type": "array"
+        },
+        "relation": {
+          "$ref": "#/$defs/FeedbackProximityRelationV1"
+        },
+        "scope": {
+          "$ref": "#/$defs/FeedbackScopeV1"
+        }
+      },
+      "required": [
+        "encounter_id",
+        "scope",
+        "interval",
+        "participants",
+        "relation",
+        "observed_at",
+        "expires_at",
+        "coverage"
+      ],
+      "type": "object"
+    },
+    "FeedbackProximityIntervalV1": {
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "start": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "FeedbackProximityOmissionV1": {
+      "enum": [
+        "active_session_limit",
+        "session_activity_limit",
+        "recent_observation_limit",
+        "edited_path_limit",
+        "encounter_limit",
+        "missing_participant_observation",
+        "missing_participant_worktree",
+        "missing_participant_revision",
+        "missing_code_address",
+        "clone_coverage_partial",
+        "conflict_evidence_unavailable",
+        "code_index_revision_mismatch"
+      ],
+      "type": "string"
+    },
+    "FeedbackProximityParticipantV1": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "$ref": "#/$defs/FeedbackProximityAccessKindV1"
+        },
+        "activity": {
+          "$ref": "#/$defs/FeedbackProximityIntervalV1"
+        },
+        "address": {
+          "$ref": "#/$defs/ProximityAddressV1"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/AgentInstanceId"
+        },
+        "branch_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/ObservationSourceIdentityV1"
+        },
+        "worktree_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorktreeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "worktree_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "agent_id",
+        "worktree_id",
+        "worktree_root",
+        "branch_ref",
+        "head_revision",
+        "access",
+        "activity",
+        "address"
+      ],
+      "type": "object"
+    },
+    "FeedbackProximityReadPageV1": {
+      "additionalProperties": false,
+      "properties": {
+        "encounters": {
+          "items": {
+            "$ref": "#/$defs/FeedbackProximityEncounterV1"
+          },
+          "type": "array"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "scope": {
+          "$ref": "#/$defs/FeedbackScopeV1"
+        },
+        "source_generation": {
+          "$ref": "#/$defs/CodeGenerationId"
+        }
+      },
+      "required": [
+        "scope",
+        "source_generation",
+        "observed_at",
+        "expires_at",
+        "encounters"
+      ],
+      "type": "object"
+    },
+    "FeedbackProximityReadRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "FeedbackProximityReadResultV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "$ref": "#/$defs/FeedbackProximityReadPageV1"
+            },
+            "state": {
+              "const": "complete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "$ref": "#/$defs/FeedbackProximityReadPageV1"
+            },
+            "state": {
+              "const": "complete_zero",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "omissions": {
+              "items": {
+                "$ref": "#/$defs/FeedbackProximityOmissionV1"
+              },
+              "type": "array"
+            },
+            "page": {
+              "$ref": "#/$defs/FeedbackProximityReadPageV1"
+            },
+            "state": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "page",
+            "omissions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "omissions": {
+              "items": {
+                "$ref": "#/$defs/FeedbackProximityOmissionV1"
+              },
+              "type": "array"
+            },
+            "page": {
+              "$ref": "#/$defs/FeedbackProximityReadPageV1"
+            },
+            "state": {
+              "const": "stale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "page",
+            "omissions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "state": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observed_at"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FeedbackProximityRelationV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "relation_kind": {
+              "const": "code_neighborhood_candidate",
+              "type": "string"
+            },
+            "warning_class": {
+              "$ref": "#/$defs/ProximityWarningClassV1"
+            }
+          },
+          "required": [
+            "relation_kind",
+            "warning_class"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "clone_handle": {
+              "$ref": "#/$defs/FeedbackProximityCloneHandleV1"
+            },
+            "relation_kind": {
+              "const": "shared_code_candidate",
+              "type": "string"
+            },
+            "warning_class": {
+              "$ref": "#/$defs/ProximityWarningClassV1"
+            }
+          },
+          "required": [
+            "relation_kind",
+            "warning_class",
+            "clone_handle"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "relation_kind": {
+              "const": "overlapping_edit",
+              "type": "string"
+            },
+            "warning_class": {
+              "$ref": "#/$defs/ProximityWarningClassV1"
+            }
+          },
+          "required": [
+            "relation_kind",
+            "warning_class"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "conflict_handle": {
+              "$ref": "#/$defs/FeedbackProximityConflictHandleV1"
+            },
+            "relation_kind": {
+              "const": "confirmed_conflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "relation_kind",
+            "conflict_handle"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "FeedbackRejectedArgumentGroupV1": {
       "additionalProperties": false,
       "description": "One surface × operation × argument × error-class cell projected from\ndispatcher rejection source events.",
@@ -11160,6 +12115,35 @@
         "argument",
         "error_class",
         "count"
+      ],
+      "type": "object"
+    },
+    "FeedbackScopeV1": {
+      "additionalProperties": false,
+      "description": "Exact repository scope used for a feedback evaluation. A path, current\nworking directory, repository display name, or mutable branch label is not\na substitute for this identity.",
+      "properties": {
+        "branch_ref": {
+          "type": "string"
+        },
+        "head_commit_id": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "repository_id": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "worktree_id": {
+          "$ref": "#/$defs/WorktreeId"
+        }
+      },
+      "required": [
+        "project_id",
+        "repository_id",
+        "worktree_id",
+        "branch_ref",
+        "head_commit_id"
       ],
       "type": "object"
     },
@@ -17079,6 +18063,71 @@
         "cost_basis"
       ],
       "type": "object"
+    },
+    "ProximityAddressV1": {
+      "additionalProperties": false,
+      "description": "A privacy-scoped code address. It identifies the coarse changed-code shape\nbut carries no other actor, session, or private-source content.",
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/FileOccurrenceId"
+        },
+        "scope": {
+          "$ref": "#/$defs/FeedbackScopeV1"
+        },
+        "span": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceSpan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolOccurrenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "scope",
+        "file",
+        "span",
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "ProximityCoverageV1": {
+      "enum": [
+        "complete",
+        "partial",
+        "stale",
+        "unavailable",
+        "denied",
+        "private"
+      ],
+      "type": "string"
+    },
+    "ProximityWarningClassV1": {
+      "enum": [
+        "same_file",
+        "overlapping_range",
+        "same_symbol",
+        "same_package",
+        "same_crate",
+        "neighborhood",
+        "shared_caller",
+        "shared_dependency",
+        "shared_test",
+        "incompatible_branch_worktree"
+      ],
+      "type": "string"
     },
     "PublicCodeProject": {
       "properties": {
@@ -30772,6 +31821,9 @@
     "costs": {
       "$ref": "#/$defs/CostsReadModelV1"
     },
+    "delivery_inbox": {
+      "$ref": "#/$defs/DeliveryInboxV1"
+    },
     "delivery_overview": {
       "$ref": "#/$defs/DeliveryOverviewV1"
     },
@@ -30792,6 +31844,12 @@
     },
     "fact_store_curate_request": {
       "$ref": "#/$defs/FactStoreCurateRequestV1"
+    },
+    "feedback_proximity": {
+      "$ref": "#/$defs/FeedbackProximityReadResultV1"
+    },
+    "feedback_proximity_request": {
+      "$ref": "#/$defs/FeedbackProximityReadRequestV1"
     },
     "feedback_status": {
       "$ref": "#/$defs/DashboardEnvelopeV129"
@@ -31162,8 +32220,11 @@
     "lcm_overview",
     "lcm_search",
     "loom_temporal",
+    "delivery_inbox",
     "delivery_overview",
     "feedback_status",
+    "feedback_proximity_request",
+    "feedback_proximity",
     "code_index_freshness",
     "settings",
     "settings_project_patch",
