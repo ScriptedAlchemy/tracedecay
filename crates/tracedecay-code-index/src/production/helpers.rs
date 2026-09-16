@@ -1094,48 +1094,24 @@ where
                 ImportModuleKindV1::BareModule => false,
             });
     }
-
-    // `path::Type::method` — resolve every module segment, not just a crate root.
-    let module_prefix = &parts[..parts.len() - 1];
-    let module_path = module_prefix.join("/");
-
-    // Crate-qualified: `dep::a::Builder::method` must land under `dep` *and*
-    // under module `a` (not a sibling `dep::b::Builder`).
-    if let Some(root_index) = rust.files.crate_root(module_prefix[0]) {
-        let root_path = files[root_index].as_ref().authority.logical_path.as_str();
-        let Some(crate_source_root) = rust_source_root(root_path) else {
-            return false;
-        };
-        if rust_source_root(target_path) != Some(crate_source_root) {
-            return false;
-        }
-        let Some(relative_file) = target_path
-            .strip_prefix(crate_source_root)
-            .and_then(|path| path.strip_prefix('/'))
-        else {
-            return false;
-        };
-        let Some(target_module) = rust_file_module(relative_file) else {
-            return false;
-        };
-        let module_after_crate = module_prefix[1..].join("/");
-        return if module_after_crate.is_empty() {
-            target_module.is_empty()
-        } else {
-            target_module == module_after_crate
-                || target_module.starts_with(&format!("{module_after_crate}/"))
-        };
+    // `crate_name::…::Type::method` — crate root plus the intermediate module
+    // path must match; otherwise sibling modules with the same Type::method
+    // collide or cross-bind.
+    let crate_name = parts[0];
+    let Some(root_index) = rust.files.crate_root(crate_name) else {
+        return false;
+    };
+    let root_path = files[root_index].as_ref().authority.logical_path.as_str();
+    if rust_source_root(target_path) != rust_source_root(root_path) {
+        return false;
     }
-
-    // Same-crate module path: `walk::WalkBuilder::method` from `src/lib.rs`.
-    if let Some(module_index) = rust
-        .files
-        .module(&source_file.authority.logical_path, &module_path)
-    {
-        return module_index == target_index;
-    }
-
-    false
+    let module_prefix = parts[1..parts.len().saturating_sub(1)].join("::");
+    let expected_relative = if module_prefix.is_empty() {
+        expected
+    } else {
+        format!("{module_prefix}::{expected}")
+    };
+    relative == expected_relative || relative.ends_with(&format!("::{expected_relative}"))
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`

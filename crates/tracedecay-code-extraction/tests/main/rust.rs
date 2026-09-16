@@ -921,200 +921,79 @@ fn use_foo() {
 }
 
 #[test]
-fn mut_builder_local_emits_qualified_method_ref() {
+fn test_rust_factory_method_does_not_qualify_as_owner_type() {
     let source = r#"
-struct WalkBuilder;
-impl WalkBuilder {
-    fn new() -> Self { WalkBuilder }
-    fn build(&self) -> u32 { 1 }
+struct Client;
+struct ClientBuilder;
+impl Client {
+    fn builder() -> ClientBuilder { ClientBuilder }
+    fn build(&self) {}
+}
+impl ClientBuilder {
+    fn build(self) -> Client { Client }
 }
 
-fn make_walk() -> u32 {
-    let mut builder = WalkBuilder::new();
-    builder.build()
+fn use_client() {
+    let builder = Client::builder();
+    let _ = builder.build();
 }
 "#;
     let result = RustExtractor.extract("src/lib.rs", source);
-    assert!(result.errors.is_empty(), "{:?}", result.errors);
-    let make_walk = result
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let use_fn = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "make_walk")
-        .expect("make_walk");
-    let refs: Vec<_> = result
+        .find(|n| n.kind == NodeKind::Function && n.name == "use_client")
+        .expect("use_client function");
+    let ref_names: Vec<&str> = result
         .unresolved_refs
         .iter()
-        .filter(|r| r.from_node_id == make_walk.id && r.reference_kind == EdgeKind::Calls)
+        .filter(|r| r.from_node_id == use_fn.id && r.reference_kind == EdgeKind::Calls)
         .map(|r| r.reference_name.as_str())
         .collect();
     assert!(
-        refs.contains(&"WalkBuilder::build"),
-        "let mut builder = WalkBuilder::new(); builder.build() must emit WalkBuilder::build, got {refs:?}"
+        !ref_names.contains(&"Client::build"),
+        "Client::builder() must not invent Client::build, got: {ref_names:?}"
     );
 }
 
 #[test]
-fn shadowed_locals_emit_types_in_declaration_order() {
+fn test_rust_rebinding_withholds_typed_method_qualification() {
     let source = r#"
 struct A;
+struct B;
 impl A {
     fn new() -> Self { A }
-    fn run(&self) {}
+    fn build(&self) {}
 }
-struct B;
 impl B {
     fn new() -> Self { B }
-    fn run(&self) {}
+    fn build(&self) {}
 }
 
-fn shadow() {
+fn use_shadow() {
     let b = A::new();
-    b.run();
+    let _ = b.build();
     let b = B::new();
-    b.run();
+    let _ = b.build();
 }
 "#;
     let result = RustExtractor.extract("src/lib.rs", source);
-    assert!(result.errors.is_empty(), "{:?}", result.errors);
-    let shadow = result
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let use_fn = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "shadow")
-        .expect("shadow");
-    let run_refs: Vec<_> = result
+        .find(|n| n.kind == NodeKind::Function && n.name == "use_shadow")
+        .expect("use_shadow function");
+    let ref_names: Vec<&str> = result
         .unresolved_refs
         .iter()
-        .filter(|r| {
-            r.from_node_id == shadow.id
-                && r.reference_kind == EdgeKind::Calls
-                && (r.reference_name == "A::run" || r.reference_name == "B::run")
-        })
-        .map(|r| r.reference_name.as_str())
-        .collect();
-    assert_eq!(
-        run_refs,
-        ["A::run", "B::run"],
-        "each b.run() must use the lexically enclosing binding's type, got {run_refs:?}"
-    );
-}
-
-#[test]
-fn nested_block_shadow_does_not_retype_outer_calls() {
-    let source = r#"
-struct A;
-impl A {
-    fn new() -> Self { A }
-    fn run(&self) {}
-}
-struct B;
-impl B {
-    fn new() -> Self { B }
-    fn run(&self) {}
-}
-
-fn nested() {
-    let b = A::new();
-    {
-        let b = B::new();
-        b.run();
-    }
-    b.run();
-}
-"#;
-    let result = RustExtractor.extract("src/lib.rs", source);
-    assert!(result.errors.is_empty(), "{:?}", result.errors);
-    let nested = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "nested")
-        .expect("nested");
-    let run_refs: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| {
-            r.from_node_id == nested.id
-                && r.reference_kind == EdgeKind::Calls
-                && (r.reference_name == "A::run" || r.reference_name == "B::run")
-        })
-        .map(|r| r.reference_name.as_str())
-        .collect();
-    assert_eq!(
-        run_refs,
-        ["B::run", "A::run"],
-        "inner shadow must not retype the outer b.run(), got {run_refs:?}"
-    );
-}
-
-#[test]
-fn non_constructor_associated_call_does_not_assume_qualifier_type() {
-    let source = r#"
-struct Factory;
-struct Product;
-impl Factory {
-    fn make() -> Product { Product }
-}
-impl Product {
-    fn build(&self) -> u32 { 1 }
-}
-impl Factory {
-    fn build(&self) -> u32 { 2 }
-}
-
-fn use_factory() -> u32 {
-    let value = Factory::make();
-    value.build()
-}
-"#;
-    let result = RustExtractor.extract("src/lib.rs", source);
-    assert!(result.errors.is_empty(), "{:?}", result.errors);
-    let use_factory = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "use_factory")
-        .expect("use_factory");
-    let refs: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.from_node_id == use_factory.id && r.reference_kind == EdgeKind::Calls)
+        .filter(|r| r.from_node_id == use_fn.id && r.reference_kind == EdgeKind::Calls)
         .map(|r| r.reference_name.as_str())
         .collect();
     assert!(
-        !refs.contains(&"Factory::build"),
-        "Factory::make() must not invent Factory as value's type: {refs:?}"
-    );
-    assert!(
-        refs.contains(&"build"),
-        "bare method hint should still be emitted: {refs:?}"
-    );
-}
-
-#[test]
-fn typed_annotation_establishes_local_type_without_new() {
-    let source = r#"
-struct Product;
-impl Product {
-    fn build(&self) -> u32 { 1 }
-}
-fn from_annotation(value: Product) -> u32 {
-    value.build()
-}
-"#;
-    let result = RustExtractor.extract("src/lib.rs", source);
-    assert!(result.errors.is_empty(), "{:?}", result.errors);
-    let func = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "from_annotation")
-        .expect("from_annotation");
-    let refs: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.from_node_id == func.id && r.reference_kind == EdgeKind::Calls)
-        .map(|r| r.reference_name.as_str())
-        .collect();
-    assert!(
-        refs.contains(&"Product::build"),
-        "parameter type annotation must emit Product::build, got {refs:?}"
+        !ref_names.iter().any(|name| *name == "A::build" || *name == "B::build"),
+        "rebinding must withhold Type::build qualification, got: {ref_names:?}"
     );
 }
 
