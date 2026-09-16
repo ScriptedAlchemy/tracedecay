@@ -575,7 +575,7 @@ impl CodeFileIndexArtifactsV1 {
         for symbol in &self.symbols {
             occurrences.insert(
                 symbol.occurrence.clone(),
-                symbol_occurrence_id(&generation_id, &file_occurrence_id, &symbol.identity)?,
+                symbol_occurrence_id(&file_occurrence_id, &symbol.identity)?,
             );
         }
         let chunks = self.chunks.rematerialize_for_generation(
@@ -586,10 +586,10 @@ impl CodeFileIndexArtifactsV1 {
 
         let mut symbols = self.symbols.clone();
         for symbol in &mut symbols {
-            // Carried records are shared with the prior generation; rebinding
-            // writes into this generation's own copy.
-            let symbol = Arc::make_mut(symbol);
-            symbol.occurrence = rematerialized_occurrence(&occurrences, &symbol.occurrence)?;
+            let occurrence = rematerialized_occurrence(&occurrences, &symbol.occurrence)?;
+            if occurrence != symbol.occurrence {
+                Arc::make_mut(symbol).occurrence = occurrence;
+            }
         }
         symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
 

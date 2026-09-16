@@ -822,7 +822,7 @@ impl CodeLexicalArtifactReaderV1 {
             ));
         }
         Ok(Some(CodeIndexCloneBodyV1 {
-            payload,
+            payload: Arc::new(payload),
             occurrence,
         }))
     }
@@ -895,7 +895,7 @@ impl CodeLexicalArtifactReaderV1 {
             ));
         }
         Ok(Some(CodeIndexCloneBodyV1 {
-            payload,
+            payload: Arc::new(payload),
             occurrence,
         }))
     }

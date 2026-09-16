@@ -246,7 +246,7 @@ pub fn materialize_generation_increment(
                             .ok_or_else(|| {
                                 ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
                             })?;
-                        symbol_occurrence_id(&generation_id, file_occurrence_id, &symbol.identity)
+                        symbol_occurrence_id(file_occurrence_id, &symbol.identity)
                             .map(|current| (prior_occurrence.clone(), current))
                             .map_err(map_chunking_error)
                     })
