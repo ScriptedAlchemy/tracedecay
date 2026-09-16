@@ -422,7 +422,9 @@ pub struct ValidatedProfileShard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileShardValidationError {
-    Unavailable { path: PathBuf },
+    Unavailable {
+        path: PathBuf,
+    },
     NonCanonical {
         reason: ProfileShardNonCanonicalReasonV1,
     },

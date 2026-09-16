@@ -344,9 +344,11 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
 /// later pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fresh_graph_activation_starts_while_the_clone_successor_is_pending() {
-    let (fixture, admission) =
-        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-before-clone-successor", |_| {})
-            .await;
+    let (fixture, admission) = Fixture::mount_with_poisoned_artifacts_root_held(
+        "project.graph-before-clone-successor",
+        |_| {},
+    )
+    .await;
     let scope = fixture
         .registry
         .serving_code_scope(&fixture.project)

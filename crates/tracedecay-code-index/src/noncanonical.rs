@@ -228,13 +228,12 @@ impl NonCanonicalCauseV1 {
 
     pub fn from_domain(error: DomainError) -> Self {
         match error {
-            DomainError::Empty { field } => {
-                Self::new(NonCanonicalReasonCodeV1::Empty).with(NonCanonicalDetailKeyV1::Field, field)
+            DomainError::Empty { field } => Self::new(NonCanonicalReasonCodeV1::Empty)
+                .with(NonCanonicalDetailKeyV1::Field, field),
+            DomainError::NonCanonical { field } => {
+                Self::new(NonCanonicalReasonCodeV1::DomainNonCanonical)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
             }
-            DomainError::NonCanonical { field } => Self::new(
-                NonCanonicalReasonCodeV1::DomainNonCanonical,
-            )
-            .with(NonCanonicalDetailKeyV1::Field, field),
             DomainError::DuplicateId { field } => Self::new(NonCanonicalReasonCodeV1::DuplicateId)
                 .with(NonCanonicalDetailKeyV1::Field, field),
             DomainError::UnknownReference { field } => {
@@ -247,9 +246,13 @@ impl NonCanonicalCauseV1 {
             }
             DomainError::UnsafeText { field } => Self::new(NonCanonicalReasonCodeV1::UnsafeText)
                 .with(NonCanonicalDetailKeyV1::Field, field),
-            DomainError::InvalidRange { field } => Self::new(NonCanonicalReasonCodeV1::InvalidRange)
-                .with(NonCanonicalDetailKeyV1::Field, field),
-            DomainError::InvalidConfidence => Self::new(NonCanonicalReasonCodeV1::InvalidConfidence),
+            DomainError::InvalidRange { field } => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidRange)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::InvalidConfidence => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidConfidence)
+            }
             DomainError::ActivityFacetOnActivitySubject => {
                 Self::new(NonCanonicalReasonCodeV1::ActivityFacetOnActivitySubject)
             }
@@ -361,10 +364,17 @@ mod tests {
             let cause = NonCanonicalCauseV1::from_domain(error);
             assert_eq!(cause.reason_code(), expected_code);
             assert_eq!(
-                cause.details().get(&NonCanonicalDetailKeyV1::Field).map(String::as_str),
+                cause
+                    .details()
+                    .get(&NonCanonicalDetailKeyV1::Field)
+                    .map(String::as_str),
                 Some(expected_field)
             );
-            assert!(!cause.details().contains_key(&NonCanonicalDetailKeyV1::Detail));
+            assert!(
+                !cause
+                    .details()
+                    .contains_key(&NonCanonicalDetailKeyV1::Detail)
+            );
         }
     }
 

@@ -599,12 +599,9 @@ impl CodeIndexSchedulerRegistryV1 {
                             serving.generation().manifest().generation_id
                                 == latest.metadata().manifest().generation_id
                         });
-                    let source_current = worker_source_freshness.ready_without_stat(
-                        &worker_project_root,
-                        &worker_shutting_down,
-                    );
-                    let drive_retained = !owners_ready
-                        || (serving_matches_text && source_current);
+                    let source_current = worker_source_freshness
+                        .ready_without_stat(&worker_project_root, &worker_shutting_down);
+                    let drive_retained = !owners_ready || (serving_matches_text && source_current);
                     if drive_retained {
                         // The retained owner projects on its own task, exactly as
                         // a publication's replacement owner does, and this pass
@@ -1710,10 +1707,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .as_ref()
                                 .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work)
                             {
-                                Self::note_worker_continuation(
-                                    &worker_pending_wake,
-                                    &worker_wake,
-                                );
+                                Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                             }
                             // Large text projections can outlive the bounded
                             // source proof established before publication. The

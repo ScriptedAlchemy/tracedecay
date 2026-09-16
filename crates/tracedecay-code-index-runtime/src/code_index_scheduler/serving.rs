@@ -191,7 +191,7 @@ const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
 /// Outcome of the one-slice clone-fingerprint warmup on a similar/redundancy
 /// request. `Pending` means the retained worker owns remaining backfill —
-/// never collapse that into a hard GenerationUnavailable miss.
+/// never collapse that into a hard `GenerationUnavailable` miss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloneSimilarityWarmupForRequestV1 {
     Ready,

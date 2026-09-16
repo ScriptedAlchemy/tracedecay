@@ -136,10 +136,10 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
 /// proving the HTTP admission + proximity join path (not just application
 /// unit tests) owns Delivery attention.
 pub(crate) struct FakeDeliveryAuthority {
-    pub(crate) delivery_read_authority: Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>,
-    pub(crate) proximity_attention_read_authority: Option<
-        Arc<dyn tracedecay_dashboard_api::DashboardProximityAttentionReadPortV1>,
-    >,
+    pub(crate) delivery_read_authority:
+        Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>,
+    pub(crate) proximity_attention_read_authority:
+        Option<Arc<dyn tracedecay_dashboard_api::DashboardProximityAttentionReadPortV1>>,
     pub(crate) code_index_freshness_reader:
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
 }
@@ -884,8 +884,13 @@ async fn start_dashboard_fixture_with_options(
     seed_memory: bool,
     mount_configuration_runtime: bool,
 ) -> DashboardFixture {
-    start_dashboard_fixture_with_options_and_delivery(seed_lcm, seed_memory, mount_configuration_runtime, None)
-        .await
+    start_dashboard_fixture_with_options_and_delivery(
+        seed_lcm,
+        seed_memory,
+        mount_configuration_runtime,
+        None,
+    )
+    .await
 }
 
 async fn start_dashboard_fixture_with_options_and_delivery(

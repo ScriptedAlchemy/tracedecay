@@ -238,15 +238,15 @@ pub use reconcile::{
     ReconcilePassGuard,
 };
 pub(crate) use reconcile::{ServingSourceWitnessV1, SourceFreshnessFenceV1};
-use serving::{
-    CodeGraphActivationStateV1, CodeGraphServingAuthorityV1, CodeIndexBuildProgressStateV1,
-    CodeTextProjectionStateV1, DurableActiveSealedGenerationBindingV1, GenerationServingCachesV1,
-    GenerationTextControlV1, TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1, try_publish_build_progress,
-};
 pub use serving::{
     CloneSimilarityWarmupForRequestV1, CodeIndexBuildProgressSlotStateV1,
     CodeIndexBuildProgressSlotV1, DaemonCodeTextArtifactStoreV1, LatestCodeTextGenerationV1,
     LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
+};
+use serving::{
+    CodeGraphActivationStateV1, CodeGraphServingAuthorityV1, CodeIndexBuildProgressStateV1,
+    CodeTextProjectionStateV1, DurableActiveSealedGenerationBindingV1, GenerationServingCachesV1,
+    GenerationTextControlV1, TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1, try_publish_build_progress,
 };
 #[cfg(test)]
 use serving::{

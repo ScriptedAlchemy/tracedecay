@@ -1899,10 +1899,7 @@ mod tests {
             &crate::tool_error_response(json!(1), "tracedecay_redundancy", &redundancy_err),
         ))
         .expect("JSON-RPC response");
-        assert_eq!(
-            redundancy_wire["error"]["data"]["reason_code"],
-            shared_code
-        );
+        assert_eq!(redundancy_wire["error"]["data"]["reason_code"], shared_code);
         assert_eq!(redundancy_wire["error"]["data"]["retryable"], false);
         assert_ne!(
             redundancy_wire["error"]["data"]["reason_code"],

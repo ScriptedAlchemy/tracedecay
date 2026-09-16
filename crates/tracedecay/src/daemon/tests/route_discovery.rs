@@ -180,7 +180,11 @@ async fn timed_out_repository_discovery_defers_the_route() {
     assert!(
         matches!(
             refusal.project_route_context(),
-            Some((crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, _))
+            Some((
+                crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                true,
+                _
+            ))
         ),
         "a deferred discovery must stay typed-retryable, got: {refusal}"
     );
